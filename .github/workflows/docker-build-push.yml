@@ -22,15 +22,36 @@ jobs:
       attestations: write # Required for build attestations
 
     steps:
-      - name: Free up disk space
+      - name: Free up disk space (aggressive)
         run: |
           echo "Disk space before cleanup:"
           df -h
+
+          # Remove large pre-installed tools
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+          # Remove language runtimes we don't need
+          sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/.ghcup
+
+          # Clean apt cache
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
+
+          # Remove Docker images and containers
+          sudo docker system prune --all --volumes --force
+
+          # Remove swap file (we have enough RAM)
+          sudo swapoff -a
+          sudo rm -f /swapfile
+          sudo rm -f /mnt/swapfile
+
           echo "Disk space after cleanup:"
           df -h
 
@@ -81,28 +102,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           target: vllm-openai
           build-args: |
-            max_jobs=2
+            max_jobs=1
             nvcc_threads=1
             buildkite_commit=${{ github.sha }}
             GIT_REPO_CHECK=0
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
 
-      - name: Build and push test image
-        uses: docker/build-push-action@v6
-        if: github.event_name != 'pull_request'
-        with:
-          context: .
-          file: ./docker/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:test-${{ github.sha }}
-          labels: ${{ steps.meta.outputs.labels }}
-          target: test
-          build-args: |
-            max_jobs=2
-            nvcc_threads=1
-            buildkite_commit=${{ github.sha }}
-            GIT_REPO_CHECK=0
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # Skip test image build to save disk space and time
+      # - name: Build and push test image
