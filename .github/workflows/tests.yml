@@ -11,6 +11,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      VLLM_USE_CPU: "1"
+      VLLM_WORKER_MULTIPROC_METHOD: "spawn"
 
     steps:
       - name: Free up disk space
@@ -55,7 +58,6 @@ jobs:
       - name: Run journey tracing tests
         env:
           PYTHONPATH: ${{ github.workspace }}
-          VLLM_USE_CPU: "1"
         run: |
           pytest tests/v1/core/test_journey_events.py \
                  tests/v1/engine/test_journey_tracing_integration.py \
@@ -66,7 +68,6 @@ jobs:
       - name: Run basic scheduler smoke tests
         env:
           PYTHONPATH: ${{ github.workspace }}
-          VLLM_USE_CPU: "1"
         run: |
           pytest tests/v1/core/test_scheduler.py::test_scheduler_step_counter \
                  tests/v1/core/test_scheduler.py::test_scheduler_single_request \
