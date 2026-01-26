@@ -144,7 +144,13 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        if self.model_config.hf_config.model_type == "kimi_k2":
+        # Check model_type from hf_overrides first (for test mocking),
+        # then fall back to hf_text_config.model_type (more robust for VLM)
+        model_type = self.model_config.hf_text_config.model_type
+        if isinstance(self.model_config.hf_overrides, dict):
+            model_type = self.model_config.hf_overrides.get("model_type", model_type)
+
+        if model_type == "kimi_k2":
             self.tool_call_id_type = "kimi_k2"
         else:
             self.tool_call_id_type = "random"
@@ -1537,16 +1543,23 @@ class OpenAIServingChat(OpenAIServing):
             ):
                 assert tool_calls is not None and len(tool_calls) > 0
                 tool_call_class_items = []
-                for tc in tool_calls:
+                for idx, tc in enumerate(tool_calls):
                     # Use native ID if available (e.g., Kimi K2),
-                    # otherwise let class use its default
-                    # (MistralToolCall -> 9 chars, ToolCall -> 30 chars)
+                    # otherwise generate ID with correct id_type
                     if tc.id:
                         tool_call_class_items.append(
                             tool_call_class(id=tc.id, function=tc)
                         )
                     else:
-                        tool_call_class_items.append(tool_call_class(function=tc))
+                        # Generate ID using the correct format (kimi_k2 or random)
+                        generated_id = make_tool_call_id(
+                            id_type=self.tool_call_id_type,
+                            func_name=tc.name,
+                            idx=history_tool_call_cnt + idx,
+                        )
+                        tool_call_class_items.append(
+                            tool_call_class(id=generated_id, function=tc)
+                        )
                     history_tool_call_cnt += 1
                 message = ChatMessage(
                     role=role,
@@ -1558,16 +1571,22 @@ class OpenAIServingChat(OpenAIServing):
             elif request.tool_choice and request.tool_choice == "required":
                 tool_call_class_items = []
                 assert tool_calls is not None and len(tool_calls) > 0
-                for tool_call in tool_calls:
+                for idx, tool_call in enumerate(tool_calls):
                     # Use native ID if available,
-                    # otherwise let class use its default
+                    # otherwise generate ID with correct id_type
                     if tool_call.id:
                         tool_call_class_items.append(
                             tool_call_class(id=tool_call.id, function=tool_call)
                         )
                     else:
+                        # Generate ID using the correct format (kimi_k2 or random)
+                        generated_id = make_tool_call_id(
+                            id_type=self.tool_call_id_type,
+                            func_name=tool_call.name,
+                            idx=history_tool_call_cnt + idx,
+                        )
                         tool_call_class_items.append(
-                            tool_call_class(function=tool_call)
+                            tool_call_class(id=generated_id, function=tool_call)
                         )
                     history_tool_call_cnt += 1
                 message = ChatMessage(
@@ -1595,16 +1614,23 @@ class OpenAIServingChat(OpenAIServing):
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
                     tool_call_items = []
-                    for tc in tool_calls:
+                    for idx, tc in enumerate(tool_calls):
                         # Use native ID if available (e.g., Kimi K2),
-                        # otherwise let tool_call_class use its default
-                        # (MistralToolCall -> 9 chars, ToolCall -> 30 chars)
+                        # otherwise generate ID with correct id_type
                         if tc.id:
                             tool_call_items.append(
                                 tool_call_class(id=tc.id, function=tc)
                             )
                         else:
-                            tool_call_items.append(tool_call_class(function=tc))
+                            # Generate ID using the correct format (kimi_k2 or random)
+                            generated_id = make_tool_call_id(
+                                id_type=self.tool_call_id_type,
+                                func_name=tc.name,
+                                idx=history_tool_call_cnt + idx,
+                            )
+                            tool_call_items.append(
+                                tool_call_class(id=generated_id, function=tc)
+                            )
                         history_tool_call_cnt += 1
                     message = ChatMessage(
                         role=role,

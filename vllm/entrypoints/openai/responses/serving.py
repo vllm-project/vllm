@@ -251,7 +251,13 @@ class OpenAIServingResponses(OpenAIServing):
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions()
             )
-        if self.model_config.hf_config.model_type == "kimi_k2":
+        # Check model_type from hf_overrides first (for test mocking),
+        # then fall back to hf_text_config.model_type (more robust for VLM)
+        model_type = self.model_config.hf_text_config.model_type
+        if isinstance(self.model_config.hf_overrides, dict):
+            model_type = self.model_config.hf_overrides.get("model_type", model_type)
+
+        if model_type == "kimi_k2":
             self.tool_call_id_type = "kimi_k2"
         else:
             self.tool_call_id_type = "random"
