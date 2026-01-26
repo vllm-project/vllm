@@ -46,12 +46,17 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Make additional scales for per-tensor interface.
         if self.quant_config.is_per_tensor:
-            self._g1_alphas = (
-                self.quant_config.w1_scale * self.quant_config.a1_scale
-            ).squeeze()
-            self._g2_alphas = (
-                self.quant_config.w2_scale * self.quant_config.a2_scale
-            ).squeeze()
+            w1_scale = self.quant_config.w1_scale
+            assert w1_scale is not None
+            a1_scale = self.quant_config.a1_scale
+            assert a1_scale is not None
+            w2_scale = self.quant_config.w2_scale
+            assert w2_scale is not None
+            a2_scale = self.quant_config.a2_scale
+            assert a2_scale is not None
+
+            self._g1_alphas = (w1_scale * a1_scale).squeeze()
+            self._g2_alphas = (w2_scale * a2_scale).squeeze()
             self.g1_scale_c = self._g1_alphas / self.quant_config.a2_scale
 
     @staticmethod

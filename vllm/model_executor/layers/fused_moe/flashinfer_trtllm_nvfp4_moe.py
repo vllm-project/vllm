@@ -30,9 +30,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
 
-        self.moe_config = moe_config
-        # TODO: set this via the constructor
-        self.routing_method_type = flashinfer.RoutingMethodType.Renormalize
+        self.routing_method_type = self.moe_config.routing_method_type
         # self.routing_method_type = flashinfer.RoutingMethodType.Llama4
         # self.routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
 
