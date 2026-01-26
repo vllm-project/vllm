@@ -213,7 +213,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
