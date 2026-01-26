@@ -460,6 +460,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # Streaming response
         tokenizer = self.renderer.tokenizer
+        assert tokenizer is not None
 
         if request.stream:
             return self.chat_completion_stream_generator(
@@ -706,7 +707,7 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 reasoning_parser = self.reasoning_parser(
                     tokenizer,
-                    chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+                    chat_template_kwargs=chat_template_kwargs or {},  # type: ignore[call-arg]
                 )
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
