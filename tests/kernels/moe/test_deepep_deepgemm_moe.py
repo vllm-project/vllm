@@ -173,7 +173,6 @@ def make_ll_modular_kernel(
     assert test_config.low_latency
     assert test_config.use_fp8_dispatch is not None
 
-    moe_config = make_dummy_moe_config()
     a2a: DeepEPLLPrepareAndFinalize = make_deepep_a2a(
         pg=pg,
         pgi=pgi,
@@ -193,7 +192,7 @@ def make_ll_modular_kernel(
         max_num_tokens=max_tokens_per_rank,
         num_dispatchers=pgi.world_size // dp_size,
         quant_config=quant_config,
-        moe_config=moe_config,
+        moe_config=make_dummy_moe_config(),
     )
     mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
     return mk
@@ -211,7 +210,6 @@ def make_ht_modular_kernel(
     assert not test_config.low_latency
     assert test_config.use_fp8_dispatch is None
 
-    moe_config = make_dummy_moe_config()
     a2a: DeepEPHTPrepareAndFinalize = make_deepep_a2a(
         pg=pg,
         pgi=pgi,
@@ -223,7 +221,7 @@ def make_ht_modular_kernel(
     )
 
     fused_experts = DeepGemmExperts(
-        moe_config=moe_config,
+        moe_config=make_dummy_moe_config(),
         quant_config=quant_config,
     )
     mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
