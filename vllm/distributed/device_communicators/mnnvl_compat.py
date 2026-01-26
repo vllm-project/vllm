@@ -27,7 +27,7 @@ class CustomCommunicator(CommBackend):
 
     # NOTE(rob): CommBackend is an abstract class, and bcast/barrier
     # are unimplemented on vLLM side. If we need to utilize these
-    # methods in the future, can create
+    # methods in the future, can create a concrete implementation.
     def bcast(self, data: Any, root: int) -> Any:
         raise NotImplementedError
 
