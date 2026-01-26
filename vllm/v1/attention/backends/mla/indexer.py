@@ -49,7 +49,6 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        assert num_kv_heads == 1
         return (num_blocks, block_size, head_size)
 
     @staticmethod
