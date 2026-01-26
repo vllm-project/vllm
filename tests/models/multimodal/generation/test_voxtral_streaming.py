@@ -136,6 +136,8 @@ class RealTimeAudioInput:
         self._config: AudioConfig = self._tokenizer.instruct_tokenizer.audio_encoder.audio_config
         self._sampling_rate = self._config.sampling_rate
 
+        self._audio: Audio | None = None
+
         # mutable objects
         self._start = 0
 
@@ -185,6 +187,7 @@ class RealTimeAudioInput:
         return len_in_s
 
     async def add_tokens(self, tokens: list[int]) -> None:
+        assert self._audio is not None
         if self._start >= len(self._audio.audio_array):
             self.stop()
             return
