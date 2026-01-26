@@ -881,6 +881,7 @@ def unified_attention_with_output(
     # attention forward.
     del kv_cache_dummy_dep
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
+
     self.impl.forward(
         self,
         query,
