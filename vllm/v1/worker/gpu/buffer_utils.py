@@ -19,6 +19,7 @@ def async_copy_to_gpu(
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
     assert x.is_cpu
+    assert not x.is_pinned()
 
     if out is None:
         assert device is not None

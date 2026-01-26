@@ -6,7 +6,6 @@ import torch
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
 
@@ -112,7 +111,7 @@ class EncoderRunner:
             total_num_scheduled_tokens,
             dtype=torch.bool,
             device="cpu",
-            pin_memory=False,
+            pin_memory=True,
         )
         for i, req_id in enumerate(req_ids):
             if not is_prefilling[i]:
@@ -161,7 +160,7 @@ class EncoderRunner:
                 mm_embeds.append(mm_embeds_item)
 
         # Copy the is_mm_embed tensor to the GPU.
-        is_mm_embed = async_copy_to_gpu(is_mm_embed, device=self.device)
+        is_mm_embed = is_mm_embed.to(device=self.device, non_blocking=True)
         return mm_embeds, is_mm_embed
 
     @torch.inference_mode()
