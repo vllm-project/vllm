@@ -49,6 +49,9 @@ from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+
+from vllm.platforms import current_platform
+
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
@@ -910,12 +913,27 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             hidden_states = hidden_states + pos_embeds
         rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw)
 
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-        ).cumsum(
-            dim=0,
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-        )
+        # Fix for ROCm hipErrorIllegalState: compute repeat_interleave on CPU
+        if current_platform.is_rocm():
+            grid_thw_cpu = grid_thw.cpu()
+            cu_seqlens = (
+                torch.repeat_interleave(
+                    grid_thw_cpu[:, 1] * grid_thw_cpu[:, 2], grid_thw_cpu[:, 0]
+                )
+                .cumsum(
+                    dim=0,
+                    dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+                )
+                .to(device=grid_thw.device)
+            )
+        else:
+            cu_seqlens = torch.repeat_interleave(
+                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+            ).cumsum(
+                dim=0,
+                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+            )
+
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         hidden_states = hidden_states.unsqueeze(1)
