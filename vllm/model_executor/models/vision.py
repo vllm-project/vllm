@@ -100,12 +100,9 @@ def _get_vit_attn_backend(
     )
 
 
-def get_vit_attn_backend(
-    head_size: int,
-    dtype: torch.dtype,
-) -> AttentionBackendEnum:
+def _get_current_mm_config() -> MultiModalConfig | None:
     """
-    Get the attention backend for Vision Transformer.
+    Get the current MultiModalConfig if one exists.
     """
     try:
         vllm_config: VllmConfig = get_current_vllm_config()
@@ -118,6 +115,17 @@ def get_vit_attn_backend(
         multimodal_config: MultiModalConfig | None = (
             model_config.multimodal_config if model_config is not None else None
         )
+    return multimodal_config
+
+
+def get_vit_attn_backend(
+    head_size: int,
+    dtype: torch.dtype,
+) -> AttentionBackendEnum:
+    """
+    Get the attention backend for Vision Transformer.
+    """
+    multimodal_config: MultiModalConfig | None = _get_current_mm_config()
 
     attn_backend_override = (
         multimodal_config.mm_encoder_attn_backend
@@ -136,13 +144,7 @@ def is_vit_use_data_parallel():
     """
     Get the tensor parallel type for Vision Transformer.
     """
-    try:
-        vllm_config: VllmConfig = get_current_vllm_config()
-        multimodal_config: MultiModalConfig | None = (
-            vllm_config.model_config.multimodal_config
-        )
-    except AssertionError:
-        multimodal_config = None
+    multimodal_config: MultiModalConfig | None = _get_current_mm_config()
 
     mm_encoder_tp_mode = (
         multimodal_config.mm_encoder_tp_mode if multimodal_config is not None else None
