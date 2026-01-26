@@ -10,7 +10,7 @@ from mistral_common.protocol.transcription.request import (
     StreamingMode,
     TranscriptionRequest,
 )
-from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
+from mistral_common.tokens.tokenizers.audio import AudioConfig
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
