@@ -232,9 +232,6 @@ echo "CACHE_FROM: ${CACHE_FROM}"
 echo "CACHE_FROM_BASE_BRANCH: ${CACHE_FROM_BASE_BRANCH}"
 echo "CACHE_FROM_MAIN: ${CACHE_FROM_MAIN}"
 
-echo "--- :mag: Resolved config"
-echo "PARENT_COMMIT: ${PARENT_COMMIT}"
-
 # Short-circuit for existing image
 check_and_skip_if_image_exists
 
@@ -260,6 +257,7 @@ setup_buildx_builder
 
 # Compute parent commit for cache fallback (if not already set)
 resolve_parent_commit
+export PARENT_COMMIT
 
 # Print resolved config for diagnostic artifact
 print_bake_config
