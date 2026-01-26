@@ -290,7 +290,7 @@ class MBartDecoderNoPos(nn.Module):
 
     def forward(
         self,
-        decoder_input_ids: torch.Tensor,
+        decoder_input_ids: torch.Tensor | None,
         *,
         encoder_hidden_states: torch.Tensor | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -894,7 +894,7 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         encoder_outputs: list[torch.Tensor] | None = None,
         **kwargs,

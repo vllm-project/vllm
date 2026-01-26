@@ -54,12 +54,11 @@ class ModernBertEmbeddings(nn.Module):
         input_ids: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            return self.norm(inputs_embeds)
-        else:
+        if inputs_embeds is None:
             inputs_embeds = self.tok_embeddings(input_ids)
-            embeddings = self.norm(inputs_embeds)
-            return embeddings
+
+        embeddings = self.norm(inputs_embeds)
+        return embeddings
 
 
 class ModernBertAttention(nn.Module):
