@@ -12,12 +12,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    make_fp8_moe_alpha_scales_for_fi,
-)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -53,12 +47,12 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Make additional scales for per-tensor interface.
         if self.quant_config.is_per_tensor:
-            self._g1_alphas, self._g2_alphas = make_fp8_moe_alpha_scales_for_fi(
-                w13_scale=self.quant_config.w1_scale,
-                w13_input_scale=self.quant_config.a1_scale,
-                w2_scale=self.quant_config.w2_scale,
-                w2_input_scale=self.quant_config.a2_scale,
-            )
+            self._g1_alphas = (
+                self.quant_config.w1_scale * self.quant_config.a1_scale
+            ).squeeze()
+            self._g2_alphas = (
+                self.quant_config.w2_scale * self.quant_config.a2_scale
+            ).squeeze()
             self.g1_scale_c = self._g1_alphas / self.quant_config.a2_scale
 
     @staticmethod
@@ -178,6 +172,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
+        assert not apply_router_weight_on_input
         assert activation == "silu"
         assert (
             self.e_score_correction_bias is None
@@ -196,9 +191,13 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         # Routing kernel expects #experts <= #threads 512
         assert global_num_experts <= 512
 
-        a1_q, a1q_scale = per_token_group_quant_fp8(
-            hidden_states, self.quant_config.block_shape[1]
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            hidden_states,
+            self.quant_config.a1_scale,
+            quant_dtype=self.quant_config.quant_dtype,
+            per_act_token_quant=self.quant_config.per_act_token_quant,
         )
+
         # Kernel requires transposed hidden state scales
         # TODO: fuse into the quant kernel.
         a1q_scale_t = a1q_scale.t().contiguous()
@@ -206,7 +205,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=self.e_score_correction_bias,
-            hidden_states=a1_q,
+            hidden_states=a1q,
             hidden_states_scale=a1q_scale_t,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
