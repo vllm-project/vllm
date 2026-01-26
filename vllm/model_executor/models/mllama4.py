@@ -70,20 +70,15 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
-    LMMissingLayer,
     MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
-    TowerMissingLayer,
 )
 from .llama4 import Llama4ForCausalLM
-from .utils import (
-    AutoWeightsLoader,
-    maybe_prefix,
-)
+from .utils import AutoWeightsLoader, StageMissingLayer, maybe_prefix
 from .vision import run_dp_sharded_vision_model
 
 
@@ -906,7 +901,7 @@ class Llama4ForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1024,7 +1019,7 @@ class Llama4ForConditionalGeneration(
             renamed = self._rename_weight_for_modelopt_checkpoint(name)
 
             attr = renamed.split(".", 1)[0]
-            if isinstance(getattr(self, attr), (LMMissingLayer, TowerMissingLayer)):
+            if isinstance(getattr(self, attr), StageMissingLayer):
                 continue
 
             if renamed.startswith("language_model."):

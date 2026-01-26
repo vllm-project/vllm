@@ -53,7 +53,6 @@ SPARSE_BACKEND_BATCH_SPECS["large_q_pure_prefill"] = BatchSpec(
 
 def _float_to_e8m0_truncate(f: float) -> float:
     """Simulate SM100's float -> e8m0 -> bf16 scale conversion.
-
     e8m0 format only stores the exponent (power of 2).
     cudaRoundZero truncates toward zero, meaning we round down to the
     nearest power of 2.

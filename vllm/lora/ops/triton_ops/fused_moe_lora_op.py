@@ -81,6 +81,7 @@ def _fused_moe_lora_kernel(
     top_k_num,
     lora_ids,
     adapter_enabled,
+    max_loras,  # <<< PR2: rename, used for masks when grid axis-2 != max_loras
     # The stride variables represent how much to increase the ptr by when
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
@@ -106,6 +107,7 @@ def _fused_moe_lora_kernel(
     # whether use naive block assignment
     naive_block_assignment: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
+    USE_B_L2_CACHE: tl.constexpr,  # new, enable .ca load for B
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
@@ -172,7 +174,8 @@ def _fused_moe_lora_kernel(
     cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
+    # remove modulo wrap-around
+    offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int32)
     offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
     token_mask = offs_token < num_valid_tokens
 
@@ -205,7 +208,13 @@ def _fused_moe_lora_kernel(
         # GDC wait waits for ALL programs in the prior kernel to complete
         # before continuing.
         # pre-fetch lora weight
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
+        # add (offs_bn < N) mask; optional .ca for B
+        b_mask = (offs_k[:, None] < k_remaining) & (offs_bn[None, :] < N)
+        if USE_B_L2_CACHE:
+            b = tl.load(b_ptrs, mask=b_mask, other=0.0, cache_modifier=".ca")
+        else:
+            b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+
         if USE_GDC and not IS_PRIMARY:
             tl.extra.cuda.gdc_wait()
         a = tl.load(
@@ -219,7 +228,7 @@ def _fused_moe_lora_kernel(
         b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
-        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
+        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
         accumulator = accumulator * moe_weight[:, None]
     accumulator = accumulator.to(c_ptr.dtype.element_ty)
     # Write back the block of the output
@@ -311,6 +320,7 @@ def _fused_moe_lora_shrink(
         top_k_num,
         lora_ids,
         adapter_enabled,
+        lora_a_stacked[0].shape[0],
         qcurr_hidden_states.stride(0),
         qcurr_hidden_states.stride(1),
         w1_lora_a_stacked.stride(0),
@@ -328,6 +338,7 @@ def _fused_moe_lora_shrink(
         input_token_stride=1 if mul_routed_weight else top_k_num,
         naive_block_assignment=naive_block_assignment,
         MUL_ROUTED_WEIGHT=False,
+        USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=True,
         **shrink_config,
     )
@@ -389,7 +400,7 @@ def _fused_moe_lora_expand(
         "GROUP_SIZE_M": group_size_m,
         "num_warps": num_warps,
         "num_stages": num_stages,
-        "SPLIT_K": split_k,  # Set split_k = 1 for expand calls
+        "SPLIT_K": 1,  # Set split_k = 1 for expand calls
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
     }
@@ -420,6 +431,7 @@ def _fused_moe_lora_expand(
         top_k_num,
         lora_ids,
         adapter_enabled,
+        lora_b_stacked[0].shape[0],
         a_intermediate_cache1.stride(0),
         a_intermediate_cache1.stride(1),
         w1_lora_b_stacked.stride(0),
@@ -437,6 +449,7 @@ def _fused_moe_lora_expand(
         input_token_stride=1,
         naive_block_assignment=naive_block_assignment,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
+        USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=False,
         **expand_config,
     )
