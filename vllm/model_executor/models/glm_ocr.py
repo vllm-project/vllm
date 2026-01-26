@@ -28,11 +28,14 @@
 
 from collections.abc import Callable
 from functools import partial
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers.models.glm_ocr.configuration_glm_ocr import GlmOcrVisionConfig
+
+if TYPE_CHECKING:
+    from transformers.models.glm_ocr.configuration_glm_ocr import GlmOcrVisionConfig
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
