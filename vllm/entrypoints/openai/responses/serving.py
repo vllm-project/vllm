@@ -221,15 +221,8 @@ class OpenAIServingResponses(OpenAIServing):
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        if self.default_sampling_params:
-            source = self.model_config.generation_config
-            source = "model" if source == "auto" else source
-            logger.info(
-                "Using default chat sampling params from %s: %s",
-                source,
-                self.default_sampling_params,
-            )
 
         # If False (default), the "store" option is (silently) ignored and the
         # response is not stored. If True, the response is stored in memory.

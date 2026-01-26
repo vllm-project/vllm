@@ -7,7 +7,6 @@ import time
 from typing import Any, ClassVar, Literal, TypeAlias
 
 import regex as re
-import torch
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -24,8 +23,6 @@ from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
-
-_LONG_INFO = torch.iinfo(torch.long)
 
 
 class OpenAIBaseModel(BaseModel):

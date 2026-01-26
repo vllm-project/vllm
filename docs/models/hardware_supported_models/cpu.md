@@ -7,7 +7,7 @@
 | [Intel® Xeon® 6 Processors](https://www.intel.com/content/www/us/en/products/details/processors/xeon.html)                   |
 | [Intel® Xeon® 5 Processors](https://www.intel.com/content/www/us/en/products/docs/processors/xeon/5th-gen-xeon-scalable-processors.html)              |
 
-## Supported Models
+## Recommended Models
 
 ### Text-only Language Models
 

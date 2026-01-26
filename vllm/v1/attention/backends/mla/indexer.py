@@ -26,6 +26,10 @@ logger = init_logger(__name__)
 
 class DeepseekV32IndexerBackend(AttentionBackend):
     @staticmethod
+    def get_name() -> str:
+        return "DEEPSEEK_V32_INDEXER"
+
+    @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [1 if current_platform.is_rocm() else 64]
 

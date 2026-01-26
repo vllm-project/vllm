@@ -11,6 +11,10 @@ from vllm.v1.attention.backends.mamba_attn import (
 
 class ShortConvAttentionBackend(AttentionBackend):
     @staticmethod
+    def get_name() -> str:
+        return "SHORT_CONV_ATTN"
+
+    @staticmethod
     def get_builder_cls() -> type["ShortConvAttentionMetadataBuilder"]:
         return ShortConvAttentionMetadataBuilder
 

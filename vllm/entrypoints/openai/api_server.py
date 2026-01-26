@@ -558,7 +558,8 @@ def build_app(args: Namespace) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
         param = None
-        for error in exc.errors():
+        errors = exc.errors()
+        for error in errors:
             if "ctx" in error and "error" in error["ctx"]:
                 ctx_error = error["ctx"]["error"]
                 if isinstance(ctx_error, VLLMValidationError):
@@ -566,9 +567,9 @@ def build_app(args: Namespace) -> FastAPI:
                     break
 
         exc_str = str(exc)
-        errors_str = str(exc.errors())
+        errors_str = str(errors)
 
-        if exc.errors() and errors_str and errors_str != exc_str:
+        if errors and errors_str and errors_str != exc_str:
             message = f"{exc_str} {errors_str}"
         else:
             message = exc_str

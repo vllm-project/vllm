@@ -390,29 +390,43 @@ class Attention(nn.Module, AttentionLayerBase):
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size_v)
             if self.use_direct_call:
-                forward_context: ForwardContext = get_forward_context()
-                attn_metadata = forward_context.attn_metadata
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                self.impl.forward(
-                    self, query, key, value, self_kv_cache, attn_metadata, output=output
+                kv_cache_dummy_dep = None
+                if not self.attn_backend.forward_includes_kv_cache_update:
+                    kv_cache_dummy_dep = unified_kv_cache_update(
+                        key, value, self.layer_name
+                    )
+                unified_attention_with_output(
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
             else:
+                kv_cache_dummy_dep = None
+                if not self.attn_backend.forward_includes_kv_cache_update and (
+                    # torch can only dispatch custom op if a tensor is passed
+                    key is not None or value is not None
+                ):
+                    kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
+                        key, value, self.layer_name
+                    )
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name
+                    query,
+                    key,
+                    value,
+                    output,
+                    self.layer_name,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
             return output.view(-1, hidden_size)
         else:
+            assert self.attn_backend.forward_includes_kv_cache_update, (
+                "Split KV cache update not supported when output tensor not provided."
+            )
             if self.use_direct_call:
-                forward_context = get_forward_context()
-                attn_metadata = forward_context.attn_metadata
-                if isinstance(attn_metadata, dict):
-                    attn_metadata = attn_metadata[self.layer_name]
-                self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                return self.impl.forward(
-                    self, query, key, value, self_kv_cache, attn_metadata
-                )
+                return unified_attention(query, key, value, self.layer_name)
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name
@@ -802,6 +816,55 @@ direct_register_custom_op(
 )
 
 
+def unified_kv_cache_update(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    """
+    Returns a dummy that is passed to unified_attention to signal a side effect and
+    the data dependency between them to ensure torch.compile preserves ordering.
+    """
+    forward_context = get_forward_context()
+    attn_layer = forward_context.no_compile_layers[layer_name]
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+
+    slot_mapping = forward_context.slot_mapping
+    assert isinstance(slot_mapping, dict), (
+        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+    )
+    layer_slot_mapping = slot_mapping.get(layer_name)
+    if layer_slot_mapping is not None:
+        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+        )
+        attn_layer.impl.do_kv_cache_update(
+            attn_layer,
+            key,
+            value,
+            kv_cache,
+            layer_slot_mapping,
+        )
+
+    return torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
+
+
+def unified_kv_cache_update_fake(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    layer_name: str,
+) -> torch.Tensor:
+    return torch.empty(0, device=key.device, dtype=key.dtype)
+
+
+direct_register_custom_op(
+    op_name="unified_kv_cache_update",
+    op_func=unified_kv_cache_update,
+    fake_impl=unified_kv_cache_update_fake,
+    mutates_args=[],
+)
+
+
 @maybe_transfer_kv_layer
 def unified_attention_with_output(
     query: torch.Tensor,
@@ -811,7 +874,12 @@ def unified_attention_with_output(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
+    # kv_cache_dummy_dep is not used but accepting it creates a data dependency
+    # that ensures torch.compile preserves ordering between KV cache update and
+    # attention forward.
+    del kv_cache_dummy_dep
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
 
     self.impl.forward(
@@ -835,6 +903,7 @@ def unified_attention_with_output_fake(
     layer_name: str,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
     return
 

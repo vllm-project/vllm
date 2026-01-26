@@ -1311,6 +1311,7 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
     opcheck(torch.ops._moe_C.moe_sum, (input, actual))
 
 
+@pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("m", [1, 33])
 @pytest.mark.parametrize("n,k", [(128, 128)])
 @pytest.mark.parametrize("e", [8])

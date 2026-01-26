@@ -248,6 +248,7 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
                 input=attn_out_view,
                 output_scale=output_scale,
                 input_scale=input_scale,
+                is_sf_swizzled_layout=True,
             )
             output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
             return at2[1], output_scale_view

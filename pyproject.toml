@@ -132,7 +132,8 @@ python = "./.venv"
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*",
     "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
-    "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*"]
+    "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", 
+    "docs/governance/process.md"]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
