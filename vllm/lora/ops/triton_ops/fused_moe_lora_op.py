@@ -167,7 +167,6 @@ def _fused_moe_lora_kernel(
     # whether use naive block assignment
     naive_block_assignment: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
-    ADD_INPUTS: tl.constexpr,
     USE_B_L2_CACHE: tl.constexpr,  # new, enable .ca load for B
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -190,10 +189,13 @@ def _fused_moe_lora_kernel(
     if moe_enabled == 0:
         # Early exit for the no moe lora case.
         return
-    # The grid size on axis 2 is (max_loras + 1) to handle the no-lora case
-    # (lora_id == -1), but sorted_token_ids and expert_ids are allocated with
-    # shape (max_loras, ...). Use (num_programs - 1) for correct bounds checking.
-    max_loras = tl.num_programs(axis=2) - 1
+    # The grid's axis-2 dimension is max_loras + 1 to accommodate the -1 sentinel.
+    # This guard ensures we don't access sorted_token_ids / expert_ids /
+    # num_tokens_post_padded beyond their allocated bounds if an invalid
+    # lora_id somehow appears. Although the caller should pass correct
+    # max_loras, defensive programming prevents accidental out-of-bounds.
+    if lora_id >= max_loras:
+        return
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
@@ -268,7 +270,7 @@ def _fused_moe_lora_kernel(
     offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int32)
     offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
 
-    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
+    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int32)
     token_ind = stride_tl * lora_id + offs_token_id
     offs_token = tl.load(
         sorted_token_ids_ptr + token_ind,
@@ -440,7 +442,6 @@ def _fused_moe_lora_shrink(
         token_mapping_factor=1 if mul_routed_weight else top_k_num,
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=False,
-        ADD_INPUTS=False,
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=True,
         **shrink_config,
@@ -556,7 +557,6 @@ def _fused_moe_lora_expand(
         token_mapping_factor=1,
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
-        ADD_INPUTS=True,
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=False,
         **expand_config,
