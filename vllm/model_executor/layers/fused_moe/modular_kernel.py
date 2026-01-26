@@ -586,9 +586,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         activation_key: QuantKey | None,
     ) -> bool:
         """
-        Whether the kernel supports a routing method. Can be overriden
-        by monolithic kernels that excute the router in addition to the
-        fused experts.
+        Whether the kernel supports a routing method (e.g. GroupedTopK).
+
+        Can be overriden by monolithic kernels that execute the router
+        in addition to the experts if certain routers are not supported.
         """
         return True
 
