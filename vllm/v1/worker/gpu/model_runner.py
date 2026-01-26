@@ -409,13 +409,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             torch.cuda.synchronize()
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
-        if scheduler_output.preempted_req_ids is not None:
-            for req_id in scheduler_output.preempted_req_ids:
-                self.req_states.remove_request(req_id)
-                if self.supports_mm_inputs:
-                    self.encoder_runner.remove_request(req_id)
-                self.prompt_logprobs_worker.remove_request(req_id)
-        for req_id in scheduler_output.finished_req_ids:
+        finished_req_ids = scheduler_output.finished_req_ids
+        if scheduler_output.preempted_req_ids:
+            finished_req_ids = finished_req_ids.union(
+                scheduler_output.preempted_req_ids
+            )
+        for req_id in finished_req_ids:
             self.req_states.remove_request(req_id)
             if self.supports_mm_inputs:
                 self.encoder_runner.remove_request(req_id)
