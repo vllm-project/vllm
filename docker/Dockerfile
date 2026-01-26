@@ -118,7 +118,6 @@ ENV UV_LINK_MODE=copy
 RUN gcc --version
 
 # Workaround for triton/pytorch issues
-# This temporarily adds the CUDA compatibility libraries to the ldconfig cache.
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 # ============================================================
@@ -455,7 +454,6 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 # Workaround for triton/pytorch issues
-# This temporarily adds the CUDA compatibility libraries to the ldconfig cache.
 RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 # ============================================================
@@ -556,10 +554,6 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
 # consistently from the host (see https://github.com/vllm-project/vllm/issues/18859).
 # Until then, add /usr/local/nvidia/lib64 before the image cuda path to allow override.
 ENV LD_LIBRARY_PATH=/usr/local/nvidia/lib64:${LD_LIBRARY_PATH}
-
-# Add CUDA compatibility libraries to the end of LD_LIBRARY_PATH.
-# This ensures they are used as a fallback if the host driver is too old.
-ENV LD_LIBRARY_PATH=${LD_LIBRARY_PATH}:/usr/local/cuda/compat
 
 # Copy examples and benchmarks at the end to minimize cache invalidation
 COPY examples examples
