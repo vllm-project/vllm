@@ -141,6 +141,7 @@ class CudaInputQuantKernel(InputQuantKernel[InputQuantConfig]):
             x,
             group_size=self.group_size,
             column_major_scales=self.is_column_major_scales,
+            tma_aligned_scales=self.config.tma_aligned_scales,
             dtype=_FP8_DTYPE,
             use_ue8m0=self.use_ue8m0,
         )
