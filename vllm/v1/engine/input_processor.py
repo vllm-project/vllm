@@ -743,6 +743,30 @@ class InputProcessor:
                 f"model length of {max_prompt_len}. {suggestion}"
             )
 
+        if prompt_type == "decoder" and prompt_inputs["type"] == "multimodal":
+            mm_registry = self.input_preprocessor.mm_registry
+            max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
+                self.model_config
+            )
+            max_tokens_per_mm_item = max(max_tokens_by_modality.values(), default=0)
+            encoder_cache_size = max(
+                self.vllm_config.scheduler_config.max_num_batched_tokens,
+                max_tokens_per_mm_item,
+            )
+            decoder_mm_positions = prompt_inputs["mm_placeholders"]
+            for modality, mm_positions in decoder_mm_positions.items():
+                for _, mm_position in enumerate(mm_positions):
+                    embed_length = mm_position.get_num_embeds
+                    if embed_length > encoder_cache_size:
+                        raise ValueError(
+                            f"The {prompt_type} prompt contains a multimodal item "
+                            f"in modality '{modality}' "
+                            f"with length {embed_length}, which exceeds the "
+                            f"calculated encoder cache size {encoder_cache_size}. "
+                            "Please reduce frames/resolution or increase "
+                            "--max-num-batched-tokens."
+                        )
+
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
         return self.input_preprocessor.stat_mm_cache()
 
