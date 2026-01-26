@@ -77,18 +77,6 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     )
 
 
-def make_fp8_moe_alpha_scales_for_fi(
-    w13_scale: torch.Tensor,
-    w13_input_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    w2_input_scale: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    g1_alphas = (w13_scale * w13_input_scale).squeeze()
-    g2_alphas = (w2_scale * w2_input_scale).squeeze()
-
-    return g1_alphas, g2_alphas
-
-
 def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
     moe: FusedMoEConfig | None, use_deepseek_fp8_block_scale: bool = False
 ) -> mk.FusedMoEPrepareAndFinalize:
