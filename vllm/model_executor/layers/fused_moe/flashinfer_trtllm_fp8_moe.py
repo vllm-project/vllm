@@ -115,7 +115,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
 
         self.moe_config = moe_config
         # TODO: set this via the constructor
