@@ -193,17 +193,17 @@ ecr_login
 #   VLLM_BAKE_FILE      - Path to vLLM's bake file (default: docker/docker-bake.hcl)
 #   BUILDER_NAME        - Name for buildx builder (default: vllm-builder)
 #
-# Build configuration (passed through to bake via environment):
-#   BUILDKITE_COMMIT    - Git commit (auto-detected from Buildkite)
-#   PARENT_COMMIT       - Parent commit (HEAD~1) for cache fallback (auto-computed)
-#   IMAGE_TAG           - Primary image tag
-#   IMAGE_TAG_LATEST    - Latest tag (optional)
-#   CACHE_FROM          - Cache source
-#   CACHE_FROM_BASE     - Base branch cache source
-#   CACHE_FROM_MAIN     - Main branch cache source
-#   CACHE_TO            - Cache destination
-#   VLLM_USE_PRECOMPILED    - Use precompiled wheels
-#   VLLM_MERGE_BASE_COMMIT  - Merge base commit for precompiled
+# Build configuration (exported as environment variables for bake):
+export BUILDKITE_COMMIT
+export PARENT_COMMIT
+export IMAGE_TAG
+export IMAGE_TAG_LATEST
+export CACHE_FROM
+export CACHE_FROM_BASE_BRANCH
+export CACHE_FROM_MAIN
+export CACHE_TO
+export VLLM_USE_PRECOMPILED
+export VLLM_MERGE_BASE_COMMIT
 
 # print out all args
 echo "--- :mag: Arguments"
