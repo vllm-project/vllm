@@ -96,7 +96,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 )
 from vllm.entrypoints.utils import _validate_truncation_size, sanitize_message
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import EmbedsPrompt, PromptType, TokensPrompt
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
     PromptComponents,
     get_prompt_components,
@@ -191,7 +191,7 @@ class ServeContext(Generic[RequestT, OutputT]):
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    engine_prompts: list[TokensPrompt | EmbedsPrompt] | None = None
+    engine_prompts: list[TokensPrompt] | None = None
 
     result_generator: AsyncGenerator[tuple[int, OutputT], None] | None = None
     final_res_batch: list[OutputT] = field(default_factory=list)
