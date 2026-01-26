@@ -1,6 +1,6 @@
 group: Hardware
 steps:
-  - label: "AMD: :docker: build image"
+  - label: "AMD: :docker: image build"
     device: amd_cpu
     no_plugin: true
     commands:
