@@ -146,6 +146,13 @@ def _fused_moe_lora_kernel(
         if moe_enabled == 0:
             # Early exit for the no moe lora case.
             return
+        # The grid's axis-2 dimension is max_loras + 1 to accommodate the -1 sentinel.
+        # This guard ensures we don't access sorted_token_ids / expert_ids /
+        # num_tokens_post_padded beyond their allocated bounds if an invalid
+        # lora_id somehow appears. Although the caller should pass correct
+        # max_loras, defensive programming prevents accidental out-of-bounds.
+        if lora_id >= max_loras:
+            return
         num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr + lora_id)
         if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
             return
@@ -165,6 +172,8 @@ def _fused_moe_lora_kernel(
             return
         moe_enabled = tl.load(adapter_enabled + lora_id)
         if moe_enabled == 0:
+            return
+        if lora_id >= max_loras:
             return
         expert_id = tl.load(expert_ids_ptr + pid_m)
     if expert_id == -1:
