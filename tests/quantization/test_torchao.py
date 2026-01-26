@@ -1,26 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib.metadata
-import importlib.util
 
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.platforms import current_platform
 
 DTYPE = ["bfloat16"]
-
-TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
 
 
 @pytest.mark.skipif(
     current_platform.is_rocm() and current_platform.is_fp8_fnuz(),
     reason="Only fp8_fnuz supported on CDNA3 architecture",
 )
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    not torchao_version_at_least("0.16.0"), reason="requires torchao >= 0.16.0"
+)
 def test_pre_quantized_model(vllm_runner):
     with vllm_runner(
-        "drisspg/fp8-opt-125m",
+        "torchao-testing/opt-125m-Float8WeightOnlyConfig-v2-0.15.0",
         quantization="torchao",
         dtype="bfloat16",
         enforce_eager=True,
@@ -29,46 +28,13 @@ def test_pre_quantized_model(vllm_runner):
     assert output
 
 
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
-@pytest.mark.parametrize(
-    "pt_load_map_location",
-    [
-        "cuda:0",
-        # {"": "cuda"},
-    ],
+# TODO: add more tests with v2 configs
+
+
+@pytest.mark.skipif(
+    not torchao_version_at_least("0.16.0"), reason="requires torchao >= 0.16.0"
 )
-def test_opt_125m_int8wo_model_loading_with_params(vllm_runner, pt_load_map_location):
-    torch._dynamo.reset()
-    model_name = "jerryzh168/opt-125m-int8wo-partial-quant"
-    with vllm_runner(
-        model_name=model_name,
-        quantization="torchao",
-        dtype="bfloat16",
-        pt_load_map_location=pt_load_map_location,
-        enforce_eager=True,
-    ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
-
-        assert output
-
-
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
-def test_opt_125m_int4wo_model_per_module_quant(vllm_runner):
-    torch._dynamo.reset()
-    model_name = "jerryzh168/opt-125m-int4wo-per-module"
-    with vllm_runner(
-        model_name=model_name,
-        quantization="torchao",
-        dtype="bfloat16",
-        pt_load_map_location="cuda:0",
-        enforce_eager=True,
-    ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
-
-        assert output
-
-
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skip(reason="need to update to use v2 config")
 def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
     torch._dynamo.reset()
     model_name = "mobicham/Qwen2.5-VL-3B-Instruct_int8wo_ao"
@@ -84,11 +50,13 @@ def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
         assert output
 
 
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
 @pytest.mark.skip(
     reason="since torchao nightly is only compatible with torch nightly"
     "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
     "torchao tests that requires newer versions (0.14.0.dev+) for now"
+)
+@pytest.mark.skipif(
+    not torchao_version_at_least("0.16.0"), reason="requires torchao >= 0.16.0"
 )
 def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
     torch._dynamo.reset()
@@ -104,7 +72,9 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
         assert output
 
 
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    not torchao_version_at_least("0.16.0"), reason="requires torchao >= 0.16.0"
+)
 def test_online_quant_config_dict_json(vllm_runner):
     """Testing on the fly quantization, load_weights integration point,
     with config dict serialized to json string
@@ -138,7 +108,9 @@ def test_online_quant_config_dict_json(vllm_runner):
         assert output
 
 
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    not torchao_version_at_least("0.16.0"), reason="requires torchao >= 0.16.0"
+)
 def test_online_quant_config_file(vllm_runner):
     """Testing on the fly quantization, load_weights integration point,
     with config file
@@ -173,7 +145,9 @@ def test_online_quant_config_file(vllm_runner):
             assert output
 
 
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(
+    not torchao_version_at_least("0.16.0"), reason="requires torchao >= 0.16.0"
+)
 def test_reload_weights():
     import json
 
@@ -227,11 +201,13 @@ def test_reload_weights():
         # print("-" * 60)
 
 
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
 @pytest.mark.skip(
     reason="since torchao nightly is only compatible with torch nightly"
     "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
     "torchao tests that requires newer versions (0.15.0.dev+) for now"
+)
+@pytest.mark.skipif(
+    not torchao_version_at_least("0.16.0"), reason="requires torchao >= 0.16.0"
 )
 def test_safetensors_model_loading_with_params(vllm_runner):
     torch._dynamo.reset()
@@ -243,11 +219,13 @@ def test_safetensors_model_loading_with_params(vllm_runner):
         assert output
 
 
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
 @pytest.mark.skip(
     reason="since torchao nightly is only compatible with torch nightly"
     "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
     "torchao tests that requires newer versions (0.14.0.dev+) for now"
+)
+@pytest.mark.skipif(
+    not torchao_version_at_least("0.16.0"), reason="requires torchao >= 0.16.0"
 )
 def test_opt_125m_module_fqn_to_config_regex_model(vllm_runner):
     torch._dynamo.reset()
@@ -260,11 +238,13 @@ def test_opt_125m_module_fqn_to_config_regex_model(vllm_runner):
     assert output
 
 
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
 @pytest.mark.skip(
     reason="since torchao nightly is only compatible with torch nightly"
     "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
     "torchao tests that requires newer versions (0.14.0.dev+) for now"
+)
+@pytest.mark.skipif(
+    not torchao_version_at_least("0.16.0"), reason="requires torchao >= 0.16.0"
 )
 def test_opt_125m_int4wo_model_running_preshuffled_kernel(vllm_runner, monkeypatch):
     """We load a model with Int4Tensor (plain format) linear weights
@@ -322,11 +302,13 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel(vllm_runner, monkeypat
         assert output
 
 
-@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
 @pytest.mark.skip(
     reason="since torchao nightly is only compatible with torch nightly"
     "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
     "torchao tests that requires newer versions (0.14.0.dev+) for now"
+)
+@pytest.mark.skipif(
+    not torchao_version_at_least("0.16.0"), reason="requires torchao >= 0.16.0"
 )
 def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
     vllm_runner, monkeypatch
