@@ -1001,7 +1001,9 @@ class FusedMoE(CustomOp):
             shard_size = expert_data.shape[shard_dim] // 2
         else:
             shard_size = expert_data.shape[shard_dim]
-        if not load_full:
+        # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
+        # and we're not loading the full weight
+        if not load_full and loaded_weight.ndim > 0:
             loaded_weight = loaded_weight.narrow(
                 shard_dim, shard_size * tp_rank, shard_size
             )
@@ -1027,7 +1029,9 @@ class FusedMoE(CustomOp):
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Narrow parameter and load.
         shard_size = expert_data.shape[shard_dim]
-        if not load_full:
+        # Only narrow if the loaded_weight is not a scalar (0-dim tensor)
+        # and we're not loading the full weight
+        if not load_full and loaded_weight.ndim > 0:
             loaded_weight = loaded_weight.narrow(
                 shard_dim, shard_size * tp_rank, shard_size
             )
