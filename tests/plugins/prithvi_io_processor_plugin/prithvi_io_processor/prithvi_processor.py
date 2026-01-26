@@ -349,8 +349,10 @@ class PrithviMultimodalDataProcessor(IOProcessor):
                 {
                     "prompt_token_ids": [1],
                     "multi_modal_data": {
-                        "pixel_values": window.to(torch.float16)[0],
-                        "location_coords": location_coords.to(torch.float16),
+                        "image": {
+                            "pixel_values": window.to(torch.float16)[0],
+                            "location_coords": location_coords.to(torch.float16),
+                        }
                     },
                 }
             )
