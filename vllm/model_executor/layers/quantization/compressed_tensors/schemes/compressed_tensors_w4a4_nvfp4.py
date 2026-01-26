@@ -16,6 +16,9 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     cutlass_fp4_supported,
+    pad_nvfp4_activation_for_cutlass,
+    pad_nvfp4_weight_for_cutlass,
+    slice_nvfp4_output,
     swizzle_blockscale,
 )
 from vllm.model_executor.parameter import (
@@ -159,9 +162,20 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             if self.backend == "fbgemm":
                 swizzled_weight_scale = swizzled_weight_scale.view(-1).view(torch.uint8)
             layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
-            layer.weight_packed = Parameter(
-                layer.weight_packed.data, requires_grad=False
-            )
+
+            # Pad weights for CUTLASS/FlashInfer kernel alignment (K and N
+            # divisible by 32). fbgemm has its own layout requirements.
+            if self.backend in ("cutlass", "flashinfer-cutlass"):
+                weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
+                    layer.weight_packed.data
+                )
+                layer.weights_padding_cols = weights_padding_cols
+                layer.weight_packed = Parameter(weight, requires_grad=False)
+            else:
+                layer.weights_padding_cols = 0
+                layer.weight_packed = Parameter(
+                    layer.weight_packed.data, requires_grad=False
+                )
 
         layer.alpha = Parameter(
             1 / (layer.input_global_scale * layer.weight_global_scale),
@@ -187,7 +201,8 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             return out
 
         output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], layer.weight_packed.shape[0]]
+        output_size = layer.output_size_per_partition
+        output_shape = [*x.shape[:-1], output_size]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(
@@ -196,6 +211,10 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             is_sf_swizzled_layout=True,
             backend=self.backend,
         )
+
+        # Pad activations to match weight K-dimension padding
+        weights_padding_cols = getattr(layer, "weights_padding_cols", 0)
+        x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
 
         mm_args = (
             x_fp4,
@@ -220,6 +239,9 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         else:
             assert self.backend == "cutlass"
             out = cutlass_scaled_fp4_mm(*mm_args)
+
+        # Slice output to remove N-dimension padding
+        out = slice_nvfp4_output(out, output_size)
 
         if bias is not None:
             out = out + bias

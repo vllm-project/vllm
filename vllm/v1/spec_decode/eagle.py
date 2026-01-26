@@ -403,7 +403,7 @@ class SpecDecodeBaseProposer:
             return draft_token_ids.view(-1, 1)
 
         if self.uses_mrope:
-            positions = self.positions[:, last_token_indices]
+            positions = self.mrope_positions[:, last_token_indices]
         else:
             positions = self.positions[last_token_indices]
         if self.method in (
@@ -1126,6 +1126,7 @@ class SpecDecodeBaseProposer:
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
                 "Qwen3VLMoeForConditionalGeneration",
+                "GlmOcrForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":

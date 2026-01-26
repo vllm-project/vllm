@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -330,9 +331,16 @@ def select_fp8_moe_backend(
         else:
             logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
-    raise NotImplementedError(
-        "No FP8 MoE backend supports the deployment configuration."
-    )
+    # TODO(rob): per discussion with TPU team, we need a way to register
+    # MoE backends by OOT plugins, rather than having an explicit list
+    # of AVAILBLE_BACKENDS. Enabling returning `Fp8MoeBackend.NONE` is
+    # a temporary measure until these register APIs are complete.
+    if current_platform.is_cuda() or current_platform.is_rocm():
+        raise NotImplementedError(
+            "No FP8 MoE backend supports the deployment configuration."
+        )
+
+    return Fp8MoeBackend.NONE, None
 
 
 def convert_to_fp8_moe_kernel_format(
