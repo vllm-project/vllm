@@ -351,7 +351,7 @@ def _fused_moe_lora_expand(
         "GROUP_SIZE_M": group_size_m,
         "num_warps": num_warps,
         "num_stages": num_stages,
-        "SPLIT_K": split_k,  # Set split_k = 1 for expand calls
+        "SPLIT_K": 1,  # Set split_k = 1 for expand calls
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
     }
