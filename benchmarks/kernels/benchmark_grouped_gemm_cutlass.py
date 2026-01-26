@@ -131,17 +131,16 @@ def bench_run(
             w2_scale=w2_scale,
             per_act_token_quant=per_act_token,
         )
-        moe_config = make_dummy_moe_config(
-            num_experts=w2.shape[0],
-            hidden_dim=w2.shape[1],
-            intermediate_size_per_partition=w2.shape[2],
-            in_dtype=a.dtype,
-        )
 
         fn = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
-                moe_config=moe_config,
+                moe_config=make_dummy_moe_config(
+                    num_experts=w2.shape[0],
+                    hidden_dim=w2.shape[1],
+                    intermediate_size_per_partition=w2.shape[2],
+                    in_dtype=a.dtype,
+                ),
                 quant_config=quant_config,
             ),
         )
@@ -164,17 +163,16 @@ def bench_run(
             w2_scale=w2_scale,
             per_act_token_quant=per_act_token,
         )
-        moe_config = make_dummy_moe_config(
-            num_experts=w2.shape[0],
-            hidden_dim=w2.shape[1],
-            intermediate_size_per_partition=w2.shape[2],
-            in_dtype=a.dtype,
-        )
 
         fn = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
-                moe_config=moe_config,
+                moe_config=make_dummy_moe_config(
+                    num_experts=w2.shape[0],
+                    hidden_dim=w2.shape[1],
+                    intermediate_size_per_partition=w2.shape[2],
+                    in_dtype=a.dtype,
+                ),
                 quant_config=quant_config,
             ),
         )
