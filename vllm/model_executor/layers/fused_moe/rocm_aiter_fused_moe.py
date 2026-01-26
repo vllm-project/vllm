@@ -287,16 +287,13 @@ def rocm_aiter_fused_experts(
 
 
 class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
-
-    @staticmethod
-    def expects_unquantized_inputs(
-        moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
-    ) -> bool:
-        # AITER fused MoE kernels handle input quantization internally.
-        return True
 
     @staticmethod
     def _supports_current_device() -> bool:

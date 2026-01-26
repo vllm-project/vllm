@@ -130,8 +130,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        # NOTE: defer_input_quant must be False for LoRA fused MoE.
-        prepare_finalize = MoEPrepareAndFinalizeNoEP(defer_input_quant=False)
+        prepare_finalize = MoEPrepareAndFinalizeNoEP()
         m_fused_moe_fn = FusedMoEModularKernel(
             prepare_finalize,
             self.base_layer.quant_method.select_gemm_impl(

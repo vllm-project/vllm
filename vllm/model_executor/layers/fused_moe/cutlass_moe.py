@@ -651,10 +651,8 @@ def run_cutlass_moe_fp4(
 
 
 class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
-    @staticmethod
-    def expects_unquantized_inputs(
-        moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
-    ) -> bool:
+    @property
+    def expects_unquantized_inputs(self) -> bool:
         return True
 
     @staticmethod
@@ -1147,7 +1145,7 @@ def cutlass_moe_w4a8_fp8(
     num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
 
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(defer_input_quant=False),
+        MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsW4A8Fp8(
             out_dtype=a.dtype,
             a_strides1=a_strides1,

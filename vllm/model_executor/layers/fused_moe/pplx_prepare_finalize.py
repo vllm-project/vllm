@@ -65,19 +65,12 @@ def pplx_hidden_dim_scale_bytes(
 class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
-        defer_input_quant: bool,
         a2a: pplx.AllToAll,
         max_num_tokens: int,
         num_local_experts: int,
         num_dispatchers: int,
     ):
-        super().__init__(defer_input_quant=defer_input_quant)
-        if defer_input_quant:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} does not support defer_input_quant=True. "
-                "Please select an MoE kernel that accepts quantized inputs."
-            )
-
+        super().__init__()
         assert max_num_tokens > 0
         assert num_local_experts > 0
         self.a2a = a2a
@@ -113,7 +106,14 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> tuple[Callable, mk.ReceiverType]:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
+
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
 
@@ -281,6 +281,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         hook, receiver = self.prepare_async(
             a1,
@@ -290,6 +291,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_map,
             apply_router_weight_on_input,
             quant_config,
+            defer_input_quant=defer_input_quant,
         )
         hook()
         return receiver()

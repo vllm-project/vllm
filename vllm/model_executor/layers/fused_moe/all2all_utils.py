@@ -77,7 +77,6 @@ def maybe_make_prepare_finalize(
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    defer_input_quant: bool = False,
     allow_new_interface: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
     # TODO
@@ -98,7 +97,7 @@ def maybe_make_prepare_finalize(
     #     holds the ModularKernel.
     if not moe.moe_parallel_config.use_all2all_kernels:
         if allow_new_interface:
-            return MoEPrepareAndFinalizeNoEP(defer_input_quant)
+            return MoEPrepareAndFinalizeNoEP()
         else:
             return None
 
@@ -143,7 +142,6 @@ def maybe_make_prepare_finalize(
         handle = all2all_manager.get_handle(all_to_all_args)
 
         prepare_finalize = PplxPrepareAndFinalize(
-            defer_input_quant=defer_input_quant,
             a2a=handle,
             max_num_tokens=moe.max_num_tokens,
             num_local_experts=moe.num_local_experts,
@@ -155,7 +153,6 @@ def maybe_make_prepare_finalize(
         all_to_all_args = dict()
         handle = all2all_manager.get_handle(all_to_all_args)
         prepare_finalize = DeepEPHTPrepareAndFinalize(
-            defer_input_quant=defer_input_quant,
             buffer=handle,
             num_dispatchers=all2all_manager.world_size,
             dp_size=all2all_manager.dp_world_size,
@@ -188,7 +185,6 @@ def maybe_make_prepare_finalize(
         )
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
-            defer_input_quant=defer_input_quant,
             buffer=handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
@@ -223,7 +219,6 @@ def maybe_make_prepare_finalize(
         handle = all2all_manager.get_handle(all_to_all_args)
 
         prepare_finalize = MoriPrepareAndFinalize(
-            defer_input_quant=defer_input_quant,
             mori_op=handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
@@ -233,13 +228,11 @@ def maybe_make_prepare_finalize(
     elif moe.use_fi_all2allv_kernels:
         assert quant_config is not None
         prepare_finalize = FlashInferA2APrepareAndFinalize(
-            defer_input_quant=defer_input_quant,
             num_dispatchers=all2all_manager.world_size,
         )
 
     elif moe.use_naive_all2all_kernels and allow_new_interface:
         prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
-            defer_input_quant,
             is_sequence_parallel=(moe.moe_parallel_config.is_sequence_parallel),
             num_dispatchers=all2all_manager.world_size,
         )

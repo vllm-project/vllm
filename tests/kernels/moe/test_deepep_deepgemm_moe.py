@@ -187,9 +187,6 @@ def make_ll_modular_kernel(
         ),
         q_dtype=q_dtype,
         block_shape=test_config.block_size,
-        defer_input_quant=BatchedDeepGemmExperts.expects_unquantized_inputs(
-            moe_config, quant_config
-        ),
     )
 
     fused_experts = BatchedDeepGemmExperts(
@@ -223,10 +220,6 @@ def make_ht_modular_kernel(
         deepep_ll_args=None,
         q_dtype=q_dtype,
         block_shape=test_config.block_size,
-        defer_input_quant=DeepGemmExperts.expects_unquantized_inputs(
-            moe_config,
-            quant_config,
-        ),
     )
 
     fused_experts = DeepGemmExperts(

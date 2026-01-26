@@ -403,10 +403,6 @@ def make_nvfp4_moe_kernel(
         moe=moe_config,
         quant_config=moe_quant_config,
         routing_tables=routing_tables,
-        defer_input_quant=experts_cls.expects_unquantized_inputs(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        ),
         allow_new_interface=True,
     )
     assert prepare_finalize is not None

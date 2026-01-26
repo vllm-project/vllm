@@ -608,10 +608,6 @@ def make_modular_kernel(
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe,
         quant_config=quant_config,
-        defer_input_quant=config.fused_experts_type.expects_unquantized_inputs(
-            moe_config=moe,
-            quant_config=quant_config,
-        ),
         allow_new_interface=True,
     )
     assert prepare_finalize is not None

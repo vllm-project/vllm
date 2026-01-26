@@ -161,14 +161,6 @@ class FusedMoEPrepareAndFinalize(ABC):
     described above.
     """
 
-    def __init__(
-        self,
-        defer_input_quant: bool,
-    ):
-        # Whether to defer input quantization to the Experts kernel.
-        # Useful for cases where the Kernel applies the quantization.
-        self.defer_input_quant = defer_input_quant
-
     def post_init_setup(self, fused_experts: "FusedMoEPermuteExpertsUnpermute"):
         """
         Initialize FusedMoEPrepareAndFinalize settings that depend on
@@ -188,6 +180,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
     ) -> PrepareResultType:
         """
         Perform any quantization (and/or) dispatching needed for this kernel.
@@ -200,6 +193,9 @@ class FusedMoEPrepareAndFinalize(ABC):
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
         - quant_config: Quantization info provided by the fused experts.
+        - defer_input_quant: Runtime parameter indicating whether or not to
+          defer input quantization to the FusedMoEPermuteExpertsUnpermute
+          in cases where the compute kernel expects unquantized inputs
 
         Returns a tuple of:
         - quantized + dispatched a.
@@ -228,6 +224,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
     ) -> tuple[Callable, ReceiverType] | ReceiverType:
         """
         Perform any quantization (and/or) dispatching needed for this kernel
@@ -243,6 +240,9 @@ class FusedMoEPrepareAndFinalize(ABC):
           space to the local expert space of the expert parallel shard.
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
+        - defer_input_quant: Runtime parameter indicating whether or not to
+          defer input quantization to the FusedMoEPermuteExpertsUnpermute
+          in cases where the compute kernel expects unquantized inputs
 
         Returns a callback or a hook callback pair that when invoked waits for
         results from other workers and has the same return signature as
@@ -415,10 +415,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
-    @staticmethod
-    def expects_unquantized_inputs(
-        moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig
-    ) -> bool:
+    @property
+    def expects_unquantized_inputs(self) -> bool:
         """
         Whether or not the PrepareFinalize should defer input quantization
         in the prepare step. If True, then the Experts kernel will
@@ -1077,6 +1075,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 expert_map,
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
+                defer_input_quant=self.fused_experts.expects_unquantized_inputs,
             )
         else:
             # Overlap shared expert compute with all2all dispatch.
@@ -1089,6 +1088,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 expert_map,
                 apply_router_weight_on_input,
                 self.fused_experts.quant_config,
+                defer_input_quant=self.fused_experts.expects_unquantized_inputs,
             )
 
             # TODO(lucas): refactor this in the alternative schedules followup

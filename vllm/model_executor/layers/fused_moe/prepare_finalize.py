@@ -17,11 +17,10 @@ from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
-        defer_input_quant: bool = False,
         is_sequence_parallel: bool = False,
         num_dispatchers: int = 1,
     ) -> None:
-        super().__init__(defer_input_quant=defer_input_quant)
+        super().__init__()
         self.is_sequence_parallel = is_sequence_parallel
         self._num_dispatchers = num_dispatchers
 
@@ -50,6 +49,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -61,7 +61,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
 
         # Defer input quantization to the MoE kernel.
         use_nvfp4 = quant_config.use_nvfp4_w4a4
-        if self.defer_input_quant:
+        if defer_input_quant:
             a1q = a1
             a1q_scale = None
         else:
@@ -156,6 +156,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -168,7 +169,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
 
         # Defer input quant to moe kernel for backends (e.g. AITER, FI)
         # which use a single kernel call for quant + experts.
-        if self.defer_input_quant:
+        if defer_input_quant:
             return a1, None, None, None, None
 
         input_sf = (

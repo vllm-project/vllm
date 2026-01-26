@@ -90,7 +90,7 @@ def test_cutlass_fp4_moe_no_graph(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp4(
                 moe_config=make_dummy_moe_config(),
                 quant_config=quant_config,

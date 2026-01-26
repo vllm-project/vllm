@@ -204,12 +204,7 @@ def run_with_expert_maps(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(
-                defer_input_quant=CutlassExpertsFp8.expects_unquantized_inputs(
-                    moe_config=moe_config,
-                    quant_config=new_quant_config,
-                ),
-            ),
+            MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
                 moe_config=moe_config,
                 quant_config=new_quant_config,
@@ -269,12 +264,7 @@ def run_8_bit(
             in_dtype=moe_tensors.a.dtype,
         )
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(
-                defer_input_quant=CutlassExpertsFp8.expects_unquantized_inputs(
-                    moe_config=moe_config,
-                    quant_config=quant_config,
-                )
-            ),
+            MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
                 moe_config=moe_config,
                 quant_config=quant_config,

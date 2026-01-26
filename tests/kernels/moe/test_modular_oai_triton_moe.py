@@ -182,12 +182,7 @@ def oai_triton_moe_impl(
         fused_experts = OAITritonExperts(moe_config, quant_config)
 
     mk = FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(
-            defer_input_quant=fused_experts.expects_unquantized_inputs(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            )
-        ),
+        MoEPrepareAndFinalizeNoEP(),
         fused_experts,
     )
 

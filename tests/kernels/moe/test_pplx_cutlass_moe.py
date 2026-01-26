@@ -159,10 +159,6 @@ def pplx_cutlass_moe(
     )
 
     prepare_finalize = PplxPrepareAndFinalize(
-        defer_input_quant=CutlassBatchedExpertsFp8.expects_unquantized_inputs(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        ),
         a2a=ata,
         max_num_tokens=max_num_tokens,
         num_local_experts=num_local_experts,

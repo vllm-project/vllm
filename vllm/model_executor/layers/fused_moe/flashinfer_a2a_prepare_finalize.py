@@ -23,10 +23,9 @@ class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
-        defer_input_quant: bool = False,
         num_dispatchers: int = 1,
     ):
-        super().__init__(defer_input_quant=defer_input_quant)
+        super().__init__()
         self.num_dispatchers_ = num_dispatchers
         self.all2all_manager = get_ep_group().device_communicator.all2all_manager
 
@@ -70,6 +69,7 @@ class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         self._apply_router_weight_on_input(
             a1, topk_weights, topk_ids, apply_router_weight_on_input
@@ -88,7 +88,7 @@ class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 top_k,
                 num_experts,
                 quant_config,
-                defer_input_quant=self.defer_input_quant,
+                defer_input_quant=defer_input_quant,
             )
         )
 

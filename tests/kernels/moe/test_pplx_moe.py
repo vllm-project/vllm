@@ -219,7 +219,6 @@ def create_pplx_prepare_finalize(
     block_shape: list[int] | None,
     per_act_token_quant: bool,
     group_name: str | None,
-    defer_input_quant: bool = False,
 ):
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
@@ -257,7 +256,6 @@ def create_pplx_prepare_finalize(
         ata = AllToAll.intranode(**args)
 
     prepare_finalize = PplxPrepareAndFinalize(
-        defer_input_quant=defer_input_quant,
         a2a=ata,
         max_num_tokens=max_num_tokens,
         num_local_experts=num_local_experts,
@@ -338,7 +336,6 @@ def pplx_prepare_finalize(
         block_shape,
         per_act_token_quant,
         group_name,
-        defer_input_quant=False,
     )
 
     assert a.shape[0] == topk_ids.shape[0]
@@ -568,10 +565,6 @@ def pplx_moe(
         a2_scale=a2_scale_chunk,
     )
     moe_config = make_dummy_moe_config()
-    defer_input_quant = BatchedTritonExperts.expects_unquantized_inputs(
-        moe_config=moe_config,
-        quant_config=quant_config,
-    )
 
     prepare_finalize, ata = create_pplx_prepare_finalize(
         num_tokens,
@@ -586,7 +579,6 @@ def pplx_moe(
         block_shape,
         per_act_token_quant,
         group_name,
-        defer_input_quant,
     )
 
     experts = BatchedTritonExperts(

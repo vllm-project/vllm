@@ -62,10 +62,6 @@ def test_batched_deepgemm_vs_triton(
     moe_config = make_dummy_moe_config()
 
     prep_finalize = BatchedPrepareAndFinalize(
-        defer_input_quant=BatchedTritonExperts.expects_unquantized_inputs(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        ),
         max_num_tokens=max_num_tokens,
         num_local_experts=E,
         num_dispatchers=1,

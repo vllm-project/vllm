@@ -78,11 +78,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
 
-    @staticmethod
-    def expects_unquantized_inputs(
-        moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
-    ) -> bool:
-        return quant_config.use_fp8_w8a8 and quant_config.is_block_quantized
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
 
     @staticmethod
     def _supports_current_device() -> bool:

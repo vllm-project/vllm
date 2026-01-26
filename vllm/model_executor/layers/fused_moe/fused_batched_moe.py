@@ -497,15 +497,12 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
         self,
-        defer_input_quant: bool,
         max_num_tokens: int,
         num_local_experts: int,
         num_dispatchers: int,
         rank: int,
     ):
-        if defer_input_quant:
-            raise NotImplementedError()
-        super().__init__(defer_input_quant=defer_input_quant)
+        super().__init__()
         self.max_num_tokens = max_num_tokens
         self.num_local_experts = num_local_experts
         self.rank = rank
@@ -536,7 +533,13 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
         assert a1.dim() == 2
         assert topk_ids.dim() == 2
         assert topk_ids.size(0) == a1.size(0)

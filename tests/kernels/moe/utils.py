@@ -109,10 +109,6 @@ def batched_moe(
 
     fused_experts = FusedMoEModularKernel(
         BatchedPrepareAndFinalize(
-            defer_input_quant=BatchedTritonExperts.expects_unquantized_inputs(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
             num_local_experts=w1.shape[0],
@@ -158,10 +154,6 @@ def naive_batched_moe(
 
     fused_experts = FusedMoEModularKernel(
         BatchedPrepareAndFinalize(
-            defer_input_quant=NaiveBatchedExperts.expects_unquantized_inputs(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            ),
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
             num_local_experts=w1.shape[0],
