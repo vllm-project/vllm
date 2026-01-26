@@ -460,7 +460,6 @@ def _fused_moe_lora(
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
-    double_stream: bool = False,
 ) -> None:
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
     assert (
@@ -494,10 +493,7 @@ def _fused_moe_lora(
         device=device,
     )
 
-    # PDL(GDC) is intended for single-stream dependency chains.
-    # Double stream should disable PDL and rely on the upper-level stream/event scheduling.
-    use_gdc = supports_pdl(device) and not fully_sharded and not double_stream
-
+    use_gdc = supports_pdl(device) and not fully_sharded
     _fused_moe_lora_shrink(
         a_intermediate_cache1,
         qcurr_hidden_states,
