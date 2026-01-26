@@ -32,7 +32,7 @@ You can add any other [engine-args](../configuration/engine_args.md) you need af
 !!! warning
     Make sure to use the `--model` flag to specify the model in your command.
 
-    Passing the model as a positional argument (without the flag) can cause vLLM to silently fall back to a default model instead, which may not be what you intend.
+    Passing the model as a positional argument (without the flag) will cause vLLM to silently fall back to a default model instead, which may not be what you intend.
 
 !!! note
     You can either use the `ipc=host` flag or `--shm-size` flag to allow the
