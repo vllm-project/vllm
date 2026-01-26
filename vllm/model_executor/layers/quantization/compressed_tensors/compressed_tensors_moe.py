@@ -27,7 +27,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    RoutingMethodType,
     int4_w4a16_moe_quant_config,
     int4_w4afp8_moe_quant_config,
     int8_w8a8_moe_quant_config,
@@ -68,6 +67,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
+    get_routing_method_type,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
@@ -99,6 +99,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.flashinfer import RoutingMethodType
 
 logger = init_logger(__name__)
 
@@ -1077,7 +1078,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 if layer.e_score_correction_bias is not None
                 else None
             )
-            routing_method_type = layer.routing_method_type
+            routing_method_type = get_routing_method_type(layer.router)
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
                 routing_logits=router_logits.to(torch.float32)
                 if routing_method_type == RoutingMethodType.DeepSeekV3

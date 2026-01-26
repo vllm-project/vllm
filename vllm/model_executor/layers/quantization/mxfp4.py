@@ -38,6 +38,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    get_routing_method_type,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
 )
@@ -1052,6 +1055,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
                 x_scale = x_scale.view(torch.float8_e4m3fn).reshape(*x.shape[:-1], -1)
 
+            routing_method_type = get_routing_method_type(layer.router)
             trtllm_gen_output = trtllm_fp4_block_scale_moe(
                 router_logits.to(torch.bfloat16),
                 None,  # routing_bias
@@ -1077,7 +1081,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer.ep_rank * layer.local_num_experts,  # local_expert_offset
                 self.num_experts,  # local num experts
                 None,  # routed_scaling_factor
-                1 if layer.renormalize else 0,  # routing_method_type, renormalize
+                routing_method_type,
                 True,  # do finalize
                 tune_max_num_tokens=max(self.max_capture_size, 1),
             )[0]

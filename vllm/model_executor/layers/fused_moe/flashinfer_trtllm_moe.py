@@ -7,7 +7,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
-    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -20,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import RoutingMethodType
 from vllm.utils.torch_utils import direct_register_custom_op
 
 #

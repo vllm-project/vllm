@@ -13,7 +13,11 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
+    FusedMoERouter,
+)
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import RoutingMethodType
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
@@ -108,8 +112,6 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
     global_num_experts: int,
     apply_router_weight_on_input: bool,
 ) -> torch.Tensor:
-    from flashinfer.fused_moe import RoutingMethodType
-
     import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
     from vllm.model_executor.models.llama4 import Llama4MoE
 
@@ -313,3 +315,35 @@ def prepare_fp8_moe_layer_for_fi(
         )
 
     return w13, w2, w13_scale
+
+
+def get_routing_method_type(router: FusedMoERouter) -> RoutingMethodType:
+    from vllm.model_executor.layers.fused_moe.router import (
+        CustomRoutingRouter,
+        FusedTopKBiasRouter,
+        FusedTopKRouter,
+        GroupedTopKRouter,
+    )
+
+    if isinstance(router, (FusedTopKRouter, FusedTopKBiasRouter)):
+        return (
+            RoutingMethodType.Renormalize
+            if not router.renormalize
+            else RoutingMethodType.RenormalizeNaive
+        )
+    elif isinstance(router, CustomRoutingRouter):
+        from vllm.model_executor.models.llama4 import Llama4MoE
+
+        # NOTE: FLASHINFER_TRTLLM support the Llama4 router.
+        if router.custom_routing_function == Llama4MoE.custom_routing_function:
+            return RoutingMethodType.Llama4
+        return RoutingMethodType.Unspecified
+    elif isinstance(router, GroupedTopKRouter):
+        if router.scoring_func == "sigmoid":
+            return RoutingMethodType.DeepSeekV3
+        else:
+            # NOTE: this prohibits the FLASHINFER_TRTLLM kernels from
+            # being selected, since they only support DeepSeek-style.
+            return RoutingMethodType.Unspecified
+    else:
+        return RoutingMethodType.Unspecified

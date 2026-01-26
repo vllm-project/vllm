@@ -13,10 +13,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
-    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
     create_flashinfer_prepare_finalize,
+)
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    get_routing_method_type,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -26,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    RoutingMethodType,
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutlass_fused_moe,
 )
@@ -348,9 +351,9 @@ def flashinfer_trtllm_fp4_moe(
 
     # Determine routing method type
     use_llama4_routing = custom_routing_function is Llama4MoE.custom_routing_function
-    routing_method_type = layer.routing_method_type
+    routing_method_type = get_routing_method_type(layer.router)
     if use_llama4_routing:
-        routing_method_type = flashinfer.RoutingMethodType.Llama4
+        routing_method_type = RoutingMethodType.Llama4
 
     # Prepare routing bias
     routing_bias = e_score_correction_bias

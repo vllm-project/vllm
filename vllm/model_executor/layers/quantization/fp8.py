@@ -26,7 +26,6 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
@@ -54,6 +53,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
     build_flashinfer_fp8_cutlass_moe_prepare_finalize,
+    get_routing_method_type,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -98,6 +98,7 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
+from vllm.utils.flashinfer import RoutingMethodType
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -995,7 +996,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 if layer.e_score_correction_bias is not None
                 else None
             )
-            routing_method_type = layer.routing_method_type
+            routing_method_type = get_routing_method_type(layer.router)
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
                 routing_logits=router_logits.to(torch.float32)
                 if routing_method_type == RoutingMethodType.DeepSeekV3

@@ -10,7 +10,6 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
@@ -155,14 +154,6 @@ class FusedTopKBiasRouter(BaseRouter):
         self.renormalize = renormalize
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
-
-    @property
-    def routing_method_type(self) -> RoutingMethodType:
-        return (
-            RoutingMethodType.Renormalize
-            if not self.renormalize
-            else RoutingMethodType.RenormalizeNaive
-        )
 
     def _compute_routing(
         self,

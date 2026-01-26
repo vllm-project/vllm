@@ -9,7 +9,6 @@ import torch
 import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 logger = init_logger(__name__)
@@ -324,10 +323,6 @@ class RoutingSimulatorRouter(BaseRouter):
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
-
-    @property
-    def routing_method_type(self) -> RoutingMethodType:
-        return RoutingMethodType.Simulated
 
     def _compute_routing(
         self,
