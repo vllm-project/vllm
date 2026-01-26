@@ -197,6 +197,9 @@ class APIServerProcessManager:
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
 
+        # parent sets this to tell children to start draining
+        self.drain_event = spawn_context.Event()
+
         for i, in_addr, out_addr in zip(
             range(num_servers), input_addresses, output_addresses
         ):
@@ -205,6 +208,7 @@ class APIServerProcessManager:
                 "output_address": out_addr,
                 "client_count": num_servers,
                 "client_index": i,
+                "drain_event": self.drain_event,
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
@@ -226,6 +230,11 @@ class APIServerProcessManager:
     def close(self) -> None:
         self._finalizer()
 
+    def signal_drain(self) -> None:
+        """Signal all API servers to start draining."""
+        logger.info("Signaling %d API servers to drain", len(self.processes))
+        self.drain_event.set()
+
 
 def wait_for_completion_or_failure(
     api_server_manager: APIServerProcessManager,
@@ -236,6 +245,17 @@ def wait_for_completion_or_failure(
     """Wait for all processes to complete or detect if any fail.
 
     Raises an exception if any process exits with a non-zero status.
+
+    Multi-server drain architecture:
+        Multiple API servers share the same engine cores, so this parent
+        process coordinates drain centrally. On shutdown signal:
+        1. API servers are told to reject new requests (via drain_event)
+        2. Parent signals engines to drain (engine_manager.signal_drain)
+        3. Parent waits for engines to finish (engine_manager.join_first)
+
+        This differs from single-server mode where the API server handles
+        its own drain internally via ready_to_exit_event - no parent
+        coordination needed since there's only one API server process.
 
     Args:
         api_server_manager: The manager for API servers.
@@ -287,7 +307,39 @@ def wait_for_completion_or_failure(
                 _, actor_run_refs = ray.wait(actor_run_refs, timeout=5)
 
     except KeyboardInterrupt:
-        logger.info("Received KeyboardInterrupt, shutting down API servers...")
+        drain_mode = (
+            getattr(api_server_manager.args, "shutdown_mode", "immediate") == "drain"
+        )
+        if not drain_mode or not isinstance(engine_manager, CoreEngineProcManager):
+            logger.info("Received KeyboardInterrupt, shutting down...")
+        else:
+            drain_timeout = getattr(
+                api_server_manager.args, "shutdown_drain_timeout", 120.0
+            )
+            logger.info(
+                "Received KeyboardInterrupt, initiating drain (timeout: %ds)...",
+                drain_timeout,
+            )
+
+            # tell API servers to reject new requests
+            api_server_manager.signal_drain()
+
+            # signal engines to drain in-flight requests
+            engine_manager.signal_drain()
+
+            # wait for engines to finish draining
+            deadline = time.monotonic() + drain_timeout
+            while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                poll_timeout = min(1.0, remaining)
+                if engine_manager.join_first(timeout=poll_timeout):
+                    logger.info("Engines drained successfully")
+                    break
+            else:
+                logger.warning(
+                    "Drain timed out after %ds, forcing shutdown", drain_timeout
+                )
+
     except Exception as e:
         logger.exception("Exception occurred while running API servers: %s", str(e))
         raise

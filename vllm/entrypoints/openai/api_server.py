@@ -481,6 +481,10 @@ async def run_server_worker(
         app = build_app(args, supported_tasks)
         await init_app_state(engine_client, app.state, args, supported_tasks)
 
+        # pass drain coordination event to launcher (multi-server only)
+        if client_config:
+            app.state.drain_event = client_config.get("drain_event")
+
         logger.info(
             "Starting vLLM API server %d on %s",
             engine_client.vllm_config.parallel_config._api_process_rank,

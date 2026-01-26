@@ -206,6 +206,21 @@ async def serve_http(
     loop.add_signal_handler(signal.SIGINT, on_signal)
     loop.add_signal_handler(signal.SIGTERM, on_signal)
 
+    # multi-server coordination: monitor parent's drain_event to reject new
+    # requests. parent handles waiting for engines to drain directly.
+    drain_event = getattr(app.state, "drain_event", None)
+    drain_monitor_task: asyncio.Task | None = None
+
+    if drain_event is not None and enable_drain:
+
+        async def drain_event_monitor() -> None:
+            while not drain_event.is_set():
+                await asyncio.sleep(0.1)
+            logger.info("Received drain signal from parent, rejecting new requests")
+            set_rejecting_requests(True)
+
+        drain_monitor_task = loop.create_task(drain_event_monitor())
+
     try:
         await server_task
         return dummy_shutdown()
@@ -223,6 +238,8 @@ async def serve_http(
         return server.shutdown()
     finally:
         watchdog_task.cancel()
+        if drain_monitor_task is not None:
+            drain_monitor_task.cancel()
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
