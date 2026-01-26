@@ -58,6 +58,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.unquantized_backend = select_unquantized_moe_backend(
+            moe_config=self.moe,
             use_ep=self.moe.moe_parallel_config.use_ep,
             use_dp=self.moe.moe_parallel_config.dp_size > 1,
         )
@@ -78,17 +79,20 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
             self.flashinfer_trtllm_moe = torch.ops.vllm.flashinfer_fused_moe_bf16
 
+        self.forward_native: Callable = self._select_forward_native()
+        if self.is_monolithic:
+            self.apply_monolithic: Callable = self.forward_monolithic_cuda
+
+    def _select_forward_native(self) -> Callable:
+        """Select the forward_native implementation based on platform."""
         if current_platform.is_cpu():
-            self.forward_native: Callable = self.forward_monolithic_cpu
-            self.apply_monolithic: Callable = self.forward_monolithic_cpu
+            return self.forward_monolithic_cpu
         elif current_platform.is_xpu():
-            self.forward_native: Callable = self.forward_monolithic_xpu
-            self.apply_monolithic: Callable = self.forward_monolithic_xpu
+            return self.forward_monolithic_xpu
         elif current_platform.is_cuda() and self.is_monolithic:
-            self.forward_native = self.forward_monolithic_cuda
-            self.apply_monolithic = self.forward_monolithic_cuda
+            return self.forward_monolithic_cuda
         else:
-            self.forward_native = self.forward_cuda
+            return self.forward_cuda
 
     @property
     def is_monolithic(self) -> bool:

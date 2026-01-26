@@ -224,6 +224,11 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     This reorders W13 and W2 into the expected epilogue-tiled block layout and
     returns the shuffled weight tensors.
     """
+    if w13_weight.dtype != torch.bfloat16 or w2_weight.dtype != torch.bfloat16:
+        raise ValueError(
+            "Unquantized Moe Backend FlashInfer TRTLLM requires bfloat16 weights"
+        )
+
     from flashinfer.fused_moe.core import (
         _maybe_get_cached_w3_w1_permute_indices,
         convert_to_block_layout,

@@ -50,6 +50,7 @@ UNSUPPORTED_BACKEND = [
 
 
 def select_unquantized_moe_backend(
+    moe_config: FusedMoEConfig,
     use_ep: bool,
     use_dp: bool,
 ) -> UnquantizedMoeBackend:
@@ -75,6 +76,7 @@ def select_unquantized_moe_backend(
         has_flashinfer()
         and envs.VLLM_USE_FLASHINFER_MOE_FP16
         and envs.VLLM_FLASHINFER_MOE_BACKEND == "latency"
+        and moe_config.is_act_and_mul
         and current_platform.has_device_capability(100)
     )
     if current_platform.is_rocm():
