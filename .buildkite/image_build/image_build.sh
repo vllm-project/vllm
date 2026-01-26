@@ -170,7 +170,7 @@ VLLM_USE_PRECOMPILED=$5
 VLLM_MERGE_BASE_COMMIT=$6
 
 # Configuration with sensible defaults
-TARGET="${1:-test-ci}"
+TARGET="test-ci"
 CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infra/main/docker/ci.hcl}"
 VLLM_BAKE_FILE="${VLLM_BAKE_FILE:-docker/docker-bake.hcl}"
 BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
