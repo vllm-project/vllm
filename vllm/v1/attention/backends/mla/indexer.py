@@ -30,7 +30,7 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return "DEEPSEEK_V32_INDEXER"
 
     @staticmethod
-    def get_builder_cls():
+    def get_impl_cls():
         return None  # type: ignore
 
     @staticmethod
