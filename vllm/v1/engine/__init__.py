@@ -218,8 +218,8 @@ class EngineCoreRequestType(enum.Enum):
     EXECUTOR_FAILED = b"\x04"
     # explicit shutdown from parent
     SHUTDOWN = b"\x05"
-    # graceful shutdown - drain requests first, then exit
-    GRACEFUL_SHUTDOWN = b"\x06"
+    # drain requests first, then exit
+    DRAIN = b"\x06"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):

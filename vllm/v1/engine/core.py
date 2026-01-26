@@ -687,7 +687,10 @@ class EngineCore:
 
 
 class ParentDeathMonitor:
-    """Monitors parent process via death pipe, signals when parent exits."""
+    """Monitors parent process via death pipe, signals when parent exits.
+
+    Also handles drain messages from parent before pipe close.
+    """
 
     def __init__(self, death_pipe, input_queue: queue.Queue):
         self.parent_died = threading.Event()
@@ -701,7 +704,14 @@ class ParentDeathMonitor:
 
     def _monitor(self):
         try:
-            self._death_pipe.recv()
+            while True:
+                msg = self._death_pipe.recv()
+                if msg == "DRAIN":
+                    logger.info("Received DRAIN from parent")
+                    # put drain request in input queue
+                    self._input_queue.put_nowait((EngineCoreRequestType.DRAIN, None))
+                else:
+                    logger.warning("Unknown message from parent: %s", msg)
         except EOFError:
             logger.info("Parent exited, terminating EngineCore")
             self.parent_died.set()
@@ -737,7 +747,7 @@ class EngineCoreProc(EngineCore):
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
-        self._graceful_shutdown_requested = False
+        self._drain_requested = False
 
         with self._perform_handshakes(
             handshake_address,
@@ -1057,9 +1067,9 @@ class EngineCoreProc(EngineCore):
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
 
-            # 3) Check if graceful shutdown is complete.
+            # 3) Check if drain is complete.
             if (
-                self._graceful_shutdown_requested
+                self._drain_requested
                 and not self.scheduler.has_requests()
                 and not self.scheduler.has_pending_kv_transfers()
             ):
@@ -1076,7 +1086,7 @@ class EngineCoreProc(EngineCore):
             and not self.scheduler.has_requests()
             and not self.batch_queue
             and not self._scheduler_paused
-            and not self._graceful_shutdown_requested
+            and not self._drain_requested
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1152,9 +1162,9 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.SHUTDOWN:
             logger.debug("Received SHUTDOWN request from parent.")
             raise SystemExit()
-        elif request_type == EngineCoreRequestType.GRACEFUL_SHUTDOWN:
-            logger.info("Received GRACEFUL_SHUTDOWN, draining requests...")
-            self._graceful_shutdown_requested = True
+        elif request_type == EngineCoreRequestType.DRAIN:
+            logger.info("Received DRAIN, draining requests...")
+            self._drain_requested = True
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
@@ -1192,7 +1202,7 @@ class EngineCoreProc(EngineCore):
             )
 
     def _send_ready_to_exit(self):
-        """Send ready-to-exit notification after graceful shutdown."""
+        """Send ready-to-exit notification after drain completes."""
 
         self.output_queue.put_nowait(EngineCoreProc.READY_TO_EXIT)
 
@@ -1271,7 +1281,7 @@ class EngineCoreProc(EngineCore):
                             continue
                     elif request_type in (
                         EngineCoreRequestType.SHUTDOWN,
-                        EngineCoreRequestType.GRACEFUL_SHUTDOWN,
+                        EngineCoreRequestType.DRAIN,
                     ):
                         # these have no payload
                         request = None
@@ -1339,10 +1349,9 @@ class EngineCoreProc(EngineCore):
                 outputs.engine_index = engine_index
 
                 if client_index == -1:
-                    # Don't reuse buffer for coordinator message
-                    # which will be very small.
-                    assert coord_socket is not None
-                    coord_socket.send_multipart(encoder.encode(outputs))
+                    # broadcast message (e.g., stats, wave info) - send to coordinator
+                    if coord_socket is not None:
+                        coord_socket.send_multipart(encoder.encode(outputs))
                     continue
 
                 # Reclaim buffers that zmq is finished with.
@@ -1528,9 +1537,9 @@ class DPEngineCoreProc(EngineCoreProc):
                 self.current_wave += 1
                 self.step_counter = 0
 
-            # 4) Check if graceful shutdown is complete.
+            # 4) Check if drain is complete.
             if (
-                self._graceful_shutdown_requested
+                self._drain_requested
                 and not self.scheduler.has_requests()
                 and not self.scheduler.has_pending_kv_transfers()
             ):

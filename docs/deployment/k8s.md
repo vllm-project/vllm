@@ -4,7 +4,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
-- [Graceful Shutdown](#graceful-shutdown)
+- [Drain Shutdown](#drain-shutdown)
 - [Troubleshooting](#troubleshooting)
     - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
@@ -387,28 +387,28 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
 
-## Graceful Shutdown
+## Drain Shutdown
 
-For production deployments, vLLM supports graceful shutdown to enable zero-downtime rolling updates. When enabled, the server drains in-flight requests before terminating instead of abruptly closing connections.
+For production deployments, vLLM supports drain shutdown to enable zero-downtime rolling updates. When enabled, the server drains in-flight requests before terminating instead of abruptly closing connections.
 
 ### How It Works
 
 When vLLM receives a `SIGTERM` signal (sent by Kubernetes during pod termination):
 
 1. The server stops accepting new requests (returns `503 Service Unavailable`)
-2. The frontend process sends a graceful shutdown notification to the engine
+2. The frontend process sends a drain notification to the engine
 3. In-flight requests continue processing until completion or timeout
 4. If using async KV transfer connectors, pending transfers complete before shutdown
 5. The `/live` and `/metrics` endpoints remain accessible during drain
 
 ### Configuration
 
-Enable graceful shutdown with the following CLI arguments:
+Enable drain shutdown with the following CLI arguments:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--enable-graceful-shutdown` | `false` | Enable graceful shutdown with request draining on SIGTERM |
-| `--drain-timeout` | `120` | Seconds to wait for in-flight requests to complete |
+| `--shutdown-mode` | `immediate` | Shutdown mode: `immediate` exits immediately on SIGTERM, `drain` waits for in-flight requests |
+| `--shutdown-drain-timeout` | `120` | Seconds to wait for in-flight requests to complete during drain |
 
 ### Example Deployment
 
@@ -430,14 +430,14 @@ spec:
       labels:
         app: vllm
     spec:
-      # should be >= drain-timeout to allow graceful drain
+      # should be >= shutdown-drain-timeout to allow drain
       terminationGracePeriodSeconds: 150
       containers:
       - name: vllm
         image: vllm/vllm-openai:latest
         command: ["/bin/sh", "-c"]
         args: [
-          "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --enable-graceful-shutdown --drain-timeout 120"
+          "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --shutdown-mode drain --shutdown-drain-timeout 120"
         ]
         ports:
         - containerPort: 8000

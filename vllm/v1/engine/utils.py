@@ -173,9 +173,21 @@ class CoreEngineProcManager:
         """Shutdown all procs."""
         self._finalizer()
 
-    def join_first(self):
-        """Wait for any process to exit."""
-        connection.wait(proc.sentinel for proc in self.processes)
+    def signal_drain(self):
+        """Signal all engine cores to start draining."""
+        for w in self.death_writers:
+            with contextlib.suppress(BrokenPipeError, OSError):
+                w.send("DRAIN")  # engine already exited
+
+    def join_first(self, timeout: float | None = None) -> bool:
+        """Wait for any process to exit.
+
+        Returns True if a process exited, False if timeout expired.
+        """
+        ready = connection.wait(
+            [proc.sentinel for proc in self.processes], timeout=timeout
+        )
+        return len(ready) > 0
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -795,7 +807,7 @@ def launch_core_engines(
     executor_class: type[Executor],
     log_stats: bool,
     num_api_servers: int = 1,
-    enable_graceful_shutdown: bool = False,
+    enable_drain: bool = False,
 ) -> Iterator[
     tuple[
         CoreEngineProcManager | CoreEngineActorManager | None,

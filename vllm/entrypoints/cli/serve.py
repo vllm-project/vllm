@@ -3,6 +3,7 @@
 
 import argparse
 import signal
+import time
 
 import uvloop
 
@@ -153,19 +154,6 @@ def run_headless(args: argparse.Namespace):
     if local_engine_count <= 0:
         raise ValueError("data_parallel_size_local must be > 0 in headless mode")
 
-    shutdown_requested = False
-
-    # Catch SIGTERM and SIGINT to allow graceful shutdown.
-    def signal_handler(signum, frame):
-        nonlocal shutdown_requested
-        logger.debug("Received %d signal.", signum)
-        if not shutdown_requested:
-            shutdown_requested = True
-            raise SystemExit
-
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
     if parallel_config.node_rank_within_dp > 0:
         from vllm.version import __version__ as VLLM_VERSION
 
@@ -207,8 +195,49 @@ def run_headless(args: argparse.Namespace):
         log_stats=not engine_args.disable_log_stats,
     )
 
+    drain_requested = False
+    drain_deadline: float | None = None
+    drain_mode = getattr(args, "shutdown_mode", "immediate") == "drain"
+    drain_timeout = getattr(args, "shutdown_drain_timeout", 120)
+
+    def signal_handler(signum, frame):
+        nonlocal drain_requested, drain_deadline
+        logger.info("Received signal %d", signum)
+        if not drain_requested:
+            drain_requested = True
+            if drain_mode:
+                drain_deadline = time.monotonic() + drain_timeout
+                logger.info(
+                    "Drain initiated (timeout: %ds). "
+                    "Send signal again to force immediate shutdown.",
+                    drain_timeout,
+                )
+                engine_manager.signal_drain()
+            else:
+                raise SystemExit
+        else:
+            logger.info("Received second signal, forcing immediate shutdown")
+            raise SystemExit
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     try:
-        engine_manager.join_first()
+        while True:
+            remaining = None
+            if drain_deadline is not None:
+                remaining = drain_deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning(
+                        "Drain timed out after %ds, forcing shutdown",
+                        drain_timeout,
+                    )
+                    break
+
+            # poll with 1s intervals, or remaining time if draining
+            poll_timeout = min(1.0, remaining) if remaining else 1.0
+            if engine_manager.join_first(timeout=poll_timeout):
+                break  # a process exited
     finally:
         logger.info("Shutting down.")
         engine_manager.close()
@@ -250,7 +279,7 @@ def run_multi_api_server(args: argparse.Namespace):
         executor_class,
         log_stats,
         num_api_servers,
-        enable_graceful_shutdown=args.shutdown_mode == "drain",
+        enable_drain=args.shutdown_mode == "drain",
     ) as (local_engine_manager, coordinator, addresses):
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(
