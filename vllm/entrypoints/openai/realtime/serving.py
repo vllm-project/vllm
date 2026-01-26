@@ -103,12 +103,6 @@ class OpenAIServingRealtime(OpenAIServing):
         language = config.language if config and config.language else None
         language = self.model_cls.validate_language(language)
 
-        # TODO: Add support for translation task type
-        # to_language = config.to_language if config and config.to_language else None
-        # if to_language:
-        #     to_language = self.model_cls.validate_language(to_language)
-        #     self.task_type = "translate"
-
         # Process each audio chunk from the stream
         async for audio_chunk in audio_stream:
             # TODO: Let models' adapt the audio_chunk
