@@ -68,7 +68,6 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             quant_config.quant_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
-            is_fp4_scale_swizzled=False,
         )
 
         return a1q, a1q_scale, None, None, None
@@ -76,10 +75,6 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
     def prepare_monolithic(
         self,
         a1: torch.Tensor,
-        router_logits: torch.Tensor,
-        num_experts: int,
-        expert_map: torch.Tensor | None,
-        apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # Defer input quant to moe kernel for backends (e.g. AITER, FI)
@@ -98,7 +93,6 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             quant_config.quant_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
-            is_fp4_scale_swizzled=False,
         )
 
         return a1q, a1q_scale

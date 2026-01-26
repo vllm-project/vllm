@@ -230,7 +230,6 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         assert self.routing_method_type == RoutingMethodType.Llama4
         assert apply_router_weight_on_input
-        assert a1q_scale is None
 
         topk_group = self.topk_group if self.topk_group is not None else 0
 

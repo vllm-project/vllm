@@ -227,21 +227,11 @@ class FusedMoEPrepareAndFinalize(ABC):
     def prepare_monolithic(
         self,
         a1: torch.Tensor,
-        router_logits: torch.Tensor,
-        num_experts: int,
-        expert_map: torch.Tensor | None,
-        apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> PrepareMonolithicResultType:
         """
         Perform any quantization (and/or) dispatching needed for this kernel.
         - a1: The (unquantized) input to the MoE layer.
-        - router_logits: the logits from the router.
-        - num_experts: The total number of experts in the global expert space.
-        - expert_map: A tensor mapping expert indices from the global expert
-          space to the local expert space of the expert parallel shard.
-        - apply_router_weight_on_input: When True, apply the weights to the
-          activations, before quantization + dispatching.
         - quant_config: Quantization info provided by the fused experts.
 
         Returns a tuple of:
@@ -1457,10 +1447,6 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         a1q, a1q_scale = self.prepare_finalize.prepare_monolithic(
             hidden_states,
-            router_logits,
-            global_num_experts,
-            expert_map,
-            apply_router_weight_on_input,
             self.fused_experts.quant_config,
         )
 
