@@ -11,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -170,6 +169,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         assert not apply_router_weight_on_input
@@ -191,21 +191,15 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         # Routing kernel expects #experts <= #threads 512
         assert global_num_experts <= 512
 
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            hidden_states,
-            self.quant_config.a1_scale,
-            quant_dtype=self.quant_config.quant_dtype,
-            per_act_token_quant=self.quant_config.per_act_token_quant,
-        )
-
         # Kernel requires transposed hidden state scales
         # TODO: fuse into the quant kernel.
+        assert a1q_scale is not None
         a1q_scale_t = a1q_scale.t().contiguous()
 
         return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=self.e_score_correction_bias,
-            hidden_states=a1q,
+            hidden_states=hidden_states,
             hidden_states_scale=a1q_scale_t,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
@@ -231,24 +225,19 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         assert self.routing_method_type == RoutingMethodType.Llama4
         assert apply_router_weight_on_input
+        assert a1q_scale is None
 
         topk_group = self.topk_group if self.topk_group is not None else 0
-
-        a1q, _ = moe_kernel_quantize_input(
-            hidden_states,
-            self.quant_config.a1_scale,
-            quant_dtype=self.quant_config.quant_dtype,
-            per_act_token_quant=self.quant_config.per_act_token_quant,
-        )
 
         return flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
             routing_bias=self.e_score_correction_bias,
-            hidden_states=a1q,
+            hidden_states=hidden_states,
             gemm1_weights=w1,
             output1_scales_scalar=self.g1_scale_c,
             output1_scales_gate_scalar=self._g1_alphas,
@@ -275,6 +264,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         if self.quant_config.block_shape is not None:
@@ -286,6 +276,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
                 activation,
                 global_num_experts,
                 expert_map,
+                a1q_scale,
                 apply_router_weight_on_input,
             )
         elif self.quant_config.is_per_tensor:
@@ -297,6 +288,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
                 activation,
                 global_num_experts,
                 expert_map,
+                a1q_scale,
                 apply_router_weight_on_input,
             )
         else:

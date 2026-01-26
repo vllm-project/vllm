@@ -73,6 +73,36 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
 
         return a1q, a1q_scale, None, None, None
 
+    def prepare_monolithic(
+        self,
+        a1: torch.Tensor,
+        router_logits: torch.Tensor,
+        num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # Defer input quant to moe kernel for backends (e.g. AITER, FI)
+        # which use a single kernel call for quant + experts.
+        if self.defer_input_quant:
+            return a1, None
+
+        a1_scale = (
+            quant_config.a1_gscale
+            if (quant_config.quant_dtype == "nvfp4")
+            else quant_config.a1_scale
+        )
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1,
+            a1_scale,
+            quant_config.quant_dtype,
+            quant_config.per_act_token_quant,
+            quant_config.block_shape,
+            is_fp4_scale_swizzled=False,
+        )
+
+        return a1q, a1q_scale
+
     def finalize(
         self,
         output: torch.Tensor,

@@ -152,6 +152,18 @@ PrepareResultType = tuple[
     torch.Tensor | None,
 ]
 
+#
+# PrepareResultType is a tuple of:
+# - quantized + dispatched a.
+# - quantized + dispatched a1_scales.
+#
+# See `prepare_monolithic` method below.
+#
+PrepareMonolithicResultType = tuple[
+    torch.Tensor,
+    torch.Tensor | None,
+]
+
 ReceiverType = Callable[[], PrepareResultType]
 
 
@@ -170,6 +182,13 @@ class FusedMoEPrepareAndFinalize(ABC):
         dependencies may choose to override this function.
         """
         return
+
+    def supports_async(self) -> bool:
+        """
+        Indicates whether or not this class implements prepare_async and
+        finalize_async.
+        """
+        return False
 
     @abstractmethod
     def prepare(
@@ -205,12 +224,33 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
-    def supports_async(self) -> bool:
+    def prepare_monolithic(
+        self,
+        a1: torch.Tensor,
+        router_logits: torch.Tensor,
+        num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
+    ) -> PrepareMonolithicResultType:
         """
-        Indicates whether or not this class implements prepare_async and
-        finalize_async.
+        Perform any quantization (and/or) dispatching needed for this kernel.
+        - a1: The (unquantized) input to the MoE layer.
+        - router_logits: the logits from the router.
+        - num_experts: The total number of experts in the global expert space.
+        - expert_map: A tensor mapping expert indices from the global expert
+          space to the local expert space of the expert parallel shard.
+        - apply_router_weight_on_input: When True, apply the weights to the
+          activations, before quantization + dispatching.
+        - quant_config: Quantization info provided by the fused experts.
+
+        Returns a tuple of:
+        - quantized + dispatched a.
+        - Optional quantized + dispatched a1_scales.
         """
-        return False
+        raise NotImplementedError(
+            f"prepare_monolithic not supported for {self.__class__.__name__}"
+        )
 
     def prepare_async(
         self,
@@ -800,6 +840,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         activation: str,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         """
@@ -1414,8 +1455,17 @@ class FusedMoEModularKernel(torch.nn.Module):
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
 
-        return self.fused_experts.apply_monolithic(
-            hidden_states=hidden_states,
+        a1q, a1q_scale = self.prepare_finalize.prepare_monolithic(
+            hidden_states,
+            router_logits,
+            global_num_experts,
+            expert_map,
+            apply_router_weight_on_input,
+            self.fused_experts.quant_config,
+        )
+
+        fused_out = self.fused_experts.apply_monolithic(
+            hidden_states=a1q,
             w1=w1,
             w2=w2,
             router_logits=router_logits,
@@ -1423,4 +1473,10 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            a1q_scale=a1q_scale,
         )
+
+        # TODO(rob): once naive P/F Dp/Ep lands, we will need to
+        # add support here for finalizing over just the hidden states.
+
+        return fused_out
