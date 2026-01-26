@@ -93,6 +93,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             quant_config.quant_dtype,
             quant_config.per_act_token_quant,
             quant_config.block_shape,
+            is_fp4_scale_swizzled=False,  # TODO: figure out how to propogate this flag
         )
 
         return a1q, a1q_scale

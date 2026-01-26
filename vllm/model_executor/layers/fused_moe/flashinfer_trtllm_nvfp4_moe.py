@@ -206,19 +206,11 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         activation: str,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor:
         assert activation == "silu"
-
-        # Quantize input.
-        if isinstance(hidden_states, tuple):
-            a1q, a1q_scale = hidden_states
-        else:
-            a1q, a1q_scale = flashinfer.fp4_quantize(
-                hidden_states,
-                self.quant_config.a1_gscale,
-                is_sf_swizzled_layout=False,
-            )
+        assert a1q_scale is not None
 
         # Prepare routing bias into kernel format.
         routing_bias = self.e_score_correction_bias
@@ -234,7 +226,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
             routing_bias=routing_bias,
-            hidden_states=a1q,
+            hidden_states=hidden_states,
             hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).flatten(),
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
