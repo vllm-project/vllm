@@ -273,7 +273,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Glm4MoeForCausalLM": _HfExamplesInfo("zai-org/GLM-4.5"),
     "Glm4MoeLiteForCausalLM": _HfExamplesInfo(
         "zai-org/GLM-4.7-Flash",
-        min_transformers_version="5.0.0",
+        min_transformers_version="5.0.0.dev",
     ),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
@@ -726,7 +726,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "GlmOcrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         is_available_online=False,
-        min_transformers_version="5.1.0",
+        min_transformers_version="5.0.0.dev",
     ),
     "H2OVLChatModel": _HfExamplesInfo(
         "h2oai/h2ovl-mississippi-800m",
@@ -1090,13 +1090,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Glm4MoeLiteMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.7-Flash",
         speculative_model="zai-org/GLM-4.7-Flash",
-        min_transformers_version="5.0.0",
+        min_transformers_version="5.0.0.dev",
     ),
     "GlmOcrMTPModel": _HfExamplesInfo(
         "zai-org/GLM-OCR",
         speculative_model="zai-org/GLM-OCR",
         is_available_online=False,
-        min_transformers_version="5.1.0",
+        min_transformers_version="5.0.0.dev",
     ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
