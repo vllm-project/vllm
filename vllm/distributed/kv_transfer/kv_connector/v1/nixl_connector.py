@@ -302,7 +302,7 @@ class NixlConnector(KVConnectorBase_V1):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         backend = get_current_attn_backend(self._vllm_config)
-        if backend().get_name() not in (
+        if backend.get_name() not in (
             "FLASH_ATTN",
             "FLASHINFER",
         ):
