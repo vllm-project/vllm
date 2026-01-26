@@ -136,22 +136,15 @@ def bench_run(
         per_out_ch_quant=per_out_ch,
     )
 
-    moe_config = make_dummy_moe_config(
-        num_experts=num_experts,
-        hidden_dim=k,
-        intermediate_size_per_partition=n,
-        in_dtype=a.dtype,
-    )
-
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(
-            CutlassExpertsFp8.expects_unquantized_inputs(
-                moe_config=moe_config,
-                quant_config=quant_config,
-            )
-        ),
+        MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsFp8(
-            moe_config=moe_config,
+            moe_config=make_dummy_moe_config(
+                num_experts=num_experts,
+                hidden_dim=k,
+                intermediate_size_per_partition=n,
+                in_dtype=a.dtype,
+            ),
             quant_config=quant_config,
         ),
     )
