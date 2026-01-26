@@ -33,17 +33,12 @@ The example performs the following steps:
 * Generate text again to show normal output after the weight update.
 """
 
-from dataclasses import asdict
-
 import requests
 import torch
 from openai import OpenAI
-from rlhf_utils import stateless_init_process_group
 from transformers import AutoModelForCausalLM
 
 from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLInitInfo,
-    NCCLUpdateInfo,
     NCCLWeightTransferEngine,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
@@ -76,13 +71,11 @@ def init_weight_transfer(
     """Initialize weight transfer via HTTP endpoint."""
     url = f"{base_url}/init_weight_transfer"
     payload = {
-        "init_info": asdict(
-            NCCLInitInfo(
-                master_address=master_address,
-                master_port=master_port,
-                rank_offset=rank_offset,
-                world_size=world_size,
-            )
+        "init_info": dict(
+            master_address=master_address,
+            master_port=master_port,
+            rank_offset=rank_offset,
+            world_size=world_size,
         )
     }
     response = requests.post(url, json=payload, timeout=60)
@@ -99,13 +92,11 @@ def update_weights(
     """Update weights via HTTP endpoint."""
     url = f"{base_url}/update_weights"
     payload = {
-        "update_info": asdict(
-            NCCLUpdateInfo(
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-                packed=packed,
-            )
+        "update_info": dict(
+            names=names,
+            dtype_names=dtype_names,
+            shapes=shapes,
+            packed=packed,
         )
     }
     response = requests.post(url, json=payload, timeout=300)
@@ -115,6 +106,20 @@ def update_weights(
 def finalize_weight_update(base_url: str) -> None:
     """Finalize weight update via HTTP endpoint."""
     url = f"{base_url}/finalize_weight_update"
+    response = requests.post(url, timeout=60)
+    response.raise_for_status()
+
+
+def pause_generation(base_url: str) -> None:
+    """Pause generation via HTTP endpoint."""
+    url = f"{base_url}/pause"
+    response = requests.post(url, timeout=60)
+    response.raise_for_status()
+
+
+def resume_generation(base_url: str) -> None:
+    """Resume generation via HTTP endpoint."""
+    url = f"{base_url}/resume"
     response = requests.post(url, timeout=60)
     response.raise_for_status()
 
@@ -182,12 +187,15 @@ def main():
     init_thread.start()
 
     # Initialize NCCL process group on trainer side
-    model_update_group = stateless_init_process_group(
+    model_update_group = NCCLWeightTransferEngine.stateless_init_process_group(
         master_address, master_port, 0, world_size, torch.device(device)
     )
 
     # Wait for init_weight_transfer to complete
     init_thread.join()
+
+    # Pause generation before weight sync
+    pause_generation(BASE_URL)
 
     # Collect weight metadata for the update request
     names = []
@@ -220,6 +228,9 @@ def main():
 
     # Finalize the weight update (processes weights for quantization/kernel format)
     finalize_weight_update(BASE_URL)
+
+    # Resume generation after weight sync
+    resume_generation(BASE_URL)
 
     # Generate text after weight update. The output is expected to be normal
     # because the real weights are now loaded.

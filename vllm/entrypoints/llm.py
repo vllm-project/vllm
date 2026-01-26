@@ -1806,35 +1806,31 @@ class LLM:
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
 
-    def init_weight_transfer(self, request: WeightTransferInitRequest) -> None:
+    def init_weight_transfer(self, request: WeightTransferInitRequest | dict) -> None:
         """
         Initialize weight transfer for RL training.
 
         Args:
             request: Weight transfer initialization request with backend-specific info
         """
-
-        if isinstance(request, WeightTransferInitRequest):
-            init_info_dict = request.init_info
-        else:
-            raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
+        init_info_dict = (
+            request["init_info"] if isinstance(request, dict) else request.init_info
+        )
 
         self.llm_engine.collective_rpc(
             "init_weight_transfer", kwargs={"init_info": init_info_dict}
         )
 
-    def update_weights(self, request: WeightUpdateRequest) -> None:
+    def update_weights(self, request: WeightUpdateRequest | dict) -> None:
         """
         Update the weights of the model.
 
         Args:
             request: Weight update request with backend-specific update info
         """
-
-        if isinstance(request, WeightUpdateRequest):
-            update_info_dict = request.update_info
-        else:
-            raise TypeError(f"Expected WeightUpdateRequest, got {type(request)}")
+        update_info_dict = (
+            request["update_info"] if isinstance(request, dict) else request.update_info
+        )
 
         self.llm_engine.collective_rpc(
             "update_weights", kwargs={"update_info": update_info_dict}

@@ -25,24 +25,16 @@ causes unexpected behavior.
 """
 
 import os
-from dataclasses import asdict
 
 import ray
 import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from rlhf_utils import stateless_init_process_group
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.base import (
-    WeightTransferInitRequest,
-    WeightUpdateRequest,
-)
 from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLInitInfo,
-    NCCLUpdateInfo,
     NCCLWeightTransferEngine,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
@@ -83,7 +75,7 @@ class TrainModel:
 
     def init_weight_transfer_group(self, master_address, master_port, world_size):
         """Initialize the NCCL process group for weight transfer."""
-        self.model_update_group = stateless_init_process_group(
+        self.model_update_group = NCCLWeightTransferEngine.stateless_init_process_group(
             master_address, master_port, 0, world_size, self.device
         )
 
@@ -163,14 +155,12 @@ master_port = get_open_port()
 
 world_size = ray.get(llm.get_world_size.remote()) + 1  # +1 for the trainer
 inference_handle = llm.init_weight_transfer.remote(
-    WeightTransferInitRequest(
-        init_info=asdict(
-            NCCLInitInfo(
-                master_address=master_address,
-                master_port=master_port,
-                rank_offset=1,
-                world_size=world_size,
-            )
+    dict(
+        init_info=dict(
+            master_address=master_address,
+            master_port=master_port,
+            rank_offset=1,
+            world_size=world_size,
         )
     )
 )
@@ -188,14 +178,12 @@ names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 # Issue update_weights call with NCCL-specific update info
 # packed=True enables efficient batched tensor broadcasting
 inference_handle = llm.update_weights.remote(
-    WeightUpdateRequest(
-        update_info=asdict(
-            NCCLUpdateInfo(
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-                packed=True,
-            )
+    dict(
+        update_info=dict(
+            names=names,
+            dtype_names=dtype_names,
+            shapes=shapes,
+            packed=True,
         )
     )
 )

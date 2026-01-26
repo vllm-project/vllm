@@ -91,8 +91,8 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
         MockWeightTransferEngine.shutdown_called = True
 
 
-def mock_init_transfer_engine(config, parallel_config):
-    """Factory function that returns our mock engine."""
+def mock_create_engine(config, parallel_config):
+    """Mock factory function that returns our mock engine."""
     return MockWeightTransferEngine(config, parallel_config)
 
 
@@ -127,8 +127,8 @@ def test_init_weight_transfer_calls_engine():
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
     with patch(
-        "vllm.distributed.weight_transfer.init_transfer_engine",
-        mock_init_transfer_engine,
+        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+        mock_create_engine,
     ):
         llm = LLM(
             model=MODEL_NAME,
@@ -174,8 +174,8 @@ def test_update_weights_calls_engine():
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
     with patch(
-        "vllm.distributed.weight_transfer.init_transfer_engine",
-        mock_init_transfer_engine,
+        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+        mock_create_engine,
     ):
         llm = LLM(
             model=MODEL_NAME,
@@ -228,8 +228,8 @@ def test_finalize_weight_update_runs():
         pytest.skip("Need at least 1 GPU for this test")
 
     with patch(
-        "vllm.distributed.weight_transfer.init_transfer_engine",
-        mock_init_transfer_engine,
+        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+        mock_create_engine,
     ):
         llm = LLM(
             model=MODEL_NAME,
@@ -254,8 +254,8 @@ def test_full_weight_transfer_flow():
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
     with patch(
-        "vllm.distributed.weight_transfer.init_transfer_engine",
-        mock_init_transfer_engine,
+        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+        mock_create_engine,
     ):
         llm = LLM(
             model=MODEL_NAME,

@@ -7,8 +7,10 @@ from http import HTTPStatus
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
-from vllm.distributed.weight_transfer import WeightUpdateRequest
-from vllm.distributed.weight_transfer.base import WeightTransferInitRequest
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightUpdateRequest,
+)
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 

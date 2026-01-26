@@ -90,8 +90,6 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
             init_info: NCCL initialization info containing master address, port,
                       rank offset, and world size
         """
-        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-        from vllm.distributed.utils import StatelessProcessGroup
 
         # Calculate the global rank in the trainer-worker process group
         # Must account for data parallel to get unique ranks across all workers
@@ -103,16 +101,12 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
         worker_rank = dp_rank * world_size_per_dp + tp_rank
         rank = worker_rank + init_info.rank_offset
         # Create stateless process group
-        pg = StatelessProcessGroup.create(
-            host=init_info.master_address,
-            port=init_info.master_port,
-            rank=rank,
-            world_size=init_info.world_size,
-        )
-
-        # Initialize NCCL communicator
-        self.model_update_group = PyNcclCommunicator(
-            pg, device=torch.cuda.current_device()
+        self.model_update_group = NCCLWeightTransferEngine.stateless_init_process_group(
+            init_info.master_address,
+            init_info.master_port,
+            rank,
+            init_info.world_size,
+            torch.cuda.current_device(),
         )
 
     def receive_weights(
@@ -227,3 +221,23 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
             for item in iterator:
                 tensor = post_iter_func(item)
                 group.broadcast(tensor, src=src, stream=torch.cuda.current_stream())
+
+    @staticmethod
+    def stateless_init_process_group(
+        master_address, master_port, rank, world_size, device
+    ):
+        """
+        vLLM provides `StatelessProcessGroup` to create a process group
+        without considering the global process group in torch.distributed.
+        It is recommended to create `StatelessProcessGroup`, and then initialize
+        the data-plane communication (NCCL) between external (train processes)
+        and vLLM workers.
+        """
+        from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+        from vllm.distributed.utils import StatelessProcessGroup
+
+        pg = StatelessProcessGroup.create(
+            host=master_address, port=master_port, rank=rank, world_size=world_size
+        )
+        pynccl = PyNcclCommunicator(pg, device=device)
+        return pynccl

@@ -32,9 +32,7 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
 )
-from vllm.distributed.weight_transfer import (
-    init_transfer_engine,
-)
+from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
@@ -92,8 +90,7 @@ class Worker(WorkerBase):
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine (initialized on-demand)
-        # check if class is in the map
-        self.weight_transfer_engine = init_transfer_engine(
+        self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
             self.vllm_config.weight_transfer_config, self.vllm_config.parallel_config
         )
 

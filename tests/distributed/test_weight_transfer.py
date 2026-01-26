@@ -15,19 +15,10 @@ import torch
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
-from vllm.distributed.weight_transfer import (
-    WEIGHT_TRANSFER_ENGINE_REGISTRY,
-    init_transfer_engine,
-    register_weight_transfer_engine,
-)
+from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.distributed.weight_transfer.base import (
     BackendInitInfo,
     WeightTransferEngine,
-)
-from vllm.distributed.weight_transfer.ipc_engine import (
-    IPCInitInfo,
-    IPCUpdateInfo,
-    IPCWeightTransferEngine,
 )
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLInitInfo,
@@ -95,33 +86,6 @@ class TestNCCLUpdateInfoValidation:
         assert len(info.names) == 0
 
 
-# --- Unit Tests: IPCUpdateInfo Validation ---
-
-
-class TestIPCUpdateInfoValidation:
-    """Test IPCUpdateInfo dataclass validation."""
-
-    def test_valid_update_info(self):
-        """Test creating valid IPCUpdateInfo."""
-        info = IPCUpdateInfo(
-            names=["layer.weight"],
-            dtype_names=["float32"],
-            shapes=[[10, 10]],
-            ipc_handles=[{"gpu-uuid": (lambda: None, ())}],
-        )
-        assert info.names == ["layer.weight"]
-
-    def test_mismatched_ipc_handles_raises(self):
-        """Test that mismatched ipc_handles length raises ValueError."""
-        with pytest.raises(ValueError, match="ipc_handles"):
-            IPCUpdateInfo(
-                names=["layer.weight", "layer.bias"],
-                dtype_names=["float32", "float32"],
-                shapes=[[10, 10], [10]],
-                ipc_handles=[{}],  # Only one handle
-            )
-
-
 # --- Unit Tests: Engine Parsing ---
 
 
@@ -183,54 +147,25 @@ class TestNCCLEngineParsing:
         assert update_info.shapes == [[100, 100], [50]]
 
 
-class TestIPCEngineParsing:
-    """Test IPCWeightTransferEngine parsing methods."""
-
-    def test_parse_init_info_empty(self):
-        """Test parsing empty init info (IPC doesn't need init params)."""
-        config = WeightTransferConfig(backend="ipc")
-        parallel_config = create_mock_parallel_config()
-        engine = IPCWeightTransferEngine(config, parallel_config)
-
-        init_info = engine.parse_init_info({})
-        assert isinstance(init_info, IPCInitInfo)
-
-    def test_init_transfer_is_noop(self):
-        """Test that IPC init_transfer is a no-op."""
-        config = WeightTransferConfig(backend="ipc")
-        parallel_config = create_mock_parallel_config()
-        engine = IPCWeightTransferEngine(config, parallel_config)
-
-        # Should not raise
-        engine.init_transfer(IPCInitInfo())
-
-
 # --- Unit Tests: Engine Registry ---
 
 
 class TestEngineRegistry:
     """Test weight transfer engine registry."""
 
-    def test_init_transfer_engine_nccl(self):
-        """Test init_transfer_engine creates NCCL engine."""
+    def test_create_engine_nccl(self):
+        """Test factory creates NCCL engine."""
         config = WeightTransferConfig(backend="nccl")
         parallel_config = create_mock_parallel_config()
-        engine = init_transfer_engine(config, parallel_config)
+        engine = WeightTransferEngineFactory.create_engine(config, parallel_config)
         assert isinstance(engine, NCCLWeightTransferEngine)
 
-    def test_init_transfer_engine_ipc(self):
-        """Test init_transfer_engine creates IPC engine."""
-        config = WeightTransferConfig(backend="ipc")
-        parallel_config = create_mock_parallel_config()
-        engine = init_transfer_engine(config, parallel_config)
-        assert isinstance(engine, IPCWeightTransferEngine)
-
-    def test_init_transfer_engine_invalid_backend(self):
-        """Test init_transfer_engine raises for invalid backend."""
+    def test_create_engine_invalid_backend(self):
+        """Test factory raises for invalid backend."""
         config = WeightTransferConfig(backend="invalid")
         parallel_config = create_mock_parallel_config()
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
-            init_transfer_engine(config, parallel_config)
+            WeightTransferEngineFactory.create_engine(config, parallel_config)
 
     def test_register_custom_engine(self):
         """Test registering a custom engine."""
@@ -253,16 +188,18 @@ class TestEngineRegistry:
                 pass
 
         # Register custom engine
-        register_weight_transfer_engine("custom_test", CustomEngine)
-        assert "custom_test" in WEIGHT_TRANSFER_ENGINE_REGISTRY
+        WeightTransferEngineFactory.register_engine("custom_test", CustomEngine)
+        assert WeightTransferEngineFactory.is_registered("custom_test")
 
         # Clean up
-        del WEIGHT_TRANSFER_ENGINE_REGISTRY["custom_test"]
+        WeightTransferEngineFactory.unregister_engine("custom_test")
 
     def test_register_duplicate_raises(self):
         """Test registering duplicate engine name raises."""
         with pytest.raises(ValueError, match="already registered"):
-            register_weight_transfer_engine("nccl", NCCLWeightTransferEngine)
+            WeightTransferEngineFactory.register_engine(
+                "nccl", NCCLWeightTransferEngine
+            )
 
 
 # --- Test receive_weights without init raises ---
