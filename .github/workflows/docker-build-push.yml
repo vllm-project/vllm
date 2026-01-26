@@ -60,6 +60,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Move Docker data directory to /mnt
+        run: |
+          sudo systemctl stop docker
+          sudo mkdir -p /mnt/docker-data
+          sudo rsync -a /var/lib/docker/ /mnt/docker-data/
+          echo '{"data-root": "/mnt/docker-data"}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl start docker
+          echo "Docker is now using /mnt with 70GB available"
+          df -h /mnt
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
