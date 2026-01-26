@@ -658,6 +658,9 @@ def _resolve_items(
         # and convert to VisionChunk types with proper UUID handling
         vision_chunk_items = items_by_modality["vision_chunk"]
         modality_order = vision_chunk_modality_order.get("vision_chunk", [])
+        mm_uuids["vision_chunk"] = [
+            uuid for data, uuid in items_by_modality["vision_chunk"]
+        ]
 
         # Filter out None items (from asyncio.sleep(0) placeholders)
         filtered_items = [
