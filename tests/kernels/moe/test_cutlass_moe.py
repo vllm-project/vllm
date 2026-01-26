@@ -196,7 +196,6 @@ def run_with_expert_maps(
     for kwargs, new_quant_config in slice_experts():
         w2 = kwargs["w2"]
         a = kwargs["hidden_states"]
-
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(

@@ -555,6 +555,7 @@ def pplx_moe(
         per_act_token_quant,
         group_name,
     )
+
     topk_ids = topk_ids.to(dtype=torch.uint32)
 
     # Note: workers with the same dp_rank must use the exact same inputs.
