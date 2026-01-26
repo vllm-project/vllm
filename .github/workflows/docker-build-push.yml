@@ -112,7 +112,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           target: vllm-openai
           build-args: |
-            max_jobs=1
+            max_jobs=2
             nvcc_threads=1
             buildkite_commit=${{ github.sha }}
             GIT_REPO_CHECK=0
