@@ -51,6 +51,7 @@ from vllm.v1.worker.gpu.kv_connector import (
     KVConnector,
     get_kv_connector,
 )
+from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -168,6 +169,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
             vocab_size=self.vocab_size,
         )
+        # LoRA-related workers.
+        self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
 
         # Buffers for CPU-to-GPU copies.
         self.tmp_idx_mapping = UvaBufferPool(self.max_num_reqs, torch.int32)
@@ -269,6 +272,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
+        slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings, self.kv_cache_config
+        )
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=input_batch.num_reqs,
@@ -282,6 +288,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_config=self.kv_cache_config,
         )
         input_batch.attn_metadata = attn_metadata
+        input_batch.slot_mappings = slot_mappings_by_layer
 
     @torch.inference_mode()
     def _dummy_run(
@@ -345,6 +352,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.run_model(
                 self.max_num_tokens,
                 attn_metadata=None,
+                slot_mappings=None,
                 num_tokens_across_dp=num_tokens_across_dp,
             )
         torch.cuda.synchronize()
@@ -411,17 +419,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             torch.cuda.synchronize()
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
-        if scheduler_output.preempted_req_ids is not None:
-            for req_id in scheduler_output.preempted_req_ids:
-                self.req_states.remove_request(req_id)
-                if self.supports_mm_inputs:
-                    self.encoder_runner.remove_request(req_id)
-                self.prompt_logprobs_worker.remove_request(req_id)
-        for req_id in scheduler_output.finished_req_ids:
+        finished_req_ids = scheduler_output.finished_req_ids
+        if scheduler_output.preempted_req_ids:
+            finished_req_ids = finished_req_ids.union(
+                scheduler_output.preempted_req_ids
+            )
+        for req_id in finished_req_ids:
             self.req_states.remove_request(req_id)
             if self.supports_mm_inputs:
                 self.encoder_runner.remove_request(req_id)
             self.prompt_logprobs_worker.remove_request(req_id)
+            self.lora_state.remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
         if self.supports_mm_inputs:
@@ -440,7 +448,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 prompt_len=prompt_len,
                 prefill_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                lora_request=new_req_data.lora_request,
             )
             req_index = self.req_states.req_id_to_index[req_id]
 
@@ -465,6 +472,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.prompt_logprobs_worker.add_request(
                 req_id, req_index, new_req_data.sampling_params
             )
+            self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -615,6 +623,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc,
             self.input_buffers.positions[:num_tokens],
         )
+        # Layer name -> slot mapping.
+        slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings, self.kv_cache_config
+        )
 
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
@@ -655,6 +667,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             mrope_positions=mrope_positions,
             inputs_embeds=None,
             attn_metadata=attn_metadata,
+            slot_mappings=slot_mappings_by_layer,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -832,7 +845,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.lora_config:
                 # Activate LoRA adapters.
-                lora_inputs = self.req_states.make_lora_inputs(
+                lora_inputs = self.lora_state.make_lora_inputs(
                     input_batch.req_ids,
                     input_batch.idx_mapping_np,
                     input_batch.num_scheduled_tokens,
@@ -882,14 +895,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.uses_mrope:
                 assert input_batch.mrope_positions is not None
                 positions = input_batch.mrope_positions
-            slot_mappings = self.block_tables.compute_slot_mappings(
-                input_batch.idx_mapping,
-                input_batch.query_start_loc,
-                input_batch.positions[: input_batch.num_tokens],
-            )
-            slot_mappings_by_layer = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
-            )
             with set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,
@@ -897,7 +902,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # TODO(woosuk): Support piecewise CUDA graph.
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 num_tokens_across_dp=num_tokens_across_dp,
-                slot_mapping=slot_mappings_by_layer,
+                slot_mapping=input_batch.slot_mappings,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 hidden_states = self.model(

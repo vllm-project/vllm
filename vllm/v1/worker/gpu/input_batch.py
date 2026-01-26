@@ -66,6 +66,8 @@ class InputBatch:
 
     # layer_name -> Metadata
     attn_metadata: dict[str, Any]
+    # layer_name -> slot_mapping
+    slot_mappings: dict[str, torch.Tensor]
 
     # [total_num_logits]
     logits_indices: torch.Tensor
@@ -133,6 +135,7 @@ class InputBatch:
             mrope_positions=None,
             inputs_embeds=None,
             attn_metadata=None,  # type: ignore
+            slot_mappings=None,  # type: ignore
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
