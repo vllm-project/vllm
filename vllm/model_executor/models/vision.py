@@ -10,7 +10,12 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import MultiModalConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    ModelConfig,
+    MultiModalConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -104,11 +109,15 @@ def get_vit_attn_backend(
     """
     try:
         vllm_config: VllmConfig = get_current_vllm_config()
-        multimodal_config: MultiModalConfig | None = (
-            vllm_config.model_config.multimodal_config
-        )
     except AssertionError:
         multimodal_config = None
+    else:
+        # We have a vLLM config; if we don't have a model config for
+        # any reason, set the MM config to None by default as well.
+        model_config: ModelConfig | None = vllm_config.model_config
+        multimodal_config: MultiModalConfig | None = (
+            model_config.multimodal_config if model_config is not None else None
+        )
 
     attn_backend_override = (
         multimodal_config.mm_encoder_attn_backend
