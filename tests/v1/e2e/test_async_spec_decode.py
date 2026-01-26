@@ -32,8 +32,9 @@ def sync_tracker():
                 count = sync_count.value
             # Print stack trace immediately (shows in subprocess output)
             print(f"\n{'=' * 60}", file=sys.stderr)
-            print(f"SYNC #{count}: tensor.cpu() called on CUDA tensor!",
-                  file=sys.stderr)
+            print(
+                f"SYNC #{count}: tensor.cpu() called on CUDA tensor!", file=sys.stderr
+            )
             print(f"Shape: {self.shape}, dtype: {self.dtype}", file=sys.stderr)
             print(f"{'=' * 60}", file=sys.stderr)
             traceback.print_stack(file=sys.stderr)
