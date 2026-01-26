@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Integration tests for graceful shutdown and signal handling."""
+"""Integration tests for drain shutdown and signal handling."""
 
 import asyncio
 import signal
@@ -200,8 +200,8 @@ async def _concurrent_request_loop(
 
 
 @pytest.mark.asyncio
-async def test_graceful_shutdown_drains_requests():
-    """Verify graceful shutdown: 503s returned, in-flight requests complete."""
+async def test_drain_shutdown_drains_requests():
+    """Verify drain shutdown: 503s returned, in-flight requests complete."""
     port = get_open_port()
     proc = _start_server(port, shutdown_mode="drain")
 

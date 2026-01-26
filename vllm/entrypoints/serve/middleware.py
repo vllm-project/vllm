@@ -37,7 +37,8 @@ class ServiceUnavailableMiddleware:
             return self.app(scope, receive, send)
 
         path = scope.get("path", "")
-        if is_rejecting_requests() and path not in _EXEMPT_PATHS:
+        rejecting = is_rejecting_requests()
+        if rejecting and path not in _EXEMPT_PATHS:
             response = JSONResponse(
                 content={"error": "Server is unavailable. Please try again later."},
                 status_code=503,

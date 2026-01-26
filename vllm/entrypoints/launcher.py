@@ -75,14 +75,14 @@ async def serve_http(
 
     args = getattr(app.state, "args", None)
     engine_client: EngineClient = app.state.engine_client
-    enable_graceful = (
+    enable_drain = (
         args is not None and getattr(args, "shutdown_mode", "immediate") == "drain"
     )
 
     config = uvicorn.Config(app, **uvicorn_kwargs)
     config.h11_max_incomplete_event_size = h11_max_incomplete_event_size
     config.h11_max_header_count = h11_max_header_count
-    if enable_graceful:
+    if enable_drain:
         config.install_signal_handlers = False
     config.load()
     server = uvicorn.Server(config)
@@ -104,15 +104,15 @@ async def serve_http(
         )
     )
 
-    async def graceful_drain() -> None:
-        """Perform graceful drain before shutdown."""
+    async def perform_drain() -> None:
+        """Drain in-flight requests before shutdown."""
         drain_timeout = getattr(
             args, "shutdown_drain_timeout", FrontendArgs.shutdown_drain_timeout
         )
 
         inflight_count = engine_client.get_num_unfinished_requests()
         logger.info(
-            "Graceful shutdown: draining %d in-flight requests",
+            "Drain: draining %d in-flight requests",
             inflight_count,
         )
 
@@ -120,10 +120,10 @@ async def serve_http(
 
         start_time = time.monotonic()
         try:
-            # send graceful shutdown to engines via IPC
+            # send drain to engines via IPC
             core = getattr(engine_client, "engine_core", None)
-            if core is not None and hasattr(core, "_send_graceful_shutdown_to_engines"):
-                core._send_graceful_shutdown_to_engines()
+            if core is not None and hasattr(core, "_send_drain_to_engines"):
+                core._send_drain_to_engines()
 
                 # wait for ready_to_exit event (set when engines finish draining)
                 with contextlib.suppress(asyncio.TimeoutError):
@@ -137,24 +137,24 @@ async def serve_http(
                 elapsed = time.monotonic() - start_time
                 if core.resources.ready_to_exit_event.is_set():
                     logger.info(
-                        "Graceful shutdown: drain complete in %.1fs",
+                        "Drain: complete in %.1fs",
                         elapsed,
                     )
                 elif core.resources.engine_dead:
-                    logger.warning("Graceful shutdown: engine died during drain")
+                    logger.warning("Drain: engine died during drain")
                 else:
                     remaining = engine_client.get_num_unfinished_requests()
                     logger.warning(
-                        "Graceful shutdown: drain timed out after %.1fs, "
+                        "Drain: timed out after %.1fs, "
                         "%d requests remaining, proceeding with shutdown",
                         elapsed,
                         remaining,
                     )
             else:
                 # fallback for non-MP clients
-                logger.info("Graceful shutdown: no engine core, proceeding")
+                logger.info("Drain: no engine core, proceeding")
         except Exception as e:
-            logger.warning("Graceful shutdown: drain failed: %s", e)
+            logger.warning("Drain: failed: %s", e)
 
     def signal_handler() -> None:
         # prevents the uvicorn signal handler to exit early
@@ -163,28 +163,28 @@ async def serve_http(
         if ssl_cert_refresher:
             ssl_cert_refresher.stop()
 
-    async def graceful_signal_handler() -> None:
-        """Async wrapper for graceful shutdown."""
+    async def drain_signal_handler() -> None:
+        """Async wrapper for drain shutdown."""
         try:
-            await graceful_drain()
+            await perform_drain()
         except asyncio.CancelledError:
-            logger.info("Graceful drain cancelled, proceeding with immediate shutdown")
+            logger.info("Drain cancelled, proceeding with immediate shutdown")
         signal_handler()
 
     shutting_down = False
-    graceful_task: asyncio.Task | None = None
+    drain_task: asyncio.Task | None = None
 
     def on_signal() -> None:
-        """Signal callback that spawns the graceful shutdown task."""
-        nonlocal shutting_down, graceful_task
+        """Signal callback that spawns the drain task."""
+        nonlocal shutting_down, drain_task
         if shutting_down:
-            if graceful_task is not None and not graceful_task.done():
+            if drain_task is not None and not drain_task.done():
                 logger.warning("Received second signal, forcing immediate shutdown")
-                graceful_task.cancel()
+                drain_task.cancel()
             return
         shutting_down = True
 
-        if enable_graceful:
+        if enable_drain:
             # reset should_exit to keep uvicorn's serve loop running during drain
             server.should_exit = False
 
@@ -192,11 +192,11 @@ async def serve_http(
                 args, "shutdown_drain_timeout", FrontendArgs.shutdown_drain_timeout
             )
             logger.info(
-                "Graceful shutdown initiated (timeout: %ds). "
+                "Drain initiated (timeout: %ds). "
                 "Send SIGTERM again to force immediate shutdown.",
                 drain_timeout,
             )
-            graceful_task = loop.create_task(graceful_signal_handler())
+            drain_task = loop.create_task(drain_signal_handler())
         else:
             signal_handler()
 

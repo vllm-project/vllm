@@ -384,7 +384,7 @@ class BackgroundResources:
     # processing threads can access it without holding a ref to the client.
     engine_dead: bool = False
 
-    # graceful shutdown coordination
+    # drain coordination
     ready_to_exit_event: threading.Event = field(default_factory=threading.Event)
     ready_to_exit_count: int = 0
     expected_engine_count: int = 0
@@ -579,7 +579,7 @@ class MPClient(EngineCoreClient):
             # underlying data.
             self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
 
-            # Track expected engine count for graceful shutdown
+            # Track expected engine count for drain coordination
             self.resources.expected_engine_count = len(self.core_engines)
 
             # Start monitoring engine core processes for unexpected failures
@@ -609,21 +609,19 @@ class MPClient(EngineCoreClient):
         except Exception:
             logger.debug_once("Failed to send SHUTDOWN, engines may be gone")
 
-    def _send_graceful_shutdown_to_engines(self):
-        """Send GRACEFUL_SHUTDOWN message to all engine cores via ZMQ."""
+    def _send_drain_to_engines(self):
+        """Send DRAIN message to all engine cores via ZMQ."""
         if self.resources.engine_dead:
             return
         try:
-            logger.info(
-                "Sending GRACEFUL_SHUTDOWN to %d engine(s)", len(self.core_engines)
-            )
+            logger.info("Sending DRAIN to %d engine(s)", len(self.core_engines))
             for engine_id in self.core_engines:
                 self.input_socket.send_multipart(
-                    [engine_id, EngineCoreRequestType.GRACEFUL_SHUTDOWN.value],
+                    [engine_id, EngineCoreRequestType.DRAIN.value],
                     flags=zmq.NOBLOCK,
                 )
         except Exception:
-            logger.debug_once("Failed to send GRACEFUL_SHUTDOWN, engines may be gone")
+            logger.debug_once("Failed to send DRAIN, engines may be gone")
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
@@ -938,6 +936,10 @@ class AsyncMPClient(MPClient):
                     frames = await output_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
                     if resources.is_ready_to_exit(frames):
+                        # engine drained and ready to exit, signal waiters
+                        logger.info("Engine ready to exit, marking engine as dead")
+                        resources.engine_dead = True
+                        outputs_queue.put_nowait(EngineDeadError())
                         return
                     outputs: EngineCoreOutputs = decoder.decode(frames)
                     if outputs.utility_output:
@@ -965,6 +967,8 @@ class AsyncMPClient(MPClient):
 
     async def get_output_async(self) -> EngineCoreOutputs:
         self._ensure_output_queue_task()
+        # Check if engine is already dead before waiting
+        self.ensure_alive()
         # If an exception arises in process_outputs_socket task,
         # it is forwarded to the outputs_queue so we can raise it
         # from this (run_output_handler) task to shut down the server.
