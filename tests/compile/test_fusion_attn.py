@@ -18,7 +18,7 @@ from tests.compile.fusion_test_utils import (
     is_blackwell,
     run_model,
 )
-from tests.utils import cuda_device_count_stateless, flat_product
+from tests.utils import flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention.layer import Attention
@@ -43,7 +43,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -215,7 +215,7 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
 class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
     """Test model for AttentionNvfp4QuantPattern fusion."""
 
-    quant_key = kNvfp4Quant
+    quant_key = kNvfp4Dynamic
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -265,13 +265,13 @@ if current_platform.is_cuda():
     HEADS = [(64, 8), (40, 8)]
     PATTERN_TEST_MODELS_FP8 = [
         (
-            "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+            "RedHatAI/Meta-Llama-3.1-8B-FP8",
             TestAttentionFp8StaticQuantPatternModel,
         )
     ]
     PATTERN_TEST_MODELS_FP4 = [
         (
-            "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+            "nvidia/Llama-3.1-8B-Instruct-NVFP4",
             TestAttentionNvfp4QuantPatternModel,
         )
     ]
@@ -331,9 +331,8 @@ def test_attention_quant_pattern(
     if backend == AttentionBackendEnum.FLASHINFER and (
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
     ):
+        # This also captures the FP4 case
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
-    if "Llama-4-Scout" in model_name and cuda_device_count_stateless() < 2:
-        pytest.skip("Llama-4-Scout requires at least 2 GPUs")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
@@ -468,7 +467,7 @@ def test_attention_quant_pattern(
 
     # Note: for fp8, fully_replaced=False because query quant ops remain in graph.
     # Only output quant ops are fused into attention.
-    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Quant)
+    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
 
     # access the underlying `AttnFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)

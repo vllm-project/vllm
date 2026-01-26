@@ -391,8 +391,6 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
         Returns:
             List of flattened image embeddings, one per image
         """
-        assert self.vision_tower is not None, "Vision tower is required"
-
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
 
@@ -448,7 +446,7 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal, Suppo
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

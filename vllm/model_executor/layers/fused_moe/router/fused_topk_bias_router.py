@@ -4,6 +4,8 @@ from collections.abc import Callable
 
 import torch
 
+import vllm._custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -12,15 +14,106 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 
+def vllm_topk_softmax(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, ...]:
+    ops.topk_softmax(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        e_score_correction_bias,
+    )
+
+    return topk_weights, topk_indices
+
+
+def vllm_topk_sigmoid(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    e_score_correction_bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, ...]:
+    ops.topk_sigmoid(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        e_score_correction_bias,
+    )
+
+    return topk_weights, topk_indices
+
+
 def fused_topk_bias(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
     e_score_correction_bias: torch.Tensor,
     topk: int,
     renormalize: bool,
+    scoring_func: str = "softmax",
+    indices_type: torch.dtype | None = None,
 ):
+    if not rocm_aiter_ops.is_fused_moe_enabled():
+        assert hidden_states.size(0) == gating_output.size(0), (
+            "Number of tokens mismatch"
+        )
+
+        M, _ = hidden_states.size()
+
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=hidden_states.device
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32 if indices_type is None else indices_type,
+            device=hidden_states.device,
+        )
+        token_expert_indices = torch.empty(
+            M, topk, dtype=torch.int32, device=hidden_states.device
+        )
+
+        if scoring_func == "softmax":
+            topk_weights, topk_ids = vllm_topk_softmax(
+                topk_weights,
+                topk_ids,
+                token_expert_indices,
+                gating_output,
+                renormalize,
+                e_score_correction_bias,
+            )
+            return topk_weights, topk_ids
+        elif scoring_func == "sigmoid":
+            topk_weights, topk_ids = vllm_topk_sigmoid(
+                topk_weights,
+                topk_ids,
+                token_expert_indices,
+                gating_output,
+                renormalize,
+                e_score_correction_bias,
+            )
+            return topk_weights, topk_ids
+        else:
+            raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
     n_routed_experts = gating_output.shape[-1]
-    scores = gating_output.softmax(dim=-1)
+    if scoring_func == "softmax":
+        scores = gating_output.softmax(dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output.sigmoid()
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
     scores_for_choice = scores.view(
         -1, n_routed_experts
     ) + e_score_correction_bias.unsqueeze(0)
@@ -31,7 +124,9 @@ def fused_topk_bias(
     topk_weights = scores.gather(1, topk_indices)
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-    return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
+    return topk_weights.to(torch.float32), topk_indices.to(
+        torch.int32 if indices_type is None else indices_type
+    )
 
 
 class FusedTopKBiasRouter(BaseRouter):
@@ -43,6 +138,7 @@ class FusedTopKBiasRouter(BaseRouter):
         global_num_experts: int,
         eplb_state: EplbLayerState,
         e_score_correction_bias: torch.Tensor,
+        scoring_func: str,
         renormalize: bool = True,
         routed_scaling_factor: float = 1.0,
         enable_eplb: bool = False,
@@ -57,6 +153,7 @@ class FusedTopKBiasRouter(BaseRouter):
         )
         self.e_score_correction_bias = e_score_correction_bias
         self.renormalize = renormalize
+        self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
 
     @property
@@ -80,6 +177,8 @@ class FusedTopKBiasRouter(BaseRouter):
             e_score_correction_bias=self.e_score_correction_bias.data,
             topk=self.top_k,
             renormalize=self.renormalize,
+            scoring_func=self.scoring_func,
+            indices_type=indices_type,
         )
 
         if self.routed_scaling_factor != 1.0:
