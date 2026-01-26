@@ -626,6 +626,7 @@ class CompilationConfig:
             "debug_dump_path",
             "cache_dir",
             "local_cache_dir",
+            "bs_to_padded_graph_size",
             "traced_files",
             "compilation_time",
             "static_forward_context",
