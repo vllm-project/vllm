@@ -1055,8 +1055,7 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         lengths = audio_output_lengths.tolist()
 
         embeds = tuple(
-            audio_features[i, : int(length)]
-            for i, length in enumerate(lengths)
+            audio_features[i, : int(length)] for i, length in enumerate(lengths)
         )
         if debug:
             embed_lens = [int(t.shape[0]) for t in embeds]

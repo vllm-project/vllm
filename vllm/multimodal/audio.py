@@ -216,4 +216,3 @@ class AudioResampler:
                 f"Invalid resampling method: {self.method}. "
                 "Supported methods are 'librosa' and 'scipy'."
             )
-

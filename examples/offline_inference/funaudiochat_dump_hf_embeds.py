@@ -130,7 +130,8 @@ def main() -> None:
             continuous_audio_output_lengths=cont_out_lens,
             feature_exist_mask=feature_exist_mask,
         )
-        _, out_lens = model.audio_tower._get_feat_extract_output_lengths(speech_attention_mask.sum(-1))
+        get_out_lens = model.audio_tower._get_feat_extract_output_lengths
+        _, out_lens = get_out_lens(speech_attention_mask.sum(-1))
         l0 = int(out_lens[0].item())
         arr = disc[0, :l0].detach().float().cpu().numpy()
         cont_arr = cont.detach().float().cpu().numpy()

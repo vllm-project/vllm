@@ -155,13 +155,19 @@ def main() -> None:
     # vLLM continuous tower forward (match HF get_audio_features flattening)
     with torch.no_grad():
         if feature_attention_mask.shape[1] != input_features.shape[-1]:
-            min_len = min(int(feature_attention_mask.shape[1]), int(input_features.shape[-1]))
+            min_len = min(
+                int(feature_attention_mask.shape[1]), int(input_features.shape[-1])
+            )
             feature_attention_mask = feature_attention_mask[:, :min_len]
             input_features = input_features[:, :, :min_len]
 
         feature_lens = feature_attention_mask.sum(-1)
-        flat_features = input_features.permute(0, 2, 1)[feature_attention_mask.bool()].permute(1, 0)
-        aftercnn_lens, v_cont_out_lens = v_cont._get_feat_extract_output_lengths(feature_lens)
+        flat_features = input_features.permute(0, 2, 1)[
+            feature_attention_mask.bool()
+        ].permute(1, 0)
+        aftercnn_lens, v_cont_out_lens = v_cont._get_feat_extract_output_lengths(
+            feature_lens
+        )
         v_cont_out = v_cont(
             flat_features,
             feature_lens=feature_lens,
@@ -172,7 +178,10 @@ def main() -> None:
     # Compare continuous tower outputs
     cont_max = (hf_cont - v_cont_out).abs().max().item()
     cont_mse = ((hf_cont - v_cont_out) ** 2).mean().item()
-    print(f"continuous: shape={tuple(hf_cont.shape)} max_abs_diff={cont_max:.6g} mse={cont_mse:.6g}")
+    print(
+        f"continuous: shape={tuple(hf_cont.shape)} "
+        f"max_abs_diff={cont_max:.6g} mse={cont_mse:.6g}"
+    )
 
     # Compare discrete tower outputs using the SAME continuous features (HF)
     with torch.no_grad():
@@ -189,17 +198,20 @@ def main() -> None:
             feature_exist_mask=feature_exist_mask,
         )
 
-        _, out_lens = model.audio_tower._get_feat_extract_output_lengths(speech_attention_mask.sum(-1))
+        get_out_lens = model.audio_tower._get_feat_extract_output_lengths
+        _, out_lens = get_out_lens(speech_attention_mask.sum(-1))
         lengths = [int(x) for x in out_lens.tolist()]
 
-    for i, l in enumerate(lengths):
-        a = hf_disc_out[i, :l]
-        b = v_disc_out[i, :l]
+    for i, length in enumerate(lengths):
+        a = hf_disc_out[i, :length]
+        b = v_disc_out[i, :length]
         max_diff = (a - b).abs().max().item()
         mse = ((a - b) ** 2).mean().item()
-        print(f"discrete[{i}]: shape={tuple(a.shape)} max_abs_diff={max_diff:.6g} mse={mse:.6g}")
+        print(
+            f"discrete[{i}]: shape={tuple(a.shape)} "
+            f"max_abs_diff={max_diff:.6g} mse={mse:.6g}"
+        )
 
 
 if __name__ == "__main__":
     main()
-

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
+import wave
 from io import BytesIO
 from pathlib import Path
-import wave
 
 import numpy as np
 import numpy.typing as npt

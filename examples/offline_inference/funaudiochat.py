@@ -194,8 +194,10 @@ def _run_transformers(args: argparse.Namespace) -> None:
         token_ids = token_ids.tolist()
 
     # Normalize arbitrary nesting to a single token id list.
-    while isinstance(token_ids, (list, tuple)) and token_ids and not isinstance(
-        token_ids[0], (int, np.integer)
+    while (
+        isinstance(token_ids, (list, tuple))
+        and token_ids
+        and not isinstance(token_ids[0], (int, np.integer))
     ):
         token_ids = token_ids[0]
     if isinstance(token_ids, (torch.Tensor, np.ndarray)):
@@ -216,9 +218,14 @@ def _run_transformers(args: argparse.Namespace) -> None:
         raise TypeError(f"Unsupported token id container: {type(x)}")
 
     try:
-        text = tokenizer.decode(token_ids, skip_special_tokens=False)
+        text = tokenizer.decode(
+            token_ids,
+            skip_special_tokens=False,
+        )
     except TypeError:
-        text = tokenizer.decode(_flatten_token_ids(token_ids), skip_special_tokens=False)
+        text = tokenizer.decode(
+            _flatten_token_ids(token_ids), skip_special_tokens=False
+        )
     print(text)
 
 
