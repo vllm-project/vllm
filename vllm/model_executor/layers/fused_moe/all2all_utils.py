@@ -156,7 +156,7 @@ def maybe_make_prepare_finalize(
         handle = all2all_manager.get_handle(all_to_all_args)
 
         prepare_finalize = PplxPrepareAndFinalize(
-            a2a=handle,
+            handle,
             max_num_tokens=moe.max_num_tokens,
             num_local_experts=moe.num_local_experts,
             num_dispatchers=num_dispatchers,
@@ -167,7 +167,7 @@ def maybe_make_prepare_finalize(
         all_to_all_args = dict()
         handle = all2all_manager.get_handle(all_to_all_args)
         prepare_finalize = DeepEPHTPrepareAndFinalize(
-            buffer=handle,
+            handle,
             num_dispatchers=all2all_manager.world_size,
             dp_size=all2all_manager.dp_world_size,
             rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
@@ -199,7 +199,7 @@ def maybe_make_prepare_finalize(
         )
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
-            buffer=handle,
+            handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
@@ -233,7 +233,7 @@ def maybe_make_prepare_finalize(
         handle = all2all_manager.get_handle(all_to_all_args)
 
         prepare_finalize = MoriPrepareAndFinalize(
-            mori_op=handle,
+            handle,
             max_tokens_per_rank=moe.max_num_tokens,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
