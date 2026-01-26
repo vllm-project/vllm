@@ -76,7 +76,7 @@ class InputQuantKernel(ABC, Generic[_ConfigT]):
         raise NotImplementedError
 
     @abstractmethod
-    def apply_group_qaunt(
+    def apply_group_quant(
         self,
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
@@ -85,7 +85,7 @@ class InputQuantKernel(ABC, Generic[_ConfigT]):
         raise NotImplementedError
 
     @abstractmethod
-    def apply_per_token_per_tensor(
+    def apply_per_token_per_tensor_quant(
         self,
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
@@ -102,6 +102,6 @@ class InputQuantKernel(ABC, Generic[_ConfigT]):
         group_shape = self.config.group_shape
 
         if group_shape.is_per_group():
-            return self.apply_group_qaunt(x, scale, scale_ub)
+            return self.apply_group_quant(x, scale, scale_ub)
 
-        return self.apply_per_token_per_tensor(x, scale, scale_ub)
+        return self.apply_per_token_per_tensor_quant(x, scale, scale_ub)

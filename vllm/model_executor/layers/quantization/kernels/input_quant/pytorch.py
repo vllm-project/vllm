@@ -33,7 +33,7 @@ class PytorchInputQuantKernel(InputQuantKernel[InputQuantConfig]):
     def ordered_fallback_kernels(cls) -> list[type[InputQuantKernel[InputQuantConfig]]]:
         return [cls]
 
-    def apply_group_qaunt(
+    def apply_group_quant(
         self, x, scale=None, scale_ub=None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.is_group_quant and not self.is_static_quant:
@@ -71,7 +71,7 @@ class PytorchInputQuantKernel(InputQuantKernel[InputQuantConfig]):
 
         return x_quant, scales
 
-    def apply_per_token_per_tensor(
+    def apply_per_token_per_tensor_quant(
         self, x, scale=None, scale_ub=None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert (scale is not None) == self.is_static_quant

@@ -98,7 +98,7 @@ class CudaInputQuantKernel(InputQuantKernel[InputQuantConfig]):
     def ordered_fallback_kernels(cls) -> list[type[InputQuantKernel[InputQuantConfig]]]:
         return [TritonInputQuantKernel, PytorchInputQuantKernel]
 
-    def apply_group_qaunt(self, x, scale=None, scale_ub=None):
+    def apply_group_quant(self, x, scale=None, scale_ub=None):
         if self.is_group_quant and not self.is_static_quant:
             assert scale is None, "Dynamic group quantization does not use scale"
             from vllm.model_executor.layers.quantization.utils import fp8_utils
@@ -111,7 +111,7 @@ class CudaInputQuantKernel(InputQuantKernel[InputQuantConfig]):
                 use_ue8m0=self.use_ue8m0,
             )
 
-    def apply_per_token_per_tensor(self, x, scale=None, scale_ub=None):
+    def apply_per_token_per_tensor_quant(self, x, scale=None, scale_ub=None):
         assert (scale is not None) == self.is_static_quant
         assert scale_ub is None or (
             not self.is_static_quant

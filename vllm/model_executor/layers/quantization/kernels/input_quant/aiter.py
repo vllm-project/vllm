@@ -45,12 +45,12 @@ class AiterInputQuantKernel(InputQuantKernel[InputQuantConfig]):
     def ordered_fallback_kernels(cls) -> list[type[InputQuantKernel[InputQuantConfig]]]:
         return [CudaInputQuantKernel, TritonInputQuantKernel, PytorchInputQuantKernel]
 
-    def apply_group_qaunt(
+    def apply_group_quant(
         self, x, scale=None, scale_ub=None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return rocm_aiter_ops.group_fp8_quant(x, self.group_shape.col)
 
-    def apply_per_token_per_tensor(
+    def apply_per_token_per_tensor_quant(
         self, x, scale=None, scale_ub=None
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not x.is_contiguous() or scale_ub is not None:
