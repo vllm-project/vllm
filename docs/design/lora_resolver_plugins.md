@@ -10,7 +10,7 @@ receives a request for a LoRA adapter that hasn't been loaded yet, the resolver 
 to locate and load the adapter from their configured storage locations. This enables:
 
 - **Dynamic LoRA Loading**: Load adapters on-demand without server restarts
-- **Multiple Storage Backends**: Support for filesystem, S3, and custom backends. The built-in `lora_filesystem_resolver` requires a local storage path, but custom resolvers can be implemented to fetch from any source.
+- **Multiple Storage Backends**: Support for filesystem, S3, and custom backends. The built-in `lora_filesystem_resolver` requires a local storage path, while the built-in `hf_hub_resolver` will pull LoRA adapters from Huggingface Hub and proceed in an identical manner. In general, custom resolvers can be implemented to fetch from any source.
 - **Automatic Discovery**: Seamless integration with existing LoRA workflows
 - **Scalable Deployment**: Centralized adapter management across multiple vLLM instances
 

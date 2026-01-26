@@ -16,10 +16,20 @@ class FilesystemResolver(LoRAResolver):
         self, base_model_name: str, lora_name: str
     ) -> LoRARequest | None:
         lora_path = os.path.join(self.lora_cache_dir, lora_name)
+        maybe_lora_request = await self._get_lora_req_from_path(
+            lora_name, lora_path, base_model_name
+        )
+        return maybe_lora_request
+
+    async def _get_lora_req_from_path(
+        self, lora_name: str, lora_path: str, base_model_name: str
+    ) -> LoRARequest | None:
+        """Builds a LoraRequest pointing to the lora path if it's a valid
+        LoRA adapter and has a matching base_model_name.
+        """
         if os.path.exists(lora_path):
-            adapter_config_path = os.path.join(
-                self.lora_cache_dir, lora_name, "adapter_config.json"
-            )
+            adapter_config_path = os.path.join(lora_path, "adapter_config.json")
+
             if os.path.exists(adapter_config_path):
                 with open(adapter_config_path) as file:
                     adapter_config = json.load(file)
