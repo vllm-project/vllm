@@ -1100,24 +1100,6 @@ class GPUModelRunner(
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
-        # For async spec decode: Initialize num_computed_tokens on GPU for new
-        # requests. Continuing requests already have the correct GPU values from
-        # the previous step's update.
-        if self.use_async_spec_decode and reqs_to_add:
-            prev_req_id_to_index = self.input_batch.prev_req_id_to_index or {}
-            for req in reqs_to_add:
-                req_index = self.input_batch.req_id_to_index.get(req.req_id)
-                if req_index is not None and req.req_id not in prev_req_id_to_index:
-                    self.num_computed_tokens.np[req_index] = req.num_computed_tokens
-                    # Also sync mrope_position_delta for M-RoPE models
-                    if self.uses_mrope and req.mrope_position_delta is not None:
-                        self.mrope_position_delta.np[req_index] = (
-                            req.mrope_position_delta
-                        )
-            self.num_computed_tokens.copy_to_gpu(self.input_batch.num_reqs)
-            if self.uses_mrope:
-                self.mrope_position_delta.copy_to_gpu(self.input_batch.num_reqs)
-
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
@@ -1536,10 +1518,13 @@ class GPUModelRunner(
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
         # Sync num_computed_tokens to GPU.
+        self.num_computed_tokens.np[:num_reqs] = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        )
+        self.num_computed_tokens.copy_to_gpu(num_reqs)
         # For async spec decode: compute cumulatively on GPU for continuing
         # requests (old_value + valid_sampled_count), bypassing CPU's optimistic
         # values entirely. This avoids needing prev_num_draft_len.
-        # For new requests and non-async mode: copy from CPU.
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         if (
             self.use_async_spec_decode
@@ -1559,39 +1544,20 @@ class GPUModelRunner(
                 prev_indices_gpu = torch.tensor(
                     prev_indices, dtype=torch.int64, device=self.device
                 )
-                # Gather old GPU values BEFORE copying from CPU
-                # old_value is the correct num_computed_tokens from previous step
-                old_num_computed = self.num_computed_tokens.gpu[prev_indices_gpu]
-                valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
-                # New value = old + accepted tokens (valid_sampled_count)
-                new_num_computed = old_num_computed + valid_counts.int()
-
-                # Copy from CPU for all requests (handles new requests)
-                self.num_computed_tokens.np[:num_reqs] = (
-                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
-                )
-                self.num_computed_tokens.copy_to_gpu(num_reqs)
-
-                # Overwrite continuing requests with GPU-computed values
                 current_indices_gpu = torch.tensor(
                     current_indices, dtype=torch.int64, device=self.device
                 )
-                self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
-            else:
-                # No continuing requests, just copy from CPU
-                self.num_computed_tokens.np[:num_reqs] = (
-                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
-                )
-                self.num_computed_tokens.copy_to_gpu(num_reqs)
-        else:
-            # Non-async or first step: copy from CPU
-            self.num_computed_tokens.np[:num_reqs] = (
-                self.input_batch.num_computed_tokens_cpu[:num_reqs]
-            )
-            self.num_computed_tokens.copy_to_gpu(num_reqs)
 
-        # Also sync mrope_position_delta for M-RoPE models (non-async only)
-        if not self.use_async_spec_decode and self.uses_mrope:
+                # Compute new values from old GPU state + valid counts
+                old_num_computed = self.num_computed_tokens.gpu[prev_indices_gpu]
+                valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
+                new_num_computed = old_num_computed + valid_counts.int()
+
+                # Overwrite continuing requests with GPU-computed values
+                self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
+
+        # Copy mrope_position_delta for M-RoPE models.
+        if self.uses_mrope:
             for i, req_id in enumerate(self.input_batch.req_ids):
                 req = self.requests[req_id]
                 if req.mrope_position_delta is not None:
