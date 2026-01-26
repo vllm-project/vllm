@@ -212,7 +212,8 @@ class MultiModalConfig:
         factors: list[Any] = [
             self.mm_encoder_attn_backend.name
             if self.mm_encoder_attn_backend is not None
-            else None
+            else None,
+            self.mm_encoder_tp_mode,
         ]
         normalized = normalize_value(factors)
         return {"factors": normalized} if normalized else {}
