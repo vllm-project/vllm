@@ -1894,20 +1894,18 @@ def run_step_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     model_name = "stepfun-ai/Step3-VL-10B"
-    # test for multi-image
     engine_args = EngineArgs(
         model=model_name,
         max_num_batched_tokens=4096,
         tensor_parallel_size=1,
         trust_remote_code=True,
-        limit_mm_per_prompt={modality: 5},
-        hf_overrides={"vision_config": {"enable_patch": False}},
+        limit_mm_per_prompt={modality: 1},
         reasoning_parser="deepseek_r1",
     )
 
     prompts = [
-        "<｜begin▁of▁sentence｜> You are a helpful assistant. <|BOT|>user\n "
-        f"<im_patch><im_patch><im_patch>{question} <|EOT|><|BOT|>assistant\n<think>\n"
+        "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
+        f"<im_patch>{question} <|EOT|><|BOT|>assistant\n<think>\n"
         for question in questions
     ]
 

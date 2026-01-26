@@ -1182,6 +1182,32 @@ def load_step3(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_step_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "stepfun-ai/Step3-VL-10B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_batched_tokens=4096,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        hf_overrides={"vision_config": {"enable_patch": False}},
+        trust_remote_code=True,
+        reasoning_parser="deepseek_r1",
+    )
+
+    prompt = (
+        "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
+        f"{'<im_patch>' * len(image_urls)}{question}<|EOT|><|BOT|>"
+        "assistant\n<think>\n"
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "omni-research/Tarsier-7b"
 
@@ -1374,6 +1400,7 @@ model_example_map = {
     "rvl": load_r_vl,
     "smolvlm": load_smolvlm,
     "step3": load_step3,
+    "stepvl": load_step_vl,
     "tarsier": load_tarsier,
     "tarsier2": load_tarsier2,
     "glm4_5v": load_glm4_5v,
