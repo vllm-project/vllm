@@ -28,6 +28,8 @@ from transformers.modeling_outputs import BaseModelOutput
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -107,27 +109,69 @@ class FunAudioChatAudioAttention(nn.Module):
     def __init__(self, config: Any):
         super().__init__()
         self.embed_dim = int(config.d_model)
-        self.num_heads = int(config.encoder_attention_heads)
+        self.total_num_heads = int(config.encoder_attention_heads)
         self.dropout = float(getattr(config, "attention_dropout", 0.0))
-        self.head_dim = self.embed_dim // self.num_heads
+        self.head_dim = self.embed_dim // self.total_num_heads
         self.num_key_value_groups = 1  # needed for eager attention
         self.config = config
 
-        if self.head_dim * self.num_heads != self.embed_dim:
+        if self.head_dim * self.total_num_heads != self.embed_dim:
             raise ValueError(
                 "embed_dim must be divisible by num_heads "
                 f"(got embed_dim={self.embed_dim}, "
-                f"num_heads={self.num_heads})."
+                f"num_heads={self.total_num_heads})."
             )
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = 0.0
         self.is_decoder = False
         self.is_causal = False
 
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=False)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
+        self.qkv_proj = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            self.total_num_heads,
+            bias=True,
+        )
+        self.num_heads = self.qkv_proj.num_heads
+        self.out_proj = RowParallelLinear(
+            self.embed_dim,
+            self.embed_dim,
+            bias=True,
+        )
+        with torch.no_grad():
+            if self.qkv_proj.bias is not None:
+                self.qkv_proj.bias.zero_()
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            for param_name, shard_name, shard_id in stacked_params_mapping:
+                if shard_name not in name:
+                    continue
+                name = name.replace(shard_name, param_name)
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+
+            loaded_params.add(name)
+
+        return loaded_params
 
     def forward(
         self,
@@ -139,13 +183,16 @@ class FunAudioChatAudioAttention(nn.Module):
         del kwargs
         seq_length, _ = hidden_states.size()
 
-        query_states = self.q_proj(hidden_states).reshape(
-            seq_length, self.num_heads, -1
+        qkv, _ = self.qkv_proj(hidden_states)
+        q_size = self.num_heads * self.head_dim
+        kv_size = q_size
+        query_states, key_states, value_states = qkv.split(
+            [q_size, kv_size, kv_size], dim=-1
         )
-        key_states = self.k_proj(hidden_states).reshape(seq_length, self.num_heads, -1)
-        value_states = self.v_proj(hidden_states).reshape(
-            seq_length, self.num_heads, -1
-        )
+
+        query_states = query_states.reshape(seq_length, self.num_heads, -1)
+        key_states = key_states.reshape(seq_length, self.num_heads, -1)
+        value_states = value_states.reshape(seq_length, self.num_heads, -1)
 
         query_states = query_states.transpose(0, 1).unsqueeze(0)
         key_states = key_states.transpose(0, 1).unsqueeze(0)
@@ -178,8 +225,8 @@ class FunAudioChatAudioAttention(nn.Module):
         )
 
         attn_output = attn_output.reshape(seq_length, -1).contiguous()
-        attn_output = self.out_proj(attn_output)
-        return attn_output
+        output, _ = self.out_proj(attn_output)
+        return output
 
 
 class FunAudioChatAudioEncoderLayer(nn.Module):
