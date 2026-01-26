@@ -80,7 +80,13 @@ from vllm.v1.attention.backends.mla.indexer import (
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
-from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
+from .interfaces import (
+    MixtureOfExperts,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -1171,7 +1177,12 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 
 
 class DeepseekV2ForCausalLM(
-    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle
+    nn.Module,
+    SupportsPP,
+    DeepseekV2MixtureOfExperts,
+    SupportsLoRA,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -1252,6 +1263,13 @@ class DeepseekV2ForCausalLM(
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,
