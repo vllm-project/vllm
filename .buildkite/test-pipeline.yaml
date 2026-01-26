@@ -1419,19 +1419,19 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
-- label: Speculators Test (Large Models) # optional
-  timeout_in_minutes: 60
-  gpu: a100
+- label: Acceptance Length Test (Large Models) # optional
+  timeout_in_minutes: 120
+  gpu: h100
   optional: true
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/spec_decode/
   - vllm/model_executor/models/mlp_speculator.py
-  - tests/v1/spec_decode/test_speculators_eagle3.py
+  - tests/v1/spec_decode/test_acceptance_length.py
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-    - pytest -v -s v1/spec_decode/test_speculators_eagle3.py -m optional --optional
+    - pytest -v -s v1/spec_decode/test_acceptance_length.py -m optional --optional
 
 - label: LM Eval Large Models # optional
   gpu: a100

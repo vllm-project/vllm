@@ -35,6 +35,8 @@ class Eagle3ModelConfig:
     id: str = ""
     # Backends that are incompatible with this model (will be skipped)
     excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
+    # Pytest marks for this configuration (e.g., pytest.mark.optional)
+    marks: list = field(default_factory=list)
 
 
 # Model configurations for EAGLE3 acceptance length tests.
@@ -64,6 +66,20 @@ EAGLE3_MODEL_CONFIGS = [
         # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
         # FLASHINFER does not support ("sink setting not supported")
         excluded_backends={AttentionBackendEnum.FLASHINFER},
+    ),
+    Eagle3ModelConfig(
+        verifier="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        drafter="nm-testing/Speculator-Qwen3-30B-MOE-VL-Eagle3",
+        expected_acceptance_length=1.35,
+        expected_acceptance_lengths_per_pos=[0.2900, 0.0630, 0.0120],
+        id="qwen3-30b-moe-vl-eagle3",
+        marks=[
+            pytest.mark.optional,
+            pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="The tests are skipped on rocm platform.",
+            ),
+        ],
     ),
 ]
 
@@ -196,7 +212,7 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
 @large_gpu_mark(min_gb=40)
 @pytest.mark.parametrize(
     "model_config",
-    [pytest.param(config, id=config.id) for config in EAGLE3_MODEL_CONFIGS],
+    [pytest.param(config, id=config.id, marks=config.marks) for config in EAGLE3_MODEL_CONFIGS],
 )
 @pytest.mark.parametrize("num_spec_tokens", [DEFAULT_NUM_SPEC_TOKENS])
 @pytest.mark.parametrize("tp_size", get_tp_size_params())
