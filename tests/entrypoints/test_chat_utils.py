@@ -1209,7 +1209,7 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
     assert len(mm_data["image"]) == batch_size
 
     # Verify each embedding has the correct shape
-    assert isinstance(mm_data["image"]["image_grid_thw"], torch.Tensor)
+    assert isinstance(mm_data["image"]["image_embeds"], torch.Tensor)
     assert mm_data["image"]["image_embeds"].shape == image_embeds.shape
     assert isinstance(mm_data["image"]["image_grid_thw"], torch.Tensor)
     assert mm_data["image"]["image_grid_thw"].shape == image_grid_thw.shape
