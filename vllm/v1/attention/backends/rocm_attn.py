@@ -193,7 +193,7 @@ class RocmAttentionBackend(AttentionBackend):
                 "FlexAttention backend which supports all head sizes."
             )
 
-    forward_includes_kv_cache: bool = False
+    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:

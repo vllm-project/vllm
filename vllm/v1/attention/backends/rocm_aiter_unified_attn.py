@@ -24,7 +24,7 @@ logger = init_logger(__name__)
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     accept_output_buffer: bool = True
 
-    forward_includes_kv_cache: bool = False
+    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
