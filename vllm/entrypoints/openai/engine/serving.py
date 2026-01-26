@@ -688,7 +688,7 @@ class OpenAIServing:
                 return self.create_error_response("Engine prompts not available")
 
             num_prompts = len(ctx.engine_prompts)
-            final_res_batch: list[RequestOutput | PoolingRequestOutput | None]
+            final_res_batch: list[PoolingRequestOutput | None]
             final_res_batch = [None] * num_prompts
 
             if ctx.result_generator is None:
