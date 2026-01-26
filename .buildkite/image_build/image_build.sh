@@ -265,7 +265,7 @@ print_bake_config
 
 # Building
 echo "--- :docker: Building ${TARGET}"
-docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
+docker --debug buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
 
 echo "--- :white_check_mark: Build complete"
 
