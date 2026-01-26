@@ -144,8 +144,8 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        # Determine the effective model_type, prioritising hf_overrides
-        # then fallback to hf_text_config (VLM-robust) or hf_config.
+        # Determine the effective model_type for kimi_k2, prioritising
+        # hf_overrides then fallback to hf_text_config (VLM-robust) or hf_config.
         config_obj = getattr(
             self.model_config, "hf_text_config", self.model_config.hf_config
         )
@@ -160,7 +160,10 @@ class OpenAIServingChat(OpenAIServing):
         else:
             self.tool_call_id_type = "random"
 
-        self.use_harmony = effective_model_type == "gpt_oss"
+        # NOTE: self.use_harmony must only rely on the original hf_config
+        # to avoid accidentally triggering Harmony logic for other models
+        # that might use overrides or have text_config during tests.
+        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
                 self.default_sampling_params["stop_token_ids"] = []

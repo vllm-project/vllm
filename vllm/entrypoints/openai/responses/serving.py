@@ -238,8 +238,8 @@ class OpenAIServingResponses(OpenAIServing):
                 "the store."
             )
 
-        # Determine the effective model_type, prioritising hf_overrides
-        # then fallback to hf_text_config (VLM-robust) or hf_config.
+        # Determine the effective model_type for kimi_k2, prioritising
+        # hf_overrides then fallback to hf_text_config (VLM-robust) or hf_config.
         config_obj = getattr(
             self.model_config, "hf_text_config", self.model_config.hf_config
         )
@@ -249,7 +249,10 @@ class OpenAIServingResponses(OpenAIServing):
                 "model_type", effective_model_type
             )
 
-        self.use_harmony = effective_model_type == "gpt_oss"
+        # NOTE: self.use_harmony must only rely on the original hf_config
+        # to avoid accidentally triggering Harmony logic for other models
+        # that might use overrides or have text_config during tests.
+        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             logger.warning(
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
