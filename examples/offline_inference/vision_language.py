@@ -1889,6 +1889,32 @@ def run_step3(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# StepVL10B
+def run_step_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "stepfun-ai/Step3-VL-10B"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_batched_tokens=4096,
+        tensor_parallel_size=1,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+        reasoning_parser="deepseek_r1",
+    )
+
+    prompts = [
+        "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
+        f"<im_patch>{question} <|EOT|><|BOT|>assistant\n<think>\n"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # omni-research/Tarsier-7b
 def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2006,6 +2032,7 @@ model_example_map = {
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
     "step3": run_step3,
+    "stepvl": run_step_vl,
     "tarsier": run_tarsier,
     "tarsier2": run_tarsier2,
 }
