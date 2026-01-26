@@ -25,11 +25,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
-from vllm.outputs import (
-    PoolingOutput,
-    PoolingRequestOutput,
-    RequestOutput,
-)
+from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
@@ -346,7 +342,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,
-    ) -> AsyncGenerator[RequestOutput | PoolingRequestOutput, None]:
+    ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Create a generator for a single prompt using standard processing."""
         request_id_item = f"{ctx.request_id}-{prompt_index}"
 
