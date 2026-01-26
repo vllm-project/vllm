@@ -81,15 +81,16 @@ class CudaInputQuantKernel(InputQuantKernel[InputQuantConfig]):
 
     @classmethod
     def can_implement(cls, config: InputQuantConfig):
-        if (
-            config.group_shape.is_per_group()
-            and current_platform.is_rocm()
-        ):
+        if config.group_shape.is_per_group() and config.static:
             return (
                 False,
-                (
-                    f"Cuda group quantization only supported on Cuda platform."
-                ),
+                "Cuda group quantization does not support static quantization.",
+            )
+
+        if config.group_shape.is_per_group() and current_platform.is_rocm():
+            return (
+                False,
+                ("Cuda group quantization only supported on Cuda platform."),
             )
 
         return True, ""
@@ -99,17 +100,18 @@ class CudaInputQuantKernel(InputQuantKernel[InputQuantConfig]):
         return [TritonInputQuantKernel, PytorchInputQuantKernel]
 
     def apply_group_quant(self, x, scale=None, scale_ub=None):
-        if self.is_group_quant and not self.is_static_quant:
-            assert scale is None, "Dynamic group quantization does not use scale"
-            from vllm.model_executor.layers.quantization.utils import fp8_utils
+        assert not self.is_static_quant, (
+            "Cuda group quantization does not support static quantization."
+        )
+        assert scale is None, "Dynamic group quantization does not use scale"
 
-            return fp8_utils.per_token_group_quant_fp8(
-                x,
-                group_size=self.group_size,
-                column_major_scales=self.is_column_major_scales,
-                dtype=_FP8_DTYPE,
-                use_ue8m0=self.use_ue8m0,
-            )
+        return per_token_group_quant_fp8_cuda(
+            x,
+            group_size=self.group_size,
+            column_major_scales=self.is_column_major_scales,
+            dtype=_FP8_DTYPE,
+            use_ue8m0=self.use_ue8m0,
+        )
 
     def apply_per_token_per_tensor_quant(self, x, scale=None, scale_ub=None):
         assert (scale is not None) == self.is_static_quant
