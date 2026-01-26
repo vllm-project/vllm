@@ -126,10 +126,8 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         super().__init__(moe_config, quant_config)
 
         self.moe_config = moe_config
-        # TODO: set this via the constructor
-        # self.routing_method_type = flashinfer.RoutingMethodType.Renormalize
-        self.routing_method_type = flashinfer.RoutingMethodType.Llama4
-        # self.routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
+
+        self.routing_method_type = moe_config.routing_method
 
         self.routing_bias = None
         # TODO: to: in_dtype.shape
@@ -146,13 +144,14 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
-        self._g1_alphas, self._g2_alphas = make_fp8_moe_alpha_scales_for_fi(
-            w13_scale=self.quant_config.w1_scale,
-            w13_input_scale=self.quant_config.a1_scale,
-            w2_scale=self.quant_config.w2_scale,
-            w2_input_scale=self.quant_config.a2_scale,
-        )
-        self.g1_scale_c = self._g1_alphas / self.quant_config.a2_scale
+        if self.quant_config.is_per_tensor:
+            self._g1_alphas, self._g2_alphas = make_fp8_moe_alpha_scales_for_fi(
+                w13_scale=self.quant_config.w1_scale,
+                w13_input_scale=self.quant_config.a1_scale,
+                w2_scale=self.quant_config.w2_scale,
+                w2_input_scale=self.quant_config.a2_scale,
+            )
+            self.g1_scale_c = self._g1_alphas / self.quant_config.a2_scale
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -194,15 +193,14 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         activation_key: QuantKey | None,
     ) -> bool:
         """Monolithic kernels need to express router support."""
+        # NOTE(rob): potentially allow others here. This is a conservative list.
         if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
-            # NOTE(rob): potentially allow others here. This is a conservative list.
             return routing_method in [
                 RoutingMethodType.DeepSeekV3,
                 RoutingMethodType.Renormalize,
                 RoutingMethodType.RenormalizeNaive,
             ]
         elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
-            # NOTE(rob): kernel requires Llama4.
             return routing_method == RoutingMethodType.Llama4
 
         else:
@@ -314,7 +312,6 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=self.routing_scaling_factor,
-            tile_tokens_dim=None,
             routing_method_type=self.routing_method_type,
         )
 
