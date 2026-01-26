@@ -966,25 +966,28 @@ class OpenAIServingResponses(OpenAIServing):
             enable_auto_tools=self.enable_auto_tools,
             tool_parser_cls=self.tool_parser,
         )
-        if content:
-            output_text = ResponseOutputText(
-                text=content,
-                annotations=[],  # TODO
-                type="output_text",
-                logprobs=(
-                    self._create_response_logprobs(
-                        token_ids=final_output.token_ids,
-                        logprobs=final_output.logprobs,
-                        tokenizer=tokenizer,
-                        top_logprobs=request.top_logprobs,
-                    )
-                    if request.is_include_output_logprobs()
-                    else None
-                ),
-            )
+
+        if content or (self.use_harmony and tool_calls):
+            res_text_part = None
+            if content:
+                res_text_part = ResponseOutputText(
+                    text=content,
+                    annotations=[],  # TODO
+                    type="output_text",
+                    logprobs=(
+                        self._create_response_logprobs(
+                            token_ids=final_output.token_ids,
+                            logprobs=final_output.logprobs,
+                            tokenizer=tokenizer,
+                            top_logprobs=request.top_logprobs,
+                        )
+                        if request.is_include_output_logprobs()
+                        else None
+                    ),
+                )
             message_item = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
-                content=[output_text],
+                content=[res_text_part] if res_text_part else [],
                 role="assistant",
                 status="completed",
                 type="message",
