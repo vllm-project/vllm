@@ -15,7 +15,6 @@ def async_copy_to_gpu(
     x: torch.Tensor | np.ndarray,
     out: torch.Tensor | None = None,
     device: torch.device | None = None,
-    pin_memory: bool = True,
 ) -> torch.Tensor:
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
@@ -25,9 +24,6 @@ def async_copy_to_gpu(
         assert device is not None
         out = torch.empty_like(x, device=device)
     assert out.is_cuda
-
-    if not pin_memory:
-        return out.copy_(x, non_blocking=True)
 
     tmp = torch.empty_like(x, device="cpu", pin_memory=True)
     # CPU-to-CPU copy
