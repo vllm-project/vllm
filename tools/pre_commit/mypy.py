@@ -49,6 +49,7 @@ FILES = [
     "vllm/v1/metrics",
     "vllm/v1/pool",
     "vllm/v1/sample",
+    "vllm/v1/structured_output",
     "vllm/v1/worker",
 ]
 
@@ -64,7 +65,6 @@ SEPARATE_GROUPS = [
     # v1 related
     "vllm/v1/kv_offload",
     "vllm/v1/spec_decode",
-    "vllm/v1/structured_output",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.

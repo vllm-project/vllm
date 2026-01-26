@@ -53,6 +53,9 @@ class AttentionBackend(ABC):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto", "bfloat16"]
 
+    # Does attention's forward() include kv cache update?
+    forward_includes_kv_cache_update: bool = True
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
@@ -620,6 +623,7 @@ class AttentionImpl(ABC, Generic[T]):
     # TODO add support to more backends:
     # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
+    supports_per_head_quant_scales: bool = False
 
     dcp_world_size: int
     dcp_rank: int

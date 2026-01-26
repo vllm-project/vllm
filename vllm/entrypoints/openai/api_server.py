@@ -63,6 +63,7 @@ from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
     log_non_default_args,
+    log_version_and_model,
     process_lora_modules,
     sanitize_message,
 )
@@ -557,7 +558,8 @@ def build_app(args: Namespace) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
         param = None
-        for error in exc.errors():
+        errors = exc.errors()
+        for error in errors:
             if "ctx" in error and "error" in error["ctx"]:
                 ctx_error = error["ctx"]["error"]
                 if isinstance(ctx_error, VLLMValidationError):
@@ -565,9 +567,9 @@ def build_app(args: Namespace) -> FastAPI:
                     break
 
         exc_str = str(exc)
-        errors_str = str(exc.errors())
+        errors_str = str(errors)
 
-        if exc.errors() and errors_str and errors_str != exc_str:
+        if errors and errors_str and errors_str != exc_str:
             message = f"{exc_str} {errors_str}"
         else:
             message = exc_str
@@ -867,7 +869,7 @@ def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""
 
-    logger.info("vLLM API server version %s", VLLM_VERSION)
+    log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
