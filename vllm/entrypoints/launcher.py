@@ -203,16 +203,14 @@ async def serve_http(
     async def dummy_shutdown() -> None:
         pass
 
-    loop.add_signal_handler(signal.SIGINT, on_signal)
-    loop.add_signal_handler(signal.SIGTERM, on_signal)
-
     # multi-server coordination: monitor parent's drain_event to reject new
-    # requests. parent handles waiting for engines to drain directly.
+    # requests. parent handles engine drain directly, so children only need
+    # to stop accepting requests and exit when the server task completes.
     drain_event = getattr(app.state, "drain_event", None)
     drain_monitor_task: asyncio.Task | None = None
 
     if drain_event is not None and enable_drain:
-
+        # multi-server child: parent coordinates drain, we just reject requests
         async def drain_event_monitor() -> None:
             while not drain_event.is_set():
                 await asyncio.sleep(0.1)
@@ -220,6 +218,10 @@ async def serve_http(
             set_rejecting_requests(True)
 
         drain_monitor_task = loop.create_task(drain_event_monitor())
+    else:
+        # single-server: handle signals directly with full drain logic
+        loop.add_signal_handler(signal.SIGINT, on_signal)
+        loop.add_signal_handler(signal.SIGTERM, on_signal)
 
     try:
         await server_task

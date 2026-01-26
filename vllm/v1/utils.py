@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import multiprocessing
+import signal
 import time
 import weakref
 from collections.abc import Callable, Sequence
@@ -317,7 +318,8 @@ def wait_for_completion_or_failure(
                 api_server_manager.args, "shutdown_drain_timeout", 120.0
             )
             logger.info(
-                "Received KeyboardInterrupt, initiating drain (timeout: %ds)...",
+                "Received KeyboardInterrupt, initiating drain (timeout: %ds). "
+                "Send signal again to force immediate shutdown.",
                 drain_timeout,
             )
 
@@ -327,18 +329,30 @@ def wait_for_completion_or_failure(
             # signal engines to drain in-flight requests
             engine_manager.signal_drain()
 
+            # track second signal for immediate shutdown
+            force_shutdown = False
+
+            def force_shutdown_handler(signum, frame):
+                nonlocal force_shutdown
+                logger.warning("Received second signal, forcing immediate shutdown")
+                force_shutdown = True
+
+            signal.signal(signal.SIGTERM, force_shutdown_handler)
+            signal.signal(signal.SIGINT, force_shutdown_handler)
+
             # wait for engines to finish draining
             deadline = time.monotonic() + drain_timeout
-            while time.monotonic() < deadline:
+            while time.monotonic() < deadline and not force_shutdown:
                 remaining = deadline - time.monotonic()
                 poll_timeout = min(1.0, remaining)
                 if engine_manager.join_first(timeout=poll_timeout):
                     logger.info("Engines drained successfully")
                     break
             else:
-                logger.warning(
-                    "Drain timed out after %ds, forcing shutdown", drain_timeout
-                )
+                if not force_shutdown:
+                    logger.warning(
+                        "Drain timed out after %ds, forcing shutdown", drain_timeout
+                    )
 
     except Exception as e:
         logger.exception("Exception occurred while running API servers: %s", str(e))
