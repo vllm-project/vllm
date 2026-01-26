@@ -43,7 +43,52 @@ Further update the model as follows:
                 )
     ```
 
-- Implement [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal] that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
+- Remove the embedding part from the [forward][torch.nn.Module.forward] method:
+  - Move the multi-modal embedding to [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal].
+  - The text embedding and embedding merge are handled automatically by a default implementation of [embed_input_ids][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids]. It does not need to be overridden in most cases.
+
+  ```diff
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+  -     pixel_values: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+  -     if inputs_embeds is None:
+  -         inputs_embeds = self.get_input_embeddings()(input_ids)
+  -
+  -     if pixel_values is not None:
+  -         image_features = self.get_image_features(
+  -             pixel_values=pixel_values,
+  -         )
+  -         special_image_mask = self.get_placeholder_mask(
+  -             input_ids,
+  -             inputs_embeds=inputs_embeds,
+  -             image_features=image_features,
+  -         )
+  -         inputs_embeds = inputs_embeds.masked_scatter(
+  -             special_image_mask,
+  -             image_features,
+  -         )
+
+         hidden_states = self.language_model(
+             input_ids,
+             positions,
+             intermediate_tensors,
+             inputs_embeds=inputs_embeds,
+         )
+         ...
+
+  +  def embed_multimodal(
+  +      self,
+  +      pixel_values: torch.Tensor,
+  +  ) -> MultiModalEmbeddings | None:
+  +      ...
+  ```
+
+  Below we provide a boilerplate of a typical implementation pattern of [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal], but feel free to adjust it to your own needs.
 
     ??? code
 
