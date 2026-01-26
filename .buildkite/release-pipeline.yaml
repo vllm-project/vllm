@@ -642,7 +642,7 @@ steps:
     commands:
       - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
     env:
-      S3_BUCKET: "vllm-wheels-dev"
+      S3_BUCKET: "vllm-wheels"
       VARIANT: "rocm700"
 
   # ROCm Job 5: Build ROCm Release Docker Image
