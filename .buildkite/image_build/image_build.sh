@@ -150,11 +150,13 @@ print_bake_config() {
     BAKE_CONFIG_FILE="bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
     docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
     echo "Saved bake config to ${BAKE_CONFIG_FILE}"
+    buildkite-agent artifact upload "${BAKE_CONFIG_FILE}"
 }
 
 #################################
 #         Main Script           #
 #################################
+print_instance_info
 
 # Argument check
 if [[ $# -lt 7 ]]; then
@@ -170,17 +172,6 @@ VLLM_USE_PRECOMPILED=$5
 VLLM_MERGE_BASE_COMMIT=$6
 IMAGE_TAG=$7
 IMAGE_TAG_LATEST=${8:-} # only used for main branch, optional
-
-# print out all args
-echo "--- :mag: Arguments"
-echo "REGISTRY: ${REGISTRY}"
-echo "REPO: ${REPO}"
-echo "BUILDKITE_COMMIT: ${BUILDKITE_COMMIT}"
-echo "BRANCH: ${BRANCH}"
-echo "VLLM_USE_PRECOMPILED: ${VLLM_USE_PRECOMPILED}"
-echo "VLLM_MERGE_BASE_COMMIT: ${VLLM_MERGE_BASE_COMMIT}"
-echo "IMAGE_TAG: ${IMAGE_TAG}"
-echo "IMAGE_TAG_LATEST: ${IMAGE_TAG_LATEST}"
 
 # Configuration with sensible defaults
 TARGET="test-ci"
@@ -214,6 +205,35 @@ ecr_login
 #   VLLM_USE_PRECOMPILED    - Use precompiled wheels
 #   VLLM_MERGE_BASE_COMMIT  - Merge base commit for precompiled
 
+# print out all args
+echo "--- :mag: Arguments"
+echo "REGISTRY: ${REGISTRY}"
+echo "REPO: ${REPO}"
+echo "BUILDKITE_COMMIT: ${BUILDKITE_COMMIT}"
+echo "BRANCH: ${BRANCH}"
+echo "VLLM_USE_PRECOMPILED: ${VLLM_USE_PRECOMPILED}"
+echo "VLLM_MERGE_BASE_COMMIT: ${VLLM_MERGE_BASE_COMMIT}"
+echo "IMAGE_TAG: ${IMAGE_TAG}"
+echo "IMAGE_TAG_LATEST: ${IMAGE_TAG_LATEST}"
+
+# print out all build configuration
+echo "--- :mag: Build configuration"
+echo "TARGET: ${TARGET}"
+echo "CI HCL URL: ${CI_HCL_URL}"
+echo "vLLM bake file: ${VLLM_BAKE_FILE}"
+echo "BUILDER_NAME: ${BUILDER_NAME}"
+echo "CI_HCL_PATH: ${CI_HCL_PATH}"
+echo "BUILDKIT_SOCKET: ${BUILDKIT_SOCKET}"
+
+echo "--- :mag: Cache tags"
+echo "CACHE_TO: ${CACHE_TO}"
+echo "CACHE_FROM: ${CACHE_FROM}"
+echo "CACHE_FROM_BASE_BRANCH: ${CACHE_FROM_BASE_BRANCH}"
+echo "CACHE_FROM_MAIN: ${CACHE_FROM_MAIN}"
+
+echo "--- :mag: Resolved config"
+echo "PARENT_COMMIT: ${PARENT_COMMIT}"
+
 # Short-circuit for existing image
 check_and_skip_if_image_exists
 
@@ -221,8 +241,6 @@ echo "--- :docker: Setting up Docker buildx bake"
 echo "Target: ${TARGET}"
 echo "CI HCL URL: ${CI_HCL_URL}"
 echo "vLLM bake file: ${VLLM_BAKE_FILE}"
-
-print_instance_info
 
 # Check if vLLM bake file exists
 if [[ ! -f "${VLLM_BAKE_FILE}" ]]; then
@@ -245,7 +263,7 @@ resolve_parent_commit
 # Print resolved config for diagnostic artifact
 print_bake_config
 
-# Run the actual build
+# Building
 echo "--- :docker: Building ${TARGET}"
 docker buildx bake -f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}" --progress plain "${TARGET}"
 
