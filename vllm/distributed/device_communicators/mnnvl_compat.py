@@ -25,6 +25,9 @@ class CustomCommunicator(CommBackend):
         dist.all_gather_object(gathered, data, group=self._group)
         return gathered
 
+    # NOTE(rob): CommBackend is an abstract class, and bcast/barrier
+    # are unimplemented on vLLM side. If we need to utilize these
+    # methods in the future, can create
     def bcast(self, data: Any, root: int) -> Any:
         raise NotImplementedError
 
