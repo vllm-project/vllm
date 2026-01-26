@@ -68,10 +68,10 @@ def backend_to_kernel_cls(
 ) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_nvfp4_moe import (
-            FlashInferTrtLlmFp4Experts,
+            FlashInferTrtLlmNvFp4Experts,
         )
 
-        return FlashInferTrtLlmFp4Experts
+        return FlashInferTrtLlmNvFp4Experts
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
@@ -354,9 +354,6 @@ def make_nvfp4_moe_quant_config(
         a2_gscale=(1.0 / a2_scale),
         w1_scale=w13_scale,
         w2_scale=w2_scale,
-        # NOTE(rob): this is a hack until the expets_cls()
-        # constructs the quant configs.
-        skip_nvfp4_swizzle=(backend == NvFp4MoeBackend.FLASHINFER_TRTLLM),
     )
 
 

@@ -30,7 +30,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
 
-        self.routing_method_type = self.moe_config.routing_method_type
+        self.routing_method_type = self.moe_config.routing_method
         # self.routing_method_type = flashinfer.RoutingMethodType.Llama4
         # self.routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
 
@@ -189,7 +189,6 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
-            tile_tokens_dim=None,
             routing_method_type=1,
             do_finalize=True,
             output=output,
@@ -246,7 +245,6 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
-            tile_tokens_dim=None,
             routing_method_type=self.routing_method_type,
             do_finalize=True,
         )[0]
