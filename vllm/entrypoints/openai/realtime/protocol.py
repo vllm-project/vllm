@@ -12,7 +12,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.utils import random_uuid
 
-
 # Client -> Server Events
 
 

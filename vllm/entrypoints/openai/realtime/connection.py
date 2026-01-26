@@ -15,7 +15,6 @@ from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.openai.realtime.protocol import (
     ErrorEvent,
     InputAudioBufferAppend,
-    InputAudioBufferCommit,
     SessionCreated,
     SessionUpdate,
     TranscriptionDelta,
@@ -222,7 +221,9 @@ class RealtimeConnection:
             logger.exception("Error in generation: %s", e)
             await self.send_error(str(e), "processing_error")
 
-    async def send(self, event: SessionCreated | TranscriptionDelta | TranscriptionDone):
+    async def send(
+        self, event: SessionCreated | TranscriptionDelta | TranscriptionDone
+    ):
         """Send event to client."""
         data = event.model_dump_json()
         await self.websocket.send_text(data)
