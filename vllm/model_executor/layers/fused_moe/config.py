@@ -1061,7 +1061,6 @@ class FusedMoEConfig:
     experts_per_token: int
     hidden_dim: int
     intermediate_size_per_partition: int
-
     num_local_experts: int
     activation: str
     device: torch.device | str
