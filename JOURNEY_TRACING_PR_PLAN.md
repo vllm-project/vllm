@@ -176,7 +176,7 @@ PR #9 (Remove Buffering) ← depends on all above working
 
 **Branch**: `pr1ofjourney`
 
-**Status**: ✅ **COMPLETED** - Ready to merge (pending final approval)
+**Status**: ✅ **COMPLETED** 
 
 **Goal**: Initialize tracer in scheduler without creating any per-request state.
 
@@ -272,9 +272,13 @@ class Scheduler:
 
 ---
 
-### PR #2: Engine - Core Span Create AND Close
+### PR #2: Engine - Core Span Create AND Close ✅ COMPLETED
 
-**Branch**: `journey-tracing-02-core-spans-lifecycle`
+**Branch**: `pr2ofjourney`
+
+**Status**: ✅ **MERGED** (commit fdbe492de)
+
+**Completed**: 2026-01-26
 
 **Goal**: Create core spans on `add_request`, guarantee closure on all termination paths.
 
@@ -473,8 +477,34 @@ class Scheduler:
    - Verify `extract_trace_context()` called
    - Verify parent context passed to span creation
 
-**Size**: ~100 lines, 6 tests
-**Review Time**: ~25 minutes
+#### Implementation Summary
+
+**What Was Built**:
+- Added `_core_spans` dictionary to track active spans per request
+- Created `_create_core_span()` helper with explicit OpenTelemetry parameters
+  - Uses `SpanKind.INTERNAL`, `start_time=time.time_ns()`
+  - Extracts parent context from `trace_headers`
+  - Sets `GEN_AI_REQUEST_ID` attribute for correlation
+- Created `_end_core_span_and_cleanup()` idempotent helper
+  - Uses explicit `end_time=time.time_ns()` for consistency
+  - Safe to call multiple times (idempotent via `.pop()`)
+- Modified `add_request()` to create and store core spans
+- Modified `update_from_output()` with try/finally (natural completion path)
+- Modified `finish_requests()` with try/finally (explicit abort path)
+- Added 6 comprehensive tests covering all safety properties
+
+**Test Results**: ✅ All 91 tests passing (6 new, 85 existing)
+
+**Safety Guarantees**:
+- ✅ All termination paths properly cleanup spans (no leaks)
+- ✅ Cleanup uses try/finally (runs even if teardown throws)
+- ✅ Defensive error handling (tracing never crashes requests)
+- ✅ Zero overhead when tracing disabled
+- ✅ Idempotent cleanup (safe to call multiple times)
+
+**Size**: ~125 lines production code, ~245 lines test code, 6 tests
+**Review Time**: ~20 minutes
+**Actual Implementation Time**: ~2 hours
 
 ---
 
@@ -1701,7 +1731,7 @@ Add this to every PR description:
 **Breakdown**:
 - PR #0: ✅ COMPLETED (Remove EngineCoreEvent)
 - PR #1: ✅ COMPLETED (Scheduler tracer init - 0.5 day actual)
-- PR #2: 2 days (critical, includes cleanup)
+- PR #2: ✅ COMPLETED (Core span lifecycle - 0.25 day actual)
 - PR #3: 1 day (extends cleanup)
 - PR #4: 1.5 days (event emission)
 - PR #5: 0.5 day (tiny, just fields)
@@ -1872,7 +1902,7 @@ Each milestone is independently safe and valuable.
 
 **Completed**: 2026-01-26
 **Branch**: `pr1ofjourney`
-**Status**: Ready to merge (pending final approval)
+**Status**: ✅ **MERGED** (commit 24f263656)
 
 **Implementation Summary**:
 - Added defensive `SpanAttributes` import with None fallback

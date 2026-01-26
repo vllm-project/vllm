@@ -147,6 +147,10 @@ class Scheduler(SchedulerInterface):
                         "Failed to initialize tracer for journey tracing: %s", e
                     )
 
+        # Core spans: Track active "llm_core" spans for each request
+        # Lifecycle: Created in add_request(), ended in finish_requests() or update_from_output()
+        self._core_spans: dict[str, Any] = {}
+
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
@@ -1315,8 +1319,14 @@ class Scheduler(SchedulerInterface):
 
             routed_experts = None
             if stopped:
-                routed_experts = self._get_routed_experts(request)
-                kv_transfer_params = self._free_request(request)
+                try:
+                    routed_experts = self._get_routed_experts(request)
+                    kv_transfer_params = self._free_request(request)
+                finally:
+                    # End core span for completed request (natural completion path)
+                    # Cleanup MUST happen even if teardown throws
+                    self._end_core_span_and_cleanup(request)
+
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
                 else:
@@ -1602,9 +1612,83 @@ class Scheduler(SchedulerInterface):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         return len(self.running), len(self.waiting)
 
+    def _create_core_span(self, request: Request) -> Any | None:
+        """Create a core span for the request lifecycle.
+
+        Extracts parent context from request.trace_headers and creates a child
+        span named "llm_core" that tracks the request's time in the scheduler.
+
+        Args:
+            request: The request to create a span for
+
+        Returns:
+            The created span, or None if tracing is disabled or creation fails
+        """
+        if not self.tracer:
+            return None
+
+        try:
+            import time
+            from vllm.tracing import extract_trace_context, SpanAttributes
+            from opentelemetry.trace import SpanKind
+
+            # Extract parent context from trace_headers
+            parent_context = None
+            if request.trace_headers:
+                parent_context = extract_trace_context(request.trace_headers)
+
+            # Create child span with explicit timing and kind
+            span = self.tracer.start_span(
+                name="llm_core",
+                kind=SpanKind.INTERNAL,
+                context=parent_context,
+                start_time=time.time_ns(),
+            )
+
+            # Set span attributes
+            if span and span.is_recording():
+                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request.request_id)
+
+            return span
+        except Exception as e:
+            logger.warning(
+                "Failed to create core span for request %s: %s",
+                request.request_id,
+                e
+            )
+            return None
+
+    def _end_core_span_and_cleanup(self, request: Request) -> None:
+        """End the core span for a request and remove from tracking dict.
+
+        Safe to call multiple times for the same request (idempotent).
+
+        Args:
+            request: The request whose span should be ended
+        """
+        request_id = request.request_id
+        core_span = self._core_spans.pop(request_id, None)
+
+        if core_span is not None:
+            try:
+                import time
+                core_span.end(end_time=time.time_ns())
+            except Exception as e:
+                logger.warning(
+                    "Failed to end core span for request %s: %s",
+                    request_id,
+                    e
+                )
+
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
+
+        # Create core span for request lifecycle
+        core_span = self._create_core_span(request)
+        if core_span is not None:
+            self._core_spans[request.request_id] = core_span
+
         # Journey event: QUEUED (before first schedule, so step=None)
         self._emit_journey_event(
             request, RequestJourneyEventType.QUEUED, scheduler_step=None
@@ -1656,25 +1740,30 @@ class Scheduler(SchedulerInterface):
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
 
-        # Second pass: set status and free requests
+        # Second pass: set status, free requests, and cleanup spans
         for request in valid_requests:
-            request.status = finished_status
+            try:
+                request.status = finished_status
 
-            # Journey event: FINISHED
-            finish_status_str = _map_finish_status(finished_status)
-            self._emit_journey_event(
-                request,
-                RequestJourneyEventType.FINISHED,
-                scheduler_step=scheduler_step,
-                finish_status=finish_status_str,
-            )
+                # Journey event: FINISHED
+                finish_status_str = _map_finish_status(finished_status)
+                self._emit_journey_event(
+                    request,
+                    RequestJourneyEventType.FINISHED,
+                    scheduler_step=scheduler_step,
+                    finish_status=finish_status_str,
+                )
 
-            # Cleanup journey tracing state
-            if self._enable_journey_tracing:
-                self._first_token_emitted.discard(request.request_id)
-                self._journey_prefill_hiwater.pop(request.request_id, None)
+                # Cleanup journey tracing state
+                if self._enable_journey_tracing:
+                    self._first_token_emitted.discard(request.request_id)
+                    self._journey_prefill_hiwater.pop(request.request_id, None)
 
-            self._free_request(request)
+                self._free_request(request)
+            finally:
+                # End core span for finished request (explicit abort path)
+                # Cleanup MUST happen even if teardown throws
+                self._end_core_span_and_cleanup(request)
 
     def _free_request(self, request: Request) -> dict[str, Any] | None:
         assert request.is_finished()

@@ -3535,3 +3535,248 @@ def test_tracer_init_handles_failure_gracefully(mock_init_tracer):
         "vllm.scheduler",
         "http://localhost:4317"
     )
+
+
+# ============================================================================
+# Core Span Lifecycle Tests (PR2)
+# ============================================================================
+
+
+@patch('vllm.tracing.init_tracer')
+@patch('vllm.v1.core.sched.scheduler.Scheduler._create_core_span')
+def test_core_span_created_on_add_request(mock_create_span, mock_init_tracer):
+    """Test that core span is created when request is added."""
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+    mock_span = Mock()
+    mock_create_span.return_value = mock_span
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    requests = create_requests(num_requests=1)
+    request = requests[0]
+
+    # Verify dict is empty before
+    assert len(scheduler._core_spans) == 0
+
+    scheduler.add_request(request)
+
+    # Verify _create_core_span was called
+    mock_create_span.assert_called_once_with(request)
+
+    # Verify span stored in dict
+    assert len(scheduler._core_spans) == 1
+    assert scheduler._core_spans[request.request_id] is mock_span
+
+
+@patch('vllm.tracing.init_tracer')
+def test_core_span_ended_on_finish_requests(mock_init_tracer):
+    """Test that core span is ended when request is explicitly aborted."""
+    from unittest.mock import ANY
+
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    # Mock _create_core_span to return mock span
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        requests = create_requests(num_requests=1)
+        request = requests[0]
+        scheduler.add_request(request)
+
+    # Verify span is in dict
+    assert len(scheduler._core_spans) == 1
+
+    # Abort the request
+    scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+
+    # Verify span.end() was called with end_time
+    mock_span.end.assert_called_once_with(end_time=ANY)
+
+    # Verify span removed from dict (no leak)
+    assert len(scheduler._core_spans) == 0
+
+
+@patch('vllm.tracing.init_tracer')
+def test_core_span_cleanup_on_exception_in_stopped_path(mock_init_tracer):
+    """Test that core span cleanup runs even if teardown throws in stopped path.
+
+    This tests the try/finally wrapper in update_from_output() when stopped=True.
+    If _get_routed_experts() or _free_request() throws, cleanup must still run.
+    """
+    from unittest.mock import ANY
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    # Mock _create_core_span
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        requests = create_requests(num_requests=1)
+        request = requests[0]
+        scheduler.add_request(request)
+
+    # Schedule the request
+    scheduler_output = scheduler.schedule()
+
+    # Verify span is in dict
+    assert len(scheduler._core_spans) == 1
+
+    # Mock _get_routed_experts to throw an exception
+    with patch.object(scheduler, '_get_routed_experts', side_effect=RuntimeError("Simulated failure")):
+        model_output = ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[EOS_TOKEN_ID]],  # EOS to trigger stop
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=None,
+            num_nans_in_logits=None,
+            kv_connector_output=None,
+            cudagraph_stats=None,
+        )
+
+        # update_from_output should handle the exception
+        # The cleanup should still run via finally block
+        try:
+            scheduler.update_from_output(scheduler_output, model_output)
+        except RuntimeError:
+            pass  # Expected - we simulated the failure
+
+    # CRITICAL: Verify span.end() was STILL called despite exception
+    mock_span.end.assert_called_once_with(end_time=ANY)
+
+    # Verify span removed from dict (no leak despite exception)
+    assert len(scheduler._core_spans) == 0
+
+
+def test_no_span_leak_when_tracer_none():
+    """Test that no spans are created/leaked when tracer is disabled."""
+    scheduler = create_scheduler(
+        enable_journey_tracing=False,
+        otlp_traces_endpoint=None
+    )
+
+    # Verify tracer is None
+    assert scheduler.tracer is None
+
+    requests = create_requests(num_requests=5)
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Verify no spans created
+    assert len(scheduler._core_spans) == 0
+
+    # Schedule requests
+    scheduler.schedule()
+
+    # Abort some requests
+    scheduler.finish_requests([requests[0].request_id], RequestStatus.FINISHED_ABORTED)
+    scheduler.finish_requests([requests[1].request_id], RequestStatus.FINISHED_ABORTED)
+
+    # Verify still no spans (no leaks)
+    assert len(scheduler._core_spans) == 0
+
+
+@patch('vllm.tracing.init_tracer')
+@patch('vllm.tracing.extract_trace_context')
+def test_parent_context_extraction(mock_extract_context, mock_init_tracer):
+    """Test that parent context is extracted from request trace_headers."""
+    from unittest.mock import ANY
+    from opentelemetry.trace import SpanKind
+    from vllm.v1.request import Request
+
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+    mock_tracer.start_span.return_value = mock_span
+
+    mock_parent_context = Mock()
+    mock_extract_context.return_value = mock_parent_context
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    # Create request with trace_headers (valid W3C traceparent format)
+    # Format: version-trace_id-parent_id-flags
+    # trace_id: 32 hex chars, parent_id: 16 hex chars
+    trace_headers = {
+        "traceparent": "00-1234567890abcdef1234567890abcdef-fedcba9876543210-01",
+        "tracestate": "vendor=value"
+    }
+
+    sampling_params = SamplingParams(max_tokens=10)
+    request = Request(
+        request_id="test_req",
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=sampling_params,
+        pooling_params=None,
+        eos_token_id=EOS_TOKEN_ID,
+        arrival_time=0.0,
+        trace_headers=trace_headers
+    )
+
+    scheduler.add_request(request)
+
+    # Verify extract_trace_context was called with trace_headers
+    mock_extract_context.assert_called_once_with(trace_headers)
+
+    # Verify start_span was called with all expected parameters
+    mock_tracer.start_span.assert_called_once_with(
+        name="llm_core",
+        kind=SpanKind.INTERNAL,
+        context=mock_parent_context,
+        start_time=ANY  # Timestamp will vary, just verify it's present
+    )
+
+
+@patch('vllm.tracing.init_tracer')
+def test_cleanup_is_idempotent(mock_init_tracer):
+    """Test that cleanup can be safely called multiple times."""
+    from unittest.mock import ANY
+
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    # Mock _create_core_span
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        requests = create_requests(num_requests=1)
+        request = requests[0]
+        scheduler.add_request(request)
+
+    # Call cleanup multiple times
+    scheduler._end_core_span_and_cleanup(request)
+    scheduler._end_core_span_and_cleanup(request)
+    scheduler._end_core_span_and_cleanup(request)
+
+    # Verify span.end() called only once (not multiple times)
+    mock_span.end.assert_called_once_with(end_time=ANY)
+
+    # Verify no errors (idempotent)
+    assert len(scheduler._core_spans) == 0
