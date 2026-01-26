@@ -112,6 +112,18 @@ class TimeEmbedding(torch.nn.Module):
         return torch.cat((emb.cos(), emb.sin()), dim=-1)  # (B, D) or (B, T, D)
 
 
+def _expand_tensor(input_tensor: torch.Tensor, scaling: int) -> torch.Tensor:
+    # 1. Multiply by the scaling factor (e.g. 4)
+    base = input_tensor * scaling
+
+    # 2. Create the offsets, e.g. [0, 1, 2, 3]
+    offsets = torch.arange(scaling, device=input_tensor.device)
+
+    # 3. Use broadcasting, e.g. (N, 1) + (4,) results in (N, 4)
+    # Then flatten back to 1D
+    return (base.unsqueeze(1) + offsets).view(-1)
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     VoxtralStreamingMultiModalProcessor,
     info=VoxtralProcessingInfo,
@@ -175,8 +187,9 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             inputs_embeds.shape[0] * pool_size, inputs_embeds.shape[1] // pool_size
         )
 
-        audio_hidden_states = self.whisper_encoder.whisper_encoder.forward_layers(
-            inputs_embeds
+        whisper_positions = _expand_tensor(positions, pool_size)
+        audio_hidden_states = self.whisper_encoder.whisper_encoder(
+            inputs_embeds, whisper_positions
         )
 
         num_tokens, audio_hidden_size = audio_hidden_states.shape
@@ -197,10 +210,14 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             device=inputs_embeds.device,
             dtype=inputs_embeds.dtype,
         )
-        inputs_embeds = inputs_embeds + self.time_embedding(time_tensor)
+        t_cond = self.time_embedding(time_tensor)
 
         hidden_states = self.language_model.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            t_cond=t_cond,
         )
 
         return hidden_states

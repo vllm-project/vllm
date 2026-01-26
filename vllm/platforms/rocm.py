@@ -48,7 +48,6 @@ _ROCM_UNSUPPORTED_MODELS: list[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
-_ROCM_SWA_REASON = ()
 _ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {}
 _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
@@ -293,10 +292,13 @@ class RocmPlatform(Platform):
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
             # Priority 3: Check for ROCM_ATTN (prefill-decode split)
-            from vllm.config import get_current_vllm_config
+            from vllm.config import get_current_vllm_config_or_none
 
-            vllm_config = get_current_vllm_config()
-            if vllm_config.attention_config.use_prefill_decode_attention:
+            vllm_config = get_current_vllm_config_or_none()
+            if (
+                vllm_config is not None
+                and vllm_config.attention_config.use_prefill_decode_attention
+            ):
                 logger.info("Using Rocm Attention backend.")
                 return AttentionBackendEnum.ROCM_ATTN.get_path()
 
