@@ -43,6 +43,14 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "siglip2": CHAT_TEMPLATES_DIR / "template_basic.jinja",
 }
 
+# Model types that require a custom tool chat template to properly handle
+# special characters (like parentheses) in tool parameter descriptions.
+# These templates are used instead of the HuggingFace tokenizer's template
+# when tools are provided in the request.
+_MODEL_TYPE_TO_TOOL_CHAT_TEMPLATE: dict[str, ChatTemplatePath] = {
+    "minimax_m2": CHAT_TEMPLATES_DIR / "template_minimax_m2.jinja",
+}
+
 
 def register_chat_template_fallback_path(
     model_type: str,
@@ -64,6 +72,35 @@ def get_chat_template_fallback_path(
     tokenizer_name_or_path: str,
 ) -> Path | None:
     chat_template = _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK.get(model_type)
+    if callable(chat_template):
+        chat_template = chat_template(tokenizer_name_or_path)
+
+    if chat_template is None:
+        return None
+
+    return chat_template
+
+
+def get_tool_chat_template_path(
+    model_type: str,
+    tokenizer_name_or_path: str,
+) -> Path | None:
+    """
+    Get a custom tool chat template for models that have issues with the
+    default HuggingFace tokenizer template when handling tools.
+
+    This is used for models like MiniMax-M2 where the default template
+    doesn't properly handle special characters (e.g., parentheses) in
+    tool parameter descriptions.
+
+    Args:
+        model_type: The model type (e.g., "minimax_m2")
+        tokenizer_name_or_path: The tokenizer name or path
+
+    Returns:
+        Path to the tool chat template, or None if no custom template exists
+    """
+    chat_template = _MODEL_TYPE_TO_TOOL_CHAT_TEMPLATE.get(model_type)
     if callable(chat_template):
         chat_template = chat_template(tokenizer_name_or_path)
 

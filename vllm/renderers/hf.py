@@ -28,7 +28,10 @@ from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
-from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
+from vllm.transformers_utils.chat_templates import (
+    get_chat_template_fallback_path,
+    get_tool_chat_template_path,
+)
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.func_utils import supports_kw
 
@@ -100,7 +103,23 @@ def resolve_chat_template(
     if chat_template is not None:
         return chat_template
 
-    # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
+    # 2nd priority: Custom tool chat template for models that have issues with
+    # the default HuggingFace tokenizer template when handling tools
+    # (e.g., parentheses in parameter descriptions causing crashes)
+    if tools is not None:
+        tool_template_path = get_tool_chat_template_path(
+            model_type=model_config.hf_config.model_type,
+            tokenizer_name_or_path=tokenizer.name_or_path,
+        )
+        if tool_template_path is not None:
+            logger.info_once(
+                "Using custom tool chat template for %s to properly handle "
+                "special characters in tool parameter descriptions.",
+                tokenizer.name_or_path,
+            )
+            return load_chat_template(tool_template_path)
+
+    # 3rd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
         chat_template = _try_get_processor_chat_template(
             tokenizer,
@@ -109,7 +128,7 @@ def resolve_chat_template(
         if chat_template is not None:
             return chat_template
 
-    # 3rd priority: AutoTokenizer chat template
+    # 4th priority: AutoTokenizer chat template
     try:
         return tokenizer.get_chat_template(chat_template, tools=tools)
     except Exception:
@@ -119,7 +138,7 @@ def resolve_chat_template(
             exc_info=True,
         )
 
-    # 4th priority: Predefined fallbacks
+    # 5th priority: Predefined fallbacks
     path = get_chat_template_fallback_path(
         model_type=model_config.hf_config.model_type,
         tokenizer_name_or_path=tokenizer.name_or_path,
