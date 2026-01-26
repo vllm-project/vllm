@@ -1180,7 +1180,9 @@ def test_parse_chat_messages_multiple_dict_image_embeds(
                             "image_grid_thw": tensor2base64(grid_thw),
                         },
                     }
-                    for embeds, grid_thw in zip(image_embeds.split(2), image_grid_thw)
+                    for embeds, grid_thw in zip(
+                        image_embeds.split(batch_size), image_grid_thw
+                    )
                 ]
                 + [
                     {"type": "text", "text": "Describe these two images."},
