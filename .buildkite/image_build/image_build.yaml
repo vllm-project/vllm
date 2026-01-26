@@ -4,7 +4,7 @@ steps:
     key: image-build
     depends_on: []
     commands:
-    - .buildkite/image_build/image_build.sh $REGISTRY $REPO $$BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $IMAGE_TAG
+    - .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $IMAGE_TAG $IMAGE_TAG_LATEST
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
