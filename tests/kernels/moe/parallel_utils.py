@@ -195,12 +195,7 @@ def make_deepep_a2a(
     if deepep_ht_args is not None:
         assert deepep_ll_args is None
         return make_deepep_ht_a2a(
-            pg,
-            pgi,
-            dp_size,
-            deepep_ht_args,
-            q_dtype,
-            block_shape,
+            pg, pgi, dp_size, deepep_ht_args, q_dtype, block_shape
         )
 
     assert deepep_ll_args is not None
