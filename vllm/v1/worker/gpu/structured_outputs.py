@@ -46,9 +46,7 @@ class StructuredOutputsWorker:
             logits_indices = logits_indices.to(device=self.device, non_blocking=True)
 
         # Make sure the kernel is executed after the copy is finished.
-        copy_event = torch.cuda.Event()
-        copy_event.record(self.copy_stream)
-        torch.cuda.current_stream(self.device).wait_event(copy_event)
+        torch.cuda.current_stream(self.device).wait_stream(self.copy_stream)
 
         num_masks = bitmask.shape[0]
         assert num_masks == len(mapping)
