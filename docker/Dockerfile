@@ -119,7 +119,7 @@ RUN gcc --version
 
 # Workaround for triton/pytorch issues
 # This temporarily adds the CUDA compatibility libraries to the ldconfig cache.
-RUN ldconfig /usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW
@@ -456,7 +456,7 @@ ENV UV_LINK_MODE=copy
 
 # Workaround for triton/pytorch issues
 # This temporarily adds the CUDA compatibility libraries to the ldconfig cache.
-RUN ldconfig /usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW
