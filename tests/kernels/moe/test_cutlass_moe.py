@@ -196,17 +196,16 @@ def run_with_expert_maps(
     for kwargs, new_quant_config in slice_experts():
         w2 = kwargs["w2"]
         a = kwargs["hidden_states"]
-        moe_config = make_dummy_moe_config(
-            num_experts=w2.shape[0],
-            hidden_dim=w2.shape[1],
-            intermediate_size_per_partition=w2.shape[2],
-            in_dtype=a.dtype,
-        )
 
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
-                moe_config=moe_config,
+                moe_config=make_dummy_moe_config(
+                    num_experts=w2.shape[0],
+                    hidden_dim=w2.shape[1],
+                    intermediate_size_per_partition=w2.shape[2],
+                    in_dtype=a.dtype,
+                ),
                 quant_config=new_quant_config,
             ),
         )
@@ -257,16 +256,15 @@ def run_8_bit(
     num_experts = moe_tensors.w1.size(0)  # type: ignore[attr-defined]
     with_ep = num_local_experts is not None or num_local_experts == num_experts
     if not with_ep:
-        moe_config = make_dummy_moe_config(
-            num_experts=moe_tensors.w2_q.shape[0],  # type: ignore[union-attr]
-            hidden_dim=moe_tensors.w2_q.shape[1],  # type: ignore[union-attr]
-            intermediate_size_per_partition=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
-            in_dtype=moe_tensors.a.dtype,
-        )
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
-                moe_config=moe_config,
+                moe_config=make_dummy_moe_config(
+                    num_experts=moe_tensors.w2_q.shape[0],  # type: ignore[union-attr]
+                    hidden_dim=moe_tensors.w2_q.shape[1],  # type: ignore[union-attr]
+                    intermediate_size_per_partition=moe_tensors.w2_q.shape[2],  # type: ignore[union-attr]
+                    in_dtype=moe_tensors.a.dtype,
+                ),
                 quant_config=quant_config,
             ),
         )
