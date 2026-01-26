@@ -50,7 +50,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
             self._g1_alphas = (w1_scale * a1_scale).squeeze()
             self._g2_alphas = (w2_scale * a2_scale).squeeze()
-            self.g1_scale_c = self._g1_alphas / self.quant_config.a2_scale
+            self._g1_scale_c = self._g1_alphas / self.quant_config.a2_scale
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -247,7 +247,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
             gemm1_weights=w1,
-            output1_scales_scalar=self.g1_scale_c,
+            output1_scales_scalar=self._g1_scale_c,
             output1_scales_gate_scalar=self._g1_alphas,
             gemm2_weights=w2,
             output2_scales_scalar=self._g2_alphas,
