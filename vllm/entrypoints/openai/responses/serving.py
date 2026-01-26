@@ -238,7 +238,18 @@ class OpenAIServingResponses(OpenAIServing):
                 "the store."
             )
 
-        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
+        # Determine the effective model_type, prioritising hf_overrides
+        # then fallback to hf_text_config (VLM-robust) or hf_config.
+        config_obj = getattr(
+            self.model_config, "hf_text_config", self.model_config.hf_config
+        )
+        effective_model_type = config_obj.model_type
+        if isinstance(getattr(self.model_config, "hf_overrides", None), dict):
+            effective_model_type = self.model_config.hf_overrides.get(
+                "model_type", effective_model_type
+            )
+
+        self.use_harmony = effective_model_type == "gpt_oss"
         if self.use_harmony:
             logger.warning(
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
@@ -251,13 +262,8 @@ class OpenAIServingResponses(OpenAIServing):
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions()
             )
-        # Check model_type from hf_overrides first (for test mocking),
-        # then fall back to hf_text_config.model_type (more robust for VLM)
-        model_type = self.model_config.hf_text_config.model_type
-        if isinstance(self.model_config.hf_overrides, dict):
-            model_type = self.model_config.hf_overrides.get("model_type", model_type)
 
-        if model_type == "kimi_k2":
+        if effective_model_type == "kimi_k2":
             self.tool_call_id_type = "kimi_k2"
         else:
             self.tool_call_id_type = "random"

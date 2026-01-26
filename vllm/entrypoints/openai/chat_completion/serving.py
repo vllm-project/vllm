@@ -144,18 +144,23 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        # Check model_type from hf_overrides first (for test mocking),
-        # then fall back to hf_text_config.model_type (more robust for VLM)
-        model_type = self.model_config.hf_text_config.model_type
-        if isinstance(self.model_config.hf_overrides, dict):
-            model_type = self.model_config.hf_overrides.get("model_type", model_type)
+        # Determine the effective model_type, prioritising hf_overrides
+        # then fallback to hf_text_config (VLM-robust) or hf_config.
+        config_obj = getattr(
+            self.model_config, "hf_text_config", self.model_config.hf_config
+        )
+        effective_model_type = config_obj.model_type
+        if isinstance(getattr(self.model_config, "hf_overrides", None), dict):
+            effective_model_type = self.model_config.hf_overrides.get(
+                "model_type", effective_model_type
+            )
 
-        if model_type == "kimi_k2":
+        if effective_model_type == "kimi_k2":
             self.tool_call_id_type = "kimi_k2"
         else:
             self.tool_call_id_type = "random"
 
-        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
+        self.use_harmony = effective_model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
                 self.default_sampling_params["stop_token_ids"] = []
@@ -962,8 +967,17 @@ class OpenAIServingChat(OpenAIServing):
                                     index=i,
                                 )
                             else:
+                                # Generate ID based on tokenizer type
+                                if isinstance(tokenizer, MistralTokenizer):
+                                    tool_call_id = MistralToolCall.generate_random_id()
+                                else:
+                                    tool_call_id = make_tool_call_id(
+                                        id_type=self.tool_call_id_type,
+                                        func_name=tool_choice_function_name,
+                                        idx=history_tool_call_cnt,
+                                    )
                                 delta_tool_call = DeltaToolCall(
-                                    id=make_tool_call_id(),
+                                    id=tool_call_id,
                                     type="function",
                                     function=DeltaFunctionCall(
                                         name=tool_choice_function_name,
@@ -1551,15 +1565,20 @@ class OpenAIServingChat(OpenAIServing):
                             tool_call_class(id=tc.id, function=tc)
                         )
                     else:
-                        # Generate ID using the correct format (kimi_k2 or random)
-                        generated_id = make_tool_call_id(
-                            id_type=self.tool_call_id_type,
-                            func_name=tc.name,
-                            idx=history_tool_call_cnt + idx,
-                        )
-                        tool_call_class_items.append(
-                            tool_call_class(id=generated_id, function=tc)
-                        )
+                        # Generate ID using the correct format (kimi_k2 or random),
+                        # but leave it to the class if it's Mistral to preserve
+                        # 9-char IDs
+                        if isinstance(tokenizer, MistralTokenizer):
+                            tool_call_class_items.append(tool_call_class(function=tc))
+                        else:
+                            generated_id = make_tool_call_id(
+                                id_type=self.tool_call_id_type,
+                                func_name=tc.name,
+                                idx=history_tool_call_cnt + idx,
+                            )
+                            tool_call_class_items.append(
+                                tool_call_class(id=generated_id, function=tc)
+                            )
                     history_tool_call_cnt += 1
                 message = ChatMessage(
                     role=role,
@@ -1579,15 +1598,22 @@ class OpenAIServingChat(OpenAIServing):
                             tool_call_class(id=tool_call.id, function=tool_call)
                         )
                     else:
-                        # Generate ID using the correct format (kimi_k2 or random)
-                        generated_id = make_tool_call_id(
-                            id_type=self.tool_call_id_type,
-                            func_name=tool_call.name,
-                            idx=history_tool_call_cnt + idx,
-                        )
-                        tool_call_class_items.append(
-                            tool_call_class(id=generated_id, function=tool_call)
-                        )
+                        # Generate ID using the correct format (kimi_k2 or random),
+                        # but leave it to the class if it's Mistral to preserve
+                        # 9-char IDs
+                        if isinstance(tokenizer, MistralTokenizer):
+                            tool_call_class_items.append(
+                                tool_call_class(function=tool_call)
+                            )
+                        else:
+                            generated_id = make_tool_call_id(
+                                id_type=self.tool_call_id_type,
+                                func_name=tool_call.name,
+                                idx=history_tool_call_cnt + idx,
+                            )
+                            tool_call_class_items.append(
+                                tool_call_class(id=generated_id, function=tool_call)
+                            )
                     history_tool_call_cnt += 1
                 message = ChatMessage(
                     role=role,
@@ -1622,15 +1648,20 @@ class OpenAIServingChat(OpenAIServing):
                                 tool_call_class(id=tc.id, function=tc)
                             )
                         else:
-                            # Generate ID using the correct format (kimi_k2 or random)
-                            generated_id = make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tc.name,
-                                idx=history_tool_call_cnt + idx,
-                            )
-                            tool_call_items.append(
-                                tool_call_class(id=generated_id, function=tc)
-                            )
+                            # Generate ID using the correct format (kimi_k2 or random),
+                            # but leave it to the class if it's Mistral to preserve
+                            # 9-char IDs
+                            if isinstance(tokenizer, MistralTokenizer):
+                                tool_call_items.append(tool_call_class(function=tc))
+                            else:
+                                generated_id = make_tool_call_id(
+                                    id_type=self.tool_call_id_type,
+                                    func_name=tc.name,
+                                    idx=history_tool_call_cnt + idx,
+                                )
+                                tool_call_items.append(
+                                    tool_call_class(id=generated_id, function=tc)
+                                )
                         history_tool_call_cnt += 1
                     message = ChatMessage(
                         role=role,
