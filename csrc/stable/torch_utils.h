@@ -16,6 +16,14 @@ inline cudaStream_t get_current_cuda_stream(int32_t device_index) {
   return reinterpret_cast<cudaStream_t>(stream_ptr);
 }
 
+// Utility to get the storage size in bytes for a tensor.
+// Equivalent to t.storage().nbytes() in the unstable API.
+inline int64_t get_storage_nbytes(const torch::stable::Tensor& t) {
+  int64_t storage_size = 0;
+  TORCH_ERROR_CODE_CHECK(aoti_torch_get_storage_size(t.get(), &storage_size));
+  return storage_size;
+}
+
 // Stable ABI equivalent of TORCH_CHECK_EQ - checks that two values are equal.
 // Automatically generates an error message showing both values if they differ.
 #define STD_TORCH_CHECK_EQ(a, b) \

@@ -1,9 +1,14 @@
-#include <ATen/cuda/Exceptions.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAStream.h>
-#include <torch/all.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/macros.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
+
+#include <cuda_runtime.h>
 
 #include "custom_all_reduce.cuh"
+#include "torch_utils.h"
 
 // Fake pointer type, must match fptr_t type in ops.h.
 // We use this type alias to indicate when pointers are passed in as int64_t.
@@ -11,7 +16,7 @@ using fptr_t = int64_t;
 static_assert(sizeof(void*) == sizeof(fptr_t));
 
 fptr_t init_custom_ar(const std::vector<fptr_t>& fake_ipc_ptrs,
-                      torch::Tensor& rank_data, int64_t rank,
+                      torch::stable::Tensor& rank_data, int64_t rank,
                       bool fully_connected) {
   int world_size = fake_ipc_ptrs.size();
   if (world_size > 8)
@@ -46,9 +51,9 @@ fptr_t init_custom_ar(const std::vector<fptr_t>& fake_ipc_ptrs,
  * 5. A[None].expand(2, -1, -1, -1): Not OK
  * 6. A[:, 1:, 1:]: Not OK
  */
-bool _is_weak_contiguous(torch::Tensor& t) {
+bool _is_weak_contiguous(torch::stable::Tensor& t) {
   return t.is_contiguous() ||
-         (t.storage().nbytes() - t.storage_offset() * t.element_size() ==
+         (get_storage_nbytes(t) - t.storage_offset() * t.element_size() ==
           t.numel() * t.element_size());
 }
 
@@ -59,39 +64,43 @@ bool _is_weak_contiguous(torch::Tensor& t) {
  * Otherwise, _reg_buffer is assumed to be IPC-registered and inp is first
  * copied into _reg_buffer.
  */
-void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
-                fptr_t _reg_buffer, int64_t reg_buffer_sz_bytes) {
+void all_reduce(fptr_t _fa, torch::stable::Tensor& inp,
+                torch::stable::Tensor& out, fptr_t _reg_buffer,
+                int64_t reg_buffer_sz_bytes) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
-  auto stream = c10::cuda::getCurrentCUDAStream().stream();
+  int32_t device_index = inp.get_device_index();
+  const torch::stable::accelerator::DeviceGuard device_guard(device_index);
+  auto stream = get_current_cuda_stream(device_index);
 
-  TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
-  TORCH_CHECK_EQ(inp.numel(), out.numel());
-  TORCH_CHECK(_is_weak_contiguous(out));
-  TORCH_CHECK(_is_weak_contiguous(inp));
+  STD_TORCH_CHECK_EQ(inp.scalar_type(), out.scalar_type());
+  STD_TORCH_CHECK_EQ(inp.numel(), out.numel());
+  STD_TORCH_CHECK(_is_weak_contiguous(out));
+  STD_TORCH_CHECK(_is_weak_contiguous(inp));
   auto input_size = inp.numel() * inp.element_size();
   auto reg_buffer = reinterpret_cast<void*>(_reg_buffer);
   if (reg_buffer) {
-    TORCH_CHECK_LE(input_size, reg_buffer_sz_bytes);
-    AT_CUDA_CHECK(cudaMemcpyAsync(reg_buffer, inp.data_ptr(), input_size,
-                                  cudaMemcpyDeviceToDevice, stream));
+    STD_TORCH_CHECK(input_size <= reg_buffer_sz_bytes);
+    STD_CUDA_CHECK(cudaMemcpyAsync(reg_buffer, inp.data_ptr(), input_size,
+                                   cudaMemcpyDeviceToDevice, stream));
   } else {
     reg_buffer = inp.data_ptr();
   }
+
   switch (out.scalar_type()) {
-    case at::ScalarType::Float: {
+    case torch::headeronly::ScalarType::Float: {
       fa->allreduce<float>(stream, reinterpret_cast<float*>(reg_buffer),
-                           reinterpret_cast<float*>(out.data_ptr()),
+                           reinterpret_cast<float*>(out.mutable_data_ptr()),
                            out.numel());
       break;
     }
-    case at::ScalarType::Half: {
+    case torch::headeronly::ScalarType::Half: {
       fa->allreduce<half>(stream, reinterpret_cast<half*>(reg_buffer),
-                          reinterpret_cast<half*>(out.data_ptr()), out.numel());
+                          reinterpret_cast<half*>(out.mutable_data_ptr()),
+                          out.numel());
       break;
     }
 #if (__CUDA_ARCH__ >= 800 || !defined(__CUDA_ARCH__))
-    case at::ScalarType::BFloat16: {
+    case torch::headeronly::ScalarType::BFloat16: {
       fa->allreduce<nv_bfloat16>(
           stream, reinterpret_cast<nv_bfloat16*>(reg_buffer),
           reinterpret_cast<nv_bfloat16*>(out.data_ptr()), out.numel());
@@ -112,7 +121,7 @@ int64_t meta_size() { return sizeof(vllm::Signal); }
 
 void register_buffer(fptr_t _fa, const std::vector<fptr_t>& fake_ipc_ptrs) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
-  TORCH_CHECK(fake_ipc_ptrs.size() == fa->world_size_);
+  STD_TORCH_CHECK(fake_ipc_ptrs.size() == fa->world_size_);
   void* ipc_ptrs[8];
   for (int i = 0; i < fake_ipc_ptrs.size(); i++) {
     ipc_ptrs[i] = reinterpret_cast<void*>(fake_ipc_ptrs[i]);
@@ -143,47 +152,49 @@ void register_graph_buffers(fptr_t _fa,
   fa->register_graph_buffers(bytes, offsets);
 }
 
-std::tuple<fptr_t, torch::Tensor> allocate_shared_buffer_and_handle(
+std::tuple<fptr_t, torch::stable::Tensor> allocate_shared_buffer_and_handle(
     int64_t size) {
-  auto device_index = c10::cuda::current_device();
-  at::DeviceGuard device_guard(at::Device(at::DeviceType::CUDA, device_index));
+  int32_t device_index = torch::stable::accelerator::getCurrentDeviceIndex();
+  const torch::stable::accelerator::DeviceGuard device_guard(device_index);
+
+  auto stream = get_current_cuda_stream(device_index);
   void* buffer;
   cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;
-  auto stream = c10::cuda::getCurrentCUDAStream().stream();
-  AT_CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
+  STD_CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
 
   // Allocate buffer
 #if defined(USE_ROCM)
   // data buffers need to be "uncached" for signal on MI200
-  AT_CUDA_CHECK(
+  STD_CUDA_CHECK(
       hipExtMallocWithFlags((void**)&buffer, size, hipDeviceMallocUncached));
 #else
-  AT_CUDA_CHECK(cudaMalloc((void**)&buffer, size));
+  STD_CUDA_CHECK(cudaMalloc((void**)&buffer, size));
 #endif
-  AT_CUDA_CHECK(cudaMemsetAsync(buffer, 0, size, stream));
-  AT_CUDA_CHECK(cudaStreamSynchronize(stream));
-  AT_CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
+  STD_CUDA_CHECK(cudaMemsetAsync(buffer, 0, size, stream));
+  STD_CUDA_CHECK(cudaStreamSynchronize(stream));
+  STD_CUDA_CHECK(cudaThreadExchangeStreamCaptureMode(&mode));
 
   // Create IPC memhandle for the allocated buffer.
   // Will use it in open_mem_handle.
-  auto options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU);
-  auto handle =
-      torch::empty({static_cast<int64_t>(sizeof(cudaIpcMemHandle_t))}, options);
-  AT_CUDA_CHECK(
+  torch::stable::Tensor handle = torch::stable::empty(
+      {static_cast<int64_t>(sizeof(cudaIpcMemHandle_t))},
+      torch::headeronly::ScalarType::Byte, std::nullopt,
+      torch::stable::Device(torch::stable::DeviceType::CPU));
+
+  STD_CUDA_CHECK(
       cudaIpcGetMemHandle((cudaIpcMemHandle_t*)handle.data_ptr(), buffer));
 
   return std::make_tuple(reinterpret_cast<fptr_t>(buffer), handle);
 }
 
-fptr_t open_mem_handle(torch::Tensor& mem_handle) {
+fptr_t open_mem_handle(torch::stable::Tensor& mem_handle) {
   void* ipc_ptr;
-  AT_CUDA_CHECK(cudaIpcOpenMemHandle(
+  STD_CUDA_CHECK(cudaIpcOpenMemHandle(
       (void**)&ipc_ptr, *((const cudaIpcMemHandle_t*)mem_handle.data_ptr()),
       cudaIpcMemLazyEnablePeerAccess));
   return reinterpret_cast<fptr_t>(ipc_ptr);
 }
 
 void free_shared_buffer(fptr_t buffer) {
-  AT_CUDA_CHECK(cudaFree(reinterpret_cast<void*>(buffer)));
+  STD_CUDA_CHECK(cudaFree(reinterpret_cast<void*>(buffer)));
 }

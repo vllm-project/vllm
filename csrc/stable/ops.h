@@ -4,6 +4,8 @@
 #include <torch/csrc/stable/tensor.h>
 
 #include <optional>
+#include <tuple>
+#include <vector>
 
 // Gated activation functions (input: [..., 2*d] -> output: [..., d])
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
@@ -353,7 +355,8 @@ encode_and_reorder_int4b(torch::stable::Tensor const& b_tensors);
 #endif
 
 // Hadacore (Hadamard transforms)
-torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x, bool inplace);
+torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
+                                         bool inplace);
 
 // Mamba selective scan
 void selective_scan_fwd(
@@ -372,3 +375,35 @@ void selective_scan_fwd(
     const std::optional<torch::stable::Tensor>& block_idx_first_scheduled_token,
     const std::optional<torch::stable::Tensor>& block_idx_last_scheduled_token,
     const std::optional<torch::stable::Tensor>& initial_state_idx);
+
+// Custom All-Reduce operations
+// Note: fptr_t is int64_t to represent opaque pointers
+using fptr_t = int64_t;
+
+fptr_t init_custom_ar(const std::vector<fptr_t>& fake_ipc_ptrs,
+                      torch::stable::Tensor& rank_data, int64_t rank,
+                      bool fully_connected);
+
+void all_reduce(fptr_t _fa, torch::stable::Tensor& inp,
+                torch::stable::Tensor& out, fptr_t _reg_buffer,
+                int64_t reg_buffer_sz_bytes);
+
+void dispose(fptr_t _fa);
+
+int64_t meta_size();
+
+void register_buffer(fptr_t _fa, const std::vector<fptr_t>& fake_ipc_ptrs);
+
+std::tuple<std::vector<int64_t>, std::vector<int64_t>>
+get_graph_buffer_ipc_meta(fptr_t _fa);
+
+void register_graph_buffers(fptr_t _fa,
+                            const std::vector<std::vector<int64_t>>& handles,
+                            const std::vector<std::vector<int64_t>>& offsets);
+
+std::tuple<fptr_t, torch::stable::Tensor> allocate_shared_buffer_and_handle(
+    int64_t size);
+
+fptr_t open_mem_handle(torch::stable::Tensor& mem_handle);
+
+void free_shared_buffer(fptr_t buffer);

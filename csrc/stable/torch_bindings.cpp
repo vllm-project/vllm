@@ -656,4 +656,52 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, m) {
 }
 #endif
 
+// Custom All-Reduce operations
+STABLE_TORCH_LIBRARY(_C_custom_ar, m) {
+  m.def(
+      "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
+      "int rank, bool fully_connected) -> int");
+
+  m.def(
+      "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
+      "int reg_buffer_sz_bytes) -> ()");
+
+  m.def("dispose(int fa) -> ()");
+
+  m.def("meta_size() -> int");
+
+  m.def("register_buffer(int fa, int[] ipc_ptrs) -> ()");
+
+  m.def("get_graph_buffer_ipc_meta(int fa) -> (int[], int[])");
+
+  m.def(
+      "register_graph_buffers(int fa, int[][] handles, int[][] offsets) -> ()");
+
+  m.def("allocate_shared_buffer_and_handle(int size) -> (int, Tensor)");
+
+  m.def("open_mem_handle(Tensor mem_handle) -> int");
+
+  m.def("free_shared_buffer(int buffer) -> ()");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CUDA, m) {
+  m.impl("init_custom_ar", TORCH_BOX(&init_custom_ar));
+  m.impl("all_reduce", TORCH_BOX(&all_reduce));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CPU, m) {
+  m.impl("open_mem_handle", TORCH_BOX(&open_mem_handle));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CompositeExplicitAutograd, m) {
+  m.impl("dispose", TORCH_BOX(&dispose));
+  m.impl("meta_size", TORCH_BOX(&meta_size));
+  m.impl("register_buffer", TORCH_BOX(&register_buffer));
+  m.impl("get_graph_buffer_ipc_meta", TORCH_BOX(&get_graph_buffer_ipc_meta));
+  m.impl("register_graph_buffers", TORCH_BOX(&register_graph_buffers));
+  m.impl("allocate_shared_buffer_and_handle",
+         TORCH_BOX(&allocate_shared_buffer_and_handle));
+  m.impl("free_shared_buffer", TORCH_BOX(&free_shared_buffer));
+}
+
 REGISTER_EXTENSION(_C_stable_libtorch)

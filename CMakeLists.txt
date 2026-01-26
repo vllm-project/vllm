@@ -283,7 +283,6 @@ set(VLLM_EXT_SRC
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
-  "csrc/custom_all_reduce.cu"
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
@@ -554,6 +553,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/stable/attention/paged_attention_v2.cu"
     "csrc/stable/attention/merge_attn_states.cu"
     "csrc/stable/attention/vertical_slash_index.cu"
+    "csrc/stable/custom_all_reduce.cu"
     "csrc/stable/torch_bindings.cpp")
 
 
