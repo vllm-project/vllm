@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -3429,3 +3429,109 @@ def test_prepend_skipped_requests_order():
 
     # verify waiting order is preserved
     assert list(scheduler.waiting) == expected_waiting_reqs
+
+
+# ==============================================================================
+# Journey Tracing Tracer Initialization Tests (PR #1)
+# ==============================================================================
+
+
+@patch('vllm.tracing.init_tracer')
+def test_tracer_init_when_endpoint_set(mock_init_tracer):
+    """Test that tracer is initialized when endpoint is configured."""
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    # Verify init_tracer was called with correct parameters
+    mock_init_tracer.assert_called_once_with(
+        "vllm.scheduler",
+        "http://localhost:4317"
+    )
+
+    # Verify tracer was set
+    assert scheduler.tracer is mock_tracer, (
+        "Tracer should be set to the mock tracer returned by init_tracer"
+    )
+
+
+def test_tracer_none_when_endpoint_not_set():
+    """Test that tracer is None when endpoint not configured."""
+    # Case 1: journey tracing enabled but no endpoint
+    scheduler1 = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint=None
+    )
+    assert scheduler1.tracer is None, (
+        "Tracer should be None when endpoint not configured"
+    )
+
+    # Case 2: journey tracing disabled
+    scheduler2 = create_scheduler(
+        enable_journey_tracing=False,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+    assert scheduler2.tracer is None, (
+        "Tracer should be None when journey tracing disabled"
+    )
+
+    # Case 3: both disabled
+    scheduler3 = create_scheduler(
+        enable_journey_tracing=False,
+        otlp_traces_endpoint=None
+    )
+    assert scheduler3.tracer is None, (
+        "Tracer should be None when both disabled"
+    )
+
+
+@patch('vllm.tracing.init_tracer')
+def test_scheduler_init_succeeds_with_tracing_enabled(mock_init_tracer):
+    """Test that scheduler initializes successfully with tracing config.
+
+    This is a smoke test to ensure tracing configuration doesn't break
+    scheduler initialization.
+    """
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    assert scheduler is not None, "Scheduler should initialize successfully"
+    assert hasattr(scheduler, 'tracer'), "Scheduler should have tracer attribute"
+    assert scheduler.tracer is mock_tracer, "Tracer should be set to mock"
+
+
+@patch('vllm.tracing.init_tracer', side_effect=Exception("Init failed"))
+def test_tracer_init_handles_failure_gracefully(mock_init_tracer):
+    """Test that init failure is handled gracefully with warning log.
+
+    Verifies the defensive exception handling in scheduler initialization.
+    """
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    # Should not crash - scheduler should initialize successfully
+    assert scheduler is not None, (
+        "Scheduler should initialize even if tracer init fails"
+    )
+
+    # Tracer should be None (init failed)
+    assert scheduler.tracer is None, (
+        "Tracer should be None when initialization fails"
+    )
+
+    # Verify init_tracer was called (and raised exception)
+    mock_init_tracer.assert_called_once_with(
+        "vllm.scheduler",
+        "http://localhost:4317"
+    )

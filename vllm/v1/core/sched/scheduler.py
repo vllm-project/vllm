@@ -65,6 +65,12 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
+# Defensive import for journey tracing span attributes
+try:
+    from vllm.tracing import SpanAttributes
+except Exception:
+    SpanAttributes = None  # type: ignore
+
 logger = init_logger(__name__)
 
 
@@ -127,6 +133,19 @@ class Scheduler(SchedulerInterface):
             # Prefill progress high-water marks (survives preemption)
             # request_id → number of prompt tokens processed
             self._journey_prefill_hiwater: dict[str, int] = {}
+
+        # NEW: Initialize tracer for OTEL span creation
+        self.tracer: Any | None = None
+        if self._enable_journey_tracing:
+            endpoint = self.observability_config.otlp_traces_endpoint
+            if endpoint is not None:
+                try:
+                    from vllm.tracing import init_tracer
+                    self.tracer = init_tracer("vllm.scheduler", endpoint)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to initialize tracer for journey tracing: %s", e
+                    )
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
