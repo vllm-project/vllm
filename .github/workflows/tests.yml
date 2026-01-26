@@ -49,12 +49,12 @@ jobs:
           python -m pip install --upgrade pip
           # Install PyTorch CPU (pre-compiled wheel, no compilation)
           pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu
-          # Install common dependencies, excluding torch packages
-          grep -v -E "^(torch|torchaudio|torchvision)==" requirements/common.txt > /tmp/common-requirements.txt
+          # Install all Python dependencies except torch and vLLM itself
+          # vLLM source code used via PYTHONPATH
+          grep -v -E "^(torch|torchaudio|torchvision|vllm)==" requirements/common.txt > /tmp/common-requirements.txt || true
           pip install -r /tmp/common-requirements.txt
-          # Install test dependencies, excluding torch packages
-          grep -v -E "^(torch|torchaudio|torchvision)==" requirements/test.txt > /tmp/test-requirements.txt
-          pip install -r /tmp/test-requirements.txt
+          # Install test dependencies
+          pip install pytest
 
       - name: Run journey tracing tests
         env:
@@ -63,6 +63,7 @@ jobs:
           pytest tests/v1/core/test_journey_events.py \
                  tests/v1/engine/test_journey_tracing_integration.py \
                  tests/v1/tracing/test_tracing.py \
+            -c tests/conftest_cpu.py \
             -v \
             --tb=short
 
