@@ -18,7 +18,6 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    is_supported_config_trtllm,
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -178,43 +177,21 @@ def select_nvfp4_moe_backend(
 
         elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
             # If user is explicit about backend, validate it.
-            fi_backend = get_flashinfer_moe_backend()
-
-            if fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                backend = NvFp4MoeBackend.FLASHINFER_TRTLLM
-                supported, reason = is_supported_config_trtllm(
-                    config, weight_key, activation_key, activation_format
-                )
-                if supported:
-                    logger.info_once(_make_log_backend(backend))
-                    return backend, None
-                else:
-                    raise ValueError(_make_log_unsupported(backend, reason))
-            else:
-                backend = fi_2_vllm_backend_map[fi_backend]
-                return _return_or_raise(
-                    backend, config, weight_key, activation_key, activation_format
-                )
+            backend = fi_2_vllm_backend_map[get_flashinfer_moe_backend()]
+            return _return_or_raise(
+                backend, config, weight_key, activation_key, activation_format
+            )
         else:
             # If the user is not explicit about the backend, try each.
             for backend in FLASHINFER_NVFP4_MOE_BACKENDS:
-                if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-                    k_cls = None
-                    supported, reason = is_supported_config_trtllm(
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
-                else:
-                    k_cls = backend_to_kernel_cls(backend)
-                    supported, reason = k_cls.is_supported_config(
-                        k_cls,
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
+                k_cls = backend_to_kernel_cls(backend)
+                supported, reason = k_cls.is_supported_config(
+                    k_cls,
+                    config,
+                    weight_key,
+                    activation_key,
+                    activation_format,
+                )
                 if supported:
                     logger.info_once(_make_log_backend(backend), scope="local")
                     return backend, None
@@ -236,23 +213,14 @@ def select_nvfp4_moe_backend(
 
     # Select kernels in order of backend.
     for backend in AVAILABLE_BACKENDS:
-        if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            k_cls = None  # type: ignore[assignment]
-            supported, reason = is_supported_config_trtllm(
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-        else:
-            k_cls = backend_to_kernel_cls(backend)
-            supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
+        k_cls = backend_to_kernel_cls(backend)
+        supported, reason = k_cls.is_supported_config(
+            k_cls,
+            config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
 
         if supported:
             logger.info_once(_make_log_backend(backend), scope="local")
