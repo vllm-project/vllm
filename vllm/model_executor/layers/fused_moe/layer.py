@@ -522,8 +522,7 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
 
-        # TODO(bnell): in next PR move capture back to layer
-        capture: Callable[[torch.Tensor], None] | None = None
+        self.capture: Callable[[torch.Tensor], None] | None = None
         if (
             self.vllm_config.model_config is not None
             and self.vllm_config.model_config.enable_return_routed_experts
@@ -531,7 +530,9 @@ class FusedMoE(CustomOp):
             # In dummy runs, the capturer is not initialized.
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
-                capture = lambda topk_ids: capturer.capture(self.layer_id, topk_ids)
+                self.capture = lambda topk_ids: capturer.capture(
+                    self.layer_id, topk_ids
+                )
 
         self.router = create_fused_moe_router(
             top_k=top_k,
@@ -550,7 +551,6 @@ class FusedMoE(CustomOp):
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
-            capture=capture,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
@@ -1673,12 +1673,27 @@ class FusedMoE(CustomOp):
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
             # Matrix multiply.
-            final_hidden_states = self.quant_method.apply(
-                layer=self,
-                router=self.router,
-                x=staged_hidden_states,
-                router_logits=staged_router_logits,
-            )
+            if self.quant_method.is_monolithic:
+                final_hidden_states = self.quant_method.apply_monolithic(
+                    layer=self,
+                    x=staged_hidden_states,
+                    router_logits=staged_router_logits,
+                )
+            else:
+                topk_weights, topk_ids = self.router.select_experts(
+                    hidden_states=staged_hidden_states,
+                    router_logits=staged_router_logits,
+                )
+
+                if self.capture is not None:
+                    self.capture(topk_ids)
+
+                final_hidden_states = self.quant_method.apply(
+                    layer=self,
+                    x=staged_hidden_states,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                )
 
             if has_separate_shared_experts:
                 assert not isinstance(final_hidden_states, tuple)
@@ -1810,15 +1825,20 @@ class FusedMoE(CustomOp):
                     extra_tensors=extra_tensors,
                 )
                 if extra_tensors is not None:
-                    hidden_states_combined, router_logits, extra_tensors_combined = (
-                        dispatch_res
-                    )
+                    (
+                        orig_hidden_states,
+                        router_logits,
+                        extra_tensors_combined,
+                    ) = dispatch_res
                     hidden_states_combined = (
-                        hidden_states_combined,
+                        orig_hidden_states,
                         extra_tensors_combined[0],
                     )
                 else:
                     hidden_states_combined, router_logits = dispatch_res
+                    orig_hidden_states = hidden_states_combined
+            else:
+                orig_hidden_states = hidden_states
 
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
@@ -1840,14 +1860,33 @@ class FusedMoE(CustomOp):
                 )
 
             # Matrix multiply.
-            final_hidden_states = self.quant_method.apply(
-                layer=self,
-                router=self.router,
-                x=hidden_states_combined
-                if do_naive_dispatch_combine
-                else hidden_states,
-                router_logits=router_logits,
-            )
+            x = hidden_states_combined if do_naive_dispatch_combine else hidden_states
+
+            # TODO(bnell): deal with fp4 flashinfer tuple hidden states hack (#30014).
+            # Figure out nicer way to do this.
+            x_orig = orig_hidden_states if do_naive_dispatch_combine else hidden_states
+
+            if self.quant_method.is_monolithic:
+                final_hidden_states = self.quant_method.apply_monolithic(
+                    layer=self,
+                    x=x,
+                    router_logits=router_logits,
+                )
+            else:
+                topk_weights, topk_ids = self.router.select_experts(
+                    hidden_states=x_orig,
+                    router_logits=router_logits,
+                )
+
+                if self.capture is not None:
+                    self.capture(topk_ids)
+
+                final_hidden_states = self.quant_method.apply(
+                    layer=self,
+                    x=x,  # The type signture of this is wrong due to the hack.
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                )
 
             if has_separate_shared_experts:
                 assert self.shared_experts is not None

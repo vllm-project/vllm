@@ -270,7 +270,6 @@ class Eagle2_5_VLForConditionalGeneration(
         return SiglipVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=self.multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             prefix=prefix,
         )

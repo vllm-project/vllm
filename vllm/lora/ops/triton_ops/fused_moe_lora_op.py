@@ -104,7 +104,10 @@ def _fused_moe_lora_kernel(
     if moe_enabled == 0:
         # Early exit for the no moe lora case.
         return
-    max_loras = tl.num_programs(axis=2)
+    # The grid size on axis 2 is (max_loras + 1) to handle the no-lora case
+    # (lora_id == -1), but sorted_token_ids and expert_ids are allocated with
+    # shape (max_loras, ...). Use (num_programs - 1) for correct bounds checking.
+    max_loras = tl.num_programs(axis=2) - 1
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
@@ -139,7 +142,9 @@ def _fused_moe_lora_kernel(
     offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
     token_ind = stride_tl * lora_id + offs_token_id
     offs_token = tl.load(
-        sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
+        sorted_token_ids_ptr + token_ind,
+        mask=token_ind < max_loras * stride_tl,
+        other=num_valid_tokens,
     )
     token_mask = offs_token < num_valid_tokens
 
@@ -185,7 +190,7 @@ def _fused_moe_lora_kernel(
         b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
-        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
+        moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
         accumulator = accumulator * moe_weight[:, None]
     accumulator = accumulator.to(c_ptr.dtype.element_ty)
     # Write back the block of the output
@@ -253,7 +258,8 @@ def _fused_moe_lora_shrink(
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_a_stacked),
-        lora_a_stacked[0].shape[0],
+        ## max_loras + 1 to handle the no-lora case (lora_id == -1)
+        lora_a_stacked[0].shape[0] + 1,
     )
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
@@ -345,7 +351,7 @@ def _fused_moe_lora_expand(
         "GROUP_SIZE_M": group_size_m,
         "num_warps": num_warps,
         "num_stages": num_stages,
-        "SPLIT_K": split_k,  # Set split_k = 1 for expand calls
+        "SPLIT_K": 1,  # Set split_k = 1 for expand calls
         "USE_GDC": use_gdc,
         "launch_pdl": use_gdc,  # triton kernel metadata
     }
@@ -353,7 +359,8 @@ def _fused_moe_lora_expand(
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
-        lora_b_stacked[0].shape[0],
+        ## max_loras + 1 to handle the no-lora case (lora_id == -1)
+        lora_b_stacked[0].shape[0] + 1,
     )
     _fused_moe_lora_kernel[grid](
         a_intermediate_cache1,
