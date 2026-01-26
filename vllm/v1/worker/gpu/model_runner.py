@@ -598,6 +598,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc,
             self.input_buffers.positions[:num_tokens],
         )
+        # Layer name -> slot mapping.
+        slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings, self.kv_cache_config
+        )
 
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
@@ -865,14 +869,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.uses_mrope:
                 assert input_batch.mrope_positions is not None
                 positions = input_batch.mrope_positions
-            slot_mappings = self.block_tables.compute_slot_mappings(
-                input_batch.idx_mapping,
-                input_batch.query_start_loc,
-                input_batch.positions[: input_batch.num_tokens],
-            )
-            slot_mappings_by_layer = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
-            )
             with set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,
@@ -880,7 +876,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # TODO(woosuk): Support piecewise CUDA graph.
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 num_tokens_across_dp=num_tokens_across_dp,
-                slot_mapping=slot_mappings_by_layer,
+                slot_mapping=input_batch.slot_mappings,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 hidden_states = self.model(
