@@ -271,21 +271,21 @@ def test_eagle3_acceptance_length(
             actual_per_pos = results["acceptance_lengths_per_pos"]
             expected_per_pos = model_config.expected_acceptance_lengths_per_pos
 
-            # Use model-specific rtol if provided, otherwise use default
-            rtol = model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
-
             rel_error = abs(actual_acceptance_length - expected) / expected
 
-            assert rel_error <= rtol, (
+            # Overall acceptance length always uses DEFAULT_RTOL
+            assert rel_error <= DEFAULT_RTOL, (
                 f"Acceptance length regression detected for {model_config.id}!\n"
                 f"  Expected: {expected:.3f}\n"
                 f"  Actual:   {actual_acceptance_length:.3f}\n"
-                f"  Relative error: {rel_error:.2%} (tolerance: {rtol:.2%})\n"
+                f"  Relative error: {rel_error:.2%} (tolerance: {DEFAULT_RTOL:.2%})\n"
                 f"  Drafts: {results['num_drafts']}, "
                 f"Accepted tokens: {results['num_accepted_tokens']}"
             )
 
             if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
+                # Per-position checks use model-specific rtol if provided
+                rtol = model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
                 for pos, (actual, exp) in enumerate(
                     zip(actual_per_pos, expected_per_pos)
                 ):
