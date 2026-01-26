@@ -53,14 +53,6 @@ def test_batched_deepgemm_vs_triton(
     # next power of 2 for max token number
     max_num_tokens = 1 << (max_cnt - 1).bit_length()
 
-    quant_config = fp8_w8a8_moe_quant_config(
-        w1_scale=w1_s,
-        w2_scale=w2_s,
-        per_act_token_quant=False,
-        block_shape=BLOCK_SIZE,
-    )
-    moe_config = make_dummy_moe_config()
-
     prep_finalize = BatchedPrepareAndFinalize(
         max_num_tokens=max_num_tokens,
         num_local_experts=E,
@@ -68,12 +60,19 @@ def test_batched_deepgemm_vs_triton(
         rank=0,
     )
 
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+        per_act_token_quant=False,
+        block_shape=BLOCK_SIZE,
+    )
+
     # triton (reference)
     triton_experts = BatchedTritonExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,
-        moe_config=moe_config,
+        moe_config=make_dummy_moe_config(),
     )
     mk_triton = FusedMoEModularKernel(prep_finalize, triton_experts)
 
