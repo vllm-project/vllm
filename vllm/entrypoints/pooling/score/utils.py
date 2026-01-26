@@ -19,7 +19,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.inputs import TokensPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
-from vllm.multimodal.inputs import MultiModalDataDict
+from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.outputs import PoolingRequestOutput
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.tokenizers import TokenizerLike
@@ -95,7 +95,7 @@ def parse_score_data(
     data_1: str | ScoreContentPartParam,
     data_2: str | ScoreContentPartParam,
     model_config: ModelConfig,
-) -> tuple[str, str, MultiModalDataDict | None]:
+) -> tuple[str, str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
     mm_tracker = MultiModalItemTracker(model_config)
 
     content_1 = _parse_score_content(data_1, mm_tracker)
@@ -109,8 +109,9 @@ def parse_score_data(
 
     prompt_1 = ensure_str(content_1)
     prompt_2 = ensure_str(content_2)
+    mm_items, mm_uuids = mm_tracker.resolve_items()
 
-    return prompt_1, prompt_2, mm_tracker.all_mm_data()
+    return prompt_1, prompt_2, mm_items, mm_uuids
 
 
 def _parse_score_content(
@@ -187,7 +188,7 @@ def get_score_prompt(
     data_2: str | ScoreContentPartParam,
     score_template: str | None = None,
 ) -> tuple[str, TokensPrompt]:
-    prompt_1, prompt_2, mm_data = parse_score_data(
+    prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
         data_1,
         data_2,
         model_config,
@@ -248,6 +249,9 @@ def get_score_prompt(
 
     if mm_data is not None:
         engine_prompt["multi_modal_data"] = mm_data
+    if mm_uuids is not None:
+        engine_prompt["multi_modal_uuids"] = mm_uuids
+
     return full_prompt, engine_prompt
 
 
