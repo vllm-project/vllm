@@ -85,7 +85,9 @@ Further update the model as follows:
   +      self,
   +      pixel_values: torch.Tensor,
   +  ) -> MultiModalEmbeddings | None:
-  +      ...
+  +      return self.get_image_features(
+  +          pixel_values=pixel_values,
+  +      )
   ```
 
   Below we provide a boilerplate of a typical implementation pattern of [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal], but feel free to adjust it to your own needs.
