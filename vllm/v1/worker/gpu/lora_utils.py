@@ -15,7 +15,10 @@ class LoraState:
         self.lora_requests: dict[str, LoRARequest] = {}
 
     def add_request(
-        self, req_id: str, req_index: int, lora_request: LoRARequest | None
+        self,
+        req_id: str,
+        req_index: int,
+        lora_request: LoRARequest | None,
     ) -> None:
         if lora_request is not None:
             self.lora_requests[req_id] = lora_request
@@ -38,7 +41,7 @@ class LoraState:
 
         active_lora_requests: set[LoRARequest] = set()
         for req_id in req_ids:
-            lora_request = self.lora_requests.get(req_id)
+            lora_request = self.lora_requests.get(req_id, None)
             if lora_request is not None:
                 active_lora_requests.add(lora_request)
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests
