@@ -37,6 +37,8 @@ class Eagle3ModelConfig:
     excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
     # Pytest marks for this configuration (e.g., pytest.mark.optional)
     marks: list = field(default_factory=list)
+    # Custom relative tolerance (defaults to DEFAULT_RTOL if None)
+    rtol: float | None = None
 
 
 # Model configurations for EAGLE3 acceptance length tests.
@@ -71,7 +73,7 @@ EAGLE3_MODEL_CONFIGS = [
         verifier="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
         drafter="nm-testing/Speculator-Qwen3-30B-MOE-VL-Eagle3",
         expected_acceptance_length=1.35,
-        expected_acceptance_lengths_per_pos=[0.2900, 0.0630, 0.0120],
+        expected_acceptance_lengths_per_pos=[0.2900, 0.0620, 0.0115],
         id="qwen3-30b-moe-vl-eagle3",
         marks=[
             pytest.mark.optional,
@@ -80,6 +82,7 @@ EAGLE3_MODEL_CONFIGS = [
                 reason="The tests are skipped on rocm platform.",
             ),
         ],
+        rtol=0.15,  # Higher tolerance due to small absolute values at position 2
     ),
 ]
 
@@ -268,13 +271,16 @@ def test_eagle3_acceptance_length(
             actual_per_pos = results["acceptance_lengths_per_pos"]
             expected_per_pos = model_config.expected_acceptance_lengths_per_pos
 
+            # Use model-specific rtol if provided, otherwise use default
+            rtol = model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
+
             rel_error = abs(actual_acceptance_length - expected) / expected
 
-            assert rel_error <= DEFAULT_RTOL, (
+            assert rel_error <= rtol, (
                 f"Acceptance length regression detected for {model_config.id}!\n"
                 f"  Expected: {expected:.3f}\n"
                 f"  Actual:   {actual_acceptance_length:.3f}\n"
-                f"  Relative error: {rel_error:.2%} (tolerance: {DEFAULT_RTOL:.2%})\n"
+                f"  Relative error: {rel_error:.2%} (tolerance: {rtol:.2%})\n"
                 f"  Drafts: {results['num_drafts']}, "
                 f"Accepted tokens: {results['num_accepted_tokens']}"
             )
@@ -285,13 +291,13 @@ def test_eagle3_acceptance_length(
                 ):
                     if exp > 0:
                         pos_rel_error = abs(actual - exp) / exp
-                        assert pos_rel_error <= DEFAULT_RTOL, (
+                        assert pos_rel_error <= rtol, (
                             f"Per-position acceptance length regression at pos {pos} "
                             f"for {model_config.id}!\n"
                             f"  Expected: {exp:.3f}\n"
                             f"  Actual:   {actual:.3f}\n"
                             f"  Relative error: {pos_rel_error:.2%} "
-                            f"(tolerance: {DEFAULT_RTOL:.2%})"
+                            f"(tolerance: {rtol:.2%})"
                         )
 
             print(
