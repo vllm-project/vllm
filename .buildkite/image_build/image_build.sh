@@ -157,7 +157,7 @@ print_bake_config() {
 #################################
 
 # Argument check
-if [[ $# -lt 6 ]]; then
+if [[ $# -lt 7 ]]; then
     print_usage_and_exit
 fi
 
@@ -168,6 +168,19 @@ BUILDKITE_COMMIT=$3
 BRANCH=$4
 VLLM_USE_PRECOMPILED=$5
 VLLM_MERGE_BASE_COMMIT=$6
+IMAGE_TAG=$7
+IMAGE_TAG_LATEST=$8
+
+# print out all args
+echo "--- :mag: Arguments"
+echo "REGISTRY: ${REGISTRY}"
+echo "REPO: ${REPO}"
+echo "BUILDKITE_COMMIT: ${BUILDKITE_COMMIT}"
+echo "BRANCH: ${BRANCH}"
+echo "VLLM_USE_PRECOMPILED: ${VLLM_USE_PRECOMPILED}"
+echo "VLLM_MERGE_BASE_COMMIT: ${VLLM_MERGE_BASE_COMMIT}"
+echo "IMAGE_TAG: ${IMAGE_TAG}"
+echo "IMAGE_TAG_LATEST: ${IMAGE_TAG_LATEST}"
 
 # Configuration with sensible defaults
 TARGET="test-ci"
