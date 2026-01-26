@@ -8,6 +8,7 @@ from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable
 from functools import cached_property, lru_cache, partial
+from itertools import accumulate
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, TypeVar, cast
 
@@ -41,6 +42,11 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
+from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
+    MultiModalFlatField,
+    MultiModalSharedField,
+)
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.utils import random_uuid
@@ -334,13 +340,10 @@ ModalityStr = Literal["image", "audio", "video", "image_embeds", "audio_embeds"]
 _T = TypeVar("_T")
 
 
-def _extract_embeds(
+def _detect_field(
     tensors: list[torch.Tensor],
     mm_processor: BaseMultiModalProcessor,
 ):
-    if len(tensors) == 0:
-        return tensors
-
     first_item = tensors[0]
     hidden_size = mm_processor.info.ctx.model_config.get_inputs_embeds_size()
 
@@ -355,21 +358,21 @@ def _extract_embeds(
             "Batched multi-modal embedding inputs are deprecated for Chat API. "
             "Please pass a separate content part for each multi-modal item."
         )
-        return first_item
+        return MultiModalSharedField(batch_size=1)
 
     first_shape = first_item.shape
-    if first_item.ndim == 3 and first_item.shape[-1] == hidden_size:
-        return torch.stack(tensors)
-    if first_item.ndim == 2 and first_item.shape[-1] == hidden_size:
-        return torch.cat(tensors)
-
     if all(t.shape == first_shape for t in tensors):
-        return torch.stack(tensors)
+        return MultiModalBatchedField()
 
-    return torch.cat(tensors)
+    size_per_item = [len(tensor) for tensor in tensors]
+    slice_idxs = [0, *accumulate(size_per_item)]
+    slices = [
+        (slice(slice_idxs[i], slice_idxs[i + 1]),) for i in range(len(size_per_item))
+    ]
+    return MultiModalFlatField(slices=slices)
 
 
-def _extract_dict_embeds(
+def _merge_embeds(
     data_items: list[dict[str, "torch.Tensor"]],
     mm_processor: BaseMultiModalProcessor,
 ):
@@ -382,13 +385,39 @@ def _extract_dict_embeds(
             "All dictionaries in the list of embeddings must have the same keys."
         )
 
-    return {
-        key: _extract_embeds([item[key] for item in data_items], mm_processor)
+    fields = {
+        key: _detect_field([item[key] for item in data_items], mm_processor)
         for key in first_keys
     }
+    data_merged = {
+        key: field._reduce_data([item[key] for item in data_items], pin_memory=False)
+        for key, field in fields.items()
+    }
+
+    try:
+        # TODO: Support per-request mm_processor_kwargs
+        parsed_configs = mm_processor._get_mm_fields_config(
+            transformers.BatchFeature(data_merged),
+            {},
+        )
+    except Exception:
+        pass
+    else:
+        parsed_fields = {key: parsed_configs[key].field for key in first_keys}
+
+        if fields != parsed_fields:
+            data_merged = {
+                key: field._reduce_data(
+                    [item[key] for item in data_items], pin_memory=False
+                )
+                for key, field in parsed_fields.items()
+            }
+
+    return data_merged
 
 
 def _get_embeds_data(
+    modality: str,
     data_items: list[Any],
     mm_processor: BaseMultiModalProcessor,
 ):
@@ -399,10 +428,12 @@ def _get_embeds_data(
         return data_items
 
     if is_list_of(data_items, torch.Tensor):
-        return _extract_embeds(data_items, mm_processor)
+        embeds_key = f"{modality}_embeds"
+        dict_items = [{embeds_key: item} for item in data_items]
+        return _merge_embeds(dict_items, mm_processor)[embeds_key]
 
     if is_list_of(data_items, dict):
-        return _extract_dict_embeds(data_items, mm_processor)
+        return _merge_embeds(data_items, mm_processor)
 
     raise NotImplementedError(type(data_items))
 
@@ -483,6 +514,7 @@ def _resolve_items(
     mm_uuids = {}
     if "image_embeds" in items_by_modality:
         mm_data["image"] = _get_embeds_data(
+            "image",
             [data for data, uuid in items_by_modality["image_embeds"]],
             mm_processor,
         )
@@ -492,6 +524,7 @@ def _resolve_items(
         mm_uuids["image"] = [uuid for data, uuid in items_by_modality["image"]]
     if "audio_embeds" in items_by_modality:
         mm_data["audio"] = _get_embeds_data(
+            "audio",
             [data for data, uuid in items_by_modality["audio_embeds"]],
             mm_processor,
         )
