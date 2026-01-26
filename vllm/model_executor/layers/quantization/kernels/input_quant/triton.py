@@ -255,4 +255,5 @@ class TritonInputQuantKernel(InputQuantKernel[InputQuantConfig]):
         )
 
     def apply_per_token_per_tensor_quant(self, x, scale=None, scale_ub=None):
+        # Currently there is no per_tensor, per_token triton kernel implementation.
         raise NotImplementedError

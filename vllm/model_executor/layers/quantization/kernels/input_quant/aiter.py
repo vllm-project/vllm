@@ -69,4 +69,6 @@ class AiterInputQuantKernel(InputQuantKernel[InputQuantConfig]):
         if self.group_shape.is_per_tensor():
             return rocm_aiter_ops.per_tensor_quant(x, _FP8_DTYPE, scale)
 
+        # Per-tensor already handled, so this must be per-token
+        assert self.group_shape.is_per_token()
         return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)

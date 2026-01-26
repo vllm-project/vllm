@@ -5,7 +5,6 @@ import torch
 import torch.nn.functional as F
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     group_broadcast,
     prep_scale_for_group_broadcast,
 )
@@ -87,7 +86,7 @@ class PytorchInputQuantKernel(InputQuantKernel[InputQuantConfig]):
         )
 
         if scale is None:
-            if self.group_shape == GroupShape.PER_TOKEN:
+            if self.group_shape.is_per_token():
                 x_max, _ = x.abs().max(dim=-1)
                 x_max = x_max.unsqueeze(-1).to(torch.float32)
                 if scale_ub is not None:

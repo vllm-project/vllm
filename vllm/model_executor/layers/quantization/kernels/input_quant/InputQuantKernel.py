@@ -105,4 +105,15 @@ class InputQuantKernel(ABC, Generic[_ConfigT]):
         if group_shape.is_per_group():
             return self.apply_group_quant(x, scale, scale_ub)
 
-        return self.apply_per_token_per_tensor_quant(x, scale, scale_ub)
+        # for some kernels per-tensor and per-token quantization
+        # share the same implementation
+        # since they differ only in scale dimensionality, not computation logic.
+        if group_shape.is_per_tensor() or group_shape.is_per_token():
+            return self.apply_per_token_per_tensor_quant(x, scale, scale_ub)
+
+        # TODO: Per-channel quantization not yet supported.
+        # Currently no kernel implements this quantization granularity.
+
+        raise ValueError(
+            f"Currently input quant kernel, {self}, does not support {group_shape}"
+        )
