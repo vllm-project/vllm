@@ -145,7 +145,7 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 void silu_and_mul(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
-  int arch_support_vec = 16;                                             \
+  int arch_support_vec = 16;
 #if __CUDACC_VER_MAJOR__ >= 13
   if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
     arch_support_vec = 32;
@@ -157,7 +157,7 @@ void silu_and_mul(torch::Tensor& out,    // [..., d]
 void mul_and_silu(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
-  int arch_support_vec = 16;                                             \
+  int arch_support_vec = 16;
 #if __CUDACC_VER_MAJOR__ >= 13
   if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
     arch_support_vec = 32;
@@ -171,7 +171,7 @@ void mul_and_silu(torch::Tensor& out,    // [..., d]
 void gelu_and_mul(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
-  int arch_support_vec = 16;                                             \
+  int arch_support_vec = 16;
 #if __CUDACC_VER_MAJOR__ >= 13
   if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
     arch_support_vec = 32;
@@ -183,7 +183,7 @@ void gelu_and_mul(torch::Tensor& out,    // [..., d]
 void gelu_tanh_and_mul(torch::Tensor& out,    // [..., d]
                        torch::Tensor& input)  // [..., 2 * d]
 {
-  int arch_support_vec = 16;                                             \
+  int arch_support_vec = 16;
 #if __CUDACC_VER_MAJOR__ >= 13
   if (at::cuda::getCurrentDeviceProperties()->major >= 10) {
     arch_support_vec = 32;
