@@ -12,11 +12,10 @@ from typing import final
 import torch
 
 from vllm.lora.layers import LoRAMapping
-from vllm.triton_utils import HAS_TRITON
-
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-            moe_align_block_size,
-        )
+    moe_align_block_size,
+)
+from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (
@@ -338,9 +337,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         topk_ids_lora = torch.where(
             has_lora,
             token_lora_expanded * num_experts + topk_ids,
-            torch.tensor(
-                -1, dtype=topk_ids.dtype, device=topk_ids.device
-            ),
+            torch.tensor(-1, dtype=topk_ids.dtype, device=topk_ids.device),
         )
 
         # Call standard moe_align_block_size with num_expert_lora + 1 virtual
