@@ -1539,7 +1539,17 @@ class OpenAIServingChat(OpenAIServing):
             tool_call_class = (
                 MistralToolCall if isinstance(tokenizer, MistralTokenizer) else ToolCall
             )
-            if (not self.enable_auto_tools or not self.tool_parser) and (
+            if self.use_harmony:
+                # Harmony models already have parsed content and tool_calls
+                # through parse_chat_output. Respect its output directly.
+                message = ChatMessage(
+                    role=role,
+                    reasoning=reasoning,
+                    content=content,
+                    tool_calls=tool_calls if tool_calls else [],
+                )
+
+            elif (not self.enable_auto_tools or not self.tool_parser) and (
                 not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
                 and request.tool_choice != "required"
             ):
