@@ -25,9 +25,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # Install PyTorch CPU (pre-compiled wheel, no compilation)
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          # Install test dependencies
           pip install -r requirements/test.txt
-          # Install only runtime dependencies needed for tests, not full vLLM
-          pip install msgspec opentelemetry-api opentelemetry-sdk pytest
+          # Install minimal runtime dependencies
+          pip install msgspec opentelemetry-api opentelemetry-sdk
 
       - name: Run journey tracing tests
         env:
