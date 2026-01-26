@@ -69,6 +69,16 @@ def phi3v_model_config_image_embeds():
 
 
 @pytest.fixture(scope="function")
+def qwen25omni_model_config_image_embeds():
+    return ModelConfig(
+        QWEN25OMNI_MODEL_ID,
+        runner="generate",
+        limit_mm_per_prompt={"image": 2},
+        enable_mm_embeds=True,
+    )
+
+
+@pytest.fixture(scope="function")
 def qwen2_audio_model_config():
     return ModelConfig(
         QWEN2AUDIO_MODEL_ID,
@@ -89,16 +99,6 @@ def audio_embeds_model_config():
         limit_mm_per_prompt={
             "audio": 2,
         },
-        enable_mm_embeds=True,
-    )
-
-
-@pytest.fixture(scope="function")
-def qwen25omni_model_config_image_embeds():
-    return ModelConfig(
-        QWEN25OMNI_MODEL_ID,
-        runner="generate",
-        limit_mm_per_prompt={"image": 2},
         enable_mm_embeds=True,
     )
 
