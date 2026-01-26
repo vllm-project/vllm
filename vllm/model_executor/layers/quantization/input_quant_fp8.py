@@ -5,6 +5,7 @@ import torch
 
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.kernels.input_quant import (
+    InputQuantKernel,
     select_quant_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -48,13 +49,25 @@ class QuantFP8(CustomOp):
 
         use_ue8m0 = False if use_ue8m0 is None else use_ue8m0
 
-        self.input_quant_kernel = select_quant_kernel(
+        self.input_quant_kernel: InputQuantKernel = select_quant_kernel(
             static,
             group_shape,
             column_major_scales,
             use_ue8m0,
             num_token_padding,
             tma_aligned_scales,
+            return_native=False,
+        )
+
+        # native implementation
+        self.native_kernel: InputQuantKernel = select_quant_kernel(
+            static,
+            group_shape,
+            column_major_scales,
+            use_ue8m0,
+            num_token_padding,
+            tma_aligned_scales,
+            return_native=True,
         )
 
     def forward_cuda(
@@ -63,7 +76,15 @@ class QuantFP8(CustomOp):
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_native(x, scale, scale_ub)
+        return self.input_quant_kernel.apply(x, scale, scale_ub)
+
+    def forward_hip(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.input_quant_kernel.apply(x, scale, scale_ub)
 
     def forward_native(
         self,
@@ -71,4 +92,4 @@ class QuantFP8(CustomOp):
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.input_quant_kernel.apply(x, scale, scale_ub)
+        return self.native_kernel.apply(x, scale, scale_ub)

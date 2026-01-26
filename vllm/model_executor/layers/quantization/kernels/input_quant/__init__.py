@@ -43,6 +43,7 @@ def select_quant_kernel(
     use_ue8m0: bool = False,
     num_token_padding: int | None = None,
     tma_aligned_scales: bool = False,
+    return_native: bool = False,
 ) -> InputQuantKernel:
     """
     Select the appropriate input quantization kernel based on the current platform.
@@ -53,6 +54,7 @@ def select_quant_kernel(
         column_major_scales: Whether to use column-major scale storage
         use_ue8m0: Whether to use ue8m0 format
         num_token_padding: Optional number of token padding
+        return_native: Returns native pytorch quantization implementation.
 
     Returns:
         The appropriate InputQuantKernel class for the current platform
@@ -65,6 +67,9 @@ def select_quant_kernel(
         num_token_padding=num_token_padding,
         tma_aligned_scales=tma_aligned_scales,
     )
+
+    if return_native:
+        return PytorchInputQuantKernel(config)
 
     platform_enum = current_platform._enum
 
