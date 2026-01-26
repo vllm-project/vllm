@@ -151,8 +151,6 @@ def make_modular_kernel(
         )
         ht_args = DeepEPHTArgs(num_local_experts=num_local_experts)
 
-    moe_config = make_dummy_moe_config()
-
     a2a: DeepEPHTPrepareAndFinalize | DeepEPLLPrepareAndFinalize = make_deepep_a2a(
         pg=pg,
         pgi=pgi,
@@ -164,6 +162,8 @@ def make_modular_kernel(
     )
 
     num_dispatchers = pgi.world_size // dp_size
+
+    moe_config = make_dummy_moe_config()
 
     if low_latency_mode:
         assert not quant_config.per_act_token_quant, "not supported in ll mode"
