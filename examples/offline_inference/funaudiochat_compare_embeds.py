@@ -18,6 +18,39 @@ from pathlib import Path
 import numpy as np
 
 
+def _init_vllm_single_process_tp() -> None:
+    """Initialize vLLM's (TP/PP) distributed groups for standalone scripts."""
+    import socket
+
+    import torch
+
+    from vllm.distributed.parallel_state import (
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+
+    if torch.distributed.is_initialized():
+        return
+
+    # Pick an ephemeral port to avoid collisions when running multiple scripts.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        local_rank=0,
+        distributed_init_method=f"tcp://127.0.0.1:{port}",
+        backend="nccl",
+    )
+    initialize_model_parallel(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+    )
+
+
 def _read_wav_mono(path: str) -> tuple[np.ndarray, int]:
     with wave.open(path, "rb") as wf:
         sr = int(wf.getframerate())
@@ -135,22 +168,32 @@ def main() -> None:
         )
 
     # === vLLM towers (load weights from HF modules) ===
-    from vllm.model_executor.models.funaudiochat import (
-        FunAudioChatAudioEncoder,
-        FunAudioChatDiscreteEncoder,
-    )
+    _init_vllm_single_process_tp()
+    from vllm.config import VllmConfig, set_current_vllm_config
 
-    v_cont = FunAudioChatAudioEncoder(model.config.audio_config).to(
-        device=device, dtype=dtype
-    )
-    v_disc = FunAudioChatDiscreteEncoder(model.config.audio_config).to(
-        device=device, dtype=dtype
-    )
+    with set_current_vllm_config(VllmConfig()):
+        from vllm.model_executor.models.funaudiochat import (
+            FunAudioChatAudioEncoder,
+            FunAudioChatDiscreteEncoder,
+        )
 
-    v_cont.load_state_dict(model.continuous_audio_tower.state_dict(), strict=True)
-    v_disc.load_state_dict(model.audio_tower.state_dict(), strict=True)
-    v_cont.eval()
-    v_disc.eval()
+        v_cont = FunAudioChatAudioEncoder(model.config.audio_config).to(
+            device=device, dtype=dtype
+        )
+        v_disc = FunAudioChatDiscreteEncoder(model.config.audio_config).to(
+            device=device, dtype=dtype
+        )
+
+        # vLLM tower weights may use fused QKV projections (QKVParallelLinear),
+        # so we use AutoWeightsLoader to map HF weights into the vLLM modules.
+        from vllm.model_executor.models.utils import AutoWeightsLoader
+
+        AutoWeightsLoader(v_cont).load_weights(
+            model.continuous_audio_tower.state_dict().items()
+        )
+        AutoWeightsLoader(v_disc).load_weights(model.audio_tower.state_dict().items())
+        v_cont.eval()
+        v_disc.eval()
 
     # vLLM continuous tower forward (match HF get_audio_features flattening)
     with torch.no_grad():
@@ -211,6 +254,10 @@ def main() -> None:
             f"discrete[{i}]: shape={tuple(a.shape)} "
             f"max_abs_diff={max_diff:.6g} mse={mse:.6g}"
         )
+
+    # Avoid leaving a process group initialized (can warn at exit).
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

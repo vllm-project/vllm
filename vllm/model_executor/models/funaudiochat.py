@@ -28,6 +28,7 @@ from transformers.modeling_outputs import BaseModelOutput
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -54,33 +55,6 @@ from vllm.utils.import_utils import _has_module
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
-
-
-def _eager_attention_forward(
-    module: nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor | None,
-    scaling: float,
-    dropout: float = 0.0,
-    **_: object,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    key_states = key.transpose(-1, -2)
-    attn_weights = torch.matmul(query, key_states) * scaling
-
-    if attention_mask is not None:
-        attn_weights = attn_weights + attention_mask
-
-    attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(
-        query.dtype
-    )
-    attn_weights = nn.functional.dropout(
-        attn_weights, p=dropout, training=module.training
-    )
-    attn_output = torch.matmul(attn_weights, value)
-
-    return attn_output, attn_weights
 
 
 class _SinusoidsPositionEmbedding(nn.Module):
@@ -133,14 +107,22 @@ class FunAudioChatAudioAttention(nn.Module):
             bias=True,
         )
         self.num_heads = self.qkv_proj.num_heads
+        self.num_kv_heads = self.qkv_proj.num_kv_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_heads,
+            head_size=self.head_dim,
+            scale=self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            prefix="funaudiochat_audio_tower.attn",
+        )
         self.out_proj = RowParallelLinear(
             self.embed_dim,
             self.embed_dim,
             bias=True,
         )
-        with torch.no_grad():
-            if self.qkv_proj.bias is not None:
-                self.qkv_proj.bias.zero_()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -150,6 +132,12 @@ class FunAudioChatAudioAttention(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
+        with torch.no_grad():
+            if self.qkv_proj.bias is not None:
+                # HF FunAudioChat uses bias=False for k_proj. Ensure the missing
+                # shard starts as zeros, while allowing q/v shards to load.
+                self.qkv_proj.bias.zero_()
+
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             for param_name, shard_name, shard_id in stacked_params_mapping:
@@ -181,50 +169,26 @@ class FunAudioChatAudioAttention(nn.Module):
         **kwargs: object,
     ) -> torch.Tensor:
         del kwargs
+        del attention_mask
         seq_length, _ = hidden_states.size()
 
         qkv, _ = self.qkv_proj(hidden_states)
-        q_size = self.num_heads * self.head_dim
-        kv_size = q_size
         query_states, key_states, value_states = qkv.split(
-            [q_size, kv_size, kv_size], dim=-1
+            [self.q_size, self.kv_size, self.kv_size], dim=-1
         )
 
-        query_states = query_states.reshape(seq_length, self.num_heads, -1)
-        key_states = key_states.reshape(seq_length, self.num_heads, -1)
-        value_states = value_states.reshape(seq_length, self.num_heads, -1)
-
-        query_states = query_states.transpose(0, 1).unsqueeze(0)
-        key_states = key_states.transpose(0, 1).unsqueeze(0)
-        value_states = value_states.transpose(0, 1).unsqueeze(0)
-        attn_impl = getattr(self.config, "_attn_implementation", "eager") or "eager"
-
-        attention_interface = _eager_attention_forward
-        if attn_impl != "eager":
-            from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-
-            attention_interface = ALL_ATTENTION_FUNCTIONS[attn_impl]
-
-        max_seqlen = None
+        max_seqlen: torch.Tensor | None = None
         if cu_seqlens is not None:
-            max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max().item())
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
-        attn_output, _ = attention_interface(
-            self,
-            query_states,
-            key_states,
-            value_states,
-            attention_mask=attention_mask,
-            dropout=0.0,
-            scaling=self.scaling,
-            cu_seq_lens_q=cu_seqlens,
-            cu_seq_lens_k=cu_seqlens,
-            max_length_q=max_seqlen,
-            max_length_k=max_seqlen,
-            is_causal=False,
-        )
+        attn_output = self.attn(
+            query_states.reshape(1, seq_length, self.q_size),
+            key_states.reshape(1, seq_length, self.kv_size),
+            value_states.reshape(1, seq_length, self.kv_size),
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        ).reshape(seq_length, -1)
 
-        attn_output = attn_output.reshape(seq_length, -1).contiguous()
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -336,11 +300,10 @@ class FunAudioChatAudioEncoder(nn.Module):
         speech_maxlen: int,
         **kwargs: object,
     ) -> BaseModelOutput:
-        attn_impl = getattr(self.config, "_attn_implementation", "eager") or "eager"
         # For max-length audio (300s => ~7500 speech frames at 25Hz), the
-        # SDPA+4D-block-mask path can be prohibitively memory hungry
-        # (~15000^2 elements after the CNN). Force FlashAttention-2 for such
-        # inputs to avoid OOM and performance cliffs.
+        # Torch SDPA path can be prohibitively memory hungry (~O(n^2) inside the
+        # longest chunks). Require FlashAttention for such inputs to avoid OOM
+        # and performance cliffs.
         if int(speech_maxlen) >= 7500:
             if not _has_module("flash_attn"):
                 raise RuntimeError(
@@ -348,10 +311,14 @@ class FunAudioChatAudioEncoder(nn.Module):
                     "for the continuous audio tower, but `flash_attn` is not "
                     "installed in the runtime environment."
                 )
-
-            if attn_impl != "flash_attention_2":
-                # Upgrade the audio tower attention impl for this run.
-                self.config._attn_implementation = "flash_attention_2"
+            if not getattr(
+                self.layers[0].self_attn.attn, "is_flash_attn_backend", False
+            ):
+                raise RuntimeError(
+                    "FunAudioChat long audio (~300s) requires FlashAttention for the "
+                    "continuous audio tower, but the selected MM encoder attention "
+                    "backend is not FlashAttention."
+                )
 
         # Handle empty / invalid items (feature_lens == 0) without crashing.
         original_batch_size = int(feature_lens.size(0))
@@ -416,13 +383,11 @@ class FunAudioChatAudioEncoder(nn.Module):
                 padded_mask_after_cnn.sum(1).cumsum(0),
             )
         ).to(torch.int32)
-        attention_mask = self._prepare_attention_mask(hidden_states, cu_seqlens)
 
         for encoder_layer in self.layers:
             (hidden_states,) = encoder_layer(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
-                attention_mask=attention_mask,
                 **kwargs,
             )
 

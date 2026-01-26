@@ -591,6 +591,9 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     ) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
+
+if hasattr(torch.ops._C, "marlin_gemm"):
+
     @register_fake("_C::marlin_gemm")
     def _marlin_gemm_fake(
         a: torch.Tensor,
