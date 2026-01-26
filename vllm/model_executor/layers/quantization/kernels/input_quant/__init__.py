@@ -90,5 +90,4 @@ def select_quant_kernel(
             raise ValueError("None of the exsiting quantization kernel can be selected")
 
     # Fall back to the Pytorch implementation for all other platforms
-    print("calling native pytorch")
     return PytorchInputQuantKernel(config)
