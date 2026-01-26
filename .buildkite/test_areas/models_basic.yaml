@@ -44,7 +44,7 @@ steps:
   - vllm/
   - tests/models/test_utils.py
   - tests/models/test_vision.py
-  no_gpu: true
+  device: cpu
   commands:
     - pytest -v -s models/test_utils.py models/test_vision.py
 
