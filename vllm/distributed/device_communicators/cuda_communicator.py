@@ -128,7 +128,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             elif self.all2all_backend == "deepep_low_latency":
                 from .all2all import DeepEPLLAll2AllManager
 
-                self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group, tcp_store_group)
+                self.all2all_manager = DeepEPLLAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             elif self.all2all_backend == "mori":
                 from .all2all import MoriAll2AllManager
 
