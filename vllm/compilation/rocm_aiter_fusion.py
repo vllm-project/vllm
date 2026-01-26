@@ -442,7 +442,7 @@ class AddAiterRMSNormPadPattern:
             return at[0], at[1]
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern, replacement, self.rmsnorm_matcher.inputs(), pm.fwd_only, pm_pass
         )
 
 
