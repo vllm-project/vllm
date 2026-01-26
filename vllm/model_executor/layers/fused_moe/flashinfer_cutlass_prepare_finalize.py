@@ -224,6 +224,8 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
                 a1q_scale = None
 
         if is_nvfp4 and a1q_scale is not None:
+            if a1q_scale.element_size() == 1:
+                a1q_scale = a1q_scale.view(torch.uint8)
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
