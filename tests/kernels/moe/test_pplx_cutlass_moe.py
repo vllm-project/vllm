@@ -134,7 +134,7 @@ def pplx_cutlass_moe(
     num_dispatchers = pgi.world_size // dp_size
 
     prepare_finalize = PplxPrepareAndFinalize(
-        a2a=ata,
+        ata,
         max_num_tokens=max_num_tokens,
         num_local_experts=num_local_experts,
         num_dispatchers=num_dispatchers,

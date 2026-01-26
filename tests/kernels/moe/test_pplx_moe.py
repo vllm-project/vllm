@@ -256,7 +256,7 @@ def create_pplx_prepare_finalize(
         ata = AllToAll.intranode(**args)
 
     prepare_finalize = PplxPrepareAndFinalize(
-        a2a=ata,
+        ata,
         max_num_tokens=max_num_tokens,
         num_local_experts=num_local_experts,
         num_dispatchers=world_size // dp_size,
