@@ -13,9 +13,11 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import set_forward_context
 from vllm.v1.attention.backend import AttentionMetadataBuilder
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import (
+    build_attn_metadata,
+    build_slot_mappings_by_layer,
+)
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
@@ -60,12 +62,12 @@ class CudaGraphManager:
 
     def get_cudagraph_size(
         self,
-        scheduler_output: SchedulerOutput,
         num_tokens_after_padding: int,
+        num_tokens_per_request: Iterable[int],
     ) -> int | None:
         return get_cudagraph_size(
             num_tokens_after_padding,
-            scheduler_output.num_scheduled_tokens.values(),
+            num_tokens_per_request,
             self.cudagraph_sizes,
             self.cudagraph_mode,
         )
@@ -76,6 +78,7 @@ class CudaGraphManager:
         model: nn.Module,
         input_buffers: InputBuffers,
         mrope_positions: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
@@ -86,7 +89,9 @@ class CudaGraphManager:
         if self.uses_mrope:
             assert mrope_positions is not None
             positions = mrope_positions[:, :num_tokens]
-        attn_metadata = prepare_inputs_to_capture(
+        if inputs_embeds is not None:
+            inputs_embeds = inputs_embeds[:num_tokens]
+        attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
             input_buffers,
@@ -104,10 +109,12 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
             num_tokens_across_dp=num_tokens_across_dp,
+            slot_mapping=slot_mappings,
         ):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
+                inputs_embeds=inputs_embeds,
             )
             if self.hidden_states is None:
                 self.hidden_states = torch.empty_like(hidden_states)
@@ -122,12 +129,14 @@ class CudaGraphManager:
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 num_tokens_across_dp=num_tokens_across_dp,
+                slot_mapping=slot_mappings,
             ),
             torch.cuda.graph(graph, self.pool),
         ):
             hidden_states = model(
                 input_ids=input_ids,
                 positions=positions,
+                inputs_embeds=inputs_embeds,
             )
             self.hidden_states[:num_tokens] = hidden_states
         self.graphs[num_tokens] = graph
@@ -138,6 +147,7 @@ class CudaGraphManager:
         model: nn.Module,
         input_buffers: InputBuffers,
         mrope_positions: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
@@ -149,6 +159,7 @@ class CudaGraphManager:
             model=model,
             input_buffers=input_buffers,
             mrope_positions=mrope_positions,
+            inputs_embeds=inputs_embeds,
             block_tables=block_tables,
             attn_metadata_builders=attn_metadata_builders,
             kv_cache_config=kv_cache_config,
@@ -238,7 +249,7 @@ def prepare_inputs_to_capture(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
     num_tokens_per_req = num_tokens // num_reqs
 
     query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32) * num_tokens_per_req
@@ -255,6 +266,9 @@ def prepare_inputs_to_capture(
 
     input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
     slot_mappings = block_tables.slot_mappings[:, :num_tokens]
+    slot_mappings_by_layer = build_slot_mappings_by_layer(
+        slot_mappings, kv_cache_config
+    )
 
     attn_metadata = build_attn_metadata(
         attn_metadata_builders=attn_metadata_builders,
@@ -268,4 +282,4 @@ def prepare_inputs_to_capture(
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,
     )
-    return attn_metadata
+    return attn_metadata, slot_mappings_by_layer

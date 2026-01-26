@@ -48,7 +48,7 @@ void computeExpertFirstTokenOffset(int const* sorted_indices,
                                    int64_t* expert_first_token_offset,
                                    cudaStream_t stream);
 
-void sortAndScanExpert(int* expert_for_source_row, const int* source_rows,
+void sortAndScanExpert(const int* expert_for_source_row, const int* source_rows,
                        int* permuted_experts, int* permuted_rows,
                        int64_t* expert_first_token_offset, int num_rows,
                        int num_experts, int num_experts_per_node, int k,

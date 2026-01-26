@@ -44,6 +44,7 @@ vllm = "vllm.entrypoints.cli.main:main"
 
 [project.entry-points."vllm.general_plugins"]
 lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
+lora_hf_hub_resolver = "vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_hub_resolver"
 
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
@@ -100,6 +101,13 @@ ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
 
+[[tool.mypy.overrides]]
+module = "vllm.compilation.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true
+follow_imports = "silent"
+
 [tool.pytest.ini_options]
 markers = [
     "slow_test",
@@ -125,7 +133,8 @@ python = "./.venv"
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*",
     "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
-    "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*"]
+    "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", 
+    "docs/governance/process.md"]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
