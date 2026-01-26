@@ -38,6 +38,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.tool_parsers.utils import safe_json_loads
 
 logger = logging.getLogger(__name__)
 
@@ -284,7 +285,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 type="tool_use",
                 id=tool_call.id,
                 name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
+                input=safe_json_loads(tool_call.function.arguments),
             )
             content += [anthropic_tool_call]
 
