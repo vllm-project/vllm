@@ -164,10 +164,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config, self.uses_mrope, self.device
         )
         # Structured outputs worker.
-        self.structured_outputs_worker = StructuredOutputsWorker(
-            max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
-            vocab_size=self.vocab_size,
-        )
+        self.structured_outputs_worker = StructuredOutputsWorker(self.device)
 
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 

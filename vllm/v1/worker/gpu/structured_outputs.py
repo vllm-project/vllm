@@ -4,23 +4,14 @@ import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
-from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class StructuredOutputsWorker:
-    def __init__(
-        self,
-        max_num_logits: int,
-        vocab_size: int,
-    ):
-        # NOTE(woosuk): Here, we use UvaBufferPool instead of UvaBackedTensor
-        # to save a unnecessary CPU-to-CPU copy.
-        self.logits_indices = UvaBufferPool(max_num_logits, torch.int32)
-        self.grammar_bitmask = UvaBufferPool(
-            (max_num_logits, cdiv(vocab_size, 32)), torch.int32
-        )
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.copy_stream = torch.cuda.Stream(device)
 
     def apply_grammar_bitmask(
         self,
@@ -32,6 +23,10 @@ class StructuredOutputsWorker:
         if not grammar_req_ids:
             return
 
+        # Copy the bitmask.
+        with torch.cuda.stream(self.copy_stream):
+            bitmask = async_copy_to_gpu(grammar_bitmask, device=self.device)
+
         # Construct bitmask -> logits mapping
         mapping: list[int] = []
         req_ids = input_batch.req_ids
@@ -42,12 +37,18 @@ class StructuredOutputsWorker:
             logits_start_idx = cu_num_logits[req_idx]
             logits_end_idx = cu_num_logits[req_idx + 1]
             mapping.extend(range(logits_start_idx, logits_end_idx))
-        # Copy the mapping.
-        mapping_np = np.array(mapping, dtype=np.int32)
-        logits_indices = self.logits_indices.copy_to_uva(mapping_np)
 
-        # Copy the bitmask.
-        bitmask = self.grammar_bitmask.copy_to_uva(grammar_bitmask)
+        # Copy the mapping.
+        with torch.cuda.stream(self.copy_stream):
+            logits_indices = torch.tensor(
+                mapping, dtype=torch.int32, device="cpu", pin_memory=True
+            )
+            logits_indices = logits_indices.to(device=self.device, non_blocking=True)
+
+        # Make sure the kernel is executed after the copy is finished.
+        copy_event = torch.cuda.Event()
+        copy_event.record(self.copy_stream)
+        torch.cuda.current_stream(self.device).wait_event(copy_event)
 
         num_masks = bitmask.shape[0]
         assert num_masks == len(mapping)
