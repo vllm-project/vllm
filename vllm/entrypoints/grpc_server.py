@@ -23,6 +23,7 @@ import signal
 import sys
 import time
 from collections.abc import AsyncGenerator
+from contextlib import suppress
 
 import grpc
 import uvloop
@@ -437,10 +438,8 @@ async def _health_monitor(
         except Exception as e:
             logger.error("Health monitor error: %s", e)
 
-        try:
+        with suppress(asyncio.TimeoutError):
             await asyncio.wait_for(stop_event.wait(), timeout=interval)
-        except asyncio.TimeoutError:
-            pass
 
 
 async def serve_grpc(args: argparse.Namespace):
@@ -542,10 +541,8 @@ async def serve_grpc(args: argparse.Namespace):
         # Stop health monitoring
         stop_event.set()
         health_monitor_task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await health_monitor_task
-        except asyncio.CancelledError:
-            pass
 
         # Mark all services as NOT_SERVING during graceful shutdown
         health_servicer.enter_graceful_shutdown()
