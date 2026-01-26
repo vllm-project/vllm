@@ -107,7 +107,6 @@ class OpenAIServingChat(OpenAIServing):
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
-        log_error_stack: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -115,7 +114,6 @@ class OpenAIServingChat(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
         )
 
         self.response_role = response_role

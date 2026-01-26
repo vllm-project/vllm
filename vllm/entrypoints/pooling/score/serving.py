@@ -54,13 +54,11 @@ class ServingScores(OpenAIServing):
         *,
         request_logger: RequestLogger | None,
         score_template: str | None = None,
-        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
         self.score_template = score_template
 

@@ -187,13 +187,11 @@ class ServingClassification(ClassificationMixin):
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         trust_request_chat_template: bool = False,
-        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
 
         self.chat_template = chat_template

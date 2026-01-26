@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import json
-import sys
 import time
-import traceback
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -243,7 +241,6 @@ class OpenAIServing:
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
     ):
         super().__init__()
 
@@ -255,7 +252,6 @@ class OpenAIServing:
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
         self._async_tokenizer_pool: dict[TokenizerLike, AsyncMicrobatchTokenizer] = {}
-        self.log_error_stack = log_error_stack
 
         self.input_processor = self.models.input_processor
         self.io_processor = self.models.io_processor
@@ -782,13 +778,6 @@ class OpenAIServing:
                 param = None
 
             message = str(exc)
-
-        if self.log_error_stack:
-            exc_type, _, _ = sys.exc_info()
-            if exc_type is not None:
-                traceback.print_exc()
-            else:
-                traceback.print_stack()
 
         return ErrorResponse(
             error=ErrorInfo(

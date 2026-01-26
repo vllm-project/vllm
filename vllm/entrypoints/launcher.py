@@ -167,6 +167,8 @@ def _add_shutdown_handlers(app: FastAPI, server: uvicorn.Server) -> None:
     @app.exception_handler(EngineDeadError)
     @app.exception_handler(EngineGenerateError)
     async def runtime_exception_handler(request: Request, __):
+        if app.state.args.log_error_stack:
+            logger.exception("Error caught")
         terminate_if_errored(
             server=server,
             engine=request.app.state.engine_client,
