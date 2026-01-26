@@ -92,25 +92,24 @@ Further update the model as follows:
 
     Below we provide a boilerplate of a typical implementation pattern of [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal], but feel free to adjust it to your own needs.
 
-        ```python
-        def _process_image_input(self, image_input: YourModelImageInputs) -> torch.Tensor:
-            image_features = self.vision_encoder(image_input)
-            return self.multi_modal_projector(image_features)
+    ```python
+    def _process_image_input(self, image_input: YourModelImageInputs) -> torch.Tensor:
+        image_features = self.vision_encoder(image_input)
+        return self.multi_modal_projector(image_features)
 
-        def embed_multimodal(
-            self,
-            **kwargs: object,
-        ) -> MultiModalEmbeddings | None:
-            # Validate the multimodal input keyword arguments
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            if image_input is None:
-                return None
+    def embed_multimodal(
+        self,
+        **kwargs: object,
+    ) -> MultiModalEmbeddings | None:
+        # Validate the multimodal input keyword arguments
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
 
-            # Run multimodal inputs through encoder and projector
-            vision_embeddings = self._process_image_input(image_input)
-            return vision_embeddings
-        ```
-
+        # Run multimodal inputs through encoder and projector
+        vision_embeddings = self._process_image_input(image_input)
+        return vision_embeddings
+    ```
 
 !!! important
     The returned `multimodal_embeddings` must be either a **3D [torch.Tensor][]** of shape `(num_items, feature_size, hidden_size)`, or a **list / tuple of 2D [torch.Tensor][]'s** of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
