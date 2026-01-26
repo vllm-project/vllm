@@ -540,6 +540,21 @@ def pplx_moe(
     num_experts = w1.shape[0]
     topk = topk_ids.shape[1]
     max_num_tokens = round_up(rank_chunk(a.shape[0], 0, world_size), 16)
+
+    prepare_finalize, ata = create_pplx_prepare_finalize(
+        num_tokens,
+        hidden_dim,
+        topk,
+        num_experts,
+        rank,
+        dp_size,
+        world_size,
+        a.dtype,
+        quant_dtype,
+        block_shape,
+        per_act_token_quant,
+        group_name,
+    )
     topk_ids = topk_ids.to(dtype=torch.uint32)
 
     # Note: workers with the same dp_rank must use the exact same inputs.
@@ -564,28 +579,12 @@ def pplx_moe(
         a1_scale=a1_scale_chunk,
         a2_scale=a2_scale_chunk,
     )
-    moe_config = make_dummy_moe_config()
-
-    prepare_finalize, ata = create_pplx_prepare_finalize(
-        num_tokens,
-        hidden_dim,
-        topk,
-        num_experts,
-        rank,
-        dp_size,
-        world_size,
-        a.dtype,
-        quant_dtype,
-        block_shape,
-        per_act_token_quant,
-        group_name,
-    )
 
     experts = BatchedTritonExperts(
         max_num_tokens=max_num_tokens,
         num_dispatchers=prepare_finalize.num_dispatchers(),
         quant_config=quant_config,
-        moe_config=moe_config,
+        moe_config=make_dummy_moe_config(),
     )
 
     fused_experts = FusedMoEModularKernel(
