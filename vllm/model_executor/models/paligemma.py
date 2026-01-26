@@ -314,13 +314,14 @@ class PaliGemmaForConditionalGeneration(
             config.text_config.architectures = ["Gemma2ForCausalLM"]
 
         with self._mark_language_model(vllm_config):
-            self.language_model = language_model = init_vllm_registered_model(
+            self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+
             logit_scale = getattr(config, "logit_scale", 1.0)
-            language_model.logits_processor.scale *= logit_scale
+            self.language_model.logits_processor.scale *= logit_scale
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -388,7 +389,7 @@ class PaliGemmaForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

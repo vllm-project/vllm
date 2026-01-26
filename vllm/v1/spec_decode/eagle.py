@@ -112,7 +112,9 @@ class SpecDecodeBaseProposer:
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
         )
-        self.uses_mrope = self.vllm_config.model_config.uses_mrope
+        # Use draft model's M-RoPE setting, not target model's
+        # Draft models may be text-only even if target is multimodal
+        self.uses_mrope = self.draft_model_config.uses_mrope
         if self.uses_mrope:
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
@@ -155,6 +157,10 @@ class SpecDecodeBaseProposer:
             pin_memory=is_pin_memory_available(),
             device=device,
             with_numpy=True,
+        )
+
+        self._slot_mapping_buffer = torch.zeros(
+            self.max_num_tokens, dtype=torch.int64, device=device
         )
 
         # Determine allowed attention backends once during initialization.
@@ -221,7 +227,30 @@ class SpecDecodeBaseProposer:
         if self.uses_mrope:
             self.mrope_positions[:, :num_tokens] = positions
         else:
+            # Convert M-RoPE positions if target model uses M-RoPE
+            # but draft doesn't, For text inputs, all M-RoPE
+            # dimensions are identical
+            if self.vllm_config.model_config.uses_mrope:
+                positions = positions[0]
             self.positions[:num_tokens] = positions
+
+    def _get_slot_mapping(
+        self,
+        num_tokens: int,
+        slot_mapping: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Return slot_mapping dict for EAGLE layers.
+
+        If slot_mapping is provided, copies it into the buffer first.
+        """
+        if slot_mapping is not None:
+            num_actual = slot_mapping.shape[0]
+            self._slot_mapping_buffer[:num_actual].copy_(slot_mapping)
+            if num_tokens > num_actual:
+                self._slot_mapping_buffer[num_actual:num_tokens].fill_(PADDING_SLOT_ID)
+
+        view = self._slot_mapping_buffer[:num_tokens]
+        return {name: view for name in self.attn_layer_names + self.indexer_layer_names}
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         """Initialize cudagraph dispatcher keys for eagle.
@@ -255,6 +284,9 @@ class SpecDecodeBaseProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -351,6 +383,9 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
+            slot_mapping=self._get_slot_mapping(
+                num_input_tokens, common_attn_metadata.slot_mapping
+            ),
         ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
@@ -368,7 +403,7 @@ class SpecDecodeBaseProposer:
             return draft_token_ids.view(-1, 1)
 
         if self.uses_mrope:
-            positions = self.positions[:, last_token_indices]
+            positions = self.mrope_positions[:, last_token_indices]
         else:
             positions = self.positions[last_token_indices]
         if self.method in (
@@ -389,6 +424,7 @@ class SpecDecodeBaseProposer:
                 positions=positions,
                 hidden_states=hidden_states,
                 common_attn_metadata=common_attn_metadata,
+                slot_mappings=slot_mappings,
             )
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
@@ -546,6 +582,9 @@ class SpecDecodeBaseProposer:
                 num_tokens=input_batch_size,
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=self._get_slot_mapping(
+                    input_batch_size, common_attn_metadata.slot_mapping
+                ),
             ):
                 ret_hidden_states = self.model(**model_kwargs)
                 if not self.model_returns_tuple():
@@ -753,6 +792,9 @@ class SpecDecodeBaseProposer:
         # [num_tokens, hidden_size]
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,
     ) -> list[torch.Tensor]:
         tree_attn_metadata_builder = self.runner.attn_groups[0][
             0
@@ -874,6 +916,9 @@ class SpecDecodeBaseProposer:
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=self._get_slot_mapping(
+                    num_input_tokens, attn_metadata.slot_mapping
+                ),
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
@@ -1080,6 +1125,8 @@ class SpecDecodeBaseProposer:
             if self.get_model_name(target_model) in [
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
+                "Qwen3VLMoeForConditionalGeneration",
+                "GlmOcrForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
@@ -1204,6 +1251,7 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
+        slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
@@ -1214,12 +1262,26 @@ class SpecDecodeBaseProposer:
                 num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
                     num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
                 )
-                cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
-                    num_tokens_dp_padded
-                )
-                num_input_tokens = batch_desc.num_tokens
+                if use_cudagraphs:
+                    cudagraph_runtime_mode, batch_desc = (
+                        self.cudagraph_dispatcher.dispatch(num_tokens_dp_padded)
+                    )
+                    num_input_tokens = batch_desc.num_tokens
+                else:
+                    cudagraph_runtime_mode = CUDAGraphMode.NONE
+                    num_input_tokens = num_tokens_dp_padded
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[self.dp_rank] = num_input_tokens
+
+            # Make sure to use EAGLE's own buffer during cudagraph capture.
+            if (
+                self.attn_layer_names
+                and slot_mappings is not None
+                and self.attn_layer_names[0] in slot_mappings
+            ):
+                slot_mapping_dict = self._get_slot_mapping(num_input_tokens)
+            else:
+                slot_mapping_dict = slot_mappings or {}
 
             with set_forward_context(
                 None,
@@ -1227,6 +1289,7 @@ class SpecDecodeBaseProposer:
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=slot_mapping_dict,
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
