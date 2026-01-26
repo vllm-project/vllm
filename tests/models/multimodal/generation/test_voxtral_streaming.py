@@ -23,7 +23,6 @@ from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
-from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM, StreamingInput
 
 
@@ -54,7 +53,7 @@ EXPECTED_TEXT = [
         "Here is Junior to third base. They're going to wave him in. "
         "The throw to the plate will be late. The Mariners are going"
         " to play. For the American League Championship, "
-        "I don't believe it. It just continues. My oh, my."
+        "I don't believe it. It just continues. My, oh, my."
     ),
 ]
 
@@ -139,7 +138,9 @@ class RealTimeAudioInput:
 
         # mutable objects
         self._start = 0
-        self._end = self.streaming_delay + self.streaming_size
+
+        n_left_pad_samples = self._config.raw_audio_length_per_tok * self._config.n_left_pad_tokens
+        self._end = self.streaming_delay + n_left_pad_samples + self.streaming_size
         self._queue: asyncio.Queue[StreamingInput | None] = asyncio.Queue()
 
     @classmethod
