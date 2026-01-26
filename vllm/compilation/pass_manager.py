@@ -131,7 +131,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
-            if rocm_aiter_ops.is_enabled():
+            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
                 self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
 
             if self.pass_config.fuse_attn_quant:

@@ -102,6 +102,16 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
     ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
 
+def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if RMS norm custom op is active and hidden size is 2880 i.e. gpt-oss;
+    otherwise Inductor handles fusion."""
+
+    return (
+        cfg.compilation_config.is_custom_op_enabled("rms_norm")
+        and cfg.model_config.get_hidden_size() == 2880
+    )
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {

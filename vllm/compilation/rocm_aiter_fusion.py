@@ -419,7 +419,9 @@ class AddAiterRMSNormPadPattern:
         def pattern(
             input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
-            pad_size = self.x_pad_to_multiple - (self.hidden_size % self.x_pad_to_multiple)
+            pad_size = self.x_pad_to_multiple - (
+                self.hidden_size % self.x_pad_to_multiple
+            )
             result_rms, residual_out = self.rmsnorm_matcher(input, weight, residual)
             result = torch.nn.functional.pad(
                 result_rms, (0, pad_size), mode="constant", value=0.0
@@ -456,11 +458,14 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
             pass_name="rocm_aiter_triton_add_rmsnorm_pad_fusion_pass"
         )
 
-        # gpt-oss has hidden size 2880; padded by 128 on gfx942 and 256 on gfx950 respectively
+        # gpt-oss has hidden size 2880
+        # padded to a multiple of 128 on gfx942 and 256 on gfx950 respectively
         hidden_size = 2880
         for epsilon in [1e-5, 1e-6]:
             for x_pad_to_multiple in [128, 256]:
-                AddAiterRMSNormPadPattern(epsilon, hidden_size, x_pad_to_multiple).register(self.patterns)
+                AddAiterRMSNormPadPattern(
+                    epsilon, hidden_size, x_pad_to_multiple
+                ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
