@@ -9,7 +9,6 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
@@ -57,19 +56,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         if self.defer_input_quant:
             return a1, None, None, None, None
 
-        a1_scale = (
-            quant_config.a1_gscale
-            if (quant_config.quant_dtype == "nvfp4")
-            else quant_config.a1_scale
-        )
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            a1_scale,
-            quant_config.quant_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-            is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
-        )
+        a1q, a1q_scale = self._quantize_input(a1, quant_config)
 
         return a1q, a1q_scale, None, None, None
 
@@ -83,21 +70,7 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         if self.defer_input_quant:
             return a1, None
 
-        a1_scale = (
-            quant_config.a1_gscale
-            if (quant_config.quant_dtype == "nvfp4")
-            else quant_config.a1_scale
-        )
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            a1_scale,
-            quant_config.quant_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-            is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
-        )
-
-        return a1q, a1q_scale
+        return self._quantize_input(a1, quant_config)
 
     def finalize(
         self,

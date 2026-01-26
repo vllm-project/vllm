@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     apply_moe_activation,
     count_expert_num_tokens,
     disable_inplace,
+    moe_kernel_quantize_input,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -189,6 +190,25 @@ class FusedMoEPrepareAndFinalize(ABC):
         finalize_async.
         """
         return False
+
+    def _quantize_input(
+        self,
+        a1: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        a1_scale = (
+            quant_config.a1_gscale
+            if quant_config.use_nvfp4_w4a4
+            else quant_config.a1_scale
+        )
+        return moe_kernel_quantize_input(
+            a1,
+            a1_scale,
+            quant_config.quant_dtype,
+            quant_config.per_act_token_quant,
+            quant_config.block_shape,
+            is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
+        )
 
     @abstractmethod
     def prepare(
