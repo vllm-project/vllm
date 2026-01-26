@@ -1,0 +1,25 @@
+# Fast fork Dockerfile - builds on vLLM's official image
+# Only rebuilds your Python changes, skips all C++/CUDA compilation
+
+ARG VLLM_BASE_VERSION=v0.14.0
+FROM vllm/vllm-openai:${VLLM_BASE_VERSION}
+
+# Set working directory
+WORKDIR /workspace
+
+# Copy your fork's code
+COPY vllm /workspace/vllm
+COPY tests /workspace/tests
+COPY pyproject.toml setup.py /workspace/
+
+# Reinstall vLLM from your fork (Python-only, no C++ rebuild)
+RUN pip uninstall -y vllm && \
+    pip install --no-cache-dir -e . --no-build-isolation
+
+# Labels for your fork
+LABEL org.opencontainers.image.source="https://github.com/inference-sim/vllm"
+LABEL org.opencontainers.image.description="vLLM fork with journey tracing (inference-sim)"
+LABEL org.opencontainers.image.vendor="inference-sim"
+
+# Keep the same entrypoint as vLLM
+ENTRYPOINT ["vllm", "serve"]

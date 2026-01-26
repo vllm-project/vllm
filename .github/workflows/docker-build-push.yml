@@ -101,21 +101,17 @@ jobs:
             org.opencontainers.image.vendor=inference-sim
             org.opencontainers.image.licenses=Apache-2.0
 
-      - name: Build and push Docker image
+      - name: Build and push Docker image (fast fork build)
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ./docker/Dockerfile
+          file: ./Dockerfile.fork
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          target: vllm-openai
           build-args: |
-            max_jobs=2
-            nvcc_threads=1
-            buildkite_commit=${{ github.sha }}
-            GIT_REPO_CHECK=0
+            VLLM_BASE_VERSION=v0.14.0
           cache-from: type=gha
           cache-to: type=gha,mode=min
 
