@@ -84,6 +84,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -5128,7 +5129,7 @@ class GPUModelRunner(
         graphs from profiling are deleted after measurement and their private
         pool is automatically cleaned up.
         """
-        torch.cuda.synchronize()
+        current_platform.synchronize()
         if hasattr(self, "kv_caches") and self.kv_caches:
             for i in range(len(self.kv_caches)):
                 self.kv_caches[i] = None  # type: ignore
@@ -5147,7 +5148,7 @@ class GPUModelRunner(
                 layer.kv_cache = []
 
         gc.collect()
-        torch.cuda.empty_cache()
+        current_platform.empty_cache()
 
         logger.debug("Cleaned up profiling KV cache and CUDA graphs")
 
@@ -5195,7 +5196,7 @@ class GPUModelRunner(
             piecewise_count,
             piecewise_largest,
         )
-        profiling_pool = torch.cuda.graph_pool_handle()
+        profiling_pool = current_platform.graph_pool_handle()
 
         # Swap graph pool to private one (to avoid corrupting global pool)
         original_pool = None
@@ -5227,9 +5228,9 @@ class GPUModelRunner(
                 profile_seq_lens=profile_seq_lens,
                 sync_and_empty_cache_before_capture=measure_first_capture,
             )
-            torch.cuda.synchronize()
+            current_platform.synchronize()
             first_capture_memory = (
-                before_first_capture - torch.cuda.mem_get_info()[0]
+                before_first_capture - current_platform.mem_get_info()[0]
                 if measure_first_capture
                 else 0
             )
@@ -5242,15 +5243,15 @@ class GPUModelRunner(
                         second_size = size
                         break
                 if second_size is not None:
-                    torch.cuda.synchronize()
+                    current_platform.synchronize()
                     before = self._warmup_and_capture(
                         second_size,
                         cudagraph_runtime_mode=cudagraph_runtime_mode,
                         uniform_decode=uniform_decode,
                         num_warmups=0,
                     )
-                    torch.cuda.synchronize()
-                    per_graph = before - torch.cuda.mem_get_info()[0]
+                    current_platform.synchronize()
+                    per_graph = before - current_platform.mem_get_info()[0]
             return first_capture_memory, per_graph
 
         set_cudagraph_capturing_enabled(True)
@@ -5354,9 +5355,9 @@ class GPUModelRunner(
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
         with self._freeze_gc(), graph_capture(device=self.device):
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-            start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+            current_platform.synchronize()
+            current_platform.empty_cache()
+            start_free_gpu_memory = current_platform.mem_get_info()[0]
 
             for (
                 runtime_mode,
@@ -5366,10 +5367,10 @@ class GPUModelRunner(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
                 )
-                torch.cuda.synchronize()
+                current_platform.synchronize()
 
-            torch.cuda.synchronize()
-            end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+            current_platform.synchronize()
+            end_free_gpu_memory = current_platform.mem_get_info()[0]
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
@@ -5379,8 +5380,8 @@ class GPUModelRunner(
         set_cudagraph_capturing_enabled(False)
 
         # Release fragmented memory from graph capture process.
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        current_platform.synchronize()
+        current_platform.empty_cache()
 
         # Lock workspace to prevent resizing during execution.
         # Max workspace sizes should have been captured during warmup/profiling.
@@ -5428,9 +5429,9 @@ class GPUModelRunner(
                 activate_lora=activate_lora,
             )
         if sync_and_empty_cache_before_capture:
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
-        before_capture = torch.cuda.mem_get_info()[0]
+            current_platform.synchronize()
+            current_platform.empty_cache()
+        before_capture = current_platform.mem_get_info()[0]
         self._dummy_run(
             num_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -5496,7 +5497,7 @@ class GPUModelRunner(
                 activate_lora=activate_lora,
                 allow_microbatching=allow_microbatching,
             )
-            torch.cuda.synchronize()
+            current_platform.synchronize()
         self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
