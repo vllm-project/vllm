@@ -26,9 +26,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Install PyTorch CPU (pre-compiled wheel, no compilation)
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          # Install test dependencies, ignoring torch requirement (already installed)
-          grep -v "^torch==" requirements/test.txt > /tmp/test-requirements.txt
+          pip install torch torchaudio torchvision --index-url https://download.pytorch.org/whl/cpu
+          # Install test dependencies, excluding torch packages (already installed)
+          grep -v -E "^(torch|torchaudio|torchvision)==" requirements/test.txt > /tmp/test-requirements.txt
           pip install -r /tmp/test-requirements.txt
           # Install minimal runtime dependencies
           pip install msgspec opentelemetry-api opentelemetry-sdk
