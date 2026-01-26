@@ -75,6 +75,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTokenSym,
     kNvfp4Dynamic,
     kNvfp4Static,
+    pad_nvfp4_activation_for_cutlass,
+    pad_nvfp4_weight_for_cutlass,
+    slice_nvfp4_output,
+    swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
@@ -1187,8 +1191,53 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
         )
 
-        # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
+        # Calculate `1 / input_scale` so that we don't need to do so at runtime
+        layer.input_scale_inv = Parameter(
+            (1 / layer.input_scale).to(torch.float32), requires_grad=False
+        )
+
+        # Swizzle the weight blockscale.
+        # contracting dimension is input dimension
+        # block_size = 16;
+        assert layer.weight_scale.dtype == torch.float8_e4m3fn, (
+            "Weight Block scale must be represented as FP8-E4M3"
+        )
+
+        if self.backend == "marlin":
+            prepare_fp4_layer_for_marlin(layer)
+            del layer.alpha
+            del layer.input_scale
+        elif self.backend == "flashinfer-trtllm":
+            # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
+            # FlashInfer provides nvfp4_quantize to quantize + shuffle the
+            # layout but we use our own quantization so we have to call
+            # shuffles ourselves.
+            from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
+
+            weight = layer.weight.data
+            weight_scale = layer.weight_scale.data
+
+            epilogue_tile_m = 128
+            weight = shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m)
+            weight_scale = (
+                shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
+                .reshape(weight_scale.shape)
+                .view(torch.float8_e4m3fn)
+            )
+
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            layer.weight = Parameter(weight, requires_grad=False)
+        else:
+            # Swizzle block scales and pad the packed NVFP4 weights for kernel
+            # alignment (CUTLASS/FlashInfer require K and N divisible by 32).
+            swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
+            layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
+
+            weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
+                layer.weight.data
+            )
+            layer.weights_padding_cols = weights_padding_cols
+            layer.weight = Parameter(weight, requires_grad=False)
 
     def apply(
         self,
@@ -1210,7 +1259,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             )
 
         output_dtype = x.dtype
-        output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(
@@ -1225,6 +1273,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         assert layer.weight_scale.dtype == torch.float8_e4m3fn
         assert layer.alpha.dtype == torch.float32
 
+        # Pad activations to match weight K-dimension padding
+        weights_padding_cols = getattr(layer, "weights_padding_cols", 0)
+        output_size = layer.output_size_per_partition
+        output_shape = [x.shape[0], output_size]
+        x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
+
         mm_args = (
             x_fp4,
             layer.weight,
@@ -1233,6 +1287,20 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.alpha,
             output_dtype,
         )
+
+        if self.backend.startswith("flashinfer-"):
+            backend_name = self.backend[len("flashinfer-") :]
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
+        else:
+            assert self.backend == "cutlass"
+            out = cutlass_scaled_fp4_mm(*mm_args)
+
+        # Slice output to remove N-dimension padding
+        out = slice_nvfp4_output(out, output_size)
+
+        if bias is not None:
+            out = out + bias
+        return out.view(*output_shape)
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):

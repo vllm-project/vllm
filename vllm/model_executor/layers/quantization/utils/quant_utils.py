@@ -813,3 +813,70 @@ def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tens
         t |= ((nib - 8) & 0xF) << shift
 
     return t
+
+
+def round_up(x: int, m: int) -> int:
+    """Round up x to the nearest multiple of m."""
+    return (x + m - 1) // m * m
+
+
+def pad_nvfp4_weight_for_cutlass(
+    weight: torch.Tensor,
+    alignment: int = 32,
+) -> tuple[torch.Tensor, int]:
+    """
+    Pad packed NVFP4 weights so that both N (rows) and K (columns) satisfy
+    the alignment constraints required by CUTLASS / FlashInfer FP4 kernels.
+
+    CUTLASS FP4 kernel requires both K and N matrix dimensions to be divisible
+    by 32 for aligned memory access and efficient tensor core operations.
+    """
+    weight_current_rows = weight.shape[0]
+
+    # Pad N dimension (rows) if not aligned
+    if weight_current_rows % alignment != 0:
+        total_rows = round_up(weight_current_rows, alignment)
+        pad_rows = total_rows - weight_current_rows
+        weight = torch.nn.functional.pad(weight, (0, 0, 0, pad_rows)).contiguous()
+
+    # Check K dimension alignment
+    # 2 FP4 items are packed per byte in the input dimension
+    weight_current_col_bytes = weight.shape[1]
+    weight_current_col_elements = weight_current_col_bytes * 2
+
+    weights_padding_bytes = 0
+    if weight_current_col_elements % alignment != 0:
+        total_cols = round_up(weight_current_col_elements, alignment)
+        pad_cols = total_cols - weight_current_col_elements
+        # Convert from FP4 element count to bytes (2 FP4 values per byte)
+        # pad_cols is always even since alignment=32 and current elements are even
+        pad_bytes = pad_cols // 2
+        weight = torch.nn.functional.pad(weight, (0, pad_bytes, 0, 0)).contiguous()
+        weights_padding_bytes = pad_bytes
+
+    return weight, weights_padding_bytes
+
+
+def pad_nvfp4_activation_for_cutlass(
+    x_fp4: torch.Tensor,
+    weights_padding_bytes: int,
+) -> torch.Tensor:
+    """
+    Pad packed FP4 activations to match the K-dimension padding applied to weights.
+    The padding is in bytes (tensor dimension), not FP4 elements.
+    """
+    if weights_padding_bytes > 0:
+        return torch.nn.functional.pad(x_fp4, (0, weights_padding_bytes)).contiguous()
+    return x_fp4
+
+
+def slice_nvfp4_output(
+    out: torch.Tensor,
+    output_size: int,
+) -> torch.Tensor:
+    """
+    Slice the output tensor to remove padding in N dimension if weight was padded.
+    """
+    if out.shape[-1] != output_size:
+        return out[..., :output_size].contiguous()
+    return out
