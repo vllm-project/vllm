@@ -193,6 +193,8 @@ class RocmAttentionBackend(AttentionBackend):
                 "FlexAttention backend which supports all head sizes."
             )
 
+    forward_includes_kv_cache: bool = False
+
     @staticmethod
     def get_name() -> str:
         return "ROCM_ATTN"
@@ -330,42 +332,6 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache, self.num_kv_heads, self.head_size
         )
 
-        if self.kv_sharing_target_layer_name is None:
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-
-            # Get the actual block_size from value_cache
-            # value_cache shape: [num_blocks, num_heads, head_size, block_size]
-            block_size = value_cache.shape[3]
-            # Determine if it is a power of 2
-            is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-
-            if is_pow2:
-                # Normal 16, 32, 64, etc., use vLLM native HIP C++ logic
-                PagedAttention.write_to_paged_cache(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
-            else:
-                # Case B: Non-standard blocks (e.g., 544 in Qwen3),
-                # force using our modified Triton logic
-                triton_reshape_and_cache_flash(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
-
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
@@ -403,3 +369,51 @@ class RocmAttentionImpl(AttentionImpl):
         )
 
         return output
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = PagedAttention.split_kv_cache(
+            kv_cache, self.num_kv_heads, self.head_size
+        )
+
+        if self.kv_sharing_target_layer_name is None:
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+
+            # Get the actual block_size from value_cache
+            # value_cache shape: [num_blocks, num_heads, head_size, block_size]
+            block_size = value_cache.shape[3]
+            # Determine if it is a power of 2
+            is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
+
+            if is_pow2:
+                # Normal 16, 32, 64, etc., use vLLM native HIP C++ logic
+                PagedAttention.write_to_paged_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
+            else:
+                # Case B: Non-standard blocks (e.g., 544 in Qwen3),
+                # force using our modified Triton logic
+                triton_reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
