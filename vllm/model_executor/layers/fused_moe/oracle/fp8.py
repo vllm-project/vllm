@@ -54,7 +54,11 @@ def backend_to_kernel_cls(
     backend: Fp8MoeBackend,
 ) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
     if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-        raise NotImplementedError
+        from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_fp8_moe import (
+            FlashInferTrtLlmFp8Experts,
+        )
+
+        return FlashInferTrtLlmFp8Experts
 
     elif backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (

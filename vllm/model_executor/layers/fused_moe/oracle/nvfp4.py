@@ -67,9 +67,11 @@ def backend_to_kernel_cls(
     backend: NvFp4MoeBackend,
 ) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-        raise NotImplementedError(
-            "FLASHINFER_TRTLLM doesn't support Modular Kernel Interface"
+        from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_nvfp4_moe import (
+            FlashInferTrtLlmFp4Experts,
         )
+
+        return FlashInferTrtLlmFp4Experts
 
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
@@ -165,7 +167,7 @@ def select_nvfp4_moe_backend(
             k_cls, config, weight_key, activation_key, activation_format
         )
         if supported:
-            logger.info_once(_make_log_backend(backend))
+            logger.info_once(_make_log_backend(backend), scope="local")
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
