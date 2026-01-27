@@ -185,7 +185,7 @@ def flashinfer_alltoall_dispatch(
             ep_size,
         )
 
-        # Swizzle after the A2A if nvfp4 and the MoE kernel expects swizzled scales.
+        # Swizzle after the A2A if MoE kernel expects swizzled scales.
         if quant_config.quant_dtype == "nvfp4" and quant_config.is_nvfp4_scale_swizzled:
             if x_sf.element_size() == 1:
                 x_sf = x_sf.view(torch.uint8)
