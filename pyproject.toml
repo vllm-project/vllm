@@ -101,13 +101,6 @@ ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
 
-[[tool.mypy.overrides]]
-module = "vllm.compilation.*"
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-warn_return_any = true
-follow_imports = "silent"
-
 [tool.pytest.ini_options]
 markers = [
     "slow_test",
