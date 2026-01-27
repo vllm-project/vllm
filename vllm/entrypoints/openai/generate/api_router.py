@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from vllm.entrypoints.logger import RequestLogger
     from vllm.tasks import SupportedTask
 else:
-    RequestLogger = Any
+    RequestLogger = object
 
 
 def register_generate_api_routers(app: FastAPI):
