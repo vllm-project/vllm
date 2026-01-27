@@ -95,6 +95,41 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
         return None
 
 
+def inject_trace_context(span, carrier: dict[str, str] | None = None) -> dict[str, str] | None:
+    """Inject span context into carrier dict for W3C Trace Context propagation.
+
+    Args:
+        span: The span whose context should be injected
+        carrier: Optional dict to inject into (modified in place). If None, creates new dict.
+
+    Returns:
+        The carrier dict with injected context. Returns carrier unchanged if:
+        - OTEL is unavailable (returns input carrier, which may be None)
+        - span is None (returns input carrier, which may be None)
+        - Injection fails due to exception (returns carrier, guaranteed dict after line 117)
+    """
+    if not is_otel_available():
+        return carrier
+
+    if span is None:
+        return carrier
+
+    try:
+        # Create or use existing carrier
+        if carrier is None:
+            carrier = {}
+
+        # Inject span context using W3C Trace Context propagator
+        from opentelemetry import trace
+        context = trace.set_span_in_context(span)
+        TraceContextTextMapPropagator().inject(carrier, context=context)
+
+        return carrier
+    except Exception:
+        # Injection failure should not break request processing
+        return carrier
+
+
 def extract_trace_headers(headers: Mapping[str, str]) -> Mapping[str, str]:
     return {h: headers[h] for h in TRACE_HEADERS if h in headers}
 

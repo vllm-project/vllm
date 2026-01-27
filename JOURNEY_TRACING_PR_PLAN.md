@@ -189,7 +189,7 @@ def _end_core_span_and_cleanup(self, request: Request) -> None:
 | #4 | `pr4ofjourney` | Emit events to core spans | ~113 lines | 9 | ✅ **COMPLETED** |
 | #5 | `pr5ofjourney` | Add API span tracking dict | ~67 lines | 8 | ✅ **COMPLETED** |
 | #6 | `pr6ofjourney` | Create & close API spans | ~150 lines | 17 | ✅ **COMPLETED** |
-| #7 | `journey-tracing-07-context-propagation` | Link parent-child spans | ~25 lines | 4 | No new resources |
+| #7 | `journey-tracing-07-context-propagation` | Link parent-child spans | ~25 lines | 12 | ✅ **COMPLETED** |
 | #8 | `journey-tracing-08-api-additional-events` | Emit API lifecycle events | ~80 lines | 5 | No new resources |
 | #9 | `journey-tracing-09-remove-buffering` | Remove journey event buffering | ~150 removed | 4 | Clean break |
 
@@ -212,9 +212,9 @@ PR #4 (Core Event Emit) ✅ COMPLETED
     ↓
 PR #5 (API Metadata) ← independent, can be parallel
     ↓
-PR #6 (API Span + DEPARTED/ABORTED) ← MUST include all closure paths
+PR #6 (API Span + DEPARTED/ABORTED) ✅ COMPLETED
     ↓
-PR #7 (Context Propagation) ← depends on #2 and #6
+PR #7 (Context Propagation) ✅ COMPLETED
     ↓
 PR #8 (API Additional Events) ← no new resources, safe
     ↓
@@ -1638,13 +1638,22 @@ class OpenAIServingChat(OpenAIServing):
 
 ---
 
-### PR #7: API↔Engine - Context Propagation
+### PR #7: API↔Engine - Context Propagation ✅ COMPLETED
+
+**Status**: ✅ Merged (commits 03b8a674e, edf577081)
 
 **Branch**: `journey-tracing-07-context-propagation`
 
 **Goal**: Inject API span context into trace_headers for parent-child linkage.
 
 **Why Safe**: No new resources created, just injects context into existing dict. Defensive error handling.
+
+**What was delivered**:
+- Added `inject_trace_context()` helper to `vllm/tracing.py` (~30 lines)
+- Injection call in `chat_completion/serving.py` after API span creation (~16 lines)
+- 12 comprehensive tests in `test_context_propagation.py` (~430 lines)
+- All behavioral guarantees verified (G1-G6, I1-I3)
+- Polish fixes applied: clarified docstring, strengthened test to read span context
 
 #### Changes
 
