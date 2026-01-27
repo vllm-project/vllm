@@ -330,6 +330,16 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
+    # drain shutdown only supported in single-process mode
+    shutdown_mode = getattr(args, "shutdown_mode", "immediate")
+    if shutdown_mode == "drain":
+        if getattr(args, "headless", False):
+            raise ValueError("--shutdown-mode=drain is not supported in headless mode")
+        if getattr(args, "api_server_count", 1) > 1:
+            raise ValueError(
+                "--shutdown-mode=drain is not supported with --api-server-count > 1"
+            )
+
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
     parser_for_docs = FlexibleArgumentParser(
