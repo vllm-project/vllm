@@ -144,11 +144,6 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        if self.model_config.hf_config.model_type == "kimi_k2":
-            self.tool_call_id_type = "kimi_k2"
-        else:
-            self.tool_call_id_type = "random"
-
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
@@ -455,6 +450,7 @@ class OpenAIServingChat(OpenAIServing):
 
         # Streaming response
         tokenizer = self.renderer.tokenizer
+        assert tokenizer is not None
 
         if request.stream:
             return self.chat_completion_stream_generator(
@@ -1578,7 +1574,7 @@ class OpenAIServingChat(OpenAIServing):
                             generated_id = make_tool_call_id(
                                 id_type=self.tool_call_id_type,
                                 func_name=tc.name,
-                                idx=history_tool_call_cnt,
+                                idx=history_tool_call_cnt + idx,
                             )
                             tool_call_class_items.append(
                                 tool_call_class(id=generated_id, function=tc)
@@ -1613,7 +1609,7 @@ class OpenAIServingChat(OpenAIServing):
                             generated_id = make_tool_call_id(
                                 id_type=self.tool_call_id_type,
                                 func_name=tool_call.name,
-                                idx=history_tool_call_cnt,
+                                idx=history_tool_call_cnt + idx,
                             )
                             tool_call_class_items.append(
                                 tool_call_class(id=generated_id, function=tool_call)
@@ -1661,7 +1657,7 @@ class OpenAIServingChat(OpenAIServing):
                                 generated_id = make_tool_call_id(
                                     id_type=self.tool_call_id_type,
                                     func_name=tc.name,
-                                    idx=history_tool_call_cnt,
+                                    idx=history_tool_call_cnt + idx,
                                 )
                                 tool_call_items.append(
                                     tool_call_class(id=generated_id, function=tc)
