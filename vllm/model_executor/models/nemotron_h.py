@@ -771,6 +771,9 @@ class NemotronHForCausalLM(
         "lm_head": "output_embeddings",
     }
 
+    # Skip MTP (Multi-Token Prediction) layers during LoRA loading
+    lora_skip_prefixes = ["mtp."]
+
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,
