@@ -1053,6 +1053,14 @@ class LLM:
             )
 
         if truncate_prompt_tokens is not None:
+            warnings.warn(
+                "The `truncate_prompt_tokens` parameter in `LLM.encode()` "
+                "is deprecated and will be removed in v0.16. "
+                "Please pass it via `tokenization_kwargs` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
             tokenization_kwargs = merge_kwargs(
                 tokenization_kwargs,
                 dict(truncate_prompt_tokens=truncate_prompt_tokens),
