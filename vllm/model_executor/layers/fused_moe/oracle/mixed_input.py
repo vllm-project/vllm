@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -15,9 +16,18 @@ from vllm.model_executor.layers.fused_moe.config import (
     int4_w4a16_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_act_int8_process_scales,
+    marlin_make_workspace_new,
+    marlin_moe_permute_scales,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.fused_moe import FusedMoE
+from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
 
@@ -125,36 +135,126 @@ def select_mixed_input_moe_backend(
 
 
 def convert_to_mixed_input_moe_kernel_format(
-    backend: MixedInputMoEBackend,
-    layer: torch.nn.Module,
+    layer: "FusedMoE",
+    mixed_input_moe_backend: MixedInputMoEBackend,
+    num_bits: int,
+    packed_factor: int,
+    group_size: int,
+    num_groups_w13: int,
+    num_groups_w2: int,
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
-    w13_scale_2: torch.Tensor,
-    a13_scale: torch.Tensor | None,
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
-    w2_scale_2: torch.Tensor,
-    a2_scale: torch.Tensor | None,
-    is_act_and_mul: bool,
+    w13_g_idx: torch.Tensor | None = None,
+    w2_g_idx: torch.Tensor | None = None,
+    actorder: str | None = None,
+    marlin_input_dtype: torch.dtype | None = None,
 ) -> tuple[
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
+    torch.Tensor,  # w13
+    torch.Tensor,  # w13_scale
+    torch.Tensor | None,  # w13_g_idx
+    torch.Tensor | None,  # w13_g_idx_sort_idxs
+    torch.Tensor | None,  # a13_gscale
+    torch.Tensor,  # w2
+    torch.Tensor,  # w2_scale
+    torch.Tensor | None,  # w2_g_idx
+    torch.Tensor | None,  # w2_g_idx_sort_idxs
+    torch.Tensor | None,  # a2_gscale
 ]:
+    if mixed_input_moe_backend in [
+        MixedInputMoEBackend.MARLIN,
+        MixedInputMoEBackend.BATCHED_MARLIN,
+    ]:
+        is_a_8bit = marlin_input_dtype is not None and marlin_input_dtype.itemsize == 1
+
+        if marlin_input_dtype == torch.float8_e4m3fn:
+            # NOTE: for non-zp quantization format only
+            ops.marlin_int4_fp8_preprocess(w13, inplace=True)
+            ops.marlin_int4_fp8_preprocess(w2, inplace=True)
+            w13_scale = w13_scale * 512
+            w2_scale = w2_scale * 512
+
+        assert w13_g_idx is not None
+        assert w2_g_idx is not None
+
+        # GIDX - for activation re-ordering.
+        if actorder == "group":
+            num_experts = w13_g_idx.shape[0]
+            w13_g_idx_sort_idxs = torch.empty_like(w13_g_idx)
+            w2_g_idx_sort_idxs = torch.empty_like(w2_g_idx)
+            w13_sorted_g_idx = torch.empty_like(w13_g_idx)
+            w2_sorted_g_idx = torch.empty_like(w2_g_idx)
+
+            for e in range(num_experts):
+                w13_g_idx_sort_idxs[e] = torch.argsort(w13_g_idx[e]).to(torch.int32)
+                w2_g_idx_sort_idxs[e] = torch.argsort(w2_g_idx[e]).to(torch.int32)
+                w13_sorted_g_idx[e] = w13_g_idx[e][w13_g_idx_sort_idxs[e]]
+                w2_sorted_g_idx[e] = w2_g_idx[e][w2_g_idx_sort_idxs[e]]
+
+            w13_g_idx = w13_sorted_g_idx
+            w2_g_idx = w2_sorted_g_idx
+        else:
+            device = w13.device
+            E = w13_g_idx.shape[0]
+            w13_g_idx = torch.empty((E, 0), dtype=torch.int32, device=device)
+            w2_g_idx = torch.empty((E, 0), dtype=torch.int32, device=device)
+            w13_g_idx_sort_idxs = torch.empty((E, 0), dtype=torch.int32, device=device)
+            w2_g_idx_sort_idxs = torch.empty((E, 0), dtype=torch.int32, device=device)
+
+        # WEIGHTS - repack into MARLIN format.
+        w13 = ops.gptq_marlin_moe_repack(
+            w13,
+            perm=w13_g_idx_sort_idxs,
+            size_k=w13.shape[1] * packed_factor,
+            size_n=w13.shape[2],
+            num_bits=num_bits,
+            is_a_8bit=is_a_8bit,
+        )
+        w2 = ops.gptq_marlin_moe_repack(
+            w2,
+            perm=w2_g_idx_sort_idxs,
+            size_k=w2.shape[1] * packed_factor,
+            size_n=w2.shape[2],
+            num_bits=num_bits,
+            is_a_8bit=is_a_8bit,
+        )
+
+        # SCALES - permute into MARLIN format.
+        w13_scale = marlin_moe_permute_scales(
+            s=w13_scale,
+            size_k=w13_scale.shape[1],  # is this right?
+            size_n=w13_scale.shape[2],
+            group_size=group_size,
+            is_a_8bit=is_a_8bit,
+        )
+        if marlin_input_dtype == torch.int8 and num_groups_w13 > 1:
+            w13_scale, a13_gscale = marlin_act_int8_process_scales(w13_scale)
+
+        w2_scale = marlin_moe_permute_scales(
+            s=w2_scale,
+            size_k=w2_scale.shape[1]
+            * (group_size if group_size != -1 else packed_factor),
+            size_n=w2_scale.shape[2],
+            group_size=group_size,
+            is_a_8bit=is_a_8bit,
+        )
+        if marlin_input_dtype == torch.int8 and num_groups_w2 > 1:
+            w2_scale, a2_gscale = marlin_act_int8_process_scales(w2_scale)
+
+        layer.workspace = marlin_make_workspace_new(device, 4)
+
     return (
         w13,
         w13_scale,
-        w13_scale_2,
-        a13_scale,
+        w13_g_idx,
+        w13_g_idx_sort_idxs,
+        a13_gscale,
         w2,
         w2_scale,
-        w2_scale_2,
-        a2_scale,
+        w2_g_idx,
+        w2_g_idx_sort_idxs,
+        a2_gscale,
     )
 
 

@@ -1401,13 +1401,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             and self.marlin_input_dtype.itemsize == 1
         )
 
-        if self.marlin_input_dtype == torch.float8_e4m3fn:
-            # NOTE: for non-zp quantization format only
-            ops.marlin_int4_fp8_preprocess(layer.w13_weight_packed, inplace=True)
-            ops.marlin_int4_fp8_preprocess(layer.w2_weight_packed, inplace=True)
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data * 512
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data * 512
-
         # when running models with grouped act order,
         # resort to g_idx values provided in checkpoint
         if self.actorder == "group":
