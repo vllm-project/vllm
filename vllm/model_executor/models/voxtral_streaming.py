@@ -41,6 +41,8 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from .utils import (
     _flatten_embeddings,
 )
+from mistral_common.tokens.tokenizers.audio import AudioConfig
+from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
@@ -124,6 +126,74 @@ def _expand_tensor(input_tensor: torch.Tensor, scaling: int) -> torch.Tensor:
     return (base.unsqueeze(1) + offsets).view(-1)
 
 
+class RealTimeAudioProcessor:
+
+    def __init__(self, tokenizer: MistralTokenizer) -> None:
+        self._look_ahead_in_ms = 2.5
+        self._look_back_in_ms = 52.5
+
+        self._tokenizer = tokenizer
+        self._config: AudioConfig = (
+            self._tokenizer.instruct_tokenizer.audio_encoder.audio_config
+        )
+        self._sampling_rate = self._config.sampling_rate
+
+        self._audio: Audio | None = None
+
+        # mutable objects
+        self._start = 0
+
+        n_left_pad_samples = (
+            self._config.raw_audio_length_per_tok * self._config.n_left_pad_tokens
+        )
+        self._end = self.streaming_delay + n_left_pad_samples + self.streaming_size
+
+        self.look_ahead = self._get_len_in_samples(self._look_ahead_in_ms)
+        self.look_back = self._get_len_in_samples(self._look_back_in_ms)
+        self.streaming_delay = self._get_len_in_samples(self._config.transcription_delay_ms)
+        self.streaming_size = self._get_len_in_samples(1000 / self._config.frame_rate)
+
+        # always pre-allocate 30 second buffers
+        buffer_size = 30 * self._sampling_rate
+        self._buffer: np.ndarray = np.empty(buffer_size, dtype=np.float32)
+        self._filled_buffer_len = 0
+
+    @property
+    def start_idx(self):
+        return max(self._start - self.look_back, 0)
+
+    @property
+    def end_idx(self):
+        return self._end + self.look_ahead
+
+    @property
+    def is_chunk_complete(self) -> bool:
+        return self._filled_buffer_len >= self.end_idx
+
+    def _get_len_in_samples(self, len_in_ms: float) -> int:
+        _len_in_s = self._sampling_rate * len_in_ms / 1000
+        assert _len_in_s.is_integer(), _len_in_s
+        len_in_s = int(_len_in_s)
+
+        return len_in_s
+
+    def add_audio_chunk(self, audio_chunk: np.ndarray) -> None:
+        self._buffer[self._filled_buffer_len : self._filled_buffer_len + len(audio_chunk)] = audio_chunk
+        self._filled_buffer_len += len(audio_chunk)
+
+        # TODO(Patrick) - allocate new buffer if it's full
+    
+    def get_audio_chunk(self) -> np.ndarray | None:
+        if not self.is_chunk_complete:
+            return None
+
+        audio_chunk = self._buffer[self.start_idx: self.end_idx]
+        self._start = self._end
+        self._end = self._end + self.streaming_size
+
+        return audio_chunk
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     VoxtralStreamingMultiModalProcessor,
     info=VoxtralProcessingInfo,
@@ -147,6 +217,26 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         )
 
         self.n_delay_tokens = int(_n_delay_tokens)
+
+    @classmethod
+    # for realtime transcription
+    async def buffer_realtime_audio(
+        cls,
+        audio_stream: AsyncGenerator[np.ndarray, None],
+        model_config: ModelConfig,
+    ) -> AsyncGenerator[PromptType, None]:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        _look_ahead_in_ms = 2.5
+        _look_back_in_ms = 52.5
+        n_left_pad_samples = (
+            config.raw_audio_length_per_tok * config.n_left_pad_tokens
+        )
+        buffer_size = streaming_delay + n_left_pad_samples + streaming_size
+
+        buffer = np.empty(,  dtype=np.float32)
+        is_first_yield = True
+
+        async for audio in audio_stream:
 
     @property
     def audio_config(self):

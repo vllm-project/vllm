@@ -25,7 +25,7 @@ async def realtime_endpoint(websocket: WebSocket):
     7. Server sends transcription.done with final text + usage
     8. Repeat from step 4 for next utterance
 
-    Audio format: PCM16, 24kHz, mono, base64-encoded
+    Audio format: PCM16, 16kHz, mono, base64-encoded
     """
     app = websocket.app
     serving = app.state.openai_serving_realtime

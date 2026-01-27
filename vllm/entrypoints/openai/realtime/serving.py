@@ -48,9 +48,9 @@ class OpenAIServingRealtime(OpenAIServing):
         # Get speech-to-text configuration from the model
         # TODO(Patrick) - can we use the same config as before for
         # Speech-to-text
-        self.asr_config = self.model_cls.get_speech_to_text_config(
-            self.model_config, self.task_type
-        )
+        # self.asr_config = self.model_cls.get_speech_to_text_config(
+        #     self.model_config, self.task_type
+        # )
 
         # TODO: Add warmup for audio preprocessing if needed
         # self._warmup_audio_preprocessing()
@@ -94,29 +94,14 @@ class OpenAIServingRealtime(OpenAIServing):
 
         sampling_params = SamplingParams.from_optional(
             temperature=config.temperature if config else 0.0,
-            max_tokens=self.model_config.max_model_len,
+            max_tokens=1,
             output_kind=RequestOutputKind.DELTA,
             skip_clone=True,
         )
 
-        # Get and validate language from config
-        language = config.language if config and config.language else None
-        language = self.model_cls.validate_language(language)
-
-        # Process each audio chunk from the stream
-        async for audio_chunk in audio_stream:
-            # TODO: Let models' adapt the audio_chunk
-            # and yield adapted streaming input
-            # TODO(Patrick) - add get_streaming_prompt
-            # to voxtral
-            prompt = self.model_cls.get_streaming_prompt(
-                audio=audio_chunk,
-                stt_config=self.asr_config,
-                model_config=self.model_config,
-                language=language,
-                task_type=self.task_type,
-            )
-
+        # Process each audio chunk from the stream via model specific
+        # buffer_audio function
+        async for prompt in self.model_cls.buffer_realtime_audio(audio_stream):
             # Yield as StreamingInput for the engine
             yield StreamingInput(
                 prompt=prompt,
