@@ -1061,6 +1061,29 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
         assert quant_config.activation_scheme == "dynamic"
         assert quant_config.weight_block_size is None
 
+    def create_weights(
+        self,
+        layer: Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        # Explicitly call mixin's create_weights (MRO would pick base class)
+        OnlineWeightLoaderMixin.create_weights(
+            self,
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+    
+    def process_weights_after_loading(self, layer: Module) -> None:
+        OnlineWeightLoaderMixin.process_weights_after_loading(self, layer)
+
     def _create_scale_tensors(
         self,
         layer: Module,
@@ -1070,8 +1093,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
     ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
         """Create FP8 per-expert scale tensors."""
         layer.weight_block_size = None
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
 
         # WEIGHT_SCALES (per-expert for FP8)
         # Allocate 2 scales for w1 and w3 respectively.

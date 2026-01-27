@@ -153,6 +153,9 @@ class OnlineWeightLoaderMixin:
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
+
     def _create_scale_tensors(
         self,
         layer: Module,
