@@ -195,85 +195,67 @@ def parse_compute_capability(node: ast.ClassDef) -> str:
 
     min_cap: tuple[int, int] | None = None
     max_cap: tuple[int, int] | None = None
-    major_in_list: list[int] = []
-    exact_major: int | None = None
+    major_list: list[int] = []
 
-    for sub_node in ast.walk(method):
-        if not isinstance(sub_node, ast.Compare):
+    for n in ast.walk(method):
+        if not isinstance(n, ast.Compare):
             continue
 
-        # Handle `capability >= DeviceCapability(major, minor)`
-        for op, comparator in zip(sub_node.ops, sub_node.comparators):
-            cap = _extract_device_capability(comparator)
-            if cap is not None:
-                if isinstance(op, ast.GtE):
-                    min_cap = cap
-                elif isinstance(op, ast.LtE):
-                    max_cap = cap
+        # Handle `capability >= DeviceCapability(...)` or `capability <= ...`
+        for op, comp in zip(n.ops, n.comparators):
+            if not (
+                isinstance(comp, ast.Call)
+                and isinstance(comp.func, ast.Name)
+                and comp.func.id == "DeviceCapability"
+                and comp.args
+                and isinstance(comp.args[0], ast.Constant)
+            ):
+                continue
+            major = comp.args[0].value
+            minor = 0
+            if len(comp.args) > 1 and isinstance(comp.args[1], ast.Constant):
+                minor = comp.args[1].value
+            if isinstance(op, ast.GtE):
+                min_cap = (major, minor)
+            elif isinstance(op, ast.LtE):
+                max_cap = (major, minor)
 
-        # Handle `capability.major == N`
+        # Handle `capability.major == N` or `capability.major in [N, M]`
         if (
-            isinstance(sub_node.left, ast.Attribute)
-            and sub_node.left.attr == "major"
-            and len(sub_node.ops) == 1
-            and isinstance(sub_node.ops[0], ast.Eq)
-            and len(sub_node.comparators) == 1
-            and isinstance(sub_node.comparators[0], ast.Constant)
+            isinstance(n.left, ast.Attribute)
+            and n.left.attr == "major"
+            and len(n.ops) == 1
+            and len(n.comparators) == 1
         ):
-            exact_major = sub_node.comparators[0].value
+            comp = n.comparators[0]
+            if isinstance(n.ops[0], ast.Eq) and isinstance(comp, ast.Constant):
+                major_list.append(comp.value)
+            elif isinstance(n.ops[0], ast.In) and isinstance(comp, ast.List):
+                major_list.extend(
+                    e.value
+                    for e in comp.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, int)
+                )
 
-        # Handle `capability.major in [9, 10]`
-        if (
-            isinstance(sub_node.left, ast.Attribute)
-            and sub_node.left.attr == "major"
-            and len(sub_node.ops) == 1
-            and isinstance(sub_node.ops[0], ast.In)
-            and len(sub_node.comparators) == 1
-            and isinstance(sub_node.comparators[0], ast.List)
-        ):
-            for elt in sub_node.comparators[0].elts:
-                if isinstance(elt, ast.Constant) and isinstance(elt.value, int):
-                    major_in_list.append(elt.value)
+    if major_list:
+        major_list.sort()
+        if len(major_list) == 1:
+            return f"{major_list[0]}.x"
+        return f"{major_list[0]}.x-{major_list[-1]}.x"
 
-    # Format the result
-    if major_in_list:
-        major_in_list.sort()
-        if len(major_in_list) == 1:
-            return f"{major_in_list[0]}.x"
-        return f"{major_in_list[0]}.x-{major_in_list[-1]}.x"
-
-    if exact_major is not None:
-        return f"{exact_major}.x"
-
-    if min_cap is not None:
-        major, minor = min_cap
-        if max_cap is not None:
-            return f"{major}.x-{max_cap[0]}.x"
-        return f"≥{major}.{minor}"
+    if min_cap:
+        if max_cap:
+            return f"{min_cap[0]}.x-{max_cap[0]}.x"
+        return f"≥{min_cap[0]}.{min_cap[1]}"
 
     return "Any"
-
-
-def _extract_device_capability(node: ast.expr) -> tuple[int, int] | None:
-    """Extract (major, minor) from a DeviceCapability(...) call."""
-    if not isinstance(node, ast.Call):
-        return None
-    if not (isinstance(node.func, ast.Name) and node.func.id == "DeviceCapability"):
-        return None
-    if len(node.args) < 1 or not isinstance(node.args[0], ast.Constant):
-        return None
-    major = node.args[0].value
-    minor = 0
-    if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
-        minor = node.args[1].value
-    return (major, minor)
 
 
 def parse_attention_types(node: ast.ClassDef) -> str:
     """Parse supports_attn_type method."""
     method = find_method(node, "supports_attn_type")
     if method is None:
-        return "Decoder"  # Default
+        return "Decoder"
 
     type_map = {
         "DECODER": "Decoder",
@@ -283,31 +265,24 @@ def parse_attention_types(node: ast.ClassDef) -> str:
     }
     types: set[str] = set()
 
-    for sub_node in ast.walk(method):
+    for n in ast.walk(method):
         # Handle `attn_type in (AttentionType.DECODER, ...)`
-        if not isinstance(sub_node, ast.Compare):
-            continue
-        if not (len(sub_node.ops) == 1 and isinstance(sub_node.ops[0], ast.In)):
-            continue
-        if len(sub_node.comparators) != 1:
-            continue
-
-        comparator = sub_node.comparators[0]
-        # Handle both tuple and set expressions
-        if isinstance(comparator, ast.Tuple | ast.Set):
-            elts = comparator.elts
-        else:
+        if not (
+            isinstance(n, ast.Compare)
+            and len(n.ops) == 1
+            and isinstance(n.ops[0], ast.In)
+            and len(n.comparators) == 1
+            and isinstance(n.comparators[0], ast.Tuple | ast.Set)
+        ):
             continue
 
-        for elt in elts:
+        for elt in n.comparators[0].elts:
             if isinstance(elt, ast.Attribute) and elt.attr in type_map:
                 types.add(type_map[elt.attr])
 
     if not types:
         return "Decoder"
-    if len(types) >= 3:
-        return "All"
-    return ", ".join(sorted(types))
+    return "All" if len(types) >= 3 else ", ".join(sorted(types))
 
 
 def check_method_overrides(node: ast.ClassDef, method_name: str) -> bool:
@@ -722,42 +697,26 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.files:
-        relevant_files = [f for f in args.files if is_relevant_file(f)]
-        if not relevant_files:
-            sys.exit(0)
+    if args.files and not any(is_relevant_file(f) for f in args.files):
+        sys.exit(0)
 
     output_path = Path(args.output)
-
-    # Generate the documentation
     new_content = generate_docs()
 
     if args.check:
-        # Check mode: compare with existing file
+        regen_cmd = "python tools/pre_commit/generate_attention_backend_docs.py"
         if not output_path.exists():
-            print(f"❌ Documentation file does not exist: {output_path}")
-            print(
-                "Run 'python tools/pre_commit/generate_attention_backend_docs.py'"
-                " to generate it."
-            )
+            print(f"❌ Missing: {output_path}\nRun '{regen_cmd}' to generate.")
             sys.exit(1)
-
-        existing_content = output_path.read_text()
-        if existing_content != new_content:
-            print(f"❌ Documentation is out of date: {output_path}")
-            print(
-                "Run 'python tools/pre_commit/generate_attention_backend_docs.py'"
-                " to update it."
-            )
+        if output_path.read_text() != new_content:
+            print(f"❌ Out of date: {output_path}\nRun '{regen_cmd}' to update.")
             sys.exit(1)
-
-        print(f"✅ Documentation is up to date: {output_path}")
+        print(f"✅ Up to date: {output_path}")
         sys.exit(0)
 
-    # Write mode: generate the file
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(new_content)
-    print(f"Generated documentation: {output_path}")
+    print(f"Generated: {output_path}")
 
 
 if __name__ == "__main__":
