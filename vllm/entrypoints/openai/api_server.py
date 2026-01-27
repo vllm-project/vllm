@@ -182,8 +182,6 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
 
     register_realtime_api_router(app)
 
-    from vllm.entrypoints.openai.completion.api_router import (
-        attach_router as register_completion_api_router,
     from vllm.entrypoints.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )
