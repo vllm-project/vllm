@@ -449,8 +449,8 @@ run_serving_tests() {
 
     # save the compilation mode and optimization level on the serving results
     # whenever they are set
-    compilation_config_mode=$(echo "$server_params" | jq -r '."compilation_config.mode"')
-    optimization_level=$(echo "$server_params" | jq -r '.optimization_level')
+    compilation_config_mode=$(echo "$server_params" | jq -r '."compilation_config.mode" // empty')
+    optimization_level=$(echo "$server_params" | jq -r '.optimization_level // empty')
 
     # iterate over different QPS
     for qps in $qps_list; do
