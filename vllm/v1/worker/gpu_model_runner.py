@@ -1011,26 +1011,21 @@ class GPUModelRunner(
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker.
-                new_token_ids = req_data.new_token_ids[i]
-                # Add the sampled token(s) from the previous step (if any).
-                # This doesn't include "unverified" tokens like spec tokens.
-                num_new_tokens = (
-                    num_computed_tokens + len(new_token_ids) - req_state.num_tokens
-                )
-                if num_new_tokens > 0:
-                    # TODO(wentao): we may remove the new_token_ids handling logic
-                    # for async scheduling + PP or even for PP
-                    # new_token_ids is split in _make_cached_request_data
-                    # we don't guarantee the length of new_token_ids is always correct
-                    if len(new_token_ids) >= num_new_tokens:
-                        # truncate when new_token_ids is longers
-                        new_token_ids = new_token_ids[-num_new_tokens:]
-                    else:
-                        # pad -1 when new_token_ids is shorter
-                        new_token_ids = [-1] * (
-                            num_new_tokens - len(new_token_ids)
-                        ) + new_token_ids
-                    req_state.output_token_ids.extend(new_token_ids)
+                new_token_ids: list[int] = []
+                if req_data.new_token_ids:
+                    new_token_ids = req_data.new_token_ids[i]
+                    # Add the sampled token(s) from the previous step (if any).
+                    # This doesn't include "unverified" tokens like spec tokens.
+                    num_new_tokens = (
+                        num_computed_tokens + len(new_token_ids) - req_state.num_tokens
+                    )
+                    if num_new_tokens == 1:
+                        # Avoid slicing list in most common case.
+                        req_state.output_token_ids.append(new_token_ids[-1])
+                    elif num_new_tokens > 0:
+                        req_state.output_token_ids.extend(
+                            new_token_ids[-num_new_tokens:]
+                        )
             elif num_output_tokens < len(req_state.output_token_ids):
                 # Some output tokens were discarded due to a sync-KV-load
                 # failure. Align the cached state.
@@ -3803,6 +3798,14 @@ class GPUModelRunner(
             for i, req_id in enumerate(self.input_batch.req_ids)
             if i not in discard_req_indices_set
         }
+
+        # PP+async scheduling: advance per-request local cached output length by
+        # appending a placeholder (-1) token id.
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            if i in discard_req_indices_set:
+                continue
+            if (req_state := self.requests.get(req_id)) is not None:
+                req_state.output_token_ids.append(-1)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
