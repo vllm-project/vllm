@@ -1555,6 +1555,8 @@ class GPUModelRunner(
 
                 # Overwrite continuing requests with GPU-computed values
                 self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
+                # use valid_sampled_token_count_gpu to update num_accepted_tokens
+                self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
 
         # Copy mrope_position_delta for M-RoPE models.
         if self.uses_mrope:
