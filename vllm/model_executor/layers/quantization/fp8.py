@@ -1084,35 +1084,8 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
         )
         return w13_weight_scale, w2_weight_scale
 
-    def process_weights_after_loading(self, layer: Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-
-        # deferred initialization of randomly initialized weights for the
-        # `--load_format dummy` feature
-        if layer.w13_weight.device == torch.device("meta"):
-            w13_weight = torch.nn.Parameter(
-                torch.empty_like(layer.w13_weight, device=layer._load_device),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w13_weight, {"weight_loader": layer.w13_weight.weight_loader}
-            )
-            _copy_missing_attrs(layer.w13_weight, w13_weight)
-            layer.register_parameter("w13_weight", w13_weight)
-            initialize_single_dummy_weight(layer.w13_weight)
-        if layer.w2_weight.device == torch.device("meta"):
-            w2_weight = torch.nn.Parameter(
-                torch.empty_like(layer.w2_weight, device=layer._load_device),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w2_weight, {"weight_loader": layer.w2_weight.weight_loader}
-            )
-            _copy_missing_attrs(layer.w2_weight, w2_weight)
-            layer.register_parameter("w2_weight", w2_weight)
-            initialize_single_dummy_weight(layer.w2_weight)
-
+    def _quantize_and_setup_kernel(self, layer: Module) -> None:
+        """Quantize weights to FP8 and setup the kernel."""
         # If checkpoint is fp16, quantize in place.
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)

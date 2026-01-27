@@ -28,9 +28,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
     OnlineWeightLoaderMixin,
-    _copy_missing_attrs,
 )
-from vllm.model_executor.utils import set_weight_attrs
 
 
 class ExpertsInt8Config(QuantizationConfig):
@@ -122,35 +120,8 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase, OnlineWeightLoaderMixin):
         )
         return w13_weight_scale, w2_weight_scale
 
-    def process_weights_after_loading(self, layer: Module) -> None:
-        if getattr(layer, "_already_called_process_weights_after_loading", False):
-            return
-
-        # Handle dummy weights (--load_format dummy)
-        if layer.w13_weight.device == torch.device("meta"):
-            w13_weight = torch.nn.Parameter(
-                torch.empty_like(layer.w13_weight, device=layer._load_device),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w13_weight, {"weight_loader": layer.w13_weight.weight_loader}
-            )
-            _copy_missing_attrs(layer.w13_weight, w13_weight)
-            layer.register_parameter("w13_weight", w13_weight)
-            torch.nn.init.normal_(layer.w13_weight)
-
-        if layer.w2_weight.device == torch.device("meta"):
-            w2_weight = torch.nn.Parameter(
-                torch.empty_like(layer.w2_weight, device=layer._load_device),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w2_weight, {"weight_loader": layer.w2_weight.weight_loader}
-            )
-            _copy_missing_attrs(layer.w2_weight, w2_weight)
-            layer.register_parameter("w2_weight", w2_weight)
-            torch.nn.init.normal_(layer.w2_weight)
-
+    def _quantize_and_setup_kernel(self, layer: Module) -> None:
+        """Quantize weights to int8 and setup the modular kernel."""
         # Quantize fp16/bf16 weights to int8 with per-channel scales
         w13, w13_scale = self._quantize_to_int8(layer.w13_weight)
         w2, w2_scale = self._quantize_to_int8(layer.w2_weight)

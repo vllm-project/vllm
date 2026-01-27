@@ -8,6 +8,9 @@ import torch
 from torch.nn import Module
 from torch.utils._python_dispatch import TorchDispatchMode
 
+from vllm.model_executor.model_loader.weight_utils import (
+    initialize_single_dummy_weight,
+)
 from vllm.model_executor.utils import set_weight_attrs
 
 
@@ -49,11 +52,11 @@ class OnlineWeightLoaderMixin:
     1. Creates weights on meta device initially
     2. Materializes weights just-in-time when loading starts
     3. Tracks loading progress using CopyNumelCounter
-    4. Calls a callback when all weights are loaded
+    4. Calls process_weights_after_loading when all weights are loaded
 
-    Classes using this mixin should:
-    - Implement `_create_scale_tensors` to create quantization-specific scales
-    - Implement `process_weights_after_loading` for quantization and kernel setup
+    Classes using this mixin must implement:
+    - `_create_scale_tensors`: Create quantization-specific scale tensors
+    - `_quantize_and_setup_kernel`: Quantize weights and setup the kernel
     """
 
     def create_weights(
@@ -256,3 +259,58 @@ class OnlineWeightLoaderMixin:
         Default implementation calls process_weights_after_loading.
         """
         self.process_weights_after_loading(layer)
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        """
+        Process weights after loading - materialize dummy weights, quantize,
+        and setup kernel.
+
+        Subclasses must implement:
+        - `_initialize_dummy_weight(weight)`: Initialize a dummy weight tensor
+        - `_quantize_and_setup_kernel(layer)`: Quantize weights and setup kernel
+        """
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        # Handle dummy weights (--load_format dummy)
+        self._materialize_dummy_weights(layer)
+
+        # Subclass handles quantization and kernel setup
+        self._quantize_and_setup_kernel(layer)
+
+    def _materialize_dummy_weights(self, layer: Module) -> None:
+        """Materialize weights that are still on meta device (dummy weights)."""
+        if layer.w13_weight.device == torch.device("meta"):
+            w13_weight = torch.nn.Parameter(
+                torch.empty_like(layer.w13_weight, device=layer._load_device),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                w13_weight, {"weight_loader": layer.w13_weight.weight_loader}
+            )
+            _copy_missing_attrs(layer.w13_weight, w13_weight)
+            layer.register_parameter("w13_weight", w13_weight)
+            initialize_single_dummy_weight(layer.w13_weight)
+
+        if layer.w2_weight.device == torch.device("meta"):
+            w2_weight = torch.nn.Parameter(
+                torch.empty_like(layer.w2_weight, device=layer._load_device),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                w2_weight, {"weight_loader": layer.w2_weight.weight_loader}
+            )
+            _copy_missing_attrs(layer.w2_weight, w2_weight)
+            layer.register_parameter("w2_weight", w2_weight)
+            initialize_single_dummy_weight(layer.w2_weight)
+
+    def _quantize_and_setup_kernel(self, layer: Module) -> None:
+        """
+        Quantize weights and setup the kernel. Subclasses must implement.
+
+        Args:
+            layer: The MoE layer module with loaded weights
+        """
+        raise NotImplementedError(
+            "Subclasses must implement _quantize_and_setup_kernel"
+        )
