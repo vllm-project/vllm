@@ -1114,6 +1114,9 @@ class GPUModelRunner(
         if not self.speculative_config or not self.model_config.is_hybrid:
             return
 
+        # TODO: Remove .cpu() sync to enable fully async for hybrid model;
+        # Use num_computed_tokens.gpu instead of req.num_computed_tokens to
+        # support aligned mamba cache mode.
         # Find the number of accepted tokens for each sequence.
         num_accepted_tokens = (
             (
