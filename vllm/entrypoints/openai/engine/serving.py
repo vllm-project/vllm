@@ -263,6 +263,73 @@ class OpenAIServing:
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
 
+        # NEW: Track API spans separately (not in Pydantic model to avoid serialization)
+        # Maps request_id → (span, arrival_time, first_response_time)
+        # Type hint 'Any' avoids OTEL import dependency (PR #6 will import OTEL)
+        self._api_spans: dict[str, tuple[Any, float, float | None]] = {}
+
+        # NEW: Cache for tracing enabled check (cached once, assumes config immutable)
+        self._cached_is_tracing_enabled: bool | None = None
+
+    async def _get_is_tracing_enabled(self) -> bool:
+        """Check if journey tracing is enabled.
+
+        Caches result to avoid repeated async calls to engine.
+        Cached once at startup; assumes tracing config is immutable.
+        Defaults to False on error (tracing must never break serving).
+
+        Returns:
+            True if journey tracing is enabled, False otherwise
+        """
+        if self._cached_is_tracing_enabled is None:
+            try:
+                self._cached_is_tracing_enabled = (
+                    await self.engine_client.is_tracing_enabled()
+                )
+            except Exception:
+                # Defensive: if check fails, assume tracing disabled
+                # Prevents repeated exceptions from impacting serving performance
+                self._cached_is_tracing_enabled = False
+        return self._cached_is_tracing_enabled
+
+    def _store_api_span(
+        self,
+        request_id: str,
+        span: Any,
+        arrival_time: float,
+    ) -> None:
+        """Store API span and timing info for a request.
+
+        Args:
+            request_id: The request ID
+            span: The OTEL span object
+            arrival_time: time.monotonic() when request arrived
+        """
+        self._api_spans[request_id] = (span, arrival_time, None)
+
+    def _get_api_span_info(
+        self,
+        request_id: str,
+    ) -> tuple[Any | None, float | None, float | None]:
+        """Get API span and timing info for a request.
+
+        Returns:
+            Tuple of (span, arrival_time, first_response_time)
+            Returns (None, None, None) if request not found
+        """
+        return self._api_spans.get(request_id, (None, None, None))
+
+    def _cleanup_api_span(self, request_id: str) -> None:
+        """Remove API span tracking for a request.
+
+        Safe to call even if span was never created (e.g., tracing disabled).
+        Called after span.end() in normal flow (PR #6 responsibility).
+
+        Args:
+            request_id: The request ID to cleanup
+        """
+        self._api_spans.pop(request_id, None)
+
     def _get_tool_parser(
         self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
     ) -> Callable[[TokenizerLike], ToolParser] | None:

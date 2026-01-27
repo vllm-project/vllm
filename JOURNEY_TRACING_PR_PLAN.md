@@ -187,7 +187,7 @@ def _end_core_span_and_cleanup(self, request: Request) -> None:
 | #2 | `journey-tracing-02-core-spans-lifecycle` | Create & cleanup core spans | ~100 lines | 6 | ✅ **COMPLETED** |
 | #3 | `pr3ofjourney` | Add journey state & cleanup | ~26 lines | 4 | ✅ **COMPLETED** |
 | #4 | `pr4ofjourney` | Emit events to core spans | ~113 lines | 9 | ✅ **COMPLETED** |
-| #5 | `journey-tracing-05-api-span-tracking` | Add API span tracking dict | ~20 lines | 2 | No Pydantic field |
+| #5 | `pr5ofjourney` | Add API span tracking dict | ~67 lines | 8 | ✅ **COMPLETED** |
 | #6 | `journey-tracing-06-api-spans-full-lifecycle` | Create & close API spans | ~150 lines | 9 | **All closure paths in same PR** ✅ |
 | #7 | `journey-tracing-07-context-propagation` | Link parent-child spans | ~25 lines | 4 | No new resources |
 | #8 | `journey-tracing-08-api-additional-events` | Emit API lifecycle events | ~80 lines | 5 | No new resources |
@@ -1003,13 +1003,37 @@ def finish_requests(self, ...):
 
 ### PR #5: API - Add Span Tracking Dict
 
-**Branch**: `journey-tracing-05-api-span-tracking`
+**Status**: ✅ Completed (PR #13 merged)
+
+**Branch**: `pr5ofjourney`
 
 **Goal**: Add separate dict for tracking API spans, avoiding Pydantic serialization risks.
 
 **Why Safe**: No per-request state in serializable models. Spans tracked in separate dict.
 
 **Key Decision**: Store spans in `_api_spans` dict instead of Pydantic model to avoid serialization issues.
+
+**What was implemented**:
+- Added `_api_spans` dict to track `(span, arrival_time, first_response_time)` tuples
+- Added `_cached_is_tracing_enabled` flag with defensive error handling (defaults to False on failure)
+- Added `_get_is_tracing_enabled()` async method with caching to avoid repeated engine calls
+- Added `_store_api_span()` method to insert span tracking entries
+- Added `_get_api_span_info()` method returning `(None, None, None)` for missing entries
+- Added `_cleanup_api_span()` method with idempotent `.pop()` for safe cleanup
+- All state is private (`_` prefix) and lives outside Pydantic models
+- Added 8 comprehensive unit tests covering all dict operations and edge cases
+
+**Tests added**: 8 tests (177 lines), all passing
+- `test_api_span_dict_initialized()` - Verify dict and cache initialized correctly
+- `test_store_and_retrieve_api_span()` - Store and retrieve span info
+- `test_retrieve_missing_request_returns_none_tuple()` - Safe defaults for missing entries
+- `test_cleanup_removes_api_span()` - Cleanup removes dict entry
+- `test_cleanup_nonexistent_request_is_safe()` - Cleanup is idempotent
+- `test_tracing_enabled_cache_works()` - Cache reduces async calls (call_count == 1)
+- `test_tracing_enabled_check_handles_errors()` - Error handling defaults to False
+- `test_multiple_requests_tracked_independently()` - Multi-request isolation
+
+**Size**: ~67 lines production code, 177 lines test code
 
 #### Changes
 
@@ -1020,25 +1044,33 @@ class OpenAIServing:
     def __init__(self, ...):
         # ... existing init ...
 
-        # NEW: Track API spans separately (not in Pydantic model)
+        # NEW: Track API spans separately (not in Pydantic model to avoid serialization)
         # Maps request_id → (span, arrival_time, first_response_time)
+        # Type hint 'Any' avoids OTEL import dependency (PR #6 will import OTEL)
         self._api_spans: dict[str, tuple[Any, float, float | None]] = {}
 
-        # Cache for tracing enabled check
+        # NEW: Cache for tracing enabled check (cached once, assumes config immutable)
         self._cached_is_tracing_enabled: bool | None = None
 
     async def _get_is_tracing_enabled(self) -> bool:
         """Check if journey tracing is enabled.
 
         Caches result to avoid repeated async calls to engine.
+        Cached once at startup; assumes tracing config is immutable.
+        Defaults to False on error (tracing must never break serving).
 
         Returns:
             True if journey tracing is enabled, False otherwise
         """
         if self._cached_is_tracing_enabled is None:
-            self._cached_is_tracing_enabled = (
-                await self.engine_client.is_tracing_enabled()
-            )
+            try:
+                self._cached_is_tracing_enabled = (
+                    await self.engine_client.is_tracing_enabled()
+                )
+            except Exception:
+                # Defensive: if check fails, assume tracing disabled
+                # Prevents repeated exceptions from impacting serving performance
+                self._cached_is_tracing_enabled = False
         return self._cached_is_tracing_enabled
 
     def _store_api_span(
@@ -1064,11 +1096,15 @@ class OpenAIServing:
 
         Returns:
             Tuple of (span, arrival_time, first_response_time)
+            Returns (None, None, None) if request not found
         """
         return self._api_spans.get(request_id, (None, None, None))
 
     def _cleanup_api_span(self, request_id: str) -> None:
-        """Remove API span tracking for a request (after span.end() called).
+        """Remove API span tracking for a request.
+
+        Safe to call even if span was never created (e.g., tracing disabled).
+        Called after span.end() in normal flow (PR #6 responsibility).
 
         Args:
             request_id: The request ID to cleanup
@@ -1086,17 +1122,7 @@ class OpenAIServing:
 
 #### Tests
 
-1. **`test_api_span_tracking_dict_exists()`**
-   - Verify `_api_spans` dict initialized
-   - Verify empty on startup
-
-2. **`test_store_and_get_api_span()`**
-   - Store mock span with timing info
-   - Retrieve and verify all fields
-   - Verify cleanup removes entry
-
-**Size**: ~20 lines, 2 tests
-**Review Time**: ~5 minutes
+(See "What was implemented" section above for full test list - 8 tests implemented)
 
 ---
 
@@ -1932,49 +1958,6 @@ Add this to every PR description:
 
 ---
 
-## Timeline Estimate
-
-| Phase | PRs | Time | Cumulative |
-|-------|-----|------|------------|
-| **Phase 0: Prerequisites** | #0 | ✅ DONE | 0 days |
-| **Phase 1: Core** | #1-4 | 1 week | 1 week |
-| **Phase 2: API** | #5-8 | 1 week | 2 weeks |
-| **Phase 3: Cleanup** | #9 | 1 day | ~2 weeks |
-
-**Breakdown**:
-- PR #0: ✅ COMPLETED (Remove EngineCoreEvent)
-- PR #1: ✅ COMPLETED (Scheduler tracer init - 0.5 day actual)
-- PR #2: ✅ COMPLETED (Core span lifecycle - 0.25 day actual)
-- PR #3: 1 day (extends cleanup)
-- PR #4: 1.5 days (event emission)
-- PR #5: 0.5 day (tiny, just fields)
-- PR #6: 2 days (critical, includes all closure)
-- PR #7: 1 day (context propagation)
-- PR #8: 1 day (additional events)
-- PR #9: 1 day (removal)
-
-**Total**: ~2 weeks for complete implementation
-
----
-
-## Review Time Estimates
-
-| PR | Review Time | Reason |
-|----|-------------|--------|
-| #1 | 10 min | Tiny, just tracer init |
-| #2 | 25 min | Critical, includes cleanup |
-| #3 | 15 min | Extends cleanup |
-| #4 | 20 min | Event emission |
-| #5 | 5 min | Trivial, just fields |
-| #6 | 30 min | Critical, all closure paths |
-| #7 | 15 min | Context propagation |
-| #8 | 15 min | Additional events |
-| #9 | 20 min | Code removal |
-
-**Total**: ~2.5 hours spread across 9 PRs
-**Compare to**: Many hours for single 800-line PR
-
----
 
 ## Benefits of This Disciplined Approach
 
@@ -1987,26 +1970,6 @@ Add this to every PR description:
 7. **Better Testing**: Each piece tested thoroughly before building next
 8. **Clear Progress**: 9 milestones with visible checkpoints
 9. **Parallel Potential**: Some PRs (e.g., #5) can be developed in parallel with others
-
----
-
-## Rollback Strategy
-
-Each PR can be independently reverted without breaking others:
-
-| Revert | Impact | System State |
-|--------|--------|--------------|
-| PR #1 | Tracer removed | No tracing, legacy works |
-| PR #2 | Core spans removed | No core spans, legacy works |
-| PR #3 | Journey state removed | Simplified core spans, legacy works |
-| PR #4 | Event emission removed | Silent core spans, legacy works |
-| PR #5 | Metadata fields removed | API spans can't be stored |
-| PR #6 | API spans removed | No API spans, legacy works |
-| PR #7 | Context propagation removed | Parent-child link broken but both work |
-| PR #8 | Additional events removed | Fewer events but lifecycle complete |
-| PR #9 | Legacy buffering restored | Both buffering and spans active |
-
-**All rollbacks maintain system stability and correctness.**
 
 ---
 
@@ -2047,19 +2010,6 @@ Each PR can be independently reverted without breaking others:
 
 ---
 
-## Key Differences from Initial Plan
-
-| Initial Plan (Bad) | This Plan (Good) |
-|-------------------|------------------|
-| PR creates spans, separate PR cleans them | Same PR creates + cleans |
-| PR creates API spans, later PR adds ABORTED | Same PR creates + adds DEPARTED/ABORTED |
-| 11 PRs with dependencies | 9 PRs, each self-consistent |
-| "We'll fix leaks later" | No leaks possible |
-| Reviewer must trust future PRs | Reviewer can verify each PR independently |
-| Technical debt accumulation | Zero technical debt |
-
----
-
 ## Final Notes
 
 ### For Implementer
@@ -2082,142 +2032,58 @@ When reviewing each PR:
 5. Verify legacy tracing untouched
 6. Confirm PR is independently safe
 
-### For Project Manager
-
-Progress tracking:
-- **After PR #0**: ✅ EngineCoreEvent removed, Prometheus metrics restored
-- **After PR #1**: ✅ Tracer initialized (ready for span creation)
-- **After PR #2**: Core spans working (create + cleanup)
-- **After PR #3**: Journey state tracking working
-- **After PR #4**: Core events flowing to spans
-- **After PR #5**: API metadata ready
-- **After PR #6**: API spans working (full lifecycle)
-- **After PR #7**: Parent-child linkage working
-- **After PR #8**: All API events flowing
-- **After PR #9**: Journey event buffering removed, dual-stream feature complete
-  - Note: do_tracing() and RequestJourneyEvent preserved (not removed)
-
-Each milestone is independently safe and valuable.
-
 ---
 
 ## Implementation History
 
-### ✅ PR #0: Remove EngineCoreEvent System
+Condensed summary of completed PRs. See individual PR sections above for detailed implementation notes.
 
-**Completed**: Prior to journey tracing implementation
-**Branch**: `removelegacy`
-**Commit**: 717f90eb5
-**Changes**: ~130 lines removed, 1 new test + existing tests passing
-**Impact**: Cleaned up legacy v0.0.1 metrics system, restored Prometheus metrics using RequestJourneyEvent timestamps
+### ✅ PR #0: Remove EngineCoreEvent System
+- **Completed**: 2026-01-25 (prior to journey tracing)
+- **Commit**: 717f90eb5
+- **Changes**: ~130 lines removed, 1 new test
+- **Impact**: Removed legacy v0.0.1 metrics system, restored Prometheus metrics using RequestJourneyEvent timestamps
+
+---
 
 ### ✅ PR #1: Scheduler Tracer Initialization
+- **Completed**: 2026-01-26
+- **Branch**: `pr1ofjourney` | **Commit**: 24f263656 | **PR**: #10
+- **Changes**: +19 production, +110 test lines | 4 tests
+- **Key**: Added tracer initialization to scheduler with defensive error handling, zero per-request state
 
-**Completed**: 2026-01-26
-**Branch**: `pr1ofjourney`
-**Status**: ✅ **MERGED** (commit 24f263656)
-
-**Implementation Summary**:
-- Added defensive `SpanAttributes` import with None fallback
-- Added tracer initialization in `Scheduler.__init__()` with try/except
-- Added `otlp_traces_endpoint` parameter to test utilities
-- Implemented 4 comprehensive tests with proper mocking
-
-**Changes**:
-- Production code: 19 lines added
-  - `vllm/v1/core/sched/scheduler.py`: 6 lines (import) + 13 lines (init)
-- Test utilities: 2 lines modified
-  - `tests/v1/core/utils.py`: Added parameter
-- Test code: 110 lines added
-  - `tests/v1/core/test_scheduler.py`: 4 new tests
-
-**Test Results**: ✅ All 85 tests passing (81 existing + 4 new)
-
-**Code Review**: Approved with fix applied
-- Issue identified: Test 3 initially called real `init_tracer()`
-- Fix applied: Added mock decorator for deterministic testing
-- All tests now properly mocked and isolated
-
-**Key Achievements**:
-- ✅ Zero per-request state introduced
-- ✅ Zero overhead when disabled
-- ✅ Defensive error handling with warning logs
-- ✅ Backward compatible (all parameters optional)
-- ✅ No regressions in existing tests
-- ✅ Foundation ready for PR #2 (core span creation)
-
-**Next Steps**: PR #2 will use `self.tracer` to create core spans with complete cleanup in same PR
+---
 
 ### ✅ PR #2: Core Span Lifecycle Management
+- **Completed**: 2026-01-26
+- **Branch**: `pr2ofjourney` | **Commit**: d46cdf231 | **PR**: #33115
+- **Changes**: +125 production, +245 test lines | 6 tests
+- **Key**: Added `_core_spans` dict, span creation/cleanup on all termination paths with try/finally blocks
 
-**Completed**: 2026-01-26
-**Branch**: `pr2ofjourney`
-**Status**: ✅ **MERGED** (commit d46cdf231)
-
-**Implementation Summary**:
-- Added `_core_spans` dictionary to track active spans per request
-- Created `_create_core_span()` helper with explicit OpenTelemetry parameters
-- Created `_end_core_span_and_cleanup()` idempotent helper
-- Modified `add_request()` to create and store core spans
-- Modified `update_from_output()` with try/finally (natural completion path)
-- Modified `finish_requests()` with try/finally (explicit abort path)
-
-**Changes**:
-- Production code: ~125 lines added
-  - `vllm/v1/core/sched/scheduler.py`: Core span lifecycle
-- Test code: ~245 lines added
-  - `tests/v1/core/test_scheduler.py`: 6 new tests
-
-**Test Results**: ✅ All 91 tests passing (6 new, 85 existing)
-
-**Safety Guarantees**:
-- ✅ All termination paths properly cleanup spans (no leaks)
-- ✅ Cleanup uses try/finally (runs even if teardown throws)
-- ✅ Defensive error handling (tracing never crashes requests)
-- ✅ Zero overhead when tracing disabled
-- ✅ Idempotent cleanup (safe to call multiple times)
-
-**Next Steps**: PR #3 will add journey state tracking with integrated cleanup
+---
 
 ### ✅ PR #3: Journey State Cleanup
+- **Completed**: 2026-01-26
+- **Branch**: `pr3ofjourney` | **Commit**: f4cf7903c | **PR**: #11
+- **Changes**: 26 production modified, +162 test lines | 4 tests
+- **Key**: Extended cleanup to handle journey state, fixed memory leak, decoupled span vs state cleanup
 
-**Completed**: 2026-01-26
-**Branch**: `pr3ofjourney`
-**Status**: ✅ **COMPLETED** (commit f4cf7903c, PR #33126)
+---
 
-**Implementation Summary**:
-- Extended `_end_core_span_and_cleanup()` with decoupled cleanup logic
-- Removed duplicate inline cleanup from `finish_requests()`
-- Added comprehensive docstring explaining two independent cleanup concerns
-- Fixed memory leak on natural completion path
+### ✅ PR #4: Emit Journey Events to Core Spans
+- **Completed**: 2026-01-26
+- **Branch**: `pr4ofjourney` | **Commit**: 6a58608de | **PR**: #12
+- **Changes**: +113 production, +328 test lines | 9 tests
+- **Key**: Added event emission to spans (QUEUED, SCHEDULED, PREEMPTED, FIRST_TOKEN, FINISHED), defensive error handling, parallel buffering
 
-**Changes**:
-- Production code: 26 lines modified
-  - `vllm/v1/core/sched/scheduler.py`: Extended cleanup method
-- Test code: 162 lines added
-  - `tests/v1/core/test_scheduler.py`: 4 new tests
-- Documentation: Updated JOURNEY_TRACING_PR_PLAN.md
+---
 
-**Test Results**: ✅ All 95 tests passing (4 new, 91 existing)
+### ✅ PR #5: Add API Span Tracking Dict
+- **Completed**: 2026-01-27
+- **Branch**: `pr5ofjourney` | **Commit**: 3d11f662d | **PR**: #13
+- **Changes**: +67 production, +177 test lines | 8 tests
+- **Key**: Added `_api_spans` dict to OpenAIServing, helper methods with error handling, avoids Pydantic serialization risks
 
-**Code Review**: Approved by ChatGPT (2 rounds of feedback)
-- Round 1: Simplified tests, removed unused imports, rewrote leak test as unit test
-- Round 2: Fresh mock spans per iteration
-- All feedback applied
+---
 
-**Key Achievements**:
-- ✅ Fixed critical memory leak on natural completion path
-- ✅ Decoupled cleanup: span cleanup (always) vs journey state (gated)
-- ✅ Centralized all cleanup in single method
-- ✅ Removed duplicate cleanup logic
-- ✅ Tests are focused, fast, and maintainable
-- ✅ No regressions in existing tests
-- ✅ Foundation ready for PR #4 (event emission)
-
-**Safety Guarantees**:
-- ✅ Span cleanup NEVER gated behind feature flags
-- ✅ Journey state cleanup only runs when enabled
-- ✅ Both termination paths verified (natural + explicit abort)
-- ✅ No accumulation over 20 iterations (unit test)
-
-**Next Steps**: PR #4 will add `_compute_progress_snapshot()` and emit journey events to core spans
+**Summary**: 5 PRs completed, ~350 production lines added, ~1022 test lines added, 31 tests passing
