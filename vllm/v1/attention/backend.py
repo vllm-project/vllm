@@ -600,6 +600,10 @@ class AttentionImpl(ABC, Generic[T]):
     head_size: int
     scale: float
 
+    # KV cache configuration - set by subclasses in __init__
+    kv_cache_dtype: str
+    kv_sharing_target_layer_name: str | int | None
+
     # Whether the forward method includes KV cache update.
     # When False, the KV cache update is handled separately via do_kv_cache_update().
     # This allows for better performance optimizations and independent scheduling.
@@ -708,24 +712,53 @@ class AttentionImpl(ABC, Generic[T]):
     ) -> torch.Tensor:
         """Perform KV cache update separately from attention forward pass.
 
-        This method should be implemented by backends that set
-        forward_includes_kv_cache = False. It updates the KV cache with the
-        new key and value tensors.
+        This is the default implementation that uses the standard
+        reshape_and_cache_flash operation. Backends can override this method
+        if they need custom KV cache update logic (e.g., shuffle layouts,
+        different head sizes for K and V).
 
         Args:
             layer: The attention layer instance.
             key: Key tensor with shape [num_tokens, num_kv_heads, head_size].
             value: Value tensor with shape [num_tokens, num_kv_heads, head_size].
             kv_cache: The KV cache tensor.
-            attn_metadata: Attention metadata containing slot_mapping.
+            attn_metadata: Attention metadata containing slot_mapping, or
+                           slot_mapping tensor directly.
 
         Returns:
             The KV cache tensor (possibly with dtype changed for FP8).
         """
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement do_kv_cache_update. "
-            "Either implement this method or set forward_includes_kv_cache = True."
+        # Skip if sharing KV cache with an earlier attention layer
+        if self.kv_sharing_target_layer_name is not None:
+            return kv_cache
+
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        # Extract slot_mapping from metadata if it's an object, otherwise use directly
+        slot_mapping = (
+            attn_metadata.slot_mapping
+            if hasattr(attn_metadata, "slot_mapping")
+            else attn_metadata
         )
+
+        # Default implementation using the standard reshape_and_cache_flash op.
+        # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+        # not padded. However, we don't need to do key[:num_actual_tokens]
+        # and value[:num_actual_tokens] because the reshape_and_cache_flash
+        # op uses the slot_mapping's shape to determine the number of
+        # actual tokens.
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
+
+        return kv_cache
 
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """

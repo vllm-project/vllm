@@ -834,7 +834,11 @@ def unified_kv_cache_update(
         f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
     )
     layer_slot_mapping = slot_mapping.get(layer_name)
-    if layer_slot_mapping is not None:
+
+    # Skip KV cache update if key/value is None or slot_mapping is not available.
+    # key and value may be None in the case of cross attention where they are
+    # calculated once based on the output from the encoder and then cached.
+    if layer_slot_mapping is not None and key is not None and value is not None:
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
         )

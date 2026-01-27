@@ -821,41 +821,6 @@ class FlexAttentionImpl(AttentionImpl):
                 "FlexAttention does not support quantized kv-cache. Yet"
             )
 
-    def do_kv_cache_update(
-        self,
-        layer: torch.nn.Module,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: FlexAttentionMetadata,
-    ) -> torch.Tensor:
-        """Perform KV cache update separately from attention forward pass.
-
-        Args:
-            layer: The attention layer instance.
-            key: Key tensor with shape [num_tokens, num_kv_heads, head_size].
-            value: Value tensor with shape [num_tokens, num_kv_heads, head_size].
-            kv_cache: The KV cache tensor.
-            attn_metadata: Attention metadata containing slot_mapping.
-
-        Returns:
-            The KV cache tensor.
-        """
-        key_cache, value_cache = kv_cache.unbind(0)
-
-        torch.ops._C_cache_ops.reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            attn_metadata.slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
-
-        return kv_cache
-
     @staticmethod
     def view_as_4d(tensor: torch.Tensor) -> torch.Tensor:
         """View a 3d tensor as 4D."""
