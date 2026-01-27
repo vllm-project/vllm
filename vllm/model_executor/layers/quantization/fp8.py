@@ -50,7 +50,6 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
     create_fp8_input_scale,
@@ -96,7 +95,6 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.flashinfer import (
     apply_fi_trtllm_fp8_per_tensor_moe,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
 )
 
 if TYPE_CHECKING:
