@@ -6,10 +6,9 @@ import sys
 import time
 import traceback
 from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
@@ -26,10 +25,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
     ConversationMessage,
-    apply_hf_chat_template,
-    apply_mistral_chat_template,
-    parse_chat_messages_futures,
-    resolve_chat_template_content_format,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -69,23 +64,27 @@ from vllm.entrypoints.openai.translations.protocol import (
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
-    ClassificationRequest,
     ClassificationResponse,
 )
 from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
-    EmbeddingRequest,
     EmbeddingResponse,
 )
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
+    PoolingChatRequest,
+    PoolingCompletionRequest,
     PoolingResponse,
 )
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
+    ScoreDataRequest,
+    ScoreQueriesDocumentsRequest,
     ScoreRequest,
     ScoreResponse,
+    ScoreTextRequest,
 )
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
@@ -95,11 +94,14 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import _validate_truncation_size, sanitize_message
+from vllm.entrypoints.utils import (
+    _validate_truncation_size,
+    get_max_tokens,
+    sanitize_message,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
-    PromptComponents,
     get_prompt_components,
     is_explicit_encoder_decoder_prompt,
 )
@@ -110,10 +112,9 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.renderers import RendererLike
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers import ToolParser, ToolParserManager
 from vllm.tracing import (
     contains_trace_headers,
@@ -124,10 +125,8 @@ from vllm.utils import random_uuid
 from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
     collect_from_async_generator,
-    make_async,
     merge_async_iterators,
 )
-from vllm.utils.collection_utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
 
 
@@ -143,19 +142,21 @@ logger = init_logger(__name__)
 
 CompletionLikeRequest: TypeAlias = (
     CompletionRequest
+    | TokenizeCompletionRequest
     | DetokenizeRequest
     | EmbeddingCompletionRequest
-    | RerankRequest
     | ClassificationCompletionRequest
+    | RerankRequest
     | ScoreRequest
-    | TokenizeCompletionRequest
+    | PoolingCompletionRequest
 )
 
 ChatLikeRequest: TypeAlias = (
     ChatCompletionRequest
-    | EmbeddingChatRequest
     | TokenizeChatRequest
+    | EmbeddingChatRequest
     | ClassificationChatRequest
+    | PoolingChatRequest
 )
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
 AnyRequest: TypeAlias = (
@@ -171,6 +172,7 @@ AnyResponse: TypeAlias = (
     CompletionResponse
     | ChatCompletionResponse
     | EmbeddingResponse
+    | EmbeddingBytesResponse
     | TranscriptionResponse
     | TokenizeResponse
     | PoolingResponse
@@ -184,55 +186,21 @@ RequestT = TypeVar("RequestT", bound=AnyRequest)
 
 
 @dataclass(kw_only=True)
-class RequestProcessingMixin:
-    """
-    Mixin for request processing,
-    handling prompt preparation and engine input.
-    """
-
-    engine_prompts: list[TokensPrompt] | None = field(default_factory=list)
-
-
-@dataclass(kw_only=True)
-class ResponseGenerationMixin:
-    """
-    Mixin for response generation,
-    managing result generators and final batch results.
-    """
-
-    result_generator: (
-        AsyncGenerator[tuple[int, RequestOutput | PoolingRequestOutput], None] | None
-    ) = None
-    final_res_batch: list[RequestOutput | PoolingRequestOutput] = field(
-        default_factory=list
-    )
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-
-@dataclass(kw_only=True)
-class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, Generic[RequestT]):
-    # Shared across all requests
+class ServeContext(Generic[RequestT]):
     request: RequestT
     raw_request: Request | None = None
     model_name: str
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
+    engine_prompts: list[TokensPrompt] | None = None
 
-    # Shared across most requests
-    tokenizer: TokenizerLike | None = None
+    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
+        None
+    )
+    final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
 
-
-@dataclass(kw_only=True)
-class ClassificationServeContext(ServeContext[ClassificationRequest]):
-    pass
-
-
-@dataclass(kw_only=True)
-class EmbeddingServeContext(ServeContext[EmbeddingRequest]):
-    chat_template: str | None = None
-    chat_template_content_format: ChatTemplateContentFormatOption
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class OpenAIServing:
@@ -258,16 +226,13 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
-        self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
-        self._apply_mistral_chat_template_async = make_async(
-            apply_mistral_chat_template, executor=self._tokenizer_executor
-        )
 
         self._async_tokenizer_pool: dict[TokenizerLike, AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
 
         self.input_processor = self.models.input_processor
         self.io_processor = self.models.io_processor
+        self.renderer = self.models.renderer
         self.model_config = self.models.model_config
         self.max_model_len = self.model_config.max_model_len
 
@@ -554,14 +519,14 @@ class OpenAIServing:
             prompt_logprobs=None,
         )
 
-    def _get_renderer(self, tokenizer: TokenizerLike | None) -> BaseRenderer:
+    def _get_completion_renderer(self) -> BaseRenderer:
         """
         Get a Renderer instance with the provided tokenizer.
         Uses shared async tokenizer pool for efficiency.
         """
         return CompletionRenderer(
             model_config=self.model_config,
-            tokenizer=tokenizer,
+            tokenizer=self.renderer.tokenizer,
             async_tokenizer_pool=self._async_tokenizer_pool,
         )
 
@@ -613,10 +578,7 @@ class OpenAIServing:
         self,
         ctx: ServeContext,
     ) -> AnyResponse | ErrorResponse:
-        generation: AsyncGenerator[AnyResponse | ErrorResponse, None]
-        generation = self._pipeline(ctx)
-
-        async for response in generation:
+        async for response in self._pipeline(ctx):
             return response
 
         return self.create_error_response("No response yielded from pipeline")
@@ -675,9 +637,7 @@ class OpenAIServing:
         ctx: ServeContext,
     ) -> ErrorResponse | None:
         """Schedule the request and get the result generator."""
-        generators: list[
-            AsyncGenerator[RequestOutput | PoolingRequestOutput, None]
-        ] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         try:
             trace_headers = (
@@ -731,7 +691,7 @@ class OpenAIServing:
                 return self.create_error_response("Engine prompts not available")
 
             num_prompts = len(ctx.engine_prompts)
-            final_res_batch: list[RequestOutput | PoolingRequestOutput | None]
+            final_res_batch: list[PoolingRequestOutput | None]
             final_res_batch = [None] * num_prompts
 
             if ctx.result_generator is None:
@@ -1019,7 +979,7 @@ class OpenAIServing:
 
     def _validate_input(
         self,
-        request: AnyRequest,
+        request: object,
         input_ids: list[int],
         input_text: str,
     ) -> TokensPrompt:
@@ -1032,7 +992,9 @@ class OpenAIServing:
             (
                 EmbeddingChatRequest,
                 EmbeddingCompletionRequest,
-                ScoreRequest,
+                ScoreDataRequest,
+                ScoreTextRequest,
+                ScoreQueriesDocumentsRequest,
                 RerankRequest,
                 ClassificationCompletionRequest,
                 ClassificationChatRequest,
@@ -1042,7 +1004,9 @@ class OpenAIServing:
             # since these requests don't generate tokens.
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
-                    ScoreRequest: "score",
+                    ScoreDataRequest: "score",
+                    ScoreTextRequest: "score",
+                    ScoreQueriesDocumentsRequest: "score",
                     ClassificationCompletionRequest: "classification",
                     ClassificationChatRequest: "classification",
                 }
@@ -1176,7 +1140,7 @@ class OpenAIServing:
     async def _preprocess_chat(
         self,
         request: ChatLikeRequest | ResponsesRequest,
-        tokenizer: TokenizerLike | None,
+        renderer: RendererLike,
         messages: list[ChatCompletionMessageParam],
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -1189,59 +1153,58 @@ class OpenAIServing:
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
         add_special_tokens: bool = False,
     ) -> tuple[list[ConversationMessage], list[TokensPrompt]]:
-        model_config = self.model_config
-
-        resolved_content_format = resolve_chat_template_content_format(
-            chat_template,
-            tool_dicts,
-            chat_template_content_format,
-            tokenizer,
-            model_config=model_config,
-        )
-        conversation, mm_data_future, mm_uuids = parse_chat_messages_futures(
-            messages,
-            model_config,
-            content_format=resolved_content_format,
-        )
-
-        _chat_template_kwargs: dict[str, Any] = dict(
-            chat_template=chat_template,
-            add_generation_prompt=add_generation_prompt,
-            continue_final_message=continue_final_message,
-            tools=tool_dicts,
-            documents=documents,
-        )
-        _chat_template_kwargs |= self._prepare_extra_chat_template_kwargs(
+        chat_template_kwargs = {
+            "chat_template": chat_template,
+            "add_generation_prompt": add_generation_prompt,
+            "continue_final_message": continue_final_message,
+            "tools": tool_dicts,
+            "documents": documents,
+            **(chat_template_kwargs or {}),
+        }
+        chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
             chat_template_kwargs,
             default_chat_template_kwargs,
         )
 
-        request_prompt: str | list[int]
+        # Use the async tokenizer in `OpenAIServing` if possible.
+        # Later we can move it into the renderer so that we can return both
+        # text and token IDs in the same prompt from `render_messages_async`
+        # which is used for logging and `enable_response_messages`.
+        from vllm.tokenizers.mistral import MistralTokenizer
 
-        if tokenizer is None:
-            request_prompt = "placeholder"
-        elif isinstance(tokenizer, MistralTokenizer):
-            request_prompt = await self._apply_mistral_chat_template_async(
-                tokenizer,
-                messages=messages,
-                **_chat_template_kwargs,
+        conversation, engine_prompt = await renderer.render_messages_async(
+            messages,
+            chat_template_content_format=chat_template_content_format,
+            tokenize=(
+                chat_template_kwargs.pop("tokenize", False)
+                or isinstance(renderer.tokenizer, MistralTokenizer)
+            ),
+            **chat_template_kwargs,
+        )
+
+        if "prompt_token_ids" not in engine_prompt:
+            extra_data = engine_prompt
+            engine_prompt = await self._tokenize_prompt_input_async(
+                request,
+                renderer.get_tokenizer(),
+                engine_prompt["prompt"],
+                add_special_tokens=add_special_tokens,
             )
-        elif isinstance(tokenizer, DeepseekV32Tokenizer):
-            request_prompt = tokenizer.apply_chat_template(
-                conversation=conversation,
-                messages=messages,
-                model_config=model_config,
-                **_chat_template_kwargs,
-            )
+            # Fill in other keys like MM data
+            engine_prompt.update(extra_data)  # type: ignore
         else:
-            request_prompt = apply_hf_chat_template(
-                tokenizer=tokenizer,
-                conversation=conversation,
-                model_config=model_config,
-                **_chat_template_kwargs,
+            self._validate_input(
+                request=request,
+                input_ids=engine_prompt["prompt_token_ids"],  # type: ignore
+                input_text="",
             )
 
-        mm_data = await mm_data_future
+        engine_prompt = cast(TokensPrompt, engine_prompt)
+
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+        if (cache_salt := getattr(request, "cache_salt", None)) is not None:
+            engine_prompt["cache_salt"] = cache_salt
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
@@ -1257,48 +1220,9 @@ class OpenAIServing:
                     "or Responses API requests."
                 )
                 raise NotImplementedError(msg)
+
+            tokenizer = renderer.get_tokenizer()
             request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
-
-        if tokenizer is None:
-            assert isinstance(request_prompt, str), (
-                "Prompt has to be a string",
-                "when the tokenizer is not initialised",
-            )
-            prompt_inputs = TokensPrompt(prompt=request_prompt, prompt_token_ids=[1])
-        elif isinstance(request_prompt, str):
-            prompt_inputs = await self._tokenize_prompt_input_async(
-                request,
-                tokenizer,
-                request_prompt,
-                add_special_tokens=add_special_tokens,
-            )
-        else:
-            # For MistralTokenizer
-            assert is_list_of(request_prompt, int), (
-                "Prompt has to be either a string or a list of token ids"
-            )
-            input_text = tokenizer.decode(request_prompt)
-            prompt_inputs = self._validate_input(
-                request=request,
-                input_ids=request_prompt,
-                input_text=input_text,
-            )
-
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_inputs["prompt_token_ids"])
-        if "prompt" in prompt_inputs:
-            engine_prompt["prompt"] = prompt_inputs["prompt"]
-
-        if mm_data is not None:
-            engine_prompt["multi_modal_data"] = mm_data
-
-        if mm_uuids is not None:
-            engine_prompt["multi_modal_uuids"] = mm_uuids
-
-        if request.mm_processor_kwargs is not None:
-            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
-
-        if hasattr(request, "cache_salt") and request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
 
         return conversation, [engine_prompt]
 
@@ -1334,7 +1258,7 @@ class OpenAIServing:
     async def _render_next_turn(
         self,
         request: ResponsesRequest,
-        tokenizer: TokenizerLike | None,
+        renderer: RendererLike,
         messages: list[ResponseInputOutputItem],
         tool_dicts: list[dict[str, Any]] | None,
         tool_parser,
@@ -1347,7 +1271,7 @@ class OpenAIServing:
 
         _, engine_prompts = await self._preprocess_chat(
             request,
-            tokenizer,
+            renderer,
             new_messages,
             tool_dicts=tool_dicts,
             tool_parser=tool_parser,
@@ -1366,7 +1290,7 @@ class OpenAIServing:
         priority: int = 0,
         **kwargs,
     ):
-        prompt_text, _, _ = self._get_prompt_components(engine_prompt)
+        prompt_text, _, _ = get_prompt_components(engine_prompt)
 
         orig_priority = priority
         sub_request = 0
@@ -1417,14 +1341,16 @@ class OpenAIServing:
             # yield context
 
             # Create inputs for the next turn.
-            # Render the next prompt token ids.
+            # Render the next prompt token ids and update sampling_params.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
-                prompt_token_ids = context.render_for_completion()
-                engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+                token_ids = context.render_for_completion()
+                engine_prompt = TokensPrompt(prompt_token_ids=token_ids)
+
+                sampling_params.max_tokens = self.max_model_len - len(token_ids)
             elif isinstance(context, ParsableContext):
                 engine_prompts = await self._render_next_turn(
                     context.request,
-                    context.tokenizer,
+                    context.renderer,
                     context.parser.response_messages,
                     context.tool_dicts,
                     context.tool_parser_cls,
@@ -1432,18 +1358,18 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
-                prompt_text, _, _ = self._get_prompt_components(engine_prompt)
+                prompt_text, _, _ = get_prompt_components(engine_prompt)
 
-            # Update the sampling params.
-            sampling_params.max_tokens = self.max_model_len - len(
-                engine_prompt["prompt_token_ids"]
-            )
+                sampling_params.max_tokens = get_max_tokens(
+                    self.max_model_len,
+                    context.request,
+                    engine_prompt,
+                    self.default_sampling_params,  # type: ignore
+                )
+
             # OPTIMIZATION
             priority = orig_priority - 1
             sub_request += 1
-
-    def _get_prompt_components(self, prompt: PromptType) -> PromptComponents:
-        return get_prompt_components(prompt)
 
     def _log_inputs(
         self,
@@ -1455,7 +1381,7 @@ class OpenAIServing:
         if self.request_logger is None:
             return
 
-        prompt, prompt_token_ids, prompt_embeds = self._get_prompt_components(inputs)
+        prompt, prompt_token_ids, prompt_embeds = get_prompt_components(inputs)
 
         self.request_logger.log_inputs(
             request_id,
@@ -1569,6 +1495,7 @@ class OpenAIServing:
                 # extract_tool_calls() returns a list of tool calls.
                 function_calls.extend(
                     FunctionCall(
+                        id=tool_call.id,
                         name=tool_call.function.name,
                         arguments=tool_call.function.arguments,
                     )

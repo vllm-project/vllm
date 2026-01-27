@@ -235,6 +235,27 @@ class VideoLoader:
 VIDEO_LOADER_REGISTRY = ExtensionManager()
 
 
+@VIDEO_LOADER_REGISTRY.register("identity")
+class IdentityVideoLoader(VideoLoader):
+    """IdentityVideoLoader returns raw video bytes without decoding.
+
+    This allows the model processor to handle video decoding and
+    is required for models like Kimi-K2.5 that need custom video chunk splitting.
+
+    NOTE: This is temporary for Kimi-K2.5 testing. Remember to change back
+    to opencv before release if needed.
+    """
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        **kwargs: Any,
+    ) -> tuple[Any, Any]:
+        return data, None
+
+
 @VIDEO_LOADER_REGISTRY.register("opencv")
 class OpenCVVideoBackend(VideoLoader):
     def get_cv2_video_api(self):

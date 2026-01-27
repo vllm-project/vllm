@@ -18,12 +18,12 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from tests.kernels.moe.utils import fused_moe
+from tests.kernels.moe.utils import fused_moe, make_dummy_moe_config
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import init_distributed_environment
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe import (
     fused_topk,
 )
@@ -332,7 +332,7 @@ def test_fused_moe(
     #
     quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    m_fused_moe_fn = modular_triton_fused_moe(quant_config)
+    m_fused_moe_fn = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
 
     def m_fused_moe(
         a: torch.Tensor,
@@ -437,7 +437,7 @@ def test_naive_block_assignment_moe(
     #
     quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    m_fused_moe_fn = modular_triton_fused_moe(quant_config)
+    m_fused_moe_fn = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
 
     def m_fused_moe(
         a: torch.Tensor,
@@ -713,6 +713,10 @@ def test_mixtral_moe(
 
         vllm_moe.experts.quant_method.process_weights_after_loading(vllm_moe.experts)
 
+        # need to override the forward context for unittests, otherwise it assumes
+        # we're running the model forward pass (the model specified in vllm_config)
+        get_forward_context().remaining_moe_layers = None
+
         # Run forward passes for both MoE blocks
         hf_states, _ = hf_moe.forward(hf_inputs)
         vllm_states = vllm_moe.forward(vllm_inputs)
@@ -953,18 +957,18 @@ class MarlinMoEWeightData:
 )
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_fused_marlin_moe(
-    a_type,
-    b_type,
-    c_type,
-    group_blocks,
-    m,
-    n,
-    k,
-    e,
-    topk,
-    ep_size,
-    act_order,
-    is_k_full,
+    a_type: ScalarType,
+    b_type: ScalarType,
+    c_type: ScalarType,
+    group_blocks: int,
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    ep_size: int,
+    act_order: bool,
+    is_k_full: bool,
 ):
     torch.cuda.manual_seed(1)
     group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
@@ -1040,7 +1044,6 @@ def test_fused_marlin_moe(
         None,
         w1_data.scales,
         w2_data.scales,
-        score,
         topk_weights,
         topk_ids,
         global_num_experts=e,
@@ -1116,7 +1119,6 @@ def test_fused_marlin_moe_with_bias(m):
         w2_data.marlin_bias,
         w1_data.scales,
         w2_data.scales,
-        score,
         topk_weights,
         topk_ids,
         global_num_experts=e,
@@ -1195,7 +1197,6 @@ def test_fused_marlin_moe_non_gated(m: int, n: int, k: int, e: int, topk: int):
         None,  # bias2
         w1_data.scales,
         w2_data.scales,
-        score,
         topk_weights,
         topk_ids,
         global_num_experts=e,
@@ -1310,6 +1311,7 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
     opcheck(torch.ops._moe_C.moe_sum, (input, actual))
 
 
+@pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("m", [1, 33])
 @pytest.mark.parametrize("n,k", [(128, 128)])
 @pytest.mark.parametrize("e", [8])
@@ -1515,7 +1517,6 @@ def test_batched_fused_marlin_moe(
         "bias2": None,
         "w1_scale": w1_data.scales,
         "w2_scale": w2_data.scales,
-        "gating_output": score,
         "global_num_experts": e,
         "expert_map": None,
         "global_scale1": w1_data.global_scale,

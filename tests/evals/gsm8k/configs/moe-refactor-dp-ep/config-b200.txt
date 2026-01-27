@@ -1,6 +1,7 @@
 Qwen3-30B-A3B-NvFp4-CT-fi-cutedsl-deepep-ll.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-fi-cutedsl-deepep-ll.yaml
 Qwen3-30B-A3B-NvFp4-CT-fi-cutlass.yaml
+Qwen3-30B-A3B-NvFp4-ModelOpt-fi-trtllm.yaml
 Qwen3-30B-A3B-NvFp4-ModelOpt-fi-cutlass.yaml
 Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm-deepep-ht.yaml
 Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm-deepep-ll.yaml
