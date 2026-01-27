@@ -11,25 +11,18 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 
 @dataclass
-class Wfp8A16LinearLayerConfig:
+class FP8W8A16LinearLayerConfigBase:
     pass
 
 
 @dataclass
-class FP8WoQLinearLayerConfig(Wfp8A16LinearLayerConfig):
+class FP8W8A16LinearLayerConfig(FP8W8A16LinearLayerConfigBase):
     weight_quant_key: QuantKey
     input_dtype: torch.dtype
     is_block_quant: bool = False
 
 
-_FP8ParamsT = tuple[
-    torch.Tensor,  # weight
-    torch.Tensor,  # weight_scale
-    torch.Tensor,  # activation
-]
-
-
-class FP8WoQLinearKernel(ABC):
+class FP8W8A16LinearKernel(ABC):
     """
     FP8 WoQ kernel for GPUs that lack FP8 hardware support.
     Leverages the Marlin kernel for fast weight-only FP8 quantization.
@@ -44,12 +37,12 @@ class FP8WoQLinearKernel(ABC):
 
     @classmethod
     @abstractmethod
-    def can_implement(cls, c: FP8WoQLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: FP8W8A16LinearLayerConfig) -> tuple[bool, str | None]:
         raise NotImplementedError
 
     def __init__(
         self,
-        c: FP8WoQLinearLayerConfig,
+        c: FP8W8A16LinearLayerConfig,
     ) -> None:
         assert self.can_implement(c)[0]
         assert self.is_supported()[0]

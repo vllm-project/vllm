@@ -45,17 +45,11 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.wFP8a16 import (
+from vllm.model_executor.layers.quantization.kernels.fp8_w8a16 import (
     init_wfp8a16_kernels,
 )
-from vllm.model_executor.layers.quantization.kernels.wFP8a16.WFP8A16_kernel import (  # noqa: E501
-    FP8WoQLinearKernel,
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -329,10 +323,8 @@ class Fp8LinearMethod(LinearMethodBase):
         self.block_quant = self.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
 
-        self.fp8_linear: FP8ScaledMMLinearKernel | FP8WoQLinearKernel = None
-
         if self.use_fp8_woq:
-            self.fp8_linear = init_wfp8a16_kernels(
+            self.fp8_w8a16_linear = init_wfp8a16_kernels(
                 weight_quant_key=kFp8StaticTensorSym,
                 input_dtype=self.marlin_input_dtype,
                 module_name=self.__class__.__name__,
@@ -473,7 +465,7 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.input_scale = None
 
         if self.use_fp8_woq:
-            self.fp8_linear.process_weights_after_loading(layer)
+            self.fp8_w8a16_linear.process_weights_after_loading(layer)
             # Activations not quantized for marlin.
             del layer.input_scale
             return
@@ -524,7 +516,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
         if self.use_fp8_woq:
-            return self.fp8_linear.apply_weights(
+            return self.fp8_w8a16_linear.apply_weights(
                 layer,
                 x,
                 bias,
@@ -621,7 +613,7 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
         if self.use_fp8_woq:
             # Activations not quantized for woq.
-            self.fp8_linear.process_weights_after_loading(layer)
+            self.fp8_w8a16_linear.process_weights_after_loading(layer)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):

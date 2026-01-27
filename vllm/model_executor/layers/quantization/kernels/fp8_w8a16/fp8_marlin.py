@@ -4,9 +4,9 @@
 
 import torch
 
-from vllm.model_executor.layers.quantization.kernels.wFP8a16.WFP8A16_kernel import (
-    FP8WoQLinearKernel,
-    FP8WoQLinearLayerConfig,
+from vllm.model_executor.layers.quantization.kernels.fp8_w8a16.FP8W8A16LinearKernel import (  # noqa: E501
+    FP8W8A16LinearKernel,
+    FP8W8A16LinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.platforms import current_platform
 
 
-class FP8MarlinLinearKernel(FP8WoQLinearKernel):
+class FP8MarlinLinearKernel(FP8W8A16LinearKernel):
     """
     FP8 Marlin kernel for GPUs that lack FP8 hardware support.
     Leverages the Marlin kernel for fast weight-only FP8 quantization.
@@ -27,7 +27,7 @@ class FP8MarlinLinearKernel(FP8WoQLinearKernel):
         return is_fp8_marlin_supported()
 
     @classmethod
-    def can_implement(cls, c: FP8WoQLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: FP8W8A16LinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
         per_channel_weight_scales = (
             c.weight_quant_key.scale.group_shape.is_per_channel()
@@ -50,7 +50,7 @@ class FP8MarlinLinearKernel(FP8WoQLinearKernel):
 
     def __init__(
         self,
-        c: FP8WoQLinearLayerConfig,
+        c: FP8W8A16LinearLayerConfig,
     ) -> None:
         super().__init__(c)
 

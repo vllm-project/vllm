@@ -4,12 +4,12 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.kernels.wFP8a16.fp8_marlin import (
+from vllm.model_executor.layers.quantization.kernels.fp8_w8a16.fp8_marlin import (  # noqa: E501
     FP8MarlinLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.wFP8a16.WFP8A16_kernel import (
-    FP8WoQLinearKernel,
-    FP8WoQLinearLayerConfig,
+from vllm.model_executor.layers.quantization.kernels.fp8_w8a16.FP8W8A16LinearKernel import (  # noqa: E501
+    FP8W8A16LinearKernel,
+    FP8W8A16LinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -18,14 +18,14 @@ from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
 
-_POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8WoQLinearKernel]]] = {
+_POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8W8A16LinearKernel]]] = {
     PlatformEnum.CUDA: [FP8MarlinLinearKernel],
 }
 
 
 def is_supported_and_can_implement_kernel(
-    kernel: type[FP8WoQLinearKernel],
-    config: FP8WoQLinearLayerConfig,
+    kernel: type[FP8W8A16LinearKernel],
+    config: FP8W8A16LinearLayerConfig,
     compute_capability: int | None,
 ) -> tuple[bool, str]:
     # TODO: Fetch `VLLM_DISABLED_KERNELS` from vllm.envs instead.
@@ -52,11 +52,11 @@ def is_supported_and_can_implement_kernel(
 
 
 def choose_mp_linear_kernel(
-    config: FP8WoQLinearLayerConfig,
-    possible_kernels: dict[PlatformEnum, list[type[FP8WoQLinearKernel]]],
+    config: FP8W8A16LinearLayerConfig,
+    possible_kernels: dict[PlatformEnum, list[type[FP8W8A16LinearKernel]]],
     compute_capability: int | None = None,
-    force_kernel: type[FP8WoQLinearKernel] | None = None,
-) -> type[FP8WoQLinearKernel]:
+    force_kernel: type[FP8W8A16LinearKernel] | None = None,
+) -> type[FP8W8A16LinearKernel]:
     """
     Choose an MPLinearKernel that can implement the given config for the given
      compute capability. Attempts to choose the best kernel in terms of
@@ -108,11 +108,11 @@ def init_wfp8a16_kernels(
     weight_quant_key: QuantKey,
     input_dtype: torch.dtype,
     is_block_quant: bool = False,
-    force_kernel: type[FP8WoQLinearKernel] | None = None,
+    force_kernel: type[FP8W8A16LinearKernel] | None = None,
     module_name: str | None = None,
-) -> FP8WoQLinearKernel:
+) -> FP8W8A16LinearKernel:
     """Initialize wFP8a16 kernels."""
-    kernel_config = FP8WoQLinearLayerConfig(
+    kernel_config = FP8W8A16LinearLayerConfig(
         weight_quant_key=weight_quant_key,
         input_dtype=input_dtype,
         is_block_quant=is_block_quant,
