@@ -42,20 +42,17 @@ from vllm.utils.torch_utils import (
 
 logger = init_logger(__name__)
 
-StrWeightsMapping = Mapping[str, str | None]
-"""If a key maps to a value of `None`, the corresponding weight is ignored."""
-RegexWeightsMapping = Mapping[re.Pattern, str | None]
-"""If a key maps to a value of `None`, the corresponding weight is ignored."""
-
 
 @dataclass
 class WeightsMapper:
-    """Maps the name of each weight if they match the following patterns."""
+    """Maps the name of each weight if they match the following patterns.
 
-    orig_to_new_regex: RegexWeightsMapping = field(default_factory=dict)
-    orig_to_new_substr: StrWeightsMapping = field(default_factory=dict)
-    orig_to_new_prefix: StrWeightsMapping = field(default_factory=dict)
-    orig_to_new_suffix: StrWeightsMapping = field(default_factory=dict)
+    If a key maps to a value of `None`, the corresponding weight is ignored."""
+
+    orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
+    orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
 
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
