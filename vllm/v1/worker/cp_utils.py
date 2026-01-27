@@ -82,10 +82,9 @@ class PCPManager:
     def compute_rank_indices(
         self,
         num_scheduled_tokens: np.ndarray,
-        num_computed_tokens: np.ndarray,
         arange_np: np.ndarray,
         reorder_batch_threshold: int | None,
-    ) -> tuple[np.ndarray, torch.Tensor, torch.Tensor]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Compute which tokens this PCP rank processes and their indices
         into the original batch.
@@ -110,17 +109,14 @@ class PCPManager:
 
         Args:
             num_scheduled_tokens: 1D numpy array of per-request token counts.
-            num_computed_tokens: 1D numpy array of already computed tokens per
-                request.
             arange_np: Pre-allocated arange buffer for efficient operations.
             reorder_batch_threshold: Threshold for decode vs prefill requests.
 
         Returns:
-            Tuple (pcp_num_scheduled, pcp_rank_indices, padding_mask):
+            Tuple (pcp_num_scheduled, local_token_indices):
             - pcp_num_scheduled: per-request token counts for this rank
-            - pcp_rank_indices: GPU tensor of indices into original batch for
-              real tokens (used with advanced indexing to gather tokens)
-            - padding_mask: GPU tensor, True for padding slots in PCP batch
+            - local_token_indices: numpy array of indices into original batch
+              for gathering positions (padding indices are clamped to 0)
 
         Example:
             Assume tokens = [1, 5, 8], pcp_world_size = 2:
@@ -241,8 +237,8 @@ class PCPManager:
         self.pcp_allgather_restore_idx.copy_to_gpu(all_positions.shape[0])
 
         # Now compute indices into original batch
-        # positions[i] is the position VALUE for PCP token i
-        # We need to find which original token that corresponds to
+        # positions[i] is the position VALUE (relative) for PCP token i
+        # We need to find which original token index that corresponds to
 
         # Compute cumsum of original tokens for request start offsets
         cu_orig_tokens = np.cumsum(num_scheduled_tokens)
@@ -257,43 +253,11 @@ class PCPManager:
         # For real tokens, compute index into original batch
         # original_index = orig_start_offset[req] + position
         orig_start_expanded = np.repeat(orig_start_offsets, pcp_tokens)
-        # Only compute for non-padding tokens
-        real_indices = orig_start_expanded + positions[:pcp_total_tokens]
-        # Clamp padding indices to 0 (they won't be used anyway)
-        real_indices = np.where(padding_mask_np, 0, real_indices)
+        local_token_indices = orig_start_expanded + positions[:pcp_total_tokens]
+        # Clamp padding indices to 0 (position won't matter for padding)
+        local_token_indices = np.where(padding_mask_np, 0, local_token_indices)
 
-        # Extract just the indices for real tokens
-        pcp_rank_indices = real_indices[~padding_mask_np]
-
-        # Convert to GPU tensors
-        pcp_rank_indices_gpu = torch.from_numpy(pcp_rank_indices.astype(np.int64)).to(
-            self.device, non_blocking=True
-        )
-        padding_mask_gpu = torch.from_numpy(padding_mask_np.copy()).to(
-            self.device, non_blocking=True
-        )
-
-        return pcp_tokens[:num_reqs], pcp_rank_indices_gpu, padding_mask_gpu
-
-    def get_logits_indices(self, cu_num_tokens: np.ndarray, num_reqs: int):
-        return (
-            torch.from_numpy(cu_num_tokens) * self.pcp_world_size
-            - self.num_pcp_pads_cpu_tensor[:num_reqs]
-            - 1
-        ).to(self.device, non_blocking=True)
-
-    def get_discard_request_mask(
-        self,
-        num_computed_tokens_cpu: np.ndarray,
-        num_scheduled_tokens: np.ndarray,
-        num_reqs: int,
-        num_tokens_np: np.ndarray,
-    ):
-        return (
-            num_computed_tokens_cpu[:num_reqs]
-            + num_scheduled_tokens * self.pcp_world_size
-            - self.num_pcp_pads_cpu[:num_reqs]
-        ) < num_tokens_np
+        return pcp_tokens[:num_reqs], local_token_indices.astype(np.int64)
 
     def get_padded_slot_mapping(self, num_tokens: int, slot_mapping: torch.Tensor):
         # After pcp allgather and restore, there are padded tokens in kv,

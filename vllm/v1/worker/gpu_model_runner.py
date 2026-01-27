@@ -1322,10 +1322,39 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
+    def _partition_for_pcp(
+        self,
+        num_scheduled_tokens_np: np.ndarray,
+        num_reqs: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Compute PCP partition indices.
+
+        Args:
+            num_scheduled_tokens_np: Per-request token counts (original).
+            num_reqs: Number of requests in the batch.
+
+        Returns:
+            Tuple (local_num_scheduled_tokens, local_token_indices):
+            - local_num_scheduled_tokens: Per-request token counts for this rank
+            - local_token_indices: Indices into full-batch positions for this rank
+        """
+        local_num_scheduled, local_token_indices = (
+            self.pcp_manager.compute_rank_indices(
+                num_scheduled_tokens_np[:num_reqs],
+                self.arange_np,
+                self.reorder_batch_threshold,
+            )
+        )
+        return local_num_scheduled, local_token_indices
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
+        local_num_scheduled_tokens: np.ndarray,
+        total_num_scheduled_tokens: int,
+        local_token_indices: np.ndarray | None = None,
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
@@ -1335,8 +1364,8 @@ class GPUModelRunner(
             logits_indices, spec_decode_metadata,
         ]
         """
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        assert total_num_scheduled_tokens > 0
+        total_local_tokens = int(local_num_scheduled_tokens.sum())
+        assert total_local_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
@@ -1362,6 +1391,20 @@ class GPUModelRunner(
 
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
+
+        logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
+            self.device, non_blocking=True
+        )
+
+        # For PCP: gather positions and recompute local indices
+        if local_token_indices is not None:
+            cu_num_tokens, _ = self._get_cumsum_and_arange(local_num_scheduled_tokens)
+            positions_np[:total_local_tokens] = positions_np[local_token_indices]
+            req_indices[:total_local_tokens] = req_indices[local_token_indices]
+            # Slice to local length for subsequent use
+            positions_np = positions_np[:total_local_tokens]
+            req_indices = req_indices[:total_local_tokens]
+            total_num_scheduled_tokens = total_local_tokens
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1406,7 +1449,7 @@ class GPUModelRunner(
         if self.input_batch.req_prompt_embeds:
             output_idx = 0
             for req_idx in range(num_reqs):
-                num_sched = num_scheduled_tokens[req_idx]
+                num_sched = local_num_scheduled_tokens[req_idx]
 
                 # Skip if this request doesn't have embeddings
                 if req_idx not in self.input_batch.req_prompt_embeds:
@@ -1445,7 +1488,6 @@ class GPUModelRunner(
         # like FlashAttention requires that
         self.query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
         self.query_start_loc.copy_to_gpu()
-        query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
@@ -1458,8 +1500,7 @@ class GPUModelRunner(
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
         # Record which requests should not be sampled,
-        # so that we could clear the sampled tokens before returning.
-        # Note: PCP updates this in _maybe_partition_batch_for_pcp.
+        # so that we could clear the sampled tokens before returning
         self.discard_request_mask.np[:num_reqs] = (
             self.seq_lens.np[:num_reqs] < num_tokens_np
         )
@@ -1495,9 +1536,7 @@ class GPUModelRunner(
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            # Note: PCP updates logits_indices in _maybe_partition_batch_for_pcp.
-            logits_indices = query_start_loc[1:] - 1
-            num_draft_tokens = None
+            # logits_indices already computed above using original cu_num_tokens
             spec_decode_metadata = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
         else:
@@ -1540,103 +1579,13 @@ class GPUModelRunner(
                 <= self.vllm_config.scheduler_config.max_num_batched_tokens
             )
             self.set_active_loras(
-                self.input_batch, num_scheduled_tokens, num_sampled_tokens
+                self.input_batch, local_num_scheduled_tokens, num_sampled_tokens
             )
 
         return (
             logits_indices,
             spec_decode_metadata,
         )
-
-    def _partition_batch_for_pcp(
-        self,
-        num_scheduled_tokens_np: np.ndarray,
-        num_reqs: int,
-        original_total_tokens: int,
-    ) -> tuple[int, int, torch.Tensor]:
-        """
-        Partition batch for Prefill Context Parallelism. Mutates GPU buffers
-        in-place.
-
-        This method applies PCP partitioning by:
-        1. Computing which tokens this PCP rank processes
-        2. Using index_select on GPU to gather real tokens from original batch
-        3. Filling padding slots with placeholder values
-        4. Updating query_start_loc, seq_lens, and discard_request_mask
-
-        Args:
-            num_scheduled_tokens_np: Per-request token counts (original).
-            num_reqs: Number of requests in the batch.
-            original_total_tokens: Total tokens in the original batch.
-
-        Returns:
-            Tuple (total_num_scheduled_tokens, max_num_scheduled_tokens, logits_indices)
-        """
-
-        # 1. Compute PCP token assignments and indices
-        pcp_num_scheduled, pcp_rank_indices_gpu, padding_mask_gpu = (
-            self.pcp_manager.compute_rank_indices(
-                num_scheduled_tokens_np[:num_reqs],
-                self.input_batch.num_computed_tokens_cpu[:num_reqs],
-                self.arange_np,
-                self.reorder_batch_threshold,
-            )
-        )
-
-        pcp_total_tokens = int(pcp_num_scheduled.sum())
-        max_scheduled = int(pcp_num_scheduled.max())
-
-        # 2. GPU index_select for real tokens
-        real_mask_gpu = ~padding_mask_gpu
-        self.input_ids.gpu[:pcp_total_tokens][real_mask_gpu] = self.input_ids.gpu[
-            :original_total_tokens
-        ][pcp_rank_indices_gpu]
-        self.positions.gpu[:pcp_total_tokens][real_mask_gpu] = self.positions.gpu[
-            :original_total_tokens
-        ][pcp_rank_indices_gpu]
-
-        # 3. Fill padding slots with placeholder
-        self.input_ids.gpu[:pcp_total_tokens][padding_mask_gpu] = 0
-        self.positions.gpu[:pcp_total_tokens][padding_mask_gpu] = 0
-
-        # 4. Handle inputs_embeds if present
-        if self.inputs_embeds is not None:
-            self.inputs_embeds.gpu[:pcp_total_tokens][real_mask_gpu] = (
-                self.inputs_embeds.gpu[:original_total_tokens][pcp_rank_indices_gpu]
-            )
-            self.inputs_embeds.gpu[:pcp_total_tokens][padding_mask_gpu] = 0
-
-        # 5. Update query_start_loc (CPU + GPU mirror)
-        cu_pcp_tokens = np.cumsum(pcp_num_scheduled)
-        self.query_start_loc.np[0] = 0
-        self.query_start_loc.np[1 : num_reqs + 1] = cu_pcp_tokens
-        self.query_start_loc.copy_to_gpu()
-
-        # 6. Update seq_lens (CPU + GPU mirror)
-        self.seq_lens.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] + pcp_num_scheduled
-        )
-        self.seq_lens.copy_to_gpu()
-
-        # 7. Update discard_request_mask
-        num_tokens = [
-            self.requests[r].num_tokens for r in self.input_batch.req_ids[:num_reqs]
-        ]
-        num_tokens_np = np.array(num_tokens, dtype=np.int32)
-        self.discard_request_mask.np[:num_reqs] = (
-            self.pcp_manager.get_discard_request_mask(
-                num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
-                num_scheduled_tokens=pcp_num_scheduled,
-                num_reqs=num_reqs,
-                num_tokens_np=num_tokens_np,
-            )
-        )
-        self.discard_request_mask.copy_to_gpu(num_reqs)
-
-        # 8. Compute logits_indices
-        logits_indices = self.pcp_manager.get_logits_indices(cu_pcp_tokens, num_reqs)
-
-        return pcp_total_tokens, max_scheduled, logits_indices
 
     def _build_attention_metadata(
         self,
@@ -3247,8 +3196,19 @@ class GPUModelRunner(
                 req_ids = self.input_batch.req_ids
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
-                max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
                 num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+
+                local_num_scheduled_tokens = num_scheduled_tokens_np
+                local_token_indices = None
+                total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+                if self.pcp_world_size > 1:
+                    local_num_scheduled_tokens, local_token_indices = (
+                        self._partition_for_pcp(num_scheduled_tokens_np, num_reqs)
+                    )
+                    total_num_scheduled_tokens = int(local_num_scheduled_tokens.sum())
+
+                max_num_scheduled_tokens = int(local_num_scheduled_tokens.max())
 
                 (
                     logits_indices,
@@ -3256,20 +3216,10 @@ class GPUModelRunner(
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
+                    local_num_scheduled_tokens,
+                    total_num_scheduled_tokens,
+                    local_token_indices,
                 )
-
-                total_num_scheduled_tokens = num_tokens_unpadded
-                if self.pcp_world_size > 1:
-                    # Apply PCP partitioning (mutates GPU buffers in-place)
-                    (
-                        total_num_scheduled_tokens,
-                        max_num_scheduled_tokens,
-                        logits_indices,
-                    ) = self._partition_batch_for_pcp(
-                        num_scheduled_tokens_np,
-                        num_reqs,
-                        num_tokens_unpadded,
-                    )
 
                 cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
