@@ -194,6 +194,7 @@ from enum import Enum
 from typing import ClassVar, Generic, TypeVar
 
 import torch
+from flashinfer.concat_ops import concat_mla_k
 from tqdm import tqdm
 
 from vllm import _custom_ops as ops
@@ -1634,14 +1635,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
         assert prefill.workspace_buffer is not None
 
-        out = torch.zeros(
+        out = torch.empty(
             q.shape[0],
             q.shape[1],
             v.shape[2],
             device=q.device,
             dtype=q.dtype,
         )
-        prefill.workspace_buffer.fill_(0)
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
@@ -1684,15 +1684,26 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         Returns:
             Tensor of shape [..., nope_dim + pe_dim]
         """
+
         k = torch.empty(
             (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
             dtype=k_nope.dtype,
             device=k_nope.device,
         )
-        # Direct copies with efficient broadcasting
-        k[..., : k_nope.shape[-1]] = k_nope
-        k[..., k_nope.shape[-1] :] = k_pe
-        return k
+
+        # Optimized copy kernel for the DSV3 dimensions.
+        if (
+            self.num_heads == 128
+            and self.qk_nope_head_dim == 128
+            and self.qk_rope_head_dim == 64
+        ):
+            concat_mla_k(k, k_nope, k_pe)
+            return k
+        else:
+            # Direct copies with efficient broadcasting
+            k[..., : k_nope.shape[-1]] = k_nope
+            k[..., k_nope.shape[-1] :] = k_pe
+            return k
 
     def _compute_prefill_context(
         self,
