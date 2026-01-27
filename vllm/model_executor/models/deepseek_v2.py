@@ -33,7 +33,6 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -43,9 +42,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -63,6 +62,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -74,16 +74,11 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits
-from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
-    DeepseekV32IndexerMetadata,
 )
-from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
-from vllm.v1.worker.workspace import current_workspace_manager
 
 from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
 from .utils import (
@@ -93,11 +88,6 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
-
-if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
-elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops
 
 logger = init_logger(__name__)
 
@@ -599,213 +589,6 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         return DeepseekV32IndexerBackend
 
 
-def sparse_attn_indexer(
-    hidden_states: torch.Tensor,
-    k_cache_prefix: str,
-    kv_cache: torch.Tensor,
-    q_fp8: torch.Tensor,
-    k: torch.Tensor,
-    weights: torch.Tensor,
-    quant_block_size: int,
-    scale_fmt: str | None,
-    topk_tokens: int,
-    head_dim: int,
-    max_model_len: int,
-    total_seq_lens: int,
-    topk_indices_buffer: torch.Tensor | None,
-) -> torch.Tensor:
-    # careful! this will be None in dummy run
-    attn_metadata = get_forward_context().attn_metadata
-    fp8_dtype = current_platform.fp8_dtype()
-
-    # assert isinstance(attn_metadata, dict)
-    if not isinstance(attn_metadata, dict):
-        # Reserve workspace for indexer during profiling run
-        current_workspace_manager().get_simultaneous(
-            ((total_seq_lens, head_dim), torch.float8_e4m3fn),
-            ((total_seq_lens, 4), torch.uint8),
-        )
-
-        return sparse_attn_indexer_fake(
-            hidden_states,
-            k_cache_prefix,
-            kv_cache,
-            q_fp8,
-            k,
-            weights,
-            quant_block_size,
-            scale_fmt,
-            topk_tokens,
-            head_dim,
-            max_model_len,
-            total_seq_lens,
-            topk_indices_buffer,
-        )
-    attn_metadata = attn_metadata[k_cache_prefix]
-    assert isinstance(attn_metadata, DeepseekV32IndexerMetadata)
-    slot_mapping = attn_metadata.slot_mapping
-    has_decode = attn_metadata.num_decodes > 0
-    has_prefill = attn_metadata.num_prefills > 0
-    num_decode_tokens = attn_metadata.num_decode_tokens
-
-    ops.indexer_k_quant_and_cache(
-        k,
-        kv_cache,
-        slot_mapping,
-        quant_block_size,
-        scale_fmt,
-    )
-
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
-    if has_prefill:
-        prefill_metadata = attn_metadata.prefill
-
-        # Get the full shared workspace buffers once (will allocate on first use)
-        workspace_manager = current_workspace_manager()
-        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), fp8_dtype),
-            ((total_seq_lens, 4), torch.uint8),
-        )
-
-        for chunk in prefill_metadata.chunks:
-            k_fp8 = k_fp8_full[: chunk.total_seq_lens]
-            k_scale = k_scale_full[: chunk.total_seq_lens]
-            ops.cp_gather_indexer_k_quant_cache(
-                kv_cache,
-                k_fp8,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
-            )
-            fp8_mqa_logits_func = fp8_mqa_logits
-            if current_platform.is_rocm():
-                from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-                    rocm_fp8_mqa_logits,
-                )
-
-                fp8_mqa_logits_func = rocm_fp8_mqa_logits
-            logits = fp8_mqa_logits_func(
-                q_fp8[chunk.token_start : chunk.token_end],
-                (k_fp8, k_scale.view(torch.float32).flatten()),
-                weights[chunk.token_start : chunk.token_end],
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-            )
-            num_rows = logits.shape[0]
-            topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
-            ]
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
-
-    if has_decode:
-        decode_metadata = attn_metadata.decode
-        # kv_cache size requirement [num_block, block_size, n_head, head_dim],
-        # we only have [num_block, block_size, head_dim],
-        kv_cache = kv_cache.unsqueeze(-2)
-        decode_lens = decode_metadata.decode_lens
-        if decode_metadata.requires_padding:
-            # pad in edge case where we have short chunked prefill length <
-            # decode_threshold since we unstrictly split
-            # prefill and decode by decode_threshold
-            # (currently set to 1 + speculative tokens)
-
-            # [num_decode_tokens, n_head, head_dim] -> [bs, 1+next_n, n_head, head_dim]
-            padded_q_fp8_decode_tokens = pack_seq_triton(
-                q_fp8[:num_decode_tokens], decode_lens
-            )
-            # [num_decode_tokens, n_head] -> [bs, 1+next_n, n_head]
-            padded_weights = pack_seq_triton(weights[:num_decode_tokens], decode_lens)
-            # [bs, 1+next_n, n_head] -> [bs * next_n, n_head]
-            padded_weights = padded_weights.flatten(0, 1)
-        else:
-            padded_q_fp8_decode_tokens = q_fp8[:num_decode_tokens].reshape(
-                decode_lens.shape[0], -1, *q_fp8.shape[1:]
-            )
-            padded_weights = weights
-        # TODO: move and optimize below logic with triton kernels
-        batch_size = padded_q_fp8_decode_tokens.shape[0]
-        next_n = padded_q_fp8_decode_tokens.shape[1]
-        assert batch_size == decode_metadata.seq_lens.shape[0]
-        num_padded_tokens = batch_size * next_n
-        fp8_paged_mqa_logits_func = fp8_paged_mqa_logits
-        if current_platform.is_rocm():
-            from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-                rocm_fp8_paged_mqa_logits,
-            )
-
-            fp8_paged_mqa_logits_func = rocm_fp8_paged_mqa_logits
-        logits = fp8_paged_mqa_logits_func(
-            padded_q_fp8_decode_tokens,
-            kv_cache,
-            padded_weights[:num_padded_tokens],
-            decode_metadata.seq_lens,
-            decode_metadata.block_table,
-            decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
-        )
-        num_rows = logits.shape[0]
-        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
-
-        torch.ops._C.top_k_per_row_decode(
-            logits,
-            next_n,
-            decode_metadata.seq_lens,
-            topk_indices,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
-            topk_tokens,
-        )
-        if decode_metadata.requires_padding:
-            # if padded, we need to unpack
-            # the topk indices removing padded tokens
-            topk_indices = unpack_seq_triton(
-                topk_indices.reshape(batch_size, -1, topk_indices.shape[-1]),
-                decode_lens,
-            )
-            topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
-                topk_indices
-            )
-
-    return topk_indices_buffer
-
-
-def sparse_attn_indexer_fake(
-    hidden_states: torch.Tensor,
-    k_cache_prefix: str,
-    kv_cache: torch.Tensor,
-    q_fp8: torch.Tensor,
-    k: torch.Tensor,
-    weights: torch.Tensor,
-    quant_block_size: int,
-    scale_fmt: str | None,
-    topk_tokens: int,
-    head_dim: int,
-    max_model_len: int,
-    total_seq_lens: int,
-    topk_indices_buffer: torch.Tensor | None,
-) -> torch.Tensor:
-    return topk_indices_buffer
-
-
-direct_register_custom_op(
-    op_name="sparse_attn_indexer",
-    op_func=sparse_attn_indexer,
-    mutates_args=["topk_indices_buffer"],
-    fake_impl=sparse_attn_indexer_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
-
-
 class Indexer(nn.Module):
     def __init__(
         self,
@@ -870,6 +653,16 @@ class Indexer(nn.Module):
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
+        self.indexer_op = SparseAttnIndexer(
+            self.k_cache,
+            self.quant_block_size,
+            self.scale_fmt,
+            self.topk_tokens,
+            self.head_dim,
+            self.max_model_len,
+            self.max_total_seq_len,
+            self.topk_indices_buffer,
+        )
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
@@ -892,6 +685,8 @@ class Indexer(nn.Module):
         q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
         k_pe = k_pe.reshape(-1, 1, self.rope_dim)
 
+        # `rotary_emb` is shape-preserving; `q_pe` is already
+        # [num_tokens, n_head, rope_dim].
         q = torch.cat([q_pe, q_nope], dim=-1)
         # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
         k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
@@ -913,21 +708,7 @@ class Indexer(nn.Module):
         )
         weights = weights.squeeze(-1)
 
-        return torch.ops.vllm.sparse_attn_indexer(
-            hidden_states,
-            self.k_cache.prefix,
-            self.k_cache.kv_cache[0],
-            q_fp8,
-            k,
-            weights,
-            self.quant_block_size,
-            self.scale_fmt,
-            self.topk_tokens,
-            self.head_dim,
-            self.max_model_len,
-            self.max_total_seq_len,
-            self.topk_indices_buffer,
-        )
+        return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
 class DeepseekV2MLAAttention(nn.Module):
@@ -1304,7 +1085,7 @@ class DeepseekV2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1474,7 +1255,7 @@ class DeepseekV2ForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
