@@ -429,11 +429,26 @@ def setup_server(args):
     # many concurrent requests active
     set_ulimit()
 
-    def signal_handler(*_) -> None:
-        # Interrupt server on sigterm while initializing
-        raise KeyboardInterrupt("terminated")
+    # set up SIGTERM handler for initialization phase
+    # (will be replaced by serve_http's signal handlers once server starts)
+    try:
+        loop = asyncio.get_running_loop()
 
-    signal.signal(signal.SIGTERM, signal_handler)
+        def async_signal_handler():
+            # cancel all tasks to trigger clean shutdown
+            for task in asyncio.all_tasks(loop):
+                task.cancel()
+
+        loop.add_signal_handler(signal.SIGTERM, async_signal_handler)
+    except RuntimeError:
+        # no running loop - use traditional handler
+        # TODO: raising from signal handlers is unsafe per python docs
+        # (see https://docs.python.org/3/library/signal.html#note-on-signal-handlers-and-exceptions)
+        # should use wakeup pipe with multiprocessing.connection.wait()
+        def signal_handler(*_) -> None:
+            raise KeyboardInterrupt("terminated")
+
+        signal.signal(signal.SIGTERM, signal_handler)
 
     if args.uds:
         listen_address = f"unix:{args.uds}"
