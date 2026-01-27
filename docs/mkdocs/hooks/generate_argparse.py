@@ -162,11 +162,12 @@ class MarkdownFormatter(HelpFormatter):
             if action.help:
                 self._markdown_output.append(f"{action.help}\n\n")
 
-            # None typically indicates "auto-detect" or "use runtime default"
-            if (default := action.default) not in {SUPPRESS, None}:
-                # Make empty string defaults visible
             # None usually means the default is determined at runtime
             if (default := action.default) != SUPPRESS and default is not None:
+                # Make empty string defaults visible
+                if default == "":
+                    default = '""'
+                self._markdown_output.append(f"Default: `{default}`\n\n")
 
     def format_help(self):
         """Return the formatted help as markdown."""
