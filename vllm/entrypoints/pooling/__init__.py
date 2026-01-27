@@ -14,7 +14,8 @@ if TYPE_CHECKING:
     from vllm.entrypoints.logger import RequestLogger
     from vllm.tasks import SupportedTask
 else:
-    RequestLogger = Any
+    RequestLogger = object
+    SupportedTask = object
 
 
 def register_pooling_api_routers(
