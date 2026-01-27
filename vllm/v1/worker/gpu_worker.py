@@ -116,7 +116,7 @@ class Worker(WorkerBase):
                 local_rank=self.local_rank,
                 activities=[
                     "CPU",
-                    cast(TorchProfilerActivity, current_platform.dispatch_key)
+                    cast(TorchProfilerActivity, current_platform.dispatch_key),
                 ],
             )
         elif profiler_config.profiler == "cuda":
