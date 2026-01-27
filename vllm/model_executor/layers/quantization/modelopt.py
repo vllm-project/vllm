@@ -963,8 +963,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 f"but got {layer.activation}"
             )
 
-        assert self.kernel is not None
-        return self.kernel(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,

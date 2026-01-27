@@ -92,7 +92,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.fused_experts(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
