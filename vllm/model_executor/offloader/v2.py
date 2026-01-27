@@ -4,8 +4,9 @@
 # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/utils/offloader.py
 """OffloaderV2: CPU offloading with async prefetching.
 
-This version uses static buffers and stream synchronization (instead of
-CUDA events) for torch.compile + CUDA graph compatibility.
+This version uses static buffers and event-based stream forking for
+torch.compile + CUDA graph compatibility. Events allow the copy stream
+to join CUDA graph captures, ensuring H2D copies are properly captured.
 """
 
 from abc import ABC, abstractmethod
@@ -247,14 +248,107 @@ class OffloaderV2(BaseOffloader):
         module.forward = forward
 
     def _wait_for_layer(self, layer_idx: int):
-        """Called by custom op - wait for copy stream to complete."""
-        # wait_stream creates a CUDA graph dependency edge when captured
+        """Called by custom op - wait for copy to complete.
+
+        Synchronization strategy:
+        - During CUDA graph capture: use event-based wait (graph-compatible)
+        - Outside capture (warmup/eager): use wait_stream (more robust)
+
+        During capture, we skip wait for pre-capture prefetches because:
+        1. sync_before_graph_capture() ensures pre-capture work is complete
+        2. We can't wait on pre-capture events during capture (isolation error)
+        """
+        offloader = self.module_offloaders[layer_idx]
+
+        if torch.cuda.is_current_stream_capturing():
+            # During capture, skip wait for pre-capture prefetches.
+            # sync_before_graph_capture() ensures pre-capture work is complete.
+            if not offloader._prefetch_in_capture:
+                return
+            # Event-based wait for in-capture prefetches (graph-compatible)
+            torch.cuda.current_stream().wait_event(offloader._copy_done_event)
+            # Mark that this prefetch has been waited on (joined).
+            offloader._prefetch_in_capture = False
+        else:
+            # Outside capture: use wait_stream for robustness.
+            # Events used in previous captures can be in invalid state.
+            torch.cuda.current_stream().wait_stream(self.copy_stream)
+
+    def sync_before_graph_capture(self):
+        """Sync copy stream before CUDA graph capture or replay.
+
+        Pre-capture prefetches from warmup must complete before capture.
+        This method ensures those dependencies are satisfied.
+
+        Call this:
+        1. Before capturing a CUDA graph
+        2. Before replaying a CUDA graph (if prefetches were issued outside)
+
+        Also resets _prefetch_in_capture flags. This is critical for piecewise
+        cudagraph mode where multiple subgraphs are captured sequentially.
+        Each subgraph's prefetches must be tracked independently - we can't
+        wait on events recorded in a different subgraph's capture.
+        """
         torch.cuda.current_stream().wait_stream(self.copy_stream)
+
+        # Reset flags so only prefetches started in THIS capture are tracked.
+        # This prevents cross-capture event waits which cause cudaErrorInvalidValue.
+        for offloader in self.module_offloaders:
+            offloader._prefetch_in_capture = False
 
     def _start_prefetch(self, layer_idx: int):
         """Called by custom op - start async copy to static buffer."""
         offloader = self.module_offloaders[layer_idx]
         offloader.start_onload_to_static()
+
+    def _join_copy_stream(self, layer_idx: int):
+        """Called by custom op - join copy_stream back to compute stream.
+
+        Used after the last layer's start_prefetch to ensure copy_stream is
+        rejoined before CUDA graph capture ends. The start_prefetch forks
+        copy_stream into the capture, but the corresponding wait_prefetch
+        only happens in the next forward pass. During capture, this would
+        leave copy_stream unjoined, causing cudaErrorStreamCaptureUnjoined.
+
+        During capture, we check if the prefetch was started during the same
+        capture. If not (e.g., from post_init or warmup), we skip the wait
+        because:
+        1. sync_before_graph_capture() ensures pre-capture work is complete
+        2. We can't wait on pre-capture events during capture (would cause
+           cudaErrorStreamCaptureIsolation)
+        """
+        offloader = self.module_offloaders[layer_idx]
+
+        # During capture, skip wait for pre-capture prefetches.
+        # sync_before_graph_capture() ensures pre-capture work is complete.
+        if (
+            torch.cuda.is_current_stream_capturing()
+            and not offloader._prefetch_in_capture
+        ):
+            return
+
+        torch.cuda.current_stream().wait_event(offloader._copy_done_event)
+
+    def join_after_forward(self):
+        """Join copy_stream after model forward completes.
+
+        Call this after the model forward pass but before CUDA graph capture
+        ends. This ensures copy_stream is rejoined for any prefetches started
+        during the forward pass.
+
+        We join ALL layers that have _prefetch_in_capture=True, meaning their
+        prefetch was started during capture but not yet waited on (joined).
+        This handles both full and piecewise cudagraph modes correctly:
+        - Full mode: joins layers 0..prefetch_step-1 (prefetched by last layers)
+        - Piecewise mode: joins only layers prefetched by THIS subgraph's layers
+        """
+        if not self.module_offloaders:
+            return
+        # Join all layers whose prefetch was started in capture but not waited on
+        for offloader in self.module_offloaders:
+            if offloader._prefetch_in_capture:
+                torch.cuda.current_stream().wait_event(offloader._copy_done_event)
+                offloader._prefetch_in_capture = False
 
     def post_init(self):
         """Allocate static buffer pool and start initial prefetches.
@@ -334,6 +428,15 @@ class _ModuleOffloader:
         self.copy_stream = copy_stream
         self.layer_idx = layer_idx
         self.offloaded_bytes = 0
+
+        # Event to signal when H2D copy to static buffer is complete.
+        # Used for CUDA graph compatible synchronization during capture.
+        # Outside capture, we use wait_stream instead (more robust).
+        self._copy_done_event = torch.cuda.Event()
+
+        # Track if last prefetch was started during CUDA graph capture.
+        # Used to skip wait_event during capture for pre-capture prefetches.
+        self._prefetch_in_capture = False
 
         assert self.device != torch.device("cpu"), (
             "Module parameters should not already be on CPU "
@@ -416,8 +519,8 @@ class _ModuleOffloader:
     def start_onload_to_static(self):
         """Start async copy from CPU storage to GPU buffer.
 
-        Uses the stored _gpu_buffer reference directly instead of accessing
-        param.data, to avoid any issues with parameter identity changes.
+        Uses event-based forking to join copy_stream to CUDA graph capture.
+        This ensures H2D copies are properly captured when recording a graph.
 
         IMPORTANT: We must wait for the compute stream before copying, because
         the previous layer's forward may still be using the buffer (GPU ops are
@@ -426,8 +529,14 @@ class _ModuleOffloader:
         """
         assert self._buffer_pool is not None, "Buffer pool not assigned"
 
-        # Wait for compute stream to finish using the buffer before overwriting
-        self.copy_stream.wait_stream(torch.cuda.current_stream())
+        # Track if this prefetch is being captured (for _wait_for_layer logic)
+        self._prefetch_in_capture = torch.cuda.is_current_stream_capturing()
+
+        # Fork: record event on compute stream, copy_stream waits on it
+        # This joins copy_stream to any active CUDA graph capture
+        fork_event = torch.cuda.Event()
+        torch.cuda.current_stream().record_event(fork_event)
+        self.copy_stream.wait_event(fork_event)
 
         with torch.cuda.stream(self.copy_stream):
             for name, offloader in self._param_offloaders.items():
@@ -437,6 +546,9 @@ class _ModuleOffloader:
                 assert gpu_buffer is not None, "GPU buffer not assigned"
                 # Async copy from pinned CPU storage to GPU buffer
                 gpu_buffer.copy_(cpu_storage, non_blocking=True)
+
+        # Record completion event for _wait_for_layer to use
+        self._copy_done_event.record(self.copy_stream)
 
 
 class _BaseParamOffloader(ABC):

@@ -16,7 +16,6 @@ def test_v2_offload_deepseek():
     """
     compare_two_settings(
         "deepseek-ai/DeepSeek-V2-Lite",
-        [],  # Baseline: no offloading
         [
             # V2 offloading configuration
             "--offload-group-size",
@@ -28,4 +27,5 @@ def test_v2_offload_deepseek():
             # torch.compile is automatically disabled when V2 offloading is
             # enabled (via enable_if in @support_torch_compile decorator)
         ],
+        [],  # Baseline: no offloading
     )
