@@ -41,8 +41,8 @@ from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import (
     CudaProfilerWrapper,
-    TorchProfilerWrapper,
     TorchProfilerActivity,
+    TorchProfilerWrapper,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
