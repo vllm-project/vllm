@@ -28,6 +28,26 @@ from vllm.tool_parsers.abstract_tool_parser import (
 logger = init_logger(__name__)
 
 
+class PartialInvoke:
+    """Represents a partially parsed invoke that can be incrementally built."""
+
+    def __init__(
+        self,
+        name: str | None = None,
+        parameters: list[tuple[str, str]] | None = None,
+        invoke_completed: bool = False,
+    ):
+        self.name = name
+        self.parameters = parameters if parameters is not None else []
+        self.invoke_completed = invoke_completed
+
+    def __repr__(self):
+        return (
+            f"PartialInvoke(name={self.name!r}, parameters={self.parameters}"
+            + f", invoke_completed={self.invoke_completed})"
+        )
+
+
 class MinimaxM2ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike):
         super().__init__(tokenizer)
@@ -352,6 +372,86 @@ class MinimaxM2ToolParser(ToolParser):
             ),
         )
 
+    def _parse_partial_invoke(
+        self, invoke_str: str, tools: list | None = None
+    ) -> PartialInvoke:
+        """
+        Parse a potentially incomplete <invoke> block.
+
+        Only includes:
+        - name: if the function name is completely parsed
+        - parameters: only those with both opening and closing tags
+        - invoke_completed: True if </invoke> closing tag is present
+
+        Returns a PartialInvoke with ordered parameters as list of tuples.
+        """
+        result = PartialInvoke()
+
+        # Extract function name - handle both single and double quotes
+        # <invoke name="X"> or <invoke name='X'>
+        name_pattern = rf'{re.escape(self.invoke_start_prefix)}["\']([^"\']+)["\']>'
+        name_match = re.search(name_pattern, invoke_str)
+        if name_match:
+            result.name = name_match.group(1).strip()
+
+        # Check if invoke block is complete (has closing tag)
+        result.invoke_completed = self.invoke_end_token in invoke_str
+
+        # Get parameter configuration for type conversion
+        param_config = {}
+        if tools and result.name:
+            for tool in tools:
+                if (
+                    hasattr(tool, "function")
+                    and tool.function.name == result.name
+                    and hasattr(tool.function, "parameters")
+                ):
+                    params = tool.function.parameters
+                    if isinstance(params, dict) and "properties" in params:
+                        param_config = params["properties"]
+                    break
+
+        # Extract only COMPLETE parameters (both opening and closing tags)
+        # Handle both single and double quotes
+        # <parameter name="X">...</parameter> or <parameter name='X'>...</parameter>
+        complete_param_pattern = (
+            rf'{re.escape(self.parameter_prefix)}["\']([^"\']+)["\']>'
+            rf"(.*?){re.escape(self.parameter_end_token)}"
+        )
+
+        for match in re.finditer(complete_param_pattern, invoke_str, re.DOTALL):
+            param_name = match.group(1).strip()
+            param_value = match.group(2).strip()
+
+            # Clean up leading/trailing newlines
+            if param_value.startswith("\n"):
+                param_value = param_value[1:]
+            if param_value.endswith("\n"):
+                param_value = param_value[:-1]
+
+            # Get parameter types and convert
+            if param_config:
+                param_type = self._get_param_types_from_config(param_name, param_config)
+                converted_value = self._convert_param_value_with_types(
+                    param_value, param_type
+                )
+            else:
+                # Without config, keep as string
+                converted_value = param_value
+
+            # Append as tuple to maintain order
+            result.parameters.append((param_name, converted_value))
+
+        return result
+
+    def _find_all_indices(self, string, substring):
+        indices = []
+        start = 0
+        while (index := string.find(substring, start)) != -1:
+            indices.append(index)
+            start = index + 1
+        return indices
+
     def extract_tool_calls(
         self,
         model_output: str,
@@ -406,6 +506,7 @@ class MinimaxM2ToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+    # Note: If tool_call_start_token appears in delta_text, it must be the last token
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
@@ -446,25 +547,6 @@ class MinimaxM2ToolParser(ToolParser):
                     return DeltaMessage(content="")
             return None
 
-        # Update accumulated text
-        self.accumulated_text = current_text
-
-        # Check if we need to advance to next tool
-        if self.json_closed and not self.in_function:
-            # Check if this tool call has ended
-            invoke_ends = current_text.count(self.invoke_end_token)
-            if invoke_ends > self.current_tool_index:
-                # This tool has ended, advance to next
-                self.current_tool_index += 1
-                self.header_sent = False
-                self.param_count = 0
-                self.json_started = False
-                self.json_closed = False
-                self.in_function = False  # Now we can safely set this to False
-                self.accumulated_params = {}
-                # Continue processing next tool
-                return None
-
         # Handle normal content before tool calls
         if not self.is_tool_call_started:
             # Check if tool call is starting
@@ -492,284 +574,108 @@ class MinimaxM2ToolParser(ToolParser):
                 # Normal content, no tool call
                 return DeltaMessage(content=delta_text)
 
-        # Check if we're between tool calls (waiting for next one)
-        invoke_starts_count = current_text.count(self.invoke_start_prefix)
-        if self.current_tool_index >= invoke_starts_count:
-            # We're past all tool calls, shouldn't be here
-            return None
+        invoke_start_indices = self._find_all_indices(
+            current_text, self.invoke_start_prefix
+        )
+        invoke_stop_indices = self._find_all_indices(
+            current_text, self.invoke_end_token
+        )
+        invokes = []
+        for i in range(self.current_tool_index, len(invoke_start_indices)):
+            invoke_start_idx = invoke_start_indices[i]
+            if i < len(invoke_stop_indices):
+                invoke_stop_idx = invoke_stop_indices[i] + len(self.invoke_end_token)
+                invoke_content = current_text[invoke_start_idx:invoke_stop_idx]
+            else:
+                invoke_content = current_text[invoke_start_idx:]
 
-        # Find the current tool call portion
-        invoke_start_positions: list[int] = []
-        idx = 0
-        while True:
-            idx = current_text.find(self.invoke_start_prefix, idx)
-            if idx == -1:
-                break
-            invoke_start_positions.append(idx)
-            idx += len(self.invoke_start_prefix)
-
-        if self.current_tool_index >= len(invoke_start_positions):
-            # No more tool calls to process yet
-            return None
-
-        invoke_start_idx = invoke_start_positions[self.current_tool_index]
-        # Find where this tool call ends (or current position if not ended yet)
-        invoke_end_idx = current_text.find(self.invoke_end_token, invoke_start_idx)
-        if invoke_end_idx == -1:
-            tool_text = current_text[invoke_start_idx:]
-        else:
-            tool_text = current_text[
-                invoke_start_idx : invoke_end_idx + len(self.invoke_end_token)
-            ]
-
-        # Looking for function header
-        if not self.header_sent:
-            if self.invoke_start_prefix in tool_text:
-                func_start = tool_text.find(self.invoke_start_prefix) + len(
-                    self.invoke_start_prefix
+            parsed_invoke = self._parse_partial_invoke(
+                invoke_content,
+                self.streaming_request.tools if self.streaming_request else None,
+            )
+            # Overwrite existing entry in prev_tool_call_arr
+            # this doesn't need to be incrementally built
+            if i < len(self.prev_tool_call_arr):
+                self.prev_tool_call_arr[i] = {
+                    "name": parsed_invoke.name,
+                    "arguments": dict(parsed_invoke.parameters),
+                }
+            else:
+                self.prev_tool_call_arr.append(
+                    {
+                        "name": parsed_invoke.name,
+                        "arguments": dict(parsed_invoke.parameters),
+                    }
                 )
-                # Find the end quote for the function name
-                func_end = tool_text.find(">", func_start)
+            invokes.append(parsed_invoke)
 
-                if func_end != -1:
-                    # Found complete function name
-                    function_name_raw = tool_text[func_start:func_end]
-                    self.current_function_name = self._extract_name(function_name_raw)
-                    self.current_tool_id = self._generate_tool_call_id()
-                    self.header_sent = True
-                    self.in_function = True
+        delta_tool_calls = []
+        for i in range(len(invokes)):
+            invoke = invokes[i]
+            arguments_json = ""
 
-                    # Add to prev_tool_call_arr immediately when we detect a tool call
-                    # Each tool call should be recorded regardless of function name
-                    # Ensure we don't add the same tool call index multiple times
-                    if len(self.prev_tool_call_arr) <= self.current_tool_index:
-                        self.prev_tool_call_arr.append(
-                            {
-                                "name": self.current_function_name,
-                                "arguments": {},  # Placeholder, will be updated later
-                            }
-                        )
-                        # Initialize streamed_args_for_tool for this tool call
-                        if len(self.streamed_args_for_tool) <= self.current_tool_index:
-                            self.streamed_args_for_tool.append("")
-
-                    # Send header with function info
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_index,
-                                id=self.current_tool_id,
-                                function=DeltaFunctionCall(
-                                    name=self.current_function_name, arguments=""
-                                ),
-                                type="function",
-                            )
-                        ]
-                    )
-            return None
-
-        # We've sent header, now handle function body
-        if self.in_function:
-            # Send opening brace if not sent yet
-            if self.in_function and not self.json_started:
-                self.json_started = True
-                # Update streamed_args_for_tool for opening brace
-                if self.current_tool_index < len(self.streamed_args_for_tool):
-                    self.streamed_args_for_tool[self.current_tool_index] += "{"
-                return DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments="{"),
-                        )
-                    ]
-                )
-
-            # Make sure json_started is set if we're processing parameters
-            if not self.json_started:
-                self.json_started = True
-
-            # Check for function end in accumulated text
-            if not self.json_closed and self.invoke_end_token in tool_text:
-                # Count total parameters in the tool text
-                total_param_count = tool_text.count(self.parameter_prefix)
-
-                # Only close JSON if all parameters have been processed
-                if self.param_count >= total_param_count:
-                    # Close JSON
-                    self.json_closed = True
-
-                    # Extract complete tool call
-                    # Find the invoke content
-                    invoke_start = tool_text.find(self.invoke_start_prefix) + len(
-                        self.invoke_start_prefix
-                    )
-                    invoke_content_end = tool_text.find(
-                        self.invoke_end_token, invoke_start
-                    )
-                    if invoke_content_end != -1:
-                        invoke_content = tool_text[invoke_start:invoke_content_end]
-                        # Parse to get the complete arguments
-                        try:
-                            parsed_tool = self._parse_single_invoke(
-                                invoke_content,
-                                self.streaming_request.tools
-                                if self.streaming_request
-                                else None,
-                            )
-                            if parsed_tool and self.current_tool_index < len(
-                                self.prev_tool_call_arr
-                            ):
-                                # Update existing entry in prev_tool_call_arr
-                                args = parsed_tool.function.arguments
-                                self.prev_tool_call_arr[self.current_tool_index][
-                                    "arguments"
-                                ] = json.loads(args)
-                        except Exception:
-                            pass  # Ignore parsing errors during streaming
-
-                    result = DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_index,
-                                function=DeltaFunctionCall(arguments="}"),
-                            )
-                        ]
-                    )
-                    # Update streamed_args_for_tool for closing brace
-                    if self.current_tool_index < len(self.streamed_args_for_tool):
-                        self.streamed_args_for_tool[self.current_tool_index] += "}"
-                    # Reset state for next tool
-                    self.json_closed = True
-                    self.in_function = False
-                    self.accumulated_params = {}
-
-                    logger.debug("[M2_STREAMING] Tool call completed")
-
-                    return result
-                else:
-                    # Don't close JSON yet, continue processing parameters
-                    return None
-
-            # Look for parameters
-            # Find all parameter starts
-            param_starts = []
-            idx = 0
-            while True:
-                idx = tool_text.find(self.parameter_prefix, idx)
-                if idx == -1:
+            if not self.header_sent:
+                if invoke.name is None:
+                    # Still waiting for function name
                     break
-                param_starts.append(idx)
-                idx += len(self.parameter_prefix)
 
-            # Check if we should start a new parameter
-            if (
-                not self.in_param
-                and self.param_count < len(param_starts)
-                and len(param_starts) > self.param_count
-            ):
-                # Process the next parameter
-                param_idx = param_starts[self.param_count]
-                param_start = param_idx + len(self.parameter_prefix)
-                remaining = tool_text[param_start:]
+                self.header_sent = True
+                self.current_tool_id = self._generate_tool_call_id()
 
-                if ">" in remaining:
-                    # We have the complete parameter name
-                    name_end = remaining.find(">")
-                    param_name_raw = remaining[:name_end]
-                    self.current_param_name = self._extract_name(param_name_raw)
+                for j in range(len(invoke.parameters)):
+                    param_name, param_value = invoke.parameters[j]
+                    param_value = param_value.replace('"', '\\"')
+                    if j == 0:
+                        json_fragment = "{" + f'"{param_name}": "{param_value}"'
+                    else:
+                        json_fragment = f', "{param_name}": "{param_value}"'
+                    arguments_json += json_fragment
+                    self.param_count += 1
+                if invoke.invoke_completed:
+                    arguments_json += "}"
 
-                    # Find the parameter value
-                    value_start = param_start + name_end + 1
-                    value_text = tool_text[value_start:]
-                    if value_text.startswith("\n"):
-                        value_text = value_text[1:]
+                delta_tool_calls.append(
+                    DeltaToolCall(
+                        index=self.current_tool_index,
+                        id=self.current_tool_id,
+                        function=DeltaFunctionCall(
+                            name=invoke.name,
+                            arguments=arguments_json,
+                        ),
+                        type="function",
+                    )
+                )
+            else:
+                for j in range(self.param_count, len(invoke.parameters)):
+                    param_name, param_value = invoke.parameters[j]
+                    param_value = param_value.replace('"', '\\"')
+                    if j == 0:
+                        json_fragment = "{" + f'"{param_name}": "{param_value}"'
+                    else:
+                        json_fragment = f', "{param_name}": "{param_value}"'
+                    arguments_json += json_fragment
+                    self.param_count += 1
+                if invoke.invoke_completed:
+                    arguments_json += "}"
 
-                    # Find where this parameter ends
-                    param_end_idx = value_text.find(self.parameter_end_token)
-                    if param_end_idx == -1:
-                        # No closing tag, look for next parameter or function end
-                        next_param_idx = value_text.find(self.parameter_prefix)
-                        func_end_idx = value_text.find(self.invoke_end_token)
+                delta_tool_calls.append(
+                    DeltaToolCall(
+                        index=self.current_tool_index,
+                        function=DeltaFunctionCall(arguments=arguments_json),
+                    )
+                )
 
-                        if next_param_idx != -1 and (
-                            func_end_idx == -1 or next_param_idx < func_end_idx
-                        ):
-                            param_end_idx = next_param_idx
-                        elif func_end_idx != -1:
-                            param_end_idx = func_end_idx
-                        else:
-                            # Neither found, check if tool call is complete
-                            if self.invoke_end_token in tool_text:
-                                # Tool call and parameter is complete
-                                param_end_idx = len(value_text)
-                            else:
-                                # Still streaming, wait for more content
-                                return None
+            if self.current_tool_index < len(self.streamed_args_for_tool):
+                self.streamed_args_for_tool[self.current_tool_index] += arguments_json
+            else:
+                self.streamed_args_for_tool.append(arguments_json)
 
-                    if param_end_idx != -1:
-                        # Complete parameter found
-                        param_value = value_text[:param_end_idx]
-                        if param_value.endswith("\n"):
-                            param_value = param_value[:-1]
+            if invoke.invoke_completed:
+                self.current_tool_index += 1
+                self.header_sent = False
+                self.param_count = 0
 
-                        # Store raw value for later processing
-                        self.accumulated_params[self.current_param_name] = param_value
-
-                        # Get parameter configuration with anyOf support
-                        param_config = {}
-                        if self.streaming_request and self.streaming_request.tools:
-                            for tool in self.streaming_request.tools:
-                                if (
-                                    hasattr(tool, "function")
-                                    and tool.function.name == self.current_function_name
-                                    and hasattr(tool.function, "parameters")
-                                ):
-                                    params = tool.function.parameters
-                                    if (
-                                        isinstance(params, dict)
-                                        and "properties" in params
-                                    ):
-                                        param_config = params["properties"]
-                                    break
-
-                        # Get parameter types (supports anyOf/oneOf/allOf)
-                        param_type = self._get_param_types_from_config(
-                            self.current_param_name, param_config
-                        )
-
-                        converted_value = self._convert_param_value_with_types(
-                            param_value, param_type
-                        )
-
-                        # Build JSON fragment based on the converted type
-                        # Use json.dumps to properly serialize the value
-                        serialized_value = json.dumps(
-                            converted_value, ensure_ascii=False
-                        )
-
-                        if self.param_count == 0:
-                            json_fragment = (
-                                f'"{self.current_param_name}": {serialized_value}'
-                            )
-                        else:
-                            json_fragment = (
-                                f', "{self.current_param_name}": {serialized_value}'
-                            )
-
-                        self.param_count += 1
-                        # Update streamed_args_for_tool for this tool call
-                        if self.current_tool_index < len(self.streamed_args_for_tool):
-                            self.streamed_args_for_tool[self.current_tool_index] += (
-                                json_fragment
-                            )
-                        return DeltaMessage(
-                            tool_calls=[
-                                DeltaToolCall(
-                                    index=self.current_tool_index,
-                                    function=DeltaFunctionCall(arguments=json_fragment),
-                                )
-                            ]
-                        )
-
-        return None
+        if delta_tool_calls:
+            return DeltaMessage(tool_calls=delta_tool_calls)
+        else:
+            return None
