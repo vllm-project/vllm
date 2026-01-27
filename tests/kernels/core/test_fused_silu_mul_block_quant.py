@@ -17,14 +17,6 @@ from vllm.platforms import current_platform
 from vllm.model_executor.layers.quantization.triton_quantization import (
     silu_and_mul_per_block_quant_triton,
 )
-import os
-
-# Set LD_LIBRARY_PATH and LIBRARY_PATH to include cuda stubs if not present
-cuda_stubs_path = "/usr/local/cuda-12.8/targets/x86_64-linux/lib/stubs"
-if cuda_stubs_path not in os.environ.get("LD_LIBRARY_PATH", ""):
-    os.environ["LD_LIBRARY_PATH"] = cuda_stubs_path + ":" + os.environ.get("LD_LIBRARY_PATH", "")
-if cuda_stubs_path not in os.environ.get("LIBRARY_PATH", ""):
-    os.environ["LIBRARY_PATH"] = cuda_stubs_path + ":" + os.environ.get("LIBRARY_PATH", "")
 
 DTYPES = [torch.float16, torch.bfloat16]
 QUANT_DTYPES = [torch.float8_e4m3fn, torch.int8]
