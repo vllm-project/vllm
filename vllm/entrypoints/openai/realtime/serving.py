@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from collections.abc import AsyncGenerator
 from functools import cached_property
 from typing import Literal, cast
@@ -73,12 +74,17 @@ class OpenAIServingRealtime(OpenAIServing):
         self,
         audio_stream: AsyncGenerator[np.ndarray, None],
         config: SessionUpdate | None,
+        input_stream: asyncio.Queue[list[int]],
     ) -> AsyncGenerator[StreamingInput, None]:
         """Transform audio stream into StreamingInput for engine.generate().
 
         Args:
             audio_stream: Async generator yielding float32 numpy audio arrays
             config: Session configuration with model and parameters
+            input_stream: Queue containing context token IDs from previous
+                generation outputs. Used for autoregressive multi-turn
+                processing where each generation's output becomes the context
+                for the next iteration.
 
         Yields:
             StreamingInput objects containing audio prompts for the engine
@@ -105,12 +111,16 @@ class OpenAIServingRealtime(OpenAIServing):
 
         # Process each audio chunk from the stream
         async for audio_chunk in audio_stream:
-            # TODO: Let models' adapt the audio_chunk
-            # and yield adapted streaming input
-            # TODO(Patrick) - add get_streaming_prompt
-            # to voxtral
+            # Get context token IDs from input_stream if available
+            # Falls back to None (model will use default prompt)
+            try:
+                context_token_ids = input_stream.get_nowait()
+            except asyncio.QueueEmpty:
+                context_token_ids = None
+
             prompt = self.model_cls.get_streaming_prompt(
                 audio=audio_chunk,
+                context_token_ids=context_token_ids,
                 stt_config=self.asr_config,
                 model_config=self.model_config,
                 language=language,
