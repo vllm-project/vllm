@@ -45,10 +45,10 @@ logger = init_logger(__name__)
 
 IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
 
-_T = TypeVar("_T", bound=type[nn.Module])
+_T = TypeVar("_T", bound=nn.Module)
 
 
-def ignore_torch_compile(cls: _T) -> _T:
+def ignore_torch_compile(cls: type[_T]) -> type[_T]:
     """
     A decorator to ignore support_torch_compile decorator
     on the class. This is useful when a parent class has
@@ -68,7 +68,7 @@ def ignore_torch_compile(cls: _T) -> _T:
     return cls
 
 
-def _should_ignore_torch_compile(cls: _T) -> bool:
+def _should_ignore_torch_compile(cls: type[_T]) -> bool:
     """
     Check if the class should be ignored for torch.compile.
     """
@@ -79,21 +79,21 @@ def _should_ignore_torch_compile(cls: _T) -> bool:
 def support_torch_compile(
     *,
     enable_if: Callable[[VllmConfig], bool] | None = None,
-) -> Callable[[_T], _T]: ...
+) -> Callable[[type[_T]], type[_T]]: ...
 
 
 @overload
 def support_torch_compile(
     *,
     dynamic_arg_dims: dict[str, int | list[int]] | None,
-) -> Callable[[_T], _T]: ...
+) -> Callable[[type[_T]], type[_T]]: ...
 
 
 @overload
 def support_torch_compile(
     *,
     mark_unbacked_dims: dict[str, int | list[int]] | None,
-) -> Callable[[_T], _T]: ...
+) -> Callable[[type[_T]], type[_T]]: ...
 
 
 @overload
@@ -101,21 +101,21 @@ def support_torch_compile(
     *,
     dynamic_arg_dims: dict[str, int | list[int]] | None,
     mark_unbacked_dims: dict[str, int | list[int]] | None,
-) -> Callable[[_T], _T]: ...
+) -> Callable[[type[_T]], type[_T]]: ...
 
 
 @overload
-def support_torch_compile(cls: _T) -> _T: ...
+def support_torch_compile(cls: type[_T]) -> type[_T]: ...
 
 
 def support_torch_compile(
-    cls: _T | None = None,
+    cls: type[_T] | None = None,
     *,
     dynamic_arg_dims: dict[str, int | list[int]] | None = None,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     shape_invariants: Callable[..., None] = lambda *args, **kwargs: None,
-) -> Callable[[_T], _T] | _T:
+) -> Callable[[type[_T]], type[_T]] | type[_T]:
     """
     A decorator to add support for compiling the forward method of a class.
 
@@ -182,7 +182,7 @@ def support_torch_compile(
     errors.
     """
 
-    def cls_decorator_helper(cls: _T) -> _T:
+    def cls_decorator_helper(cls: type[_T]) -> type[_T]:
         # helper to pass `dynamic_arg_dims` to `_support_torch_compile`
         # to avoid too much indentation for `_support_torch_compile`
         if not hasattr(cls, "forward"):
@@ -263,12 +263,12 @@ def _verify_source_unchanged(
 
 
 def _support_torch_compile(
-    cls: _T,
+    cls: type[_T],
     dynamic_arg_dims: dict[str, int | list[int]],
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     shape_invariants: Callable[..., None] = lambda *args, **kwargs: None,
-) -> _T:
+) -> type[_T]:
     """
     A decorator to add support for compiling the forward method of a class.
     """
@@ -325,12 +325,12 @@ def _support_torch_compile(
         self.compiled = False
 
         # Handled by monkeypatching `TorchCompileWithNoGuardsWrapper` into base class
-        TorchCompileWithNoGuardsWrapper.__init__(self)  # type: ignore[arg-type]
+        TorchCompileWithNoGuardsWrapper.__init__(self)
 
     cls.__init__ = __init__
 
     def _mark_dynamic_inputs(
-        mod: _T, ds_type: DynamicShapesType, *args: Any, **kwargs: Any
+        mod: type[_T], ds_type: DynamicShapesType, *args: Any, **kwargs: Any
     ) -> None:
         def mark_dynamic(arg: torch.Tensor, dims: list[int]) -> None:
             if ds_type == DynamicShapesType.UNBACKED:
@@ -382,7 +382,7 @@ def _support_torch_compile(
                         else:
                             torch._dynamo.decorators.mark_unbacked(arg, dims)
 
-    def __call__(self: _T, *args: Any, **kwargs: Any) -> Any:
+    def __call__(self: type[_T], *args: Any, **kwargs: Any) -> Any:
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
@@ -564,7 +564,7 @@ def _support_torch_compile(
         return output
 
     # triggers VllmSerializableFunction.serialize()
-    def save_aot_compiled_function(self):
+    def save_aot_compiled_function(self: type[_T]) -> None:
         if self.was_aot_compile_fn_loaded_from_disk:
             logger.debug("AOT compiled function was loaded from cache, skipping save")
             return
