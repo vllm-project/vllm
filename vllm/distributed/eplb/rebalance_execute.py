@@ -148,7 +148,11 @@ def _create_eplb_communicator(
     if backend == "pynccl":
         group_coordinator = get_ep_group()
         device_comm = group_coordinator.device_communicator
-        pynccl_comm = None if device_comm is None else device_comm.pynccl_comm
+        pynccl_comm = (
+            getattr(device_comm, "pynccl_comm", None)
+            if device_comm is not None
+            else None
+        )
         if pynccl_comm is None or pynccl_comm.disabled or not pynccl_comm.available:
             logger.warning(
                 "EPLB communicator 'pynccl' requested but unavailable; "
