@@ -17,6 +17,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_fp8_moe import (
+    FlashInferTrtLlmFp8Experts,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
@@ -205,10 +208,6 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             expert_map=None,
             apply_router_weight_on_input=True,
             quant_config=quant_config,
-        )
-
-        from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_fp8_moe import (
-            FlashInferTrtLlmFp8Experts,
         )
 
         kernel = mk.FusedMoEModularKernel(
