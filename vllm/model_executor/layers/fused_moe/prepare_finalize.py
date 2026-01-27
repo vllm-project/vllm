@@ -95,34 +95,6 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
 
         return a1q_scale
 
-    def prepare_monolithic(
-        self,
-        a1: torch.Tensor,
-        router_logits: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
-        defer_input_quant: bool = False,
-    ) -> mk.PrepareMonolithicResultType:
-        """Quantize and Dispatch Topk Weights and Topk Ids."""
-
-        a1q, scales = self._quantize_and_setup_dispatch(
-            a1, quant_config, defer_input_quant
-        )
-
-        res = get_ep_group().dispatch_router_logits(
-            a1q,
-            router_logits,
-            is_sequence_parallel=self.is_sequence_parallel,
-            extra_tensors=scales,
-        )
-
-        if scales is None:
-            a1q, router_logits = res
-        else:
-            a1q, router_logits, scales = res
-            a1q_scale = self._unwrap_scale_and_prepare_for_moe(scales, quant_config)
-
-        return a1q, a1q_scale, router_logits
-
     def prepare(
         self,
         a1: torch.Tensor,
@@ -187,6 +159,35 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         output.copy_(
             get_ep_group().combine(out, is_sequence_parallel=self.is_sequence_parallel)
         )
+
+    def prepare_monolithic(
+        self,
+        a1: torch.Tensor,
+        router_logits: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
+    ) -> mk.PrepareMonolithicResultType:
+        """Quantize and Dispatch Router Logits."""
+
+        a1q, scales = self._quantize_and_setup_dispatch(
+            a1, quant_config, defer_input_quant
+        )
+
+        res = get_ep_group().dispatch_router_logits(
+            a1q,
+            router_logits,
+            is_sequence_parallel=self.is_sequence_parallel,
+            extra_tensors=scales,
+        )
+
+        if scales is None:
+            a1q, router_logits = res
+            a1q_scale = None
+        else:
+            a1q, router_logits, scales = res
+            a1q_scale = self._unwrap_scale_and_prepare_for_moe(scales, quant_config)
+
+        return a1q, a1q_scale, router_logits
 
     def finalize_monolithic(
         self,

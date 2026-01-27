@@ -11,6 +11,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -27,6 +30,12 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
+
+        if moe_config.moe_parallel_config.use_ep and quant_config.is_per_tensor:
+            raise NotImplementedError(
+                "EP parallelism is not supported with TRTLLM"
+                "per-tensor FP8 quantization."
+            )
 
         self.routing_method_type = moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -120,9 +129,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        raise NotImplementedError(
-            f"{self.__class__.__name__} only supports the apply_monolithic interface."
-        )
+        return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
         self,
@@ -241,11 +248,11 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
         assert apply_router_weight_on_input
 
         # Should only have Llama4 routing here.
-        assert routed_scaling_factor is None
+        assert routed_scaling_factor is not None
         assert e_score_correction_bias is None
         assert num_expert_group is None
 
-        return flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
+        out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
@@ -256,7 +263,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             output2_scales_scalar=self._g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
-            n_group=num_expert_group,
+            n_group=num_expert_group or 0,
             topk_group=topk_group or 0,
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
@@ -265,6 +272,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
             use_routing_scales_on_input=apply_router_weight_on_input,
             routing_method_type=self.routing_method_type,
         )
+        return out
 
     def apply_monolithic(
         self,
