@@ -52,13 +52,19 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             a1q = a1
             a1q_scale = None
         else:
+            input_sf = (
+                quant_config.a1_gscale
+                if quant_config.use_nvfp4_w4a4
+                else quant_config.a1_scale
+            )
+
             # NOTE: swizzling pads the scales to multiple of 128
             # which makes the scales tensor different shape than
             # the hidden states, breaking the A2A kernel. So, we
             # delay the swizzling until after the A2A.
             a1q, a1q_scale = a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
-                quant_config.a1_scale,
+                input_sf,
                 quant_dtype=quant_config.quant_dtype,
                 per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
@@ -187,7 +193,7 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         fused_expert_output: torch.Tensor,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> torch.Tensor:
-        assert weight_and_reduce_impl == TopKWeightAndReduceNoOP
+        assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP)
         out = get_ep_group().combine(
             fused_expert_output, is_sequence_parallel=self.is_sequence_parallel
         )
@@ -237,9 +243,14 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         if defer_input_quant:
             return a1, None, None, None, None
 
+        input_sf = (
+            quant_config.a1_gscale
+            if quant_config.use_nvfp4_w4a4
+            else quant_config.a1_scale
+        )
         a1q, a1q_scale = a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
-            quant_config.a1_scale,
+            input_sf,
             quant_dtype=quant_config.quant_dtype,
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape,
@@ -260,9 +271,14 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         if defer_input_quant:
             return a1, None, router_logits
 
+        input_sf = (
+            quant_config.a1_gscale
+            if quant_config.use_nvfp4_w4a4
+            else quant_config.a1_scale
+        )
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
-            quant_config.a1_scale,
+            input_sf,
             quant_dtype=quant_config.quant_dtype,
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape,
@@ -294,5 +310,5 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         fused_expert_output: torch.Tensor,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> torch.Tensor:
-        assert weight_and_reduce_impl == TopKWeightAndReduceNoOP
+        assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP)
         return fused_expert_output
