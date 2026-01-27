@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
@@ -231,7 +232,14 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # Quantize after dispatch.
             expert_x_scale = None
             if expert_x.numel() != 0:
-                expert_x, expert_x_scale = self._quantize_input(expert_x, quant_config)
+                # TODO: support per_act_token_quant,
+                expert_x, expert_x_scale = moe_kernel_quantize_input(
+                    expert_x,
+                    a1_scale,
+                    quant_dtype=quant_config.quant_dtype,
+                    per_act_token_quant=False,
+                    block_shape=quant_config.block_shape,
+                )
 
         return (
             expert_x,
@@ -269,7 +277,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # * For expert kernels that require unquantized inputs,
         #   defer quantization to FusedMoEExpertsPermuteUnpermute.
         if quant_config.is_block_quantized and not defer_input_quant:
-            a1q, a1q_scale = self._quantize_input(a1, quant_config)
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                quant_config.a1_scale,
+                quant_dtype=quant_config.quant_dtype,
+                per_act_token_quant=quant_config.per_act_token_quant,
+                block_shape=quant_config.block_shape,
+            )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
             a1_post_scale = None

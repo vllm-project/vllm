@@ -11,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
@@ -55,8 +56,13 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             # which makes the scales tensor different shape than
             # the hidden states, breaking the A2A kernel. So, we
             # delay the swizzling until after the A2A.
-            a1q, a1q_scale = self._quantize_input(
-                a1, quant_config, skip_fp4_swizzle=True
+            a1q, a1q_scale = a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                quant_config.a1_scale,
+                quant_dtype=quant_config.quant_dtype,
+                per_act_token_quant=quant_config.per_act_token_quant,
+                block_shape=quant_config.block_shape,
+                is_fp4_scale_swizzled=False,
             )
 
         # Skip gathering scales if we have static quantization
@@ -231,7 +237,14 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         if defer_input_quant:
             return a1, None, None, None, None
 
-        a1q, a1q_scale = self._quantize_input(a1, quant_config)
+        a1q, a1q_scale = a1q, a1q_scale = moe_kernel_quantize_input(
+            a1,
+            quant_config.a1_scale,
+            quant_dtype=quant_config.quant_dtype,
+            per_act_token_quant=quant_config.per_act_token_quant,
+            block_shape=quant_config.block_shape,
+            is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
+        )
 
         return a1q, a1q_scale, None, None, None
 
@@ -247,7 +260,14 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         if defer_input_quant:
             return a1, None, router_logits
 
-        a1q, a1q_scale = self._quantize_input(a1, quant_config)
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1,
+            quant_config.a1_scale,
+            quant_dtype=quant_config.quant_dtype,
+            per_act_token_quant=quant_config.per_act_token_quant,
+            block_shape=quant_config.block_shape,
+            is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
+        )
         return a1q, a1q_scale, router_logits
 
     def finalize(
