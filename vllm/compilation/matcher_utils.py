@@ -16,9 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     _normalize_quant_group_shape,
-    kFp8Dynamic64ColMajorSym,
     kFp8Dynamic64Sym,
-    kFp8Dynamic128ColMajorSym,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -47,9 +45,7 @@ if current_platform.is_cuda():
         dict.fromkeys(
             [
                 kFp8Dynamic128Sym,
-                kFp8Dynamic128ColMajorSym,
                 kFp8Dynamic64Sym,
-                kFp8Dynamic64ColMajorSym,
             ],
             torch.ops._C.per_token_group_fp8_quant.default,
         )
@@ -61,12 +57,7 @@ if current_platform.is_rocm():
 
     QUANT_OPS.update(
         dict.fromkeys(
-            [
-                kFp8Dynamic128Sym,
-                kFp8Dynamic128ColMajorSym,
-                kFp8Dynamic64Sym,
-                kFp8Dynamic64ColMajorSym,
-            ],
+            [kFp8Dynamic128Sym, kFp8Dynamic64Sym],
             torch.ops.vllm.per_token_group_quant_fp8.default,
         )
     )
@@ -318,13 +309,14 @@ class MatcherQuantFP8(MatcherCustomOp):
         enabled: bool | None = None,
         is_e8m0: bool = False,
         match_rocm_aiter: bool = False,
+        has_col_major_scales: bool = False,
     ) -> None:
         if enabled is None:
             enabled = QuantFP8.enabled()
 
         super().__init__(enabled)
         self.quant_key = quant_key
-        self.has_col_major_scales = quant_key.scale.col_major
+        self.has_col_major_scales = has_col_major_scales
 
         self.is_e8m0 = is_e8m0
         self.match_rocm_aiter = match_rocm_aiter
