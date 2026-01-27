@@ -348,8 +348,8 @@ class RocmAttentionImpl(AttentionImpl):
         # Compute attention and update output up to `num_actual_tokens`.
         chunked_prefill_paged_decode(
             query=query[:num_actual_tokens],
-            key=key[:num_actual_tokens],
-            value=value[:num_actual_tokens],
+            key=key[:num_actual_tokens] if key is not None else None,
+            value=value[:num_actual_tokens] if value is not None else None,
             output=output[:num_actual_tokens],
             kv_cache_dtype=self.kv_cache_dtype,
             key_cache=key_cache,
@@ -382,7 +382,14 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache, self.num_kv_heads, self.head_size
         )
 
-        if self.kv_sharing_target_layer_name is None:
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
+        if (
+            self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
 
