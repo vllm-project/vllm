@@ -172,7 +172,8 @@ IMAGE_TAG_LATEST=${8:-} # only used for main branch, optional
 TARGET="test-ci"
 VLLM_BAKE_FILE_PATH="${VLLM_BAKE_FILE_PATH:-docker/docker-bake.hcl}"
 BUILDER_NAME="${BUILDER_NAME:-vllm-builder}"
-CI_HCL_PATH="${CI_HCL_PATH:-docker/ci.hcl}"
+CI_HCL_URL="${CI_HCL_URL:-https://raw.githubusercontent.com/vllm-project/ci-infra/main/docker/ci.hcl}"
+CI_HCL_PATH="/tmp/ci.hcl"
 BUILDKIT_SOCKET="/run/buildkit/buildkitd.sock"
 
 prepare_cache_tags
@@ -211,7 +212,7 @@ echo "--- :mag: Build configuration"
 echo "TARGET: ${TARGET}"
 echo "vLLM bake file: ${VLLM_BAKE_FILE_PATH}"
 echo "BUILDER_NAME: ${BUILDER_NAME}"
-echo "CI_HCL_PATH: ${CI_HCL_PATH}"
+echo "CI_HCL_URL: ${CI_HCL_URL}"
 echo "BUILDKIT_SOCKET: ${BUILDKIT_SOCKET}"
 
 echo "--- :mag: Cache tags"
@@ -230,6 +231,15 @@ echo "CI HCL path: ${CI_HCL_PATH}"
 if [[ ! -f "${VLLM_BAKE_FILE_PATH}" ]]; then
     echo "Error: vLLM bake file not found at ${VLLM_BAKE_FILE_PATH}"
     echo "Make sure you're running from the vLLM repository root"
+    exit 1
+fi
+
+echo "--- :arrow_down: Downloading ci.hcl"
+curl -sSfL -o "${CI_HCL_PATH}" "${CI_HCL_URL}"
+echo "Downloaded to ${CI_HCL_PATH}"
+
+if [[ ! -f "${CI_HCL_PATH}" ]]; then
+    echo "Error: ci.hcl not found at ${CI_HCL_PATH}"
     exit 1
 fi
 
