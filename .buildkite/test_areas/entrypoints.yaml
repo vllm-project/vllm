@@ -81,6 +81,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai/responses/test_mcp_tools.py
+  - tests/entrypoints/openai/responses/conftest.py
   commands:
   # Run MCP-enabled/disabled responses tests in isolation so each pytest
   # process only ever holds a single openai/gpt-oss-20b server instance.
