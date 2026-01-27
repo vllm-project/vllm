@@ -983,6 +983,7 @@ class OpenAIServingChat(OpenAIServing):
                                     index=i,
                                 )
                                 function_name_returned[i] = True
+                                history_tool_call_cnt += 1
 
                             delta_message = DeltaMessage(
                                 tool_calls=[
@@ -1583,7 +1584,7 @@ class OpenAIServingChat(OpenAIServing):
                             generated_id = make_tool_call_id(
                                 id_type=self.tool_call_id_type,
                                 func_name=tc.name,
-                                idx=history_tool_call_cnt + idx,
+                                idx=history_tool_call_cnt,
                             )
                             tool_call_class_items.append(
                                 tool_call_class(id=generated_id, function=tc)
@@ -1618,7 +1619,7 @@ class OpenAIServingChat(OpenAIServing):
                             generated_id = make_tool_call_id(
                                 id_type=self.tool_call_id_type,
                                 func_name=tool_call.name,
-                                idx=history_tool_call_cnt + idx,
+                                idx=history_tool_call_cnt,
                             )
                             tool_call_class_items.append(
                                 tool_call_class(id=generated_id, function=tool_call)
@@ -1666,7 +1667,7 @@ class OpenAIServingChat(OpenAIServing):
                                 generated_id = make_tool_call_id(
                                     id_type=self.tool_call_id_type,
                                     func_name=tc.name,
-                                    idx=history_tool_call_cnt + idx,
+                                    idx=history_tool_call_cnt,
                                 )
                                 tool_call_items.append(
                                     tool_call_class(id=generated_id, function=tc)
