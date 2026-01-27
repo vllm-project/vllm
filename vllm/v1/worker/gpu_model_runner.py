@@ -1606,7 +1606,7 @@ class GPUModelRunner(
                 self.xdrope_positions.gpu[dim, :total_num_scheduled_tokens] = xdrope_pos
 
         # Compute slot mapping on GPU
-        self.input_batch.block_table.compute_slot_mapping_gpu(
+        self.input_batch.block_table.compute_slot_mapping(
             req_indices_gpu, self.positions.gpu[:total_num_scheduled_tokens]
         )
 

@@ -130,7 +130,7 @@ class BlockTable:
         self.num_blocks_per_row[src_tgt] = self.num_blocks_per_row[tgt_src]
         self.block_table.np[src_tgt] = self.block_table.np[tgt_src]
 
-    def compute_slot_mapping_gpu(
+    def compute_slot_mapping(
         self, req_indices: torch.Tensor, positions: torch.Tensor
     ) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -308,11 +308,11 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
 
-    def compute_slot_mapping_gpu(
+    def compute_slot_mapping(
         self, req_indices: torch.Tensor, positions: torch.Tensor
     ) -> None:
         for block_table in self.block_tables:
-            block_table.compute_slot_mapping_gpu(req_indices, positions)
+            block_table.compute_slot_mapping(req_indices, positions)
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
