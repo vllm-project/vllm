@@ -379,6 +379,97 @@ def test_load_config_file(tmp_path):
     os.remove(str(config_file_path))
 
 
+def test_load_config_file_nested(tmp_path):
+    """Test that nested dicts in YAML config are converted to JSON strings."""
+    # Define the configuration data with nested dicts
+    config_data = {
+        "port": 8000,
+        "compilation-config": {
+            "pass_config": {
+                "fuse_allreduce_rms": True,
+                "eliminate_noops": True,
+            }
+        },
+        "speculative-config": {
+            "model": "nvidia/gpt-oss-120b-Eagle3-v2",
+            "num_speculative_tokens": 3,
+            "method": "eagle3",
+        },
+    }
+
+    # Write the configuration data to a temporary YAML file
+    config_file_path = tmp_path / "nested_config.yaml"
+    with open(config_file_path, "w") as config_file:
+        yaml.dump(config_data, config_file)
+
+    # Initialize the parser
+    parser = FlexibleArgumentParser()
+
+    # Call the function with the temporary file path
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    # Find the indices of each argument
+    port_idx = processed_args.index("--port")
+    cc_idx = processed_args.index("--compilation-config")
+    sc_idx = processed_args.index("--speculative-config")
+
+    # Verify port is a plain string
+    assert processed_args[port_idx + 1] == "8000"
+
+    # Verify nested dicts are converted to JSON strings
+    cc_value = json.loads(processed_args[cc_idx + 1])
+    assert cc_value == {
+        "pass_config": {
+            "fuse_allreduce_rms": True,
+            "eliminate_noops": True,
+        }
+    }
+
+    sc_value = json.loads(processed_args[sc_idx + 1])
+    assert sc_value == {
+        "model": "nvidia/gpt-oss-120b-Eagle3-v2",
+        "num_speculative_tokens": 3,
+        "method": "eagle3",
+    }
+
+    os.remove(str(config_file_path))
+
+
+def test_nested_config_end_to_end(tmp_path):
+    """Test end-to-end parsing of nested configs in YAML files."""
+    # Define the configuration data with nested dict
+    config_data = {
+        "compilation-config": {
+            "mode": 3,
+            "pass_config": {
+                "fuse_allreduce_rms": True,
+            },
+        },
+    }
+
+    # Write the configuration data to a temporary YAML file
+    config_file_path = tmp_path / "nested_e2e.yaml"
+    with open(config_file_path, "w") as config_file:
+        yaml.dump(config_data, config_file)
+
+    # Create a parser with compilation-config argument
+    parser = FlexibleArgumentParser()
+    parser.add_argument("-cc", "--compilation-config", type=json.loads)
+
+    # Parse with config file
+    args = parser.parse_args(["--config", str(config_file_path)])
+
+    # Verify the nested config was parsed correctly
+    assert args.compilation_config == {
+        "mode": 3,
+        "pass_config": {
+            "fuse_allreduce_rms": True,
+        },
+    }
+
+    os.remove(str(config_file_path))
+
+
 def test_compilation_mode_string_values(parser):
     """Test that -cc.mode accepts both integer and string mode values."""
     args = parser.parse_args(["-cc.mode", "0"])
