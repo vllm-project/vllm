@@ -701,6 +701,7 @@ class ParentDeathMonitor:
     def start(self):
         self._thread = threading.Thread(target=self._monitor, daemon=True)
         self._thread.start()
+        logger.debug("ParentDeathMonitor started")
 
     def _monitor(self):
         try:

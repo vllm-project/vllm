@@ -175,9 +175,13 @@ class CoreEngineProcManager:
 
     def signal_drain(self):
         """Signal all engine cores to start draining."""
-        for w in self.death_writers:
-            with contextlib.suppress(BrokenPipeError, OSError):
-                w.send("DRAIN")  # engine already exited
+        logger.debug("Sending DRAIN to %d engine(s)", len(self.death_writers))
+        for i, w in enumerate(self.death_writers):
+            try:
+                w.send("DRAIN")
+                logger.debug("Sent DRAIN to engine %d", i)
+            except (BrokenPipeError, OSError) as e:
+                logger.warning("Failed to send DRAIN to engine %d: %s", i, e)
 
     def join_first(self, timeout: float | None = None) -> bool:
         """Wait for any process to exit.
