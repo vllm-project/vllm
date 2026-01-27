@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch.nn import Module
-from torch.utils._python_dispatch import TorchDispatchMode
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -71,6 +70,11 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
+)
+from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
+    CopyNumelCounter,
+    OnlineWeightLoaderMixin,
+    _copy_missing_attrs,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -272,36 +276,6 @@ class Fp8Config(QuantizationConfig):
             return name.replace(".prob_output_scale", ".attn.prob_scale")
         # If no matches, return None
         return None
-
-
-class CopyNumelCounter(TorchDispatchMode):
-    """
-    Tracks total number of elements modified with `copy_`. Useful for keeping
-    track of weight loading where underlying weights can be arbitrarily
-    transformed (such as with `narrow`) before calling copy.
-    """
-
-    def __init__(self):
-        super().__init__()
-        self.copied_numel = 0
-
-    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-        out = func(*args, **kwargs)
-        if func == torch.ops.aten.copy_.default:
-            self.copied_numel += args[0].numel()
-        return out
-
-
-def _copy_missing_attrs(old: torch.Tensor, new: torch.Tensor) -> None:
-    """Copies any attrs present in `old` but not in `new` to `new`"""
-    new_attrs = set(dir(new))
-    attrs_to_set = {}
-    for attr in dir(old):
-        if attr not in new_attrs:
-            attrs_to_set[attr] = getattr(old, attr)
-    set_weight_attrs(new, attrs_to_set)
 
 
 class Fp8LinearMethod(LinearMethodBase):
@@ -1071,7 +1045,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
 
-class Fp8OnlineMoEMethod(Fp8MoEMethod):
+class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
     """MoE method for online FP8 quantization.
     Supports loading quantized FP16/BF16 model checkpoints with dynamic
     activation scaling. The weight scaling factor will be initialized after
@@ -1102,75 +1076,14 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
-        # We are doing online quantization, patch the weight loaded
+        # We are doing online quantization, patch the weight loader
         # to call `process_weights_after_loading` in a streaming fashion
         # as soon as the last weight chunk is loaded.
         weight_loader = extra_weight_attrs["weight_loader"]
-        # create a new holder to prevent modifying behavior of any other
-        # objects which might depend on the old one
-        new_extra_weight_attrs = extra_weight_attrs
-
-        def patched_weight_loader(param, loaded_weight, *args, **kwargs):
-            # add a counter to track how many elements we have updated
-            if not hasattr(layer, "_loaded_numel"):
-                layer._loaded_numel = 0
-
-                # save the ids of original w13 and w2 so that we can
-                # distinguish which one `param` should map to further
-                # down in this file
-                layer._w13_weight_orig_id = id(layer.w13_weight)
-                layer._w2_weight_orig_id = id(layer.w2_weight)
-
-                # when the first `loaded_weight` is about to be
-                # loaded to `param`, materialize `param` just-in-time
-
-                w13_weight = torch.nn.Parameter(
-                    torch.empty_like(layer.w13_weight, device=layer._load_device),
-                    requires_grad=False,
-                )
-                set_weight_attrs(w13_weight, extra_weight_attrs)
-                _copy_missing_attrs(layer.w13_weight, w13_weight)
-                layer.register_parameter("w13_weight", w13_weight)
-
-                w2_weight = torch.nn.Parameter(
-                    torch.empty_like(layer.w2_weight, device=layer._load_device),
-                    requires_grad=False,
-                )
-                set_weight_attrs(w2_weight, extra_weight_attrs)
-                _copy_missing_attrs(layer.w2_weight, w2_weight)
-                layer.register_parameter("w2_weight", w2_weight)
-                del layer._load_device
-
-            # refresh the reference to `param` to reflect just-in-time
-            # materialization
-            if id(param) == layer._w13_weight_orig_id:
-                param = layer.w13_weight
-            elif id(param) == layer._w2_weight_orig_id:
-                param = layer.w2_weight
-
-            # load the current weight chunk
-            copy_numel_counter = CopyNumelCounter()
-            with copy_numel_counter:
-                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
-            layer._loaded_numel += copy_numel_counter.copied_numel
-
-            # if we have loaded all of the elements, call
-            # process_weights_after_loading
-            target_loaded_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
-            if layer._loaded_numel == target_loaded_numel:
-                self.process_weights_after_loading(layer)
-
-                # Delete the bookkeeping
-                del layer._loaded_numel
-                del layer._w13_weight_orig_id
-                del layer._w2_weight_orig_id
-                # Prevent the usual `process_weights_after_loading` call
-                # from doing anything
-                layer._already_called_process_weights_after_loading = True
-
-            return res
-
-        new_extra_weight_attrs["weight_loader"] = patched_weight_loader
+        new_extra_weight_attrs = extra_weight_attrs.copy()
+        new_extra_weight_attrs["weight_loader"] = self._create_moe_weight_loader(
+            layer, weight_loader, extra_weight_attrs
+        )
         extra_weight_attrs = new_extra_weight_attrs
 
         # WEIGHTS

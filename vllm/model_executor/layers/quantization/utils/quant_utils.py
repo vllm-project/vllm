@@ -18,6 +18,7 @@ from vllm.scalar_type import ScalarType, scalar_types
 if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearBase
 
+INT8_DTYPE = torch.int8
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
@@ -132,6 +133,8 @@ kFp8StaticChannelSym = QuantKey(FP8_DTYPE, kStaticChannelScale, symmetric=True)
 
 kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
 kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
+
+kInt8StaticChannelSym = QuantKey(INT8_DTYPE, kStaticChannelScale, symmetric=True)
 
 kNvfp4DynamicGroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
 kNvfp4Dynamic = QuantKey(
