@@ -474,7 +474,7 @@ run_serving_tests() {
           --request-rate $qps \
           --max-concurrency $max_concurrency \
           --metadata "tensor_parallel_size=$tp" \
-          --metadata "compilation_mode=$compilation_mode"
+          --metadata "compilation_mode=$compilation_mode" \
           --metadata "optimization_level=$optimization_level" \
           $client_args $client_remote_args "
 
