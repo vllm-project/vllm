@@ -473,7 +473,9 @@ run_serving_tests() {
           --result-filename ${new_test_name}.json \
           --request-rate $qps \
           --max-concurrency $max_concurrency \
-          --metadata "tensor_parallel_size=$tp compilation_mode=$compilation_mode optimization_level=$optimization_level" \
+          --metadata "tensor_parallel_size=$tp" \
+          --metadata "compilation_mode=$compilation_mode"
+          --metadata "optimization_level=$optimization_level" \
           $client_args $client_remote_args "
 
         echo "Running test case $test_name with qps $qps"
