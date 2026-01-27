@@ -1,12 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import TYPE_CHECKING
 from fastapi import APIRouter, FastAPI, WebSocket
 
 from vllm.entrypoints.openai.realtime.connection import RealtimeConnection
+from vllm.entrypoints.openai.realtime.serving import OpenAIServingRealtime
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from argparse import Namespace
+
+    from starlette.datastructures import State
+
+    from vllm.engine.protocol import EngineClient
+    from vllm.entrypoints.logger import RequestLogger
+    from vllm.tasks import SupportedTask
+else:
+    RequestLogger = object
 
 router = APIRouter()
 
@@ -43,3 +56,21 @@ def attach_router(app: FastAPI):
     """Attach the realtime router to the FastAPI app."""
     app.include_router(router)
     logger.info("Realtime API router attached")
+
+def init_realtime_state(
+    engine_client: "EngineClient",
+    state: "State",
+    args: "Namespace",
+    request_logger: RequestLogger | None,
+    supported_tasks: tuple["SupportedTask", ...],
+):
+    state.openai_serving_realtime = (
+        OpenAIServingRealtime(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            log_error_stack=args.log_error_stack,
+        )
+        if "realtime" in supported_tasks
+        else None
+    )

@@ -176,11 +176,6 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
 
     register_models_api_router(app)
 
-    from vllm.entrypoints.openai.realtime.api_router import (
-        attach_router as register_realtime_api_router,
-    )
-
-    register_realtime_api_router(app)
 
     from vllm.entrypoints.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
@@ -201,6 +196,13 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
         )
 
         register_translations_api_router(app)
+
+    if "realtime" in supported_tasks:
+        from vllm.entrypoints.openai.realtime.api_router import (
+            attach_router as register_realtime_api_router,
+        )
+
+        register_realtime_api_router(app)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import register_pooling_api_routers
@@ -315,18 +317,6 @@ async def init_app_state(
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks
         )
-    from vllm.entrypoints.openai.realtime.serving import OpenAIServingRealtime
-
-    state.openai_serving_realtime = (
-        OpenAIServingRealtime(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
-        )
-        if "transcription" in supported_tasks
-        else None
-    )
 
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.translations.api_router import (
@@ -334,6 +324,13 @@ async def init_app_state(
         )
 
         init_transcription_state(
+            engine_client, state, args, request_logger, supported_tasks
+        )
+
+    if "realtime" in supported_tasks:
+        from vllm.entrypoints.openai.realtime.api_router import init_realtime_state
+
+        init_realtime_state(
             engine_client, state, args, request_logger, supported_tasks
         )
 

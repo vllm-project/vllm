@@ -46,7 +46,6 @@ async def serve_http(
 
         logger.info("Route: %s, Methods: %s", path, ", ".join(methods))
 
-    logger.info("\nOther routes are:")
     # other endpoints
     for route in app.routes:
         endpoint = getattr(route, "endpoint", None)
