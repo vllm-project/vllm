@@ -38,6 +38,7 @@ from vllm.distributed.parallel_state import (
     get_pcp_group,
     get_pp_group,
     get_tp_group,
+    model_parallel_is_initialized,
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
@@ -574,6 +575,10 @@ class WorkerProc:
         is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
         if not is_eep_new_worker:
             self.worker.init_device()
+            # Update process title now that parallel groups are initialized
+            self.setup_proc_title_and_log_prefix(
+                enable_ep=vllm_config.parallel_config.enable_expert_parallel
+            )
             self.worker.load_model()
 
         # Enable environment variable cache (e.g. assume no more
@@ -860,6 +865,13 @@ class WorkerProc:
 
     @staticmethod
     def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
+        # Check if parallel groups are initialized first
+        if not model_parallel_is_initialized():
+            # Parallel groups not yet initialized, use default process name
+            set_process_title(name="Worker")
+            decorate_logs("Worker")
+            return
+
         dp_size = get_dp_group().world_size
         dp_rank = get_dp_group().rank_in_group
         pp_size = get_pp_group().world_size
