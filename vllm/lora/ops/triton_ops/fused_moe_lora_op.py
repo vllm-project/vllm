@@ -47,10 +47,12 @@ def _adjust_kernel_inputs(
     if sorted_token_ids is None:
         stride_tl = 0
         stride_el = 0
+        grid_lora_dim = 1
     else:
         stride_tl = sorted_token_ids.stride(0)
         stride_el = expert_ids.stride(0)
-    return max_loras + 1 if sorted_token_ids is not None else 1, stride_tl, stride_el
+        grid_lora_dim = max_loras + 1
+    return grid_lora_dim, stride_tl, stride_el
 
 
 @triton.jit(
@@ -119,7 +121,6 @@ def _fused_moe_lora_kernel(
 ):
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
-    max_loras = tl.num_programs(axis=2)
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
