@@ -44,11 +44,6 @@ async def realtime_endpoint(websocket: WebSocket):
     app = websocket.app
     serving = app.state.openai_serving_realtime
 
-    if serving is None:
-        logger.warning("Realtime transcription not supported - closing WebSocket")
-        await websocket.close(code=1011, reason="Realtime transcription not supported")
-        return
-
     connection = RealtimeConnection(websocket, serving)
     await connection.handle_connection()
 
