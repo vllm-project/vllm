@@ -546,6 +546,7 @@ class CompilationConfig:
     cost of increased startup time and slightly higher memory usage.
     When `enable_lora` is False, this option has no effect.
     """
+
     use_inductor_graph_partition: bool = Field(default=None)
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
