@@ -103,6 +103,7 @@ def get_fake_propose_draft_token_ids_fn():
         aux_hidden_states: list[torch.Tensor] | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
         common_attn_metadata: CommonAttentionMetadata,
+        slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
     ) -> list[list[int]]:
         num_computed_tokens_cpu_tensor = self.input_batch.num_computed_tokens_cpu_tensor
         num_computed_tokens = num_computed_tokens_cpu_tensor[0].item()
