@@ -30,7 +30,7 @@ async def test_empty_prompt():
         ):
             await client.completions.create(
                 model=model_name,
-                prompt="",
+                prompt=None,
                 max_tokens=5,
                 temperature=0.0,
                 extra_body={"prompt_embeds": []},
