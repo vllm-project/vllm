@@ -94,7 +94,11 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import get_max_tokens, sanitize_message
+from vllm.entrypoints.utils import (
+    _validate_truncation_size,
+    get_max_tokens,
+    sanitize_message,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, PromptType, TokensPrompt
 from vllm.inputs.parse import (
@@ -1188,7 +1192,7 @@ class OpenAIServing:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
     ):
-        prompt_text = engine_prompt.get("prompt")
+        prompt_text, _, _ = get_prompt_components(engine_prompt)
 
         orig_priority = priority
         sub_request = 0
@@ -1259,7 +1263,7 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
-                prompt_text = engine_prompt.get("prompt")
+                prompt_text, _, _ = get_prompt_components(engine_prompt)
 
                 sampling_params.max_tokens = get_max_tokens(
                     self.max_model_len,
