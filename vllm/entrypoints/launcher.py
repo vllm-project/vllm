@@ -163,8 +163,8 @@ async def serve_http(
         if ssl_cert_refresher:
             ssl_cert_refresher.stop()
 
-    async def drain_signal_handler() -> None:
-        """Async wrapper for drain shutdown."""
+    async def drain_then_shutdown() -> None:
+        """Drain in-flight requests then trigger shutdown."""
         try:
             await perform_drain()
         except asyncio.CancelledError:
@@ -185,9 +185,6 @@ async def serve_http(
         shutting_down = True
 
         if enable_drain:
-            # reset should_exit to keep uvicorn's serve loop running during drain
-            server.should_exit = False
-
             drain_timeout = getattr(
                 args, "shutdown_drain_timeout", FrontendArgs.shutdown_drain_timeout
             )
@@ -196,7 +193,7 @@ async def serve_http(
                 "Send SIGTERM again to force immediate shutdown.",
                 drain_timeout,
             )
-            drain_task = loop.create_task(drain_signal_handler())
+            drain_task = loop.create_task(drain_then_shutdown())
         else:
             signal_handler()
 
