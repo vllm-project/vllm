@@ -486,6 +486,7 @@ class EplbState:
                 ep_group,
                 False,
                 rank_mapping,
+                communicator_backend=self.parallel_config.eplb_config.communicator,
             )
             self.expert_rearrangement_step = 0
 
@@ -819,6 +820,7 @@ class EplbState:
                     ep_group,
                     is_profile,
                     rank_mapping,
+                    communicator_backend=self.parallel_config.eplb_config.communicator,
                 )
 
                 if not is_profile:

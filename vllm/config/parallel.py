@@ -38,6 +38,7 @@ ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
+EPLBCommunicatorBackend = Literal["torch", "pynccl"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -83,6 +84,13 @@ class EPLBConfig:
 
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
+
+    communicator: EPLBCommunicatorBackend = "torch"
+    """
+    Backend for EPLB expert weight communication:
+    - "torch": Use torch.distributed
+    - "pynccl": Use PyNccl send/recv
+    """
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:

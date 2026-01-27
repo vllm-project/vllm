@@ -20,7 +20,6 @@ from torch.distributed import (
     get_global_rank,
 )
 
-import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import init_logger
@@ -144,8 +143,8 @@ class PyNcclEplbCommunicator(EplbCommunicator):
 def _create_eplb_communicator(
     ep_group: ProcessGroup,
     cuda_stream: torch.cuda.Stream | None,
+    backend: str,
 ) -> EplbCommunicator:
-    backend = envs.VLLM_EPLB_COMMUNICATOR
     if backend == "pynccl":
         group_coordinator = get_ep_group()
         device_comm = group_coordinator.device_communicator
@@ -292,6 +291,7 @@ def move_to_buffer(
     expert_weights_buffers: Sequence[torch.Tensor],
     cuda_stream: torch.cuda.Stream | None,
     ep_group: ProcessGroup,
+    communicator_backend: str,
 ) -> MoveToBufferResult:
     """
     Rearranges expert weights during EPLB rebalancing.
@@ -306,6 +306,7 @@ def move_to_buffer(
         expert_weights_buffers: Intermediate buffers (one per tensor).
         cuda_stream: CUDA stream for async copies (can be None for sync mode).
         ep_group: Distributed process group for expert parallel comms.
+        communicator_backend: Backend for EPLB communication ("torch" or "pynccl").
 
     Returns:
         is_unchanged (np.ndarray): (num_local_experts,), True where an expert row
@@ -386,6 +387,7 @@ def move_to_buffer(
     communicator = _create_eplb_communicator(
         ep_group=ep_group,
         cuda_stream=cuda_stream,
+        backend=communicator_backend,
     )
 
     # 2. Post sends
@@ -555,6 +557,7 @@ async def transfer_layer(
     layer: int = 0,
     cuda_stream: torch.cuda.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
+    communicator_backend: str = "torch",
 ) -> MoveToBufferResult:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -573,6 +576,8 @@ async def transfer_layer(
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
+        communicator_backend: Backend for EPLB communication ("torch" or "pynccl").
+            Defaults to "torch".
 
     Returns:
         is_unchanged (np.ndarray): (1, num_local_experts), True where expert
@@ -615,6 +620,7 @@ async def transfer_layer(
         expert_weights_buffers=expert_weights_buffer,
         cuda_stream=cuda_stream,
         ep_group=ep_group,
+        communicator_backend=communicator_backend,
     )
     return is_unchanged, is_received_locally, recv_metadata
 
@@ -626,6 +632,7 @@ def rearrange_expert_weights_inplace(
     ep_group: ProcessGroup,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
+    communicator_backend: str = "torch",
 ) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -645,6 +652,8 @@ def rearrange_expert_weights_inplace(
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
+        communicator_backend: Backend for EPLB communication ("torch" or "pynccl").
+            Defaults to "torch".
     """
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -707,6 +716,7 @@ def rearrange_expert_weights_inplace(
             expert_weights_buffers=weights_buffer,
             cuda_stream=None,
             ep_group=ep_group,
+            communicator_backend=communicator_backend,
         )
 
         move_from_buffer(

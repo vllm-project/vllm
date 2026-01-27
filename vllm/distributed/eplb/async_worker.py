@@ -100,6 +100,7 @@ async def transfer_run_periodically(
                             layer=model_state.layer_to_transfer,
                             cuda_stream=cuda_stream,
                             rank_mapping=rank_mapping,
+                            communicator_backend=state.parallel_config.eplb_config.communicator,
                         )
                         event = torch.cuda.Event(blocking=False)
                         cuda_stream.record_event(event)

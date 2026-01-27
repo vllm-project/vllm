@@ -242,6 +242,7 @@ def _test_async_transfer_layer_without_mtp_worker(
     num_layers: int,
     num_local_experts: int,
     num_logical_experts: int,
+    eplb_communicator: str,
 ) -> None:
     set_env_vars_and_device(env)
     ensure_model_parallel_initialized(
@@ -302,6 +303,7 @@ def _test_async_transfer_layer_without_mtp_worker(
                 ep_group=ep_group,
                 layer=layer_idx,
                 cuda_stream=cuda_stream,
+                communicator_backend=eplb_communicator,
             )
         )
         cuda_stream.synchronize()
@@ -332,7 +334,12 @@ def _test_async_transfer_layer_without_mtp_worker(
 
 
 def _test_rearrange_expert_weights_with_redundancy(
-    env, world_size, num_layers, num_local_experts, num_logical_experts
+    env,
+    world_size,
+    num_layers,
+    num_local_experts,
+    num_logical_experts,
+    eplb_communicator: str,
 ) -> None:
     # Initialize model parallel (using tensor parallel as an entrypoint
     # to expert parallel)
@@ -384,6 +391,7 @@ def _test_rearrange_expert_weights_with_redundancy(
         expert_weights,
         ep_group,
         is_profile=False,
+        communicator_backend=eplb_communicator,
     )
 
     # Verify the rearrangement result
@@ -445,11 +453,13 @@ def test_rearrange_expert_weights_with_redundancy(
         num_layers,
         num_local_experts,
         num_logical_experts,
-        eplb_communicator=eplb_communicator,
+        eplb_communicator,
     )
 
 
-def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
+def _test_rearrange_expert_weights_no_change(
+    env, world_size, eplb_communicator: str
+) -> None:
     set_env_vars_and_device(env)
     ensure_model_parallel_initialized(
         tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
@@ -492,6 +502,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         expert_weights,
         ep_group,
         is_profile=False,
+        communicator_backend=eplb_communicator,
     )
 
     # Verify that the weights have not changed
@@ -530,7 +541,7 @@ def test_async_transfer_layer_without_mtp(
         num_layers,
         num_local_experts,
         num_logical_experts,
-        eplb_communicator=eplb_communicator,
+        eplb_communicator,
     )
 
 
@@ -547,11 +558,13 @@ def test_rearrange_expert_weights_no_change(world_size, eplb_communicator):
     distributed_run(
         _test_rearrange_expert_weights_no_change,
         world_size,
-        eplb_communicator=eplb_communicator,
+        eplb_communicator,
     )
 
 
-def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
+def _test_rearrange_expert_weights_profile_mode(
+    env, world_size, eplb_communicator: str
+) -> None:
     set_env_vars_and_device(env)
     ensure_model_parallel_initialized(
         tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
@@ -601,6 +614,7 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
         expert_weights,
         ep_group,
         is_profile=True,  # Profile mode
+        communicator_backend=eplb_communicator,
     )
 
     # In profile mode, the weights should remain unchanged
@@ -623,5 +637,5 @@ def test_rearrange_expert_weights_profile_mode(world_size, eplb_communicator):
     distributed_run(
         _test_rearrange_expert_weights_profile_mode,
         world_size,
-        eplb_communicator=eplb_communicator,
+        eplb_communicator,
     )

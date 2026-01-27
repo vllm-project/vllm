@@ -15,7 +15,7 @@ from vllm.utils.system_utils import update_environment_variables
 mp.set_start_method("spawn", force=True)
 
 
-def distributed_run(fn, world_size, *args, eplb_communicator: str = "torch"):
+def distributed_run(fn, world_size, *args):
     number_of_processes = world_size
     processes: list[mp.Process] = []
     for i in range(number_of_processes):
@@ -26,7 +26,6 @@ def distributed_run(fn, world_size, *args, eplb_communicator: str = "torch"):
         env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
         env["MASTER_ADDR"] = "localhost"
         env["MASTER_PORT"] = "12345"
-        env["VLLM_EPLB_COMMUNICATOR"] = eplb_communicator
         p = mp.Process(target=fn, args=(env, world_size, *args))
         processes.append(p)
         p.start()
