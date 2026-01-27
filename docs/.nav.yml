@@ -15,7 +15,9 @@ nav:
       - serving/*
       - serving/integrations
     - Deployment:
-      - deployment/*
+      - deployment/docker.md
+      - deployment/k8s.md
+      - deployment/nginx.md
       - deployment/frameworks
       - deployment/integrations
     - Training: training
