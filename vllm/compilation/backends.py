@@ -336,16 +336,16 @@ def _is_sym_size_op(node: fx.Node) -> bool:
     """Check if a node is a sym_size operation (tensor.shape access)."""
     if node.op != "call_function":
         return False
-    target = node.target
+    
+    if not hasattr(torch.ops.aten, "sym_size"):
+        return False
+    
     # Handle both torch.ops.aten.sym_size.int and sym_size.default
-    if hasattr(torch.ops.aten, "sym_size"):
-        sym_size_ops = (
-            torch.ops.aten.sym_size,
-            torch.ops.aten.sym_size.int,
-            torch.ops.aten.sym_size.default,
-        )
-        return target in sym_size_ops
-    return False
+    return node.target in (
+        torch.ops.aten.sym_size,
+        torch.ops.aten.sym_size.int,
+        torch.ops.aten.sym_size.default,
+    )
 
 
 def _replicate_sym_size_nodes_for_split(
