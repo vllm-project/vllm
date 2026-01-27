@@ -47,6 +47,7 @@ from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
+_PRE_ALLOCATE_BUFFER_SIZE_IN_S = 30
 
 class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
     def __init__(
@@ -151,8 +152,8 @@ class VoxtralRealtimeBuffer:
         self._end = streaming_delay + n_left_pad_samples + self._streaming_size
 
         # always pre-allocate 30 second buffers
-        buffer_size = 30 * self._sampling_rate
-        self._buffer: np.ndarray = np.empty(buffer_size, dtype=np.float32)
+        self._buffer_size = _PRE_ALLOCATE_BUFFER_SIZE_IN_S * self._sampling_rate
+        self._buffer: np.ndarray = np.empty(self._buffer_size, dtype=np.float32)
         self._filled_buffer_len = 0
 
     @property
@@ -174,12 +175,30 @@ class VoxtralRealtimeBuffer:
 
         return len_in_s
 
+    def _allocate_new_buffer(self) -> None:
+        # allocate new buffer
+        new_buffer = np.empty(self._buffer_size, dtype=np.float32)
+        left_to_copy = max(self._filled_buffer_len - self.start_idx, 0)
+
+        if left_to_copy > 0:
+            new_buffer[:left_to_copy] = self._buffer[self.start_idx: self._filled_buffer_len]
+
+        del self._buffer
+        self._buffer = new_buffer
+
+        self._filled_buffer_len = left_to_copy
+        self._start = self._look_back
+        self._end = self._start + self._streaming_size
+
     def add_audio_chunk(self, audio_chunk: np.ndarray) -> None:
+        put_end_idx = self._filled_buffer_len + len(audio_chunk)
+
+        if put_end_idx > self._buffer_size:
+            self._allocate_new_buffer()
+
         self._buffer[self._filled_buffer_len : self._filled_buffer_len + len(audio_chunk)] = audio_chunk
         self._filled_buffer_len += len(audio_chunk)
 
-        # TODO(Patrick) - allocate new buffer if it's full
-    
     def get_audio_chunk(self) -> np.ndarray | None:
         if not self.is_chunk_complete:
             return None
@@ -230,6 +249,8 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         buffer = VoxtralRealtimeBuffer(config)
         is_first_yield = True
 
+        count = 0
+
         async for audio in audio_stream:
             print("audio shape", audio.shape)
             buffer.add_audio_chunk(audio)
@@ -258,8 +279,11 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
                     is_first_yield = False
                 else:
                     # pop last element from input_stream
-                    token_ids = await asyncio.wait_for(input_stream.get(), timeout=3.0)
+                    all_outputs = await asyncio.wait_for(input_stream.get(), timeout=10.0)
+                    token_ids = all_outputs[-1:]
 
+                count += 1
+                print(f"COUNT {count}")
                 print(20 * "-" + "INPUT" + 20 * "-")
                 print("token_ids", token_ids)
                 print("audio shape", new_audio.shape)
