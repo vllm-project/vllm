@@ -499,7 +499,96 @@ class LLM:
             priority=priority,
         )
 
+
     def enqueue(
+        self,
+        prompts: PromptType | Sequence[PromptType],
+        sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        priority: list[int] | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        tokenization_kwargs: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Enqueue prompts for generation without waiting for completion.
+
+        This method adds requests to the engine queue but does not start
+        processing them. Use wait_for_completion() to process the queued
+        requests and get results.
+
+        Args:
+            prompts: The prompts to the LLM. See generate() for details.
+            sampling_params: The sampling parameters for text generation.
+            lora_request: LoRA request to use for generation, if any.
+            priority: The priority of the requests, if any.
+            use_tqdm: If True, shows a tqdm progress bar while adding requests.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
+
+        Returns:
+            A list of request IDs for the enqueued requests.
+        """
+        model_config = self.model_config
+        runner_type = model_config.runner_type
+        if runner_type != "generate":
+            raise ValueError("LLM.enqueue() is only supported for generative models.")
+
+        if sampling_params is None:
+            sampling_params = self.get_default_sampling_params()
+
+        # Use the same preprocessing as _run_completion
+        seq_prompts = prompt_to_seq(prompts)
+        seq_params = self._params_to_seq(sampling_params, len(seq_prompts))
+
+        if any(param.truncate_prompt_tokens is not None for param in seq_params):
+            engine_prompts: Sequence[DictPrompt | TokPrompt] = [
+                engine_prompt
+                for prompt, param in zip(seq_prompts, seq_params)
+                for engine_prompt in self._preprocess_completion(
+                    [prompt],
+                    tokenization_kwargs=merge_kwargs(
+                        tokenization_kwargs,
+                        dict(truncate_prompt_tokens=param.truncate_prompt_tokens),
+                    ),
+                )
+            ]
+        else:
+            engine_prompts = self._preprocess_completion(
+                seq_prompts,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+        request_ids = self._validate_and_add_requests(
+            prompts=engine_prompts,
+            params=seq_params,
+            use_tqdm=use_tqdm,
+            lora_request=self._get_modality_specific_lora_reqs(
+                engine_prompts, lora_request
+            ),
+            tokenization_kwargs=tokenization_kwargs,
+            priority=priority,
+        )
+
+        return request_ids
+
+    def wait_for_completion(
+        self,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+    ) -> list[RequestOutput]:
+        """Wait for all enqueued requests to complete and return results.
+
+        This method processes all requests currently in the engine queue
+        and returns their outputs. Use after enqueue() to get results.
+
+        Args:
+            use_tqdm: If True, shows a tqdm progress bar.
+
+        Returns:
+            A list of RequestOutput objects for all completed requests.
+        """
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        return self.engine_class.validate_outputs(outputs, RequestOutput)
+
+    def _get_modality_specific_lora_reqs(
+>>>>>>> 9dab6ac47c ([Core] Add sleep level 0 mode with enqueue/wait pattern)
         self,
         prompts: PromptType | Sequence[PromptType],
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
@@ -1691,10 +1780,10 @@ class LLM:
                            a different model or update the model, where
                            previous model weights are not needed. It reduces
                            CPU memory pressure.
-            mode: How to handle any existing requests, can be "abort", "wait",
-                or "keep".
         """
-        self.llm_engine.sleep(level=level, mode=mode)
+        if level > 0:
+            self.reset_prefix_cache()
+        self.llm_engine.sleep(level=level)
 
     def wake_up(self, tags: list[str] | None = None):
         """

@@ -1130,7 +1130,13 @@ class EngineCoreProc(EngineCore):
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+            #    Skip if scheduling is paused (level 0 sleep)
+            if not self._scheduler_paused:
+                self._process_engine_step()
+            else:
+                # When scheduling is paused, still need to check for wake up
+                # by processing any utility requests that might resume scheduling
+                pass
 
         raise SystemExit
 
@@ -1138,7 +1144,7 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while not self.has_work() and self.is_running():
+        while not self.has_work() and self.is_running() and (not self.scheduler.has_requests() or self._scheduler_paused):
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1693,10 +1699,15 @@ class DPEngineCoreProc(EngineCoreProc):
                     self.process_input_queue_block = True
                     self.eep_scaling_state = None
 
+            # Skip processing if scheduling is paused (level 0 sleep)
+            if self._scheduler_paused:
+                continue
+
+            # 2) Step the engine core.
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
-
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.
