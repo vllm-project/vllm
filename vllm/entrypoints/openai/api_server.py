@@ -176,7 +176,6 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
 
     register_models_api_router(app)
 
-
     from vllm.entrypoints.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )
@@ -330,9 +329,7 @@ async def init_app_state(
     if "realtime" in supported_tasks:
         from vllm.entrypoints.openai.realtime.api_router import init_realtime_state
 
-        init_realtime_state(
-            engine_client, state, args, request_logger, supported_tasks
-        )
+        init_realtime_state(engine_client, state, args, request_logger, supported_tasks)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import init_pooling_state

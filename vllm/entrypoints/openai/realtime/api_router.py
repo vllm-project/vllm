@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import TYPE_CHECKING
+
 from fastapi import APIRouter, FastAPI, WebSocket
 
 from vllm.entrypoints.openai.realtime.connection import RealtimeConnection
@@ -56,6 +57,7 @@ def attach_router(app: FastAPI):
     """Attach the realtime router to the FastAPI app."""
     app.include_router(router)
     logger.info("Realtime API router attached")
+
 
 def init_realtime_state(
     engine_client: "EngineClient",
