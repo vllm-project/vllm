@@ -592,6 +592,9 @@ class CompilationConfig:
     Map from layer name to layer objects that need to be accessed outside
     model code, e.g., Attention, FusedMOE when dp_size>1."""
 
+    bs_to_padded_graph_size: list[int] = field(default_factory=list, init=False)
+    """Runtime map from batch size to cudagraph padded size."""
+
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [
