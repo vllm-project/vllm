@@ -222,31 +222,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
-    def prepare_monolithic(
-        self,
-        a1: torch.Tensor,
-        router_logits: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
-        defer_input_quant: bool = False,
-    ) -> PrepareMonolithicResultType:
-        """
-        Optional method for subclasses compatible with monolithic
-        FusedMoEPermuteExpertsUnpermute kernels.
-
-        Perform any quantization (and/or) dispatching needed for this kernel.
-        - a1: The (unquantized) input to the MoE layer.
-        - quant_config: Quantization info provided by the fused experts.
-        - defer_input_quant: Runtime parameter indicating whether or not to
-            defer input quantization to the FusedMoEPermuteExpertsUnpermute
-
-        Returns a tuple of:
-        - quantized + dispatched a.
-        - Optional quantized + dispatched a1_scales.
-        """
-        raise NotImplementedError(
-            f"prepare_monolithic not supported for {self.__class__.__name__}"
-        )
-
     def supports_async(self) -> bool:
         """
         Indicates whether or not this class implements prepare_async and
@@ -331,24 +306,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
-    def finalize_monolithic(
-        self,
-        fused_expert_output: torch.Tensor,
-        weight_and_reduce_impl: TopKWeightAndReduce,
-    ) -> torch.Tensor:
-        """
-        Optional method for subclasses compatible with monolithic
-        FusedMoEPermuteExpertsUnpermute kernels.
-
-        Perform any combine plus apply weights and perform a reduction on the
-        fused experts output.
-        - fused_expert_output: The unweighted, unreduced output of the fused
-          experts, it will have (M, topk, K) shape.
-        - weight_and_reduce_impl: An optional TopKWeightAndReduce
-          implementation.
-        """
-        raise NotImplementedError
-
     def finalize_async(
         self,
         output: torch.Tensor,
@@ -388,6 +345,49 @@ class FusedMoEPrepareAndFinalize(ABC):
         is equivalent to:
 
         obj.finalize(output, ...)
+        """
+        raise NotImplementedError
+
+    def prepare_monolithic(
+        self,
+        a1: torch.Tensor,
+        router_logits: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
+    ) -> PrepareMonolithicResultType:
+        """
+        Optional method for subclasses compatible with monolithic
+        FusedMoEPermuteExpertsUnpermute kernels.
+
+        Perform any quantization (and/or) dispatching needed for this kernel.
+        - a1: The (unquantized) input to the MoE layer.
+        - quant_config: Quantization info provided by the fused experts.
+        - defer_input_quant: Runtime parameter indicating whether or not to
+            defer input quantization to the FusedMoEPermuteExpertsUnpermute
+
+        Returns a tuple of:
+        - quantized + dispatched a.
+        - Optional quantized + dispatched a1_scales.
+        """
+        raise NotImplementedError(
+            f"prepare_monolithic not supported for {self.__class__.__name__}"
+        )
+
+    def finalize_monolithic(
+        self,
+        fused_expert_output: torch.Tensor,
+        weight_and_reduce_impl: TopKWeightAndReduce,
+    ) -> torch.Tensor:
+        """
+        Optional method for subclasses compatible with monolithic
+        FusedMoEPermuteExpertsUnpermute kernels.
+
+        Perform any combine plus apply weights and perform a reduction on the
+        fused experts output.
+        - fused_expert_output: The unweighted, unreduced output of the fused
+          experts, it will have (M, topk, K) shape.
+        - weight_and_reduce_impl: An optional TopKWeightAndReduce
+          implementation.
         """
         raise NotImplementedError
 
