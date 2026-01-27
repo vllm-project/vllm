@@ -89,8 +89,7 @@ class MoeQuantizationCallbacks(Protocol):
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
-    ) -> None:
-        ...
+    ) -> None: ...
 
 
 class MoeOnlineWeightLoader:
@@ -104,14 +103,14 @@ class MoeOnlineWeightLoader:
     4. Calls quantization callback when all weights are loaded
 
     Usage:
-        loader = MoeOnlineWeightLoader(callbacks)
+        loader = MoeOnlineWeightLoader(moe_quant_callbacks)
         loader.create_weights(layer, num_experts, ...)
         # Later, after model loading:
         loader.process_weights_after_loading(layer)
     """
 
-    def __init__(self, callbacks: MoeQuantizationCallbacks):
-        self.callbacks = callbacks
+    def __init__(self, moe_quant_callbacks: MoeQuantizationCallbacks):
+        self.moe_quant_callbacks = moe_quant_callbacks
 
     def create_weights(
         self,
@@ -190,11 +189,13 @@ class MoeOnlineWeightLoader:
         extra_weight_attrs: dict,
     ) -> None:
         """Create and register scale parameters."""
-        w13_weight_scale, w2_weight_scale = self.callbacks.create_scale_tensors(
-            layer,
-            num_experts,
-            intermediate_size_per_partition,
-            hidden_size,
+        w13_weight_scale, w2_weight_scale = (
+            self.moe_quant_callbacks.create_scale_tensors(
+                layer,
+                num_experts,
+                intermediate_size_per_partition,
+                hidden_size,
+            )
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
@@ -289,7 +290,7 @@ class MoeOnlineWeightLoader:
 
     def quantize_and_setup_kernel(self, layer: Module) -> None:
         # Get target dtype and create output tensors
-        quantized_dtype = self.callbacks.get_quantized_dtype()
+        quantized_dtype = self.moe_quant_callbacks.get_quantized_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=quantized_dtype)
         w2 = torch.empty_like(layer.w2_weight, dtype=quantized_dtype)
         w13_scale = layer.w13_weight_scale
@@ -297,15 +298,15 @@ class MoeOnlineWeightLoader:
 
         # Quantize each expert
         for expert in range(layer.local_num_experts):
-            w13[expert, :, :], w13_scale[expert] = self.callbacks.quantize_expert(
-                layer.w13_weight[expert, :, :]
+            w13[expert, :, :], w13_scale[expert] = (
+                self.moe_quant_callbacks.quantize_expert(layer.w13_weight[expert, :, :])
             )
-            w2[expert, :, :], w2_scale[expert] = self.callbacks.quantize_expert(
-                layer.w2_weight[expert, :, :]
+            w2[expert, :, :], w2_scale[expert] = (
+                self.moe_quant_callbacks.quantize_expert(layer.w2_weight[expert, :, :])
             )
 
         # Setup kernel with quantized weights
-        self.callbacks.setup_kernel(layer, w13, w2, w13_scale, w2_scale)
+        self.moe_quant_callbacks.setup_kernel(layer, w13, w2, w13_scale, w2_scale)
 
     def _materialize_dummy_weights(self, layer: Module) -> None:
         """Materialize weights that are still on meta device (dummy weights)."""

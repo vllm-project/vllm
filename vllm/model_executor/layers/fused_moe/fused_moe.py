@@ -1940,12 +1940,14 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ]
 
         if device_supports_fp8:
-            SUPPORTED_W_A.extend([
-                (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-                (kFp8StaticChannelSym, kFp8DynamicTokenSym),
-                (kFp8StaticTensorSym, kFp8DynamicTokenSym),
-                (kFp8StaticTensorSym, kFp8StaticTensorSym),
-            ])
+            SUPPORTED_W_A.extend(
+                [
+                    (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+                    (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+                    (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+                    (kFp8StaticTensorSym, kFp8StaticTensorSym),
+                ]
+            )
 
         return (weight_key, activation_key) in SUPPORTED_W_A
 
