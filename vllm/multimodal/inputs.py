@@ -20,7 +20,7 @@ from typing import (
 )
 
 import numpy as np
-from typing_extensions import NotRequired, TypeVar, deprecated
+from typing_extensions import NotRequired, TypeVar
 
 from vllm.utils.collection_utils import full_groupby, is_list_of
 from vllm.utils.import_utils import LazyLoader
@@ -32,9 +32,7 @@ if TYPE_CHECKING:
     from PIL.Image import Image
     from transformers.feature_extraction_utils import BatchFeature
 
-    from .base import MediaWithBytes
-    from .processing import MultiModalHashes
-
+    from .media import MediaWithBytes
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -171,10 +169,7 @@ class PlaceholderRange:
 
     @cached_property
     def embeds_cumsum(self) -> torch.Tensor | None:
-        if self.is_embed is None:
-            return None
-
-        return self.is_embed.cumsum(dim=0)
+        return None if self.is_embed is None else self.is_embed.cumsum(dim=0)
 
     @cached_property
     def get_num_embeds(self) -> int:
@@ -308,13 +303,7 @@ def batched_tensors_equal(a: BatchedTensorInputs, b: BatchedTensorInputs) -> boo
     Equality check between
     [`BatchedTensorInputs`][vllm.multimodal.inputs.BatchedTensorInputs] objects.
     """
-    for k in a:
-        if k not in b:
-            return False
-        if not nested_tensors_equal(a[k], b[k]):
-            return False
-
-    return True
+    return all(k in b and nested_tensors_equal(a[k], b[k]) for k in a)
 
 
 @dataclass
@@ -339,6 +328,9 @@ class MultiModalFeatureSpec:
     mm_position: PlaceholderRange
     """e.g., PlaceholderRange(offset=2, length=336)"""
 
+    mm_hash: str | None = None
+    """Base mm_hash for processor cache (without LoRA prefix)."""
+
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
         kwargs = defaultdict[str, list[NestedTensors]](list)
@@ -356,8 +348,8 @@ class MultiModalFeatureSpec:
 @dataclass
 class MultiModalFieldElem:
     """
-    Represents a keyword argument corresponding to a multi-modal item
-    in [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs].
+    Represents a keyword argument inside a
+    [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem].
     """
 
     modality: str
@@ -369,14 +361,14 @@ class MultiModalFieldElem:
     key: str
     """
     The key of this field in
-    [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs],
+    [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem],
     i.e. the name of the keyword argument to be passed to the model.
     """
 
     data: NestedTensors
     """
     The tensor data of this field in
-    [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs],
+    [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem],
     i.e. the value of the keyword argument to be passed to the model.
 
     It may be set to `None` if it is determined that the item is cached
@@ -410,9 +402,9 @@ class MultiModalFieldElem:
 @dataclass(frozen=True, kw_only=True)
 class BaseMultiModalField(ABC):
     """
-    Defines how to interpret tensor data belonging to a keyword argument in
-    [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs] for multiple
-    multi-modal items, and vice versa.
+    Defines how to interpret tensor data belonging to a keyword argument for
+    [`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems],
+    and vice versa.
     """
 
     keep_on_cpu: bool = False
@@ -985,65 +977,15 @@ MultiModalKwargsOptionalItems: TypeAlias = (
 )
 
 
-@deprecated("`MultiModalKwargs` is deprecated and will be removed in v0.14.")
-class MultiModalKwargs(UserDict[str, NestedTensors]):
-    """
-    A dictionary that represents the keyword arguments to
-    [`torch.nn.Module.forward`][].
-    """
-
-    @staticmethod
-    @deprecated(
-        "`MultiModalKwargs.from_hf_inputs` is deprecated and "
-        "will be removed in v0.14. "
-        "Please use `MultiModalKwargsItems.from_hf_inputs` and "
-        "access the tensor data using `.get_data()`."
-    )
-    def from_hf_inputs(
-        hf_inputs: "BatchFeature",
-        config_by_key: Mapping[str, MultiModalFieldConfig],
-    ):
-        return MultiModalKwargsItems.from_hf_inputs(hf_inputs, config_by_key).get_data()
-
-    @staticmethod
-    @deprecated(
-        "`MultiModalKwargs.from_items` is deprecated and "
-        "will be removed in v0.14. "
-        "Please use `MultiModalKwargsItems.from_seq` and "
-        "access the tensor data using `.get_data()`."
-    )
-    def from_items(
-        items: Sequence[MultiModalKwargsItem],
-        *,
-        pin_memory: bool = False,
-    ):
-        return MultiModalKwargsItems.from_seq(items).get_data(pin_memory=pin_memory)
-
-    def __getitem__(self, key: str):
-        if key not in self:
-            raise KeyError(
-                f"Keyword argument {key!r} not found. "
-                f"Available keys: {set(self.keys())}"
-            )
-
-        return super().__getitem__(key)
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, self.__class__):
-            return False
-
-        for k in self:
-            if k not in other:
-                return False
-            if not nested_tensors_equal(self[k], other[k]):
-                return False
-
-        return True
+MultiModalHashes = dict[str, list[str]]
+"""
+A dictionary containing per-item hashes for each modality.
+"""
 
 
 MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
 """
-A dictionary containing placeholder ranges for each modality.
+A dictionary containing per-item placeholder ranges for each modality.
 """
 
 
@@ -1063,10 +1005,10 @@ class MultiModalInputs(TypedDict):
     mm_kwargs: MultiModalKwargsOptionalItems
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: "MultiModalHashes"
+    mm_hashes: MultiModalHashes
     """The hashes of the multi-modal data."""
 
-    mm_placeholders: "MultiModalPlaceholderDict"
+    mm_placeholders: MultiModalPlaceholderDict
     """
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.

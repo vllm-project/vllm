@@ -9,9 +9,9 @@ import torch.distributed
 from vllm.config import VllmConfig
 from vllm.distributed import get_world_group
 from vllm.logger import init_logger
-from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import TorchProfilerWrapper
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.xpu_model_runner import XPUModelRunner
 
@@ -107,7 +107,8 @@ class XPUWorker(Worker):
 
         torch.xpu.empty_cache()
         torch_allocated_bytes = torch.xpu.memory_stats()["allocated_bytes.all.current"]
-        total_allocated_bytes = self.xpu_get_mem_info()[1] - self.xpu_get_mem_info()[0]
+        free_mem, total_mem = self.xpu_get_mem_info()
+        total_allocated_bytes = total_mem - free_mem
 
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:

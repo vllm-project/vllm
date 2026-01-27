@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+from vllm.utils.torch_utils import set_random_seed
 
 FLOAT8_DTYPE = torch.float8_e4m3fn
 GROUP_SIZE = 128
@@ -67,8 +68,12 @@ def reference(x: torch.Tensor, use_ue8m0: bool) -> tuple[torch.Tensor, torch.Ten
 
 @pytest.mark.parametrize("T", [128, 256, 512])
 @pytest.mark.parametrize("N", [128 * 2, 256 * 2, 768 * 2, 2048 * 2, 7168 * 2])
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="ROCm does not support DeepGemm.",
+)
 def test_silu_mul_fp8_quant_deep_gemm(T: int, N: int):
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     input = torch.rand((T, N), dtype=torch.bfloat16, device="cuda")
 

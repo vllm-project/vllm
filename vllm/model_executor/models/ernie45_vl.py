@@ -21,7 +21,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only Erine VL model compatible with HuggingFace weights."""
+"""Inference-only Ernie VL model compatible with HuggingFace weights."""
 
 import itertools
 import math
@@ -36,16 +36,15 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layers.mm_encoder_attention import (
-    MMEncoderAttention,
-)
-from vllm.config import MultiModalConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -64,16 +63,17 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 from .interfaces import (
@@ -119,7 +119,6 @@ class Ernie4_5_VisionAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -152,7 +151,7 @@ class Ernie4_5_VisionAttention(nn.Module):
         self.attn = MMEncoderAttention(
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
-            multimodal_config=multimodal_config,
+            scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
         )
 
@@ -265,7 +264,6 @@ class Ernie4_5_VisionBlock(nn.Module):
         act_layer: type[nn.Module] = QuickGELU,
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -281,7 +279,6 @@ class Ernie4_5_VisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -356,7 +353,6 @@ class Ernie4_5_VisionTransformer(nn.Module):
         vision_config,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -392,7 +388,6 @@ class Ernie4_5_VisionTransformer(nn.Module):
                     mlp_ratio=mlp_ratio,
                     norm_layer=norm_layer,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                 )
                 for layer_idx in range(depth)
@@ -404,13 +399,9 @@ class Ernie4_5_VisionTransformer(nn.Module):
         )
         self.ln = nn.LayerNorm(hidden_size, eps=1e-6)
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend if multimodal_config else None
-        )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
         )
 
     @property
@@ -599,7 +590,11 @@ def smart_resize(
         w_bar = ceil_by_factor(width * beta, factor)
 
     if min_pixels > h_bar * w_bar or h_bar * w_bar > max_pixels:
-        raise ValueError(f"encounter invalid h_bar: {h_bar}, w_bar: {w_bar}")
+        raise ValueError(
+            f"Invalid h_bar={h_bar}, w_bar={w_bar}: "
+            f"h_bar * w_bar must be >= min_pixels ({min_pixels}) "
+            f"and <= max_pixels ({max_pixels})."
+        )
 
     return h_bar, w_bar
 
@@ -952,6 +947,11 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
 
 
 class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessingInfo]):
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+        )
+
     def _pixel_values_norm(
         self,
         pixel_values: torch.Tensor,
@@ -1010,8 +1010,25 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             mm_data["images"] = []
         if "videos" not in mm_data:
             mm_data["videos"] = []
+
+        # Check if HF processor supports video metadata
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        supports_video_metadata = getattr(
+            hf_processor, "supports_video_metadata", False
+        )
+
+        if mm_data["videos"] and not supports_video_metadata:
+            # Old HF processor, unwrap tuple to pure frames
+            logger.warning_once(
+                "HF processor doesn't support video metadata. "
+                "Timestamps will NOT be rendered. Please upgrade the model."
+            )
+            mm_data["videos"] = [
+                v[0] if isinstance(v, tuple) else v for v in mm_data["videos"]
+            ]
+
         processor_output = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+            hf_processor,
             dict(text=[prompt], images=mm_data["images"], videos=mm_data["videos"]),
             dict(**mm_kwargs, **tok_kwargs),
         )
@@ -1163,6 +1180,60 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
             ),
         }
 
+    def _get_dummy_videos(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        num_videos: int,
+        overrides: VideoDummyOptions | None = None,
+    ):
+        if overrides:
+            if overrides.num_frames:
+                if overrides.num_frames > num_frames:
+                    logger.warning(
+                        "video.num_frames override (%d) exceeds model's "
+                        "maximum number of frames (%d), will be ignored",
+                        overrides.num_frames,
+                        num_frames,
+                    )
+                num_frames = min(num_frames, overrides.num_frames)
+            if overrides.width:
+                if overrides.width > width:
+                    logger.warning(
+                        "video.width override (%d) exceeds model's "
+                        "maximum width (%d), will be ignored",
+                        overrides.width,
+                        width,
+                    )
+                width = min(width, overrides.width)
+            if overrides.height:
+                if overrides.height > height:
+                    logger.warning(
+                        "video.height override (%d) exceeds model's "
+                        "maximum height (%d), will be ignored",
+                        overrides.height,
+                        height,
+                    )
+                height = min(height, overrides.height)
+        num_frames = max(num_frames, 2)  # ernie4.5-vl requires at least 2 frames
+
+        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        video_items = []
+        for i in range(num_videos):
+            video_metadata = {
+                "fps": 2.0,
+                "duration": num_frames / 2.0,
+                "total_num_frames": num_frames,
+                "frames_indices": [i for i in range(num_frames)],
+                "video_backend": "opencv",
+                "do_sample_frames": False,
+            }
+            video_item = (video.copy(), video_metadata)
+            video_items.append(video_item)
+        return video_items
+
 
 @MULTIMODAL_REGISTRY.register_processor(
     Ernie4_5VLMultiModalProcessor,
@@ -1222,27 +1293,27 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_model = Ernie4_5_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision_model = Ernie4_5_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.resampler_model = VariableResolutionResamplerModel(
+                self.config.pixel_hidden_size,
+                self.config.hidden_size,
+                self.config.spatial_conv_size,
+                self.config.temporal_conv_size,
+                config=self.config,
+                prefix=maybe_prefix(prefix, "resampler_model"),
+            )
 
-        self.language_model = Ernie4_5_VLMoeForCausalLM(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.resampler_model = VariableResolutionResamplerModel(
-            self.config.pixel_hidden_size,
-            self.config.hidden_size,
-            self.config.spatial_conv_size,
-            self.config.temporal_conv_size,
-            config=self.config,
-            prefix=maybe_prefix(prefix, "resampler_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = Ernie4_5_VLMoeForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
@@ -1441,9 +1512,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         return llm_positions, mrope_position_delta
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Ernie4_5_VLImageInputs | None:
@@ -1582,7 +1650,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
