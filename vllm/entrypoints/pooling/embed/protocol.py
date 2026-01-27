@@ -28,7 +28,8 @@ class EmbeddingCompletionRequest(
             if pooler_config.enable_chunked_processing:
                 max_output_tokens = 0
             else:
-                max_output_tokens = max_total_tokens - pooler_config.max_embed_len
+                max_embed_len = pooler_config.max_embed_len or 0
+                max_output_tokens = max_total_tokens - max_embed_len
         else:
             max_output_tokens = 0
 
@@ -58,7 +59,8 @@ class EmbeddingChatRequest(
             if pooler_config.enable_chunked_processing:
                 max_output_tokens = 0
             else:
-                max_output_tokens = max_total_tokens - pooler_config.max_embed_len
+                max_embed_len = pooler_config.max_embed_len or 0
+                max_output_tokens = max_total_tokens - max_embed_len
         else:
             max_output_tokens = 0
 
