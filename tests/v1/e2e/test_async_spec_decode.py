@@ -50,6 +50,11 @@ def sync_tracker():
         def count(self) -> int:
             return sync_count.value
 
+        def start_tracking(self):
+            """Start tracking syncs from this point. Call after model loading."""
+            with sync_count.get_lock():
+                sync_count.value = 0
+
         def assert_no_sync(self, msg: str = ""):
             count = sync_count.value
             assert count == 0, (
@@ -113,6 +118,9 @@ def test_no_sync_with_spec_decode(
         enforce_eager=True,
         async_scheduling=True,
     )
+
+    # Start tracking after model loading - we only care about syncs during generation
+    sync_tracker.start_tracking()
 
     outputs = llm.generate(
         ["Hello, my name is"],
