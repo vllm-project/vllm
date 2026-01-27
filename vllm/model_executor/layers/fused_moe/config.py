@@ -462,8 +462,10 @@ class FusedMoEQuantConfig:
         - a2_scale: Optional scale to be used for a2.
         - g1_alphas: Optional global quantization scales for w1 (for nvfp4).
                      Optional per-channel scales for w1 (for W4A8 FP8).
+                     Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
         - g2_alphas: Optional global quantization scales for w2 (for nvfp4).
                      Optional per-channel scales for w2 (for W4A8 FP8).
+                     Optional dq scale i.e. w_scale * a_scale (for W8A8 fp8).
         - a1_gscale: Optional global quantization scales for a1 (1.0 /a2_scale).
         - a2_gscale: Optional global quantization scales for a2 (1.0 /a2_scale).
 
@@ -518,6 +520,10 @@ def fp8_w8a8_moe_quant_config(
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     block_shape: list[int] | None = None,
+    a1_gscale: torch.Tensor | None = None,
+    a2_gscale: torch.Tensor | None = None,
+    g1_alphas: torch.Tensor | None = None,
+    g2_alphas: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and fp8 weights.
@@ -525,9 +531,13 @@ def fp8_w8a8_moe_quant_config(
     return FusedMoEQuantConfig.make(
         torch.float8_e4m3fn,
         w1_scale=w1_scale,
+        g1_alphas=g1_alphas,
         w2_scale=w2_scale,
+        g2_alphas=g2_alphas,
         a1_scale=a1_scale,
+        a1_gscale=a1_gscale,
         a2_scale=a2_scale,
+        a2_gscale=a2_gscale,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,

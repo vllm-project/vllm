@@ -400,6 +400,21 @@ def make_fp8_moe_quant_config(
             block_shape=block_shape,
         )
 
+    # Flashinfer CUTLASS per-tensor uses single dq scale
+    # (alpha = w_scale * a_scale) and inverse a2 scale.
+    if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS and block_shape is None:
+        assert a1_scale is not None and a2_scale is not None
+        return fp8_w8a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            a1_gscale=(1.0 / a1_scale),
+            a2_gscale=(1.0 / a2_scale),
+            g1_alphas=(w1_scale * a1_scale).squeeze(),
+            g2_alphas=(w2_scale * a2_scale).squeeze(),
+        )
+
     # All other backends use normal config.
     return fp8_w8a8_moe_quant_config(
         w1_scale=w1_scale,

@@ -78,18 +78,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
 
-        # Preprocess scales for FlashInfer CUTLASS kernel.
-        if self.quant_config.is_per_tensor:
-            assert quant_config.w1_scale is not None
-            assert quant_config.w2_scale is not None
-            assert quant_config.a1_scale is not None
-            assert quant_config.a2_scale is not None
-
-            self._a1_gscale = 1.0 / quant_config.a1_scale
-            self._a2_gscale = 1.0 / quant_config.a2_scale
-            self._g1_alphas = (quant_config.w1_scale * quant_config.a1_scale).squeeze()
-            self._g2_alphas = (quant_config.w2_scale * quant_config.a2_scale).squeeze()
-
     @property
     def expects_unquantized_inputs(self) -> bool:
         return self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
@@ -239,10 +227,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ):
             # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
             quant_scales = [
-                self._g1_alphas,  # w13_weight_scale * w13_input_scale
-                self._a2_gscale,  # 1.0 / w2_input_scale
-                self._g2_alphas,  # w2_weight_scale * w2_input_scale
-                self._a1_gscale,
+                self.g1_alphas,  # w13_weight_scale * w13_input_scale
+                self.a2_gscale,  # 1.0 / w2_input_scale
+                self.g2_alphas,  # w2_weight_scale * w2_input_scale
+                self.a1_gscale,
             ]
 
             a1q_scale = None  # not passing input_sf in fp8
