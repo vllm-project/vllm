@@ -556,19 +556,6 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         request_logger=None,
     )
 
-    async def _fake_process_inputs(
-        request_id,
-        engine_prompt,
-        sampling_params,
-        *,
-        lora_request,
-        trace_headers,
-        priority,
-        data_parallel_rank,
-    ):
-        return dict(engine_prompt), {}
-
-    serving_chat._process_inputs = AsyncMock(side_effect=_fake_process_inputs)
     return serving_chat
 
 
