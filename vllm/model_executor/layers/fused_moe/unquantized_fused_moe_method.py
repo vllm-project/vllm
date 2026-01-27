@@ -79,20 +79,26 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
             self.flashinfer_trtllm_moe = torch.ops.vllm.flashinfer_fused_moe_bf16
 
-        self.forward_native: Callable = self._select_forward_native()
         if self.is_monolithic:
-            self.apply_monolithic: Callable = self.forward_monolithic_cuda
+            self.apply_monolithic: Callable = self._select_monolithic()
 
-    def _select_forward_native(self) -> Callable:
-        """Select the forward_native implementation based on platform."""
+    def _select_monolithic(self) -> Callable:
+        """Select the monolithic implementation based on platform."""
         if current_platform.is_cpu():
             return self.forward_monolithic_cpu
         elif current_platform.is_xpu():
             return self.forward_monolithic_xpu
-        elif current_platform.is_cuda() and self.is_monolithic:
-            return self.forward_monolithic_cuda
         else:
-            return self.forward_cuda
+            return self.forward_monolithic_cuda
+
+    def forward_native(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return self.forward_cuda(layer, x, topk_weights, topk_ids)
 
     @property
     def is_monolithic(self) -> bool:

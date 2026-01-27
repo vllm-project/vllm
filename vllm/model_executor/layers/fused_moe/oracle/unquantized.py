@@ -64,6 +64,12 @@ def select_unquantized_moe_backend(
 
     rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
+    flashinfer_trtllm_moe_enabled = (
+        has_flashinfer()
+        and envs.VLLM_USE_FLASHINFER_MOE_FP16
+        and moe_config.is_act_and_mul
+        and current_platform.has_device_capability(100)
+    )
     # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
     flashinfer_cutlass_moe_enabled = (
         has_flashinfer_cutlass_fused_moe()
@@ -71,13 +77,6 @@ def select_unquantized_moe_backend(
         and use_ep
         and (not use_dp)
         and current_platform.has_device_capability(90)
-    )
-    flashinfer_trtllm_moe_enabled = (
-        has_flashinfer()
-        and envs.VLLM_USE_FLASHINFER_MOE_FP16
-        and envs.VLLM_FLASHINFER_MOE_BACKEND == "latency"
-        and moe_config.is_act_and_mul
-        and current_platform.has_device_capability(100)
     )
     if current_platform.is_rocm():
         if rocm_aiter_moe_enabled:
@@ -90,9 +89,19 @@ def select_unquantized_moe_backend(
         elif flashinfer_cutlass_moe_enabled:
             backend = UnquantizedMoeBackend.FLASHINFER_CUTLASS
         else:
-            if use_ep and (not use_dp):
+            if (
+                not envs.VLLM_USE_FLASHINFER_MOE_FP16
+                and current_platform.has_device_capability(100)
+            ):
                 logger.info_once(
-                    "FlashInfer CUTLASS MoE is available for EP"
+                    "FlashInfer TRTLLM MoE is available on Blackwell+ GPUs but "
+                    "not enabled, consider setting VLLM_USE_FLASHINFER_MOE_FP16=1 "
+                    "to enable it.",
+                    scope="local",
+                )
+            elif use_ep and (not use_dp):
+                logger.info_once(
+                    "FlashInfer MoE is available for EP"
                     " but not enabled, consider setting"
                     " VLLM_USE_FLASHINFER_MOE_FP16=1 to enable it.",
                     scope="local",
