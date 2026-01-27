@@ -521,6 +521,8 @@ class SupportsLoRA(Protocol):
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
     packed_modules_mapping: dict[str, list[str]] = {}
+    # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
+    lora_skip_prefixes: ClassVar[list[str]] = []
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -603,6 +605,8 @@ class SupportsPP(Protocol):
 
     def forward(
         self,
+        input_ids: Tensor | None,
+        positions: Tensor,
         *,
         intermediate_tensors: IntermediateTensors | None,
     ) -> IntermediateTensors | None:
@@ -631,6 +635,8 @@ class _SupportsPPType(Protocol):
 
     def forward(
         self,
+        input_ids: Tensor | None,
+        positions: Tensor,
         *,
         intermediate_tensors: IntermediateTensors | None,
     ) -> Tensor | IntermediateTensors: ...
