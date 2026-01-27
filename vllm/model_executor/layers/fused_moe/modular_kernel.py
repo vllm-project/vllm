@@ -163,6 +163,7 @@ PrepareResultType = tuple[
 PrepareMonolithicResultType = tuple[
     torch.Tensor,
     torch.Tensor | None,
+    torch.Tensor,
 ]
 
 ReceiverType = Callable[[], PrepareResultType]
@@ -255,10 +256,14 @@ class FusedMoEPrepareAndFinalize(ABC):
     def prepare_monolithic(
         self,
         a1: torch.Tensor,
+        router_logits: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> PrepareMonolithicResultType:
         """
+        Optional method for subclasses compatible with monolithic
+        FusedMoEPermuteExpertsUnpermute kernels.
+
         Perform any quantization (and/or) dispatching needed for this kernel.
         - a1: The (unquantized) input to the MoE layer.
         - quant_config: Quantization info provided by the fused experts.
@@ -345,6 +350,24 @@ class FusedMoEPrepareAndFinalize(ABC):
         - topk_ids: The topk_ids.
         - apply_router_weight_on_input: When False, apply the weights to
           fused_expert_output.
+        - weight_and_reduce_impl: An optional TopKWeightAndReduce
+          implementation.
+        """
+        raise NotImplementedError
+
+    def finalize_monolithic(
+        self,
+        fused_expert_output: torch.Tensor,
+        weight_and_reduce_impl: TopKWeightAndReduce,
+    ) -> torch.Tensor:
+        """
+        Optional method for subclasses compatible with monolithic
+        FusedMoEPermuteExpertsUnpermute kernels.
+
+        Perform any combine plus apply weights and perform a reduction on the
+        fused experts output.
+        - fused_expert_output: The unweighted, unreduced output of the fused
+          experts, it will have (M, topk, K) shape.
         - weight_and_reduce_impl: An optional TopKWeightAndReduce
           implementation.
         """
@@ -1490,10 +1513,11 @@ class FusedMoEModularKernel(torch.nn.Module):
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
-
-        a1q, a1q_scale = self.prepare_finalize.prepare_monolithic(
+        # TODO(rob): add inplace support.
+        a1q, a1q_scale, router_logits = self.prepare_finalize.prepare_monolithic(
             hidden_states,
-            self.fused_experts.quant_config,
+            router_logits=router_logits,
+            quant_config=self.fused_experts.quant_config,
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
         )
 
@@ -1514,7 +1538,9 @@ class FusedMoEModularKernel(torch.nn.Module):
             topk_group=topk_group,
         )
 
-        # TODO(rob): once naive P/F Dp/Ep lands, we will need to
-        # add support here for finalizing over just the hidden states.
+        output = self.prepare_finalize.finalize_monolithic(
+            fused_expert_output=fused_out,
+            weight_and_reduce_impl=self.fused_experts.finalize_weight_and_reduce_impl(),
+        )
 
-        return fused_out
+        return output
