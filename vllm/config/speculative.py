@@ -33,6 +33,7 @@ MTPModelTypes = Literal[
     "mimo_mtp",
     "glm4_moe_mtp",
     "glm4_moe_lite_mtp",
+    "glm_ocr_mtp",
     "ernie_mtp",
     "exaone_moe_mtp",
     "qwen3_next_mtp",
@@ -218,6 +219,17 @@ class SpeculativeConfig:
                     "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["Glm4MoeLiteMTPModel"],
+                }
+            )
+
+        if hf_config.architectures[0] == "GlmOcrForConditionalGeneration":
+            hf_config.model_type = "glm_ocr_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "architectures": ["GlmOcrMTPModel"],
                 }
             )
 
@@ -663,7 +675,14 @@ class SpeculativeConfig:
                 f"{self.disable_by_batch_size=}"
             )
 
-        eagle3_target_supported = ["llama", "qwen", "minicpm", "gpt_oss"]
+        eagle3_target_supported = [
+            "llama",
+            "qwen",
+            "minicpm",
+            "gpt_oss",
+            "hunyuan_vl",
+            "hunyuan_v1_dense",
+        ]
         if (
             self.method == "eagle3"
             and self.target_model_config

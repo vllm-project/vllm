@@ -280,9 +280,10 @@ class DynamicShapesConfig:
     until this change picked up https://github.com/pytorch/pytorch/pull/169239.
     """
 
-    assume_32_bit_indexing: bool = True
+    assume_32_bit_indexing: bool = False
     """
     whether all tensor sizes can use 32 bit indexing.
+    `True` requires PyTorch 2.10+
     """
 
     def compile_factors(self) -> CompileFactors:
