@@ -30,7 +30,11 @@ def create_dummy_model(repo: str, model_arch: str) -> PreTrainedModel:
     model_cls: PreTrainedModel = getattr(transformers, model_arch)
     config = AutoConfig.from_pretrained(repo)
     with torch.device("meta"):
-        return model_cls._from_config(config)
+        model = model_cls._from_config(config)
+    # TODO(hmellor): Remove this once Transformers has fixed tied weights on meta device
+    if getattr(config.get_text_config(), "tie_word_embeddings", False):
+        model.tie_weights()
+    return model
 
 
 def model_architectures_for_test() -> list[str]:
