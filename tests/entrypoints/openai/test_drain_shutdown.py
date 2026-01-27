@@ -111,6 +111,7 @@ def _start_server(
     port: int,
     shutdown_mode: str = "immediate",
     capture_output: bool = False,
+    drain_timeout: int = 30,
 ):
     args = [
         sys.executable,
@@ -135,7 +136,7 @@ def _start_server(
     ]
 
     if shutdown_mode == "drain":
-        args.extend(["--shutdown-drain-timeout", "30"])
+        args.extend(["--shutdown-drain-timeout", str(drain_timeout)])
 
     return subprocess.Popen(
         args,
@@ -242,14 +243,16 @@ async def test_drain_shutdown_drains_requests():
                 request_task.cancel()
             await asyncio.gather(request_task, return_exceptions=True)
 
-        assert (
-            state.got_503
-            or state.requests_after_sigterm > 0
-            or state.connection_errors > 0
-        ), (
-            f"Expected 503, completed requests, or connection close after SIGTERM. "
-            f"503: {state.got_503}, completed: {state.requests_after_sigterm}, "
-            f"conn_errors: {state.connection_errors}, errors: {state.errors}"
+        # drain must complete in-flight requests
+        assert state.requests_after_sigterm > 0, (
+            f"Drain should complete in-flight requests. "
+            f"503: {state.got_503}, conn_errors: {state.connection_errors}, "
+            f"errors: {state.errors}"
+        )
+        # server must stop accepting new requests (503 or connection close)
+        assert state.got_503 or state.connection_errors > 0, (
+            f"Server should stop accepting requests (503 or connection close). "
+            f"completed: {state.requests_after_sigterm}, errors: {state.errors}"
         )
 
         await _assert_children_cleaned_up(child_pids)
@@ -388,6 +391,75 @@ async def test_default_shutdown_mode():
 
         exit_time = time.time() - start_time
         assert exit_time < 10, f"Default shutdown took too long: {exit_time:.1f}s"
+        assert proc.returncode in (0, -15, None), f"Unexpected: {proc.returncode}"
+
+        await _assert_children_cleaned_up(child_pids)
+
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_drain_with_short_timeout():
+    """Verify server exits cleanly with a short drain timeout."""
+    port = get_open_port()
+    # use a short drain timeout
+    drain_timeout = 3
+    proc = _start_server(port, shutdown_mode="drain", drain_timeout=drain_timeout)
+
+    try:
+        client = openai.AsyncOpenAI(
+            base_url=f"http://localhost:{port}/v1",
+            api_key="dummy",
+            max_retries=0,
+            timeout=60,
+        )
+
+        if not await _wait_for_server_ready(client, _SERVER_STARTUP_TIMEOUT):
+            proc.terminate()
+            proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
+            pytest.fail(f"Server failed to start in {_SERVER_STARTUP_TIMEOUT}s")
+
+        child_pids = _get_child_pids(proc.pid)
+
+        # start some requests (they may or may not complete before drain)
+        state = DrainState()
+        request_task = asyncio.create_task(
+            _concurrent_request_loop(client, state, concurrency=3)
+        )
+
+        await asyncio.sleep(0.5)
+
+        # send SIGTERM
+        start_time = time.time()
+        proc.send_signal(signal.SIGTERM)
+
+        # server should exit within drain_timeout + buffer
+        max_wait = drain_timeout + 15
+        for _ in range(int(max_wait * 10)):
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        exit_time = time.time() - start_time
+
+        # cleanup request task
+        state.stop_requesting = True
+        if not request_task.done():
+            request_task.cancel()
+        await asyncio.gather(request_task, return_exceptions=True)
+
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+            pytest.fail(f"Process did not exit within {max_wait}s after SIGTERM")
+
+        # server should exit within reasonable time (drain_timeout + overhead)
+        assert exit_time < drain_timeout + 10, (
+            f"Took too long to exit ({exit_time:.1f}s), expected <{drain_timeout + 10}s"
+        )
         assert proc.returncode in (0, -15, None), f"Unexpected: {proc.returncode}"
 
         await _assert_children_cleaned_up(child_pids)
