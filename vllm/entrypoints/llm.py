@@ -88,10 +88,8 @@ logger = init_logger(__name__)
 
 _R = TypeVar("_R", default=Any)
 
-_TokenizedPrompt: TypeAlias = TokensPrompt | EmbedsPrompt
-_TokenizedEncDecPrompt: TypeAlias = ExplicitEncoderDecoderPrompt[
-    _TokenizedPrompt, _TokenizedPrompt
-]
+EnginePrompt: TypeAlias = TextPrompt | TokensPrompt | EmbedsPrompt
+EngineEncDecPrompt: TypeAlias = ExplicitEncoderDecoderPrompt[EnginePrompt, EnginePrompt]
 
 
 class LLM:
@@ -776,38 +774,43 @@ class LLM:
     def _normalize_prompts(
         self,
         prompts: PromptType | Sequence[PromptType],
-    ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt | ExplicitEncoderDecoderPrompt]:
+    ) -> list[EnginePrompt | EngineEncDecPrompt]:
         if isinstance(prompts, str):
             prompts = TextPrompt(prompt=prompts)
 
         return prompts if isinstance(prompts, Sequence) else [prompts]  # type: ignore[return-value]
 
-    def _tokenize_singleton_prompt(
+    def _preprocess_cmpl_singleton(
         self,
         prompt: SingletonPrompt,
         tok_params: TokenizeParams,
-    ) -> _TokenizedPrompt:
+    ) -> EnginePrompt:
         renderer = self.llm_engine.renderer
 
-        return renderer.tokenize_prompt(
-            TextPrompt(prompt=prompt) if isinstance(prompt, str) else prompt,
-            tok_params,
-        )
+        if not isinstance(prompt, dict):
+            prompt = renderer.render_completion(prompt)
 
-    def _tokenize_enc_dec_prompt(
+        # This is needed because some MM models have non-default `add_special_tokens`
+        # TODO: Move multi-modal processor into tokenization
+        if "multi_modal_data" in prompt or "multi_modal_uuids" in prompt:
+            return prompt
+
+        return renderer.tokenize_prompt(prompt, tok_params)
+
+    def _preprocess_cmpl_enc_dec(
         self,
         prompt: ExplicitEncoderDecoderPrompt,
         tok_params: TokenizeParams,
-    ) -> _TokenizedEncDecPrompt:
+    ) -> EngineEncDecPrompt:
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
 
-        return _TokenizedEncDecPrompt(
-            encoder_prompt=self._tokenize_singleton_prompt(enc_prompt, tok_params),
+        return EngineEncDecPrompt(
+            encoder_prompt=self._preprocess_cmpl_singleton(enc_prompt, tok_params),
             decoder_prompt=(
                 None
                 if dec_prompt is None
-                else self._tokenize_singleton_prompt(dec_prompt, tok_params)
+                else self._preprocess_cmpl_singleton(dec_prompt, tok_params)
             ),
         )
 
@@ -815,7 +818,7 @@ class LLM:
         self,
         prompts: PromptType | Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> list[_TokenizedPrompt | _TokenizedEncDecPrompt]:
+    ) -> list[EnginePrompt | EngineEncDecPrompt]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be pasesed to [LLM._add_request][].
@@ -834,13 +837,13 @@ class LLM:
             do_lower_case=encoder_config.get("do_lower_case", False),
         ).with_kwargs(tokenization_kwargs)
 
-        engine_prompts = list[_TokenizedPrompt | _TokenizedEncDecPrompt]()
+        engine_prompts = list[EnginePrompt | EngineEncDecPrompt]()
         for prompt in self._normalize_prompts(prompts):
             if is_explicit_encoder_decoder_prompt(prompt):
-                engine_prompts.append(self._tokenize_enc_dec_prompt(prompt, tok_params))
+                engine_prompts.append(self._preprocess_cmpl_enc_dec(prompt, tok_params))
             else:
                 engine_prompts.append(
-                    self._tokenize_singleton_prompt(prompt, tok_params)
+                    self._preprocess_cmpl_singleton(prompt, tok_params)
                 )
 
         return engine_prompts
@@ -856,7 +859,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[_TokenizedPrompt]:
+    ) -> list[EnginePrompt]:
         """
         Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
@@ -890,7 +893,7 @@ class LLM:
             add_special_tokens=False,
         ).with_kwargs(tokenization_kwargs)
 
-        engine_prompts = list[_TokenizedPrompt]()
+        engine_prompts = list[EnginePrompt]()
         for conversation in conversations:
             _, in_prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
