@@ -883,6 +883,8 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
         captured_prompts.append(prompt)
         return await orig_tokenize_prompt_async(prompt, **kwargs)
 
+    mock_engine.renderer.tokenize_prompt_async = tokenize_prompt_async
+
     serving_chat = _build_serving_chat(mock_engine)
 
     # Test cache_salt

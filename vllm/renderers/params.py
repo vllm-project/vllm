@@ -87,7 +87,7 @@ class TokenizeParams:
     - `-1` maps to `max_input_tokens`.
     """
 
-    do_lower_case: bool = False
+    do_lower_case: bool | None = None
     """Whether to normalize text to lower case before tokenization."""
 
     add_special_tokens: bool = True
@@ -202,7 +202,11 @@ class TokenizeParams:
         )
 
     def _apply_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
-        if self.do_lower_case:
+        do_lower_case = self.do_lower_case
+        if do_lower_case is None:
+            do_lower_case = getattr(tokenizer, "do_lower_case", False)
+
+        if do_lower_case:
             text = text.lower()
 
         return text

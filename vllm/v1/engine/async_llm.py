@@ -334,7 +334,7 @@ class AsyncLLM(EngineClient):
 
         tok_params = TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case", False),
+            do_lower_case=encoder_config.get("do_lower_case"),
         ).with_kwargs(tokenization_kwargs)
         tokenization_kwargs = tok_params.get_encode_kwargs()
 

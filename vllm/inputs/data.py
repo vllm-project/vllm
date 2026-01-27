@@ -164,7 +164,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     mm_processor_kwargs: NotRequired[dict[str, Any]]
 
 
-PromptType: TypeAlias = SingletonPrompt | ExplicitEncoderDecoderPrompt
+PromptType: TypeAlias = SingletonPrompt | ExplicitEncoderDecoderPrompt[Any, Any]
 """
 Set of possible schemas for an LLM input, including
 both decoder-only and encoder/decoder input types:

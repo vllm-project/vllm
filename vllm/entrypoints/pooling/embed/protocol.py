@@ -17,29 +17,39 @@ from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 
 
+def _get_max_total_output_tokens(
+    model_config: ModelConfig,
+) -> tuple[int | None, int]:
+    max_total_tokens = model_config.max_model_len
+    pooler_config = model_config.pooler_config
+
+    if pooler_config:
+        if pooler_config.enable_chunked_processing:
+            return None, 0
+
+        max_embed_len = pooler_config.max_embed_len or max_total_tokens
+        max_output_tokens = max_total_tokens - max_embed_len
+        return max_total_tokens, max_output_tokens
+
+    return max_total_tokens, 0
+
+
 class EmbeddingCompletionRequest(
     PoolingBasicRequestMixin, CompletionRequestMixin, EmbedRequestMixin
 ):
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        max_total_tokens = model_config.max_model_len
-        pooler_config = model_config.pooler_config
         encoder_config = model_config.encoder_config or {}
 
-        if pooler_config:
-            if pooler_config.enable_chunked_processing:
-                max_total_tokens = None
-                max_output_tokens = 0
-            else:
-                max_embed_len = pooler_config.max_embed_len or max_total_tokens
-                max_output_tokens = max_total_tokens - max_embed_len
-        else:
-            max_output_tokens = 0
+        (
+            max_total_tokens,
+            max_output_tokens,
+        ) = _get_max_total_output_tokens(model_config)
 
         return TokenizeParams(
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            do_lower_case=encoder_config.get("do_lower_case", False),
+            do_lower_case=encoder_config.get("do_lower_case"),
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_model_len - max_embed_len",
@@ -55,25 +65,18 @@ class EmbeddingChatRequest(
     )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        max_total_tokens = model_config.max_model_len
-        pooler_config = model_config.pooler_config
         encoder_config = model_config.encoder_config or {}
 
-        if pooler_config:
-            if pooler_config.enable_chunked_processing:
-                max_total_tokens = None
-                max_output_tokens = 0
-            else:
-                max_embed_len = pooler_config.max_embed_len or max_total_tokens
-                max_output_tokens = max_total_tokens - max_embed_len
-        else:
-            max_output_tokens = 0
+        (
+            max_total_tokens,
+            max_output_tokens,
+        ) = _get_max_total_output_tokens(model_config)
 
         return TokenizeParams(
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_output_tokens,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            do_lower_case=encoder_config.get("do_lower_case", False),
+            do_lower_case=encoder_config.get("do_lower_case"),
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_model_len - max_embed_len",

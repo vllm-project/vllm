@@ -36,7 +36,7 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            do_lower_case=encoder_config.get("do_lower_case", False),
+            do_lower_case=encoder_config.get("do_lower_case"),
             max_total_tokens_param="max_model_len",
         )
 
@@ -102,7 +102,7 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            do_lower_case=encoder_config.get("do_lower_case", False),
+            do_lower_case=encoder_config.get("do_lower_case"),
             max_total_tokens_param="max_model_len",
         )
 

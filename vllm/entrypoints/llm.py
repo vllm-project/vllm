@@ -834,7 +834,7 @@ class LLM:
 
         tok_params = TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case", False),
+            do_lower_case=encoder_config.get("do_lower_case"),
         ).with_kwargs(tokenization_kwargs)
 
         engine_prompts = list[EnginePrompt | EngineEncDecPrompt]()
@@ -848,9 +848,17 @@ class LLM:
 
         return engine_prompts
 
+    def _normalize_conversations(
+        self,
+        conversations: list[ChatCompletionMessageParam]
+        | list[list[ChatCompletionMessageParam]],
+    ) -> list[list[ChatCompletionMessageParam]]:
+        return conversations if is_list_of(conversations, list) else [conversations]  # type: ignore[list-item,return-value]
+
     def _preprocess_chat(
         self,
-        conversations: list[list[ChatCompletionMessageParam]],
+        conversations: list[ChatCompletionMessageParam]
+        | list[list[ChatCompletionMessageParam]],
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         chat_template_kwargs: dict[str, Any] | None = None,
@@ -889,12 +897,12 @@ class LLM:
         )
         tok_params = TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case", False),
+            do_lower_case=encoder_config.get("do_lower_case"),
             add_special_tokens=False,
         ).with_kwargs(tokenization_kwargs)
 
         engine_prompts = list[EnginePrompt]()
-        for conversation in conversations:
+        for conversation in self._normalize_conversations(conversations):
             _, in_prompt = renderer.render_messages(conversation, chat_params)
             if mm_processor_kwargs is not None:
                 in_prompt["mm_processor_kwargs"] = mm_processor_kwargs
@@ -969,9 +977,6 @@ class LLM:
             A list of `RequestOutput` objects containing the generated
             responses in the same order as the input messages.
         """
-        if not is_list_of(messages, list):
-            messages = [messages]
-
         prompts = self._preprocess_chat(
             messages,
             chat_template=chat_template,
@@ -1535,7 +1540,7 @@ class LLM:
 
         tok_params = TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case", False),
+            do_lower_case=encoder_config.get("do_lower_case"),
         ).with_kwargs(tokenization_kwargs)
         encode_kwargs = tok_params.get_encode_kwargs()
 
@@ -1704,7 +1709,7 @@ class LLM:
         try:
             for i, prompt in enumerate(it):
                 request_id = self._add_request(
-                    prompt,  # type: ignore[arg-type]
+                    prompt,
                     engine_params[i],
                     lora_request=engine_lora_requests[i],
                     priority=priority[i],
@@ -1747,7 +1752,7 @@ class LLM:
 
         tok_params = TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case", False),
+            do_lower_case=encoder_config.get("do_lower_case"),
         ).with_kwargs(tokenization_kwargs)
 
         tokenization_kwargs = tok_params.get_encode_kwargs()

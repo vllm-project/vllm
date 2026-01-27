@@ -491,7 +491,7 @@ def rebuild_mm_uuids_from_mm_data(
 
 
 def build_video_prompts_from_mm_data(
-    mm_data: MultiModalDataDict,
+    mm_data: MultiModalDataDict | None,
 ) -> list[str]:
     """Build video prompts from vision_chunk data.
 
@@ -503,6 +503,9 @@ def build_video_prompts_from_mm_data(
     Returns:
         List of video prompts, one per video.
     """
+    if mm_data is None:
+        return []
+
     vision_chunks = mm_data.get("vision_chunk")
     if vision_chunks is None:
         return []
