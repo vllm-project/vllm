@@ -288,7 +288,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
         self.group_shape = group_shape
-        self.has_col_major_scales = has_col_major_scales
+
         self.is_e8m0 = is_e8m0
         super().__init__(
             epsilon, key, is_e8m0=is_e8m0, has_col_major_scales=has_col_major_scales
@@ -310,7 +310,9 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
-            scale = self.quant_matcher.make_scale(input, self.has_col_major_scales)
+            scale = self.quant_matcher.make_scale(
+                input, self.quant_matcher.has_col_major_scales
+            )
             at = auto_functionalized(
                 self.FUSED_OP,
                 result=result,
@@ -321,7 +323,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
                 scale_ub=None,
                 residual=residual,
                 group_size=self.group_shape[1],
-                is_scale_transposed=self.has_col_major_scales,
+                is_scale_transposed=self.quant_matcher.has_col_major_scales,
             )
 
             # result, residual, scale
@@ -351,7 +353,6 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             fused_add=False,
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
-        self.has_col_major_scales = has_col_major_scales
         self.group_shape = group_shape
         super().__init__(
             epsilon, key, is_e8m0=is_e8m0, has_col_major_scales=has_col_major_scales
@@ -377,7 +378,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             scale = self.quant_matcher.make_scale(
-                input, transposed=self.has_col_major_scales
+                input, transposed=self.quant_matcher.has_col_major_scales
             )
             at = auto_functionalized(
                 self.FUSED_OP,
