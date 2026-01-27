@@ -50,6 +50,31 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         # turing and up
         return 75
 
+    # W8A8-Fp8 kernels support only per-tensor and per-channel cases.
+    # So if we have a fused module (QKV, MLP) with per tensor scales,
+    # we expand each scale to its shard's channels.
+    def process_weights_after_loading(self, layer) -> None:
+        if self.strategy == QuantizationStrategy.TENSOR:
+            ws_channelwise = convert_to_channelwise(
+                layer.weight_scale, layer.logical_widths
+            )
+            layer.weight_scale = torch.nn.Parameter(ws_channelwise, requires_grad=False)
+        else:
+            # required by torch.compile to be torch.nn.Parameter
+            layer.weight_scale = torch.nn.Parameter(
+                layer.weight_scale.data, requires_grad=False
+            )
+
+        # Weights must be transposed for marlin
+        layer.weight = torch.nn.Parameter(layer.weight.t(), requires_grad=False)
+
+        if self.is_static_input_scheme:
+            # required by torch.compile to be torch.nn.Parameter
+            layer.input_scale = torch.nn.Parameter(
+                layer.input_scale.data, requires_grad=False
+            )
+        prepare_fp8_layer_for_marlin(layer)
+
     def create_weights(
         self,
         layer: torch.nn.Module,

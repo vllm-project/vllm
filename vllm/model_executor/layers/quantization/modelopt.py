@@ -93,6 +93,11 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    flashinfer_scaled_fp4_mm,
+    has_flashinfer,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1100,7 +1105,32 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
         self.marlin_input_dtype = None
-        self.backend = select_nvfp4_linear_backend()
+
+        self.backend = "none"
+        if envs.VLLM_NVFP4_GEMM_BACKEND is None:
+            if current_platform.has_device_capability(100) and has_flashinfer():
+                self.backend = "flashinfer-cutlass"
+            elif cutlass_fp4_supported():
+                self.backend = "cutlass"
+            elif is_fp4_marlin_supported():
+                self.backend = "marlin"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND.startswith("flashinfer-"):
+            self.backend = envs.VLLM_NVFP4_GEMM_BACKEND
+            assert has_flashinfer(), f"FlashInfer is required for {self.backend}"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND == "cutlass":
+            self.backend = "cutlass"
+            assert cutlass_fp4_supported(), f"Cutlass is required for {self.backend}"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND == "marlin":
+            self.backend = "marlin"
+            assert is_fp4_marlin_supported(), f"Marlin is required for {self.backend}"
+
+        if self.backend == "none":
+            raise ValueError(
+                "No valid NVFP4 GEMM backend found. "
+                "Please check your platform capability."
+            )
+
+        logger.info_once(f"Using {self.backend} for NVFP4 GEMM")
 
     def create_weights(
         self,
