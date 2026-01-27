@@ -32,6 +32,7 @@ def create_dummy_model(repo: str, model_arch: str) -> PreTrainedModel:
     with torch.device("meta"):
         model = model_cls._from_config(config)
     # TODO(hmellor): Remove this once Transformers has fixed tied weights on meta device
+    # https://github.com/huggingface/transformers/issues/43522
     if getattr(config.get_text_config(), "tie_word_embeddings", False):
         model.tie_weights()
     return model
