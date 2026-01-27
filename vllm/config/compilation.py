@@ -596,6 +596,10 @@ class CompilationConfig:
     Map from layer name to layer objects that need to be accessed outside
     model code, e.g., Attention, FusedMOE when dp_size>1."""
 
+    static_all_moe_layers: list[str] = field(default_factory=list, init=False)
+    """The names of all the MOE layers in the model
+    """
+
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [
