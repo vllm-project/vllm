@@ -1513,7 +1513,7 @@ class NemotronH_Nano_VL_V2(
         self.video_pruning_rate = multimodal_config.video_pruning_rate
 
         with self._mark_language_model(vllm_config):
-            self.language_model = language_model = init_vllm_registered_model(
+            self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
@@ -1542,7 +1542,7 @@ class NemotronH_Nano_VL_V2(
                 ReLUSquaredActivation(),
                 nn.Linear(vision_projection_hidden_size, llm_hidden_size, bias=False),
             )
-            self.mlp1 = mlp1.to(language_model.config.dtype)
+            self.mlp1 = mlp1.to(self.language_model.config.dtype)
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -1678,7 +1678,9 @@ class NemotronH_Nano_VL_V2(
                 pixel_values_flat=pixel_values_flat, **kwargs
             )
         else:
-            return NanoNemotronVLImagePixelInputs(**kwargs)
+            return NanoNemotronVLImagePixelInputs(
+                num_patches=kwargs.pop("image_num_patches"), **kwargs
+            )
 
     def _process_image_input_dynamic(
         self, image_input: NanoNemotronVLImagePixelInputsDynamic
@@ -1915,7 +1917,7 @@ class NemotronH_Nano_VL_V2(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -2126,3 +2128,7 @@ class NemotronH_Nano_VL_V2(
         temp_vllm_config = copy.deepcopy(vllm_config)
         temp_vllm_config.model_config.hf_config = text_config
         return NemotronHForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
+
+    @classmethod
+    def get_mamba_state_copy_func(cls):
+        return NemotronHForCausalLM.get_mamba_state_copy_func()

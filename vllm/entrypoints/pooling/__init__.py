@@ -28,21 +28,17 @@ def register_pooling_api_routers(app: FastAPI):
 async def init_pooling_state(
     engine_client: "EngineClient", state: "State", args: "Namespace"
 ):
+    from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.logger import RequestLogger
     from vllm.entrypoints.pooling.classify.serving import ServingClassification
     from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
     from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
     from vllm.entrypoints.pooling.score.serving import ServingScores
-    from vllm.entrypoints.utils import process_chat_template
     from vllm.tasks import POOLING_TASKS
 
     supported_tasks = await engine_client.get_supported_tasks()
 
-    vllm_config = engine_client.vllm_config
-
-    resolved_chat_template = await process_chat_template(
-        args.chat_template, engine_client, vllm_config.model_config
-    )
+    resolved_chat_template = load_chat_template(args.chat_template)
 
     if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)

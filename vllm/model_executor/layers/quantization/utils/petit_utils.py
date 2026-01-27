@@ -38,10 +38,6 @@ def _import_petit_kernel() -> "ModuleType":
         raise ImportError(_PETIT_INSTALL_MSG) from None
 
 
-# The _require_petit function can now be a simple alias for consistency.
-_require_petit = _import_petit_kernel
-
-
 def _check_petit_nvfp4_supported(
     quant_method: str, group_size: int | None
 ) -> tuple[bool, str | None]:

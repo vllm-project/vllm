@@ -35,6 +35,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
     fp8_gemm_nt,
+    get_tma_aligned_size,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
@@ -378,6 +379,7 @@ class W8A8BlockFp8LinearOp:
                 False,
                 self.act_quant_group_shape,
                 column_major_scales=True,
+                tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
                 use_ue8m0=self.use_deep_gemm_e8m0,
             )
             if self.is_deep_gemm_supported
@@ -946,6 +948,7 @@ def per_token_group_quant_fp8(
     eps: float = 1e-10,
     dtype: torch.dtype | None = None,
     column_major_scales: bool = False,
+    tma_aligned_scales: bool = False,
     out_q: torch.Tensor | None = None,
     use_ue8m0: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -956,9 +959,10 @@ def per_token_group_quant_fp8(
         x: The input tensor with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
-        dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn`
+        dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
         is supported for now.
         column_major_scales: Outputs scales in column major.
+        tma_aligned_scales: Outputs scales in TMA-aligned layout.
         out_q: Optional output tensor. If not provided, function will create.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
@@ -982,8 +986,24 @@ def per_token_group_quant_fp8(
 
     # Allocate the scale tensor in either row- or column-major format.
     if column_major_scales:
-        shape = (x.shape[-1] // group_size,) + x.shape[:-1]
-        x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(-1, -2)
+        if tma_aligned_scales:
+            m = x.shape[-2]
+            sf_k = x.shape[-1] // group_size
+            tma_aligned_m = get_tma_aligned_size(m, 4)
+            shape = x.shape[:-2] + (m, sf_k)
+            stride = (
+                (1, tma_aligned_m)
+                if x.dim() == 2
+                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
+            )
+            x_s = torch.empty_strided(
+                shape, stride, device=x.device, dtype=torch.float32
+            )
+        else:
+            shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
+            x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(
+                -1, -2
+            )
     else:
         shape = x.shape[:-1] + (x.shape[-1] // group_size,)
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)

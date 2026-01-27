@@ -10,7 +10,6 @@ from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -875,6 +874,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             return BatchedMarlinExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=w13_g_idx,
                 w2_g_idx=w2_g_idx,
@@ -885,6 +885,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         else:
             # Standard Marlin experts for GPTQ
             return MarlinExperts(
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=w13_g_idx,
                 w2_g_idx=w2_g_idx,
@@ -896,15 +897,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     def apply(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
         return fused_marlin_moe(
             x,
             layer.w13_qweight,
@@ -913,7 +909,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             getattr(layer, "w2_bias", None),
             layer.w13_scales,
             layer.w2_scales,
-            router_logits,
             topk_weights,
             topk_ids,
             input_global_scale1=getattr(layer, "w13_input_global_scale", None),

@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
@@ -67,8 +67,7 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 }
 
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default
-
+    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.default
 if current_platform.is_cuda():
     QUANT_OPS.update(
         dict.fromkeys(
