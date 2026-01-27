@@ -723,7 +723,7 @@ def test_mixtral_moe(
 
         # need to override the forward context for unittests, otherwise it assumes
         # we're running the model forward pass (the model specified in vllm_config)
-        get_forward_context().remaining_moe_layers = None
+        get_forward_context().all_moe_layers = None
 
         # Run forward passes for both MoE blocks
         hf_states = hf_moe.forward(hf_inputs)
