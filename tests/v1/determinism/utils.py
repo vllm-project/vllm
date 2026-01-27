@@ -7,7 +7,6 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 
 skip_unsupported = pytest.mark.skipif(
@@ -22,8 +21,10 @@ BACKENDS: list[str] = [
     "TRITON_MLA",
 ]
 
-if has_flashinfer():
-    BACKENDS.append("FLASHINFER")
+# FlashInfer temporarily disabled due to invariant CTA sizes.
+# See FlashInfer issue #2424
+# if has_flashinfer():
+#     BACKENDS.append("FLASHINFER")
 
 if flash_attn_supports_mla():
     BACKENDS.append("FLASH_ATTN_MLA")
