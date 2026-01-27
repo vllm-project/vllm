@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 import contextlib
 import copy
 import logging
@@ -306,6 +307,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 class NixlConnector(KVConnectorBase_V1, SupportsHMA):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
+        return False
         backend = get_current_attn_backend(self._vllm_config)
         if backend.get_name() not in (
             "FLASH_ATTN",
@@ -331,12 +333,16 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
+        # print(f"{kv_cache_config=}\n\n")
+        for i, group in enumerate(kv_cache_config.kv_cache_groups):
+            print(f"Group {i}: {group.layer_names[:2]=} (..{len(group.layer_names)} layers), {group.kv_cache_spec=} \n")
+            
 
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
-        for group in kv_cache_config.kv_cache_groups:
-            if isinstance(group.kv_cache_spec, MambaSpec):
-                raise ValueError("NixlConnector does not support Mamba models.")
+        # for group in kv_cache_config.kv_cache_groups:
+            # if isinstance(group.kv_cache_spec, MambaSpec):
+                # raise ValueError("NixlConnector does not support Mamba models.")
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
         if role == KVConnectorRole.SCHEDULER:
@@ -947,6 +953,12 @@ class NixlConnectorWorker:
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
         )
         self.kv_cache_config = kv_cache_config
+        # TODO maybe move to topo?
+        self._layer_specs = {layer: group.kv_cache_spec for group in kv_cache_config.kv_cache_groups for layer in group.layer_names}
+        # self._is_mamba = any(isinstance(spec, MambaSpec) for spec in self._layer_specs.values())
+        assert len(kv_cache_config.kv_cache_tensors) == max(len(group.layer_names) for group in self.kv_cache_config.kv_cache_groups)
+        self.hma_group_size = len(kv_cache_config.kv_cache_tensors)
+        self._is_mamba = [isinstance(group.kv_cache_spec, MambaSpec) for group in kv_cache_config.kv_cache_groups]
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1369,7 +1381,12 @@ class NixlConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-
+        print(f"{self.vllm_config.cache_config.mamba_page_size_padded=}\n\n")
+        # block size: 400, the one from the FA spec
+        print(f"block size: {self.block_size}\n\n")
+        vs = next(iter(kv_caches.values()))
+        # len(vs)=2, [torch.Size([18525, 3, 3328]), torch.Size([18525, 48, 64, 128])]
+        print(f"{next(iter(kv_caches.keys()))}:{len(vs)=}, {[v.shape for v in vs]}\n\n")
         self.kv_topo = TpKVTopology(
             tp_rank=self.tp_rank,
             engine_id=self.engine_id,
@@ -1378,11 +1395,14 @@ class NixlConnectorWorker:
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backend=self.attn_backend,
-            tensor_shape=next(iter(kv_caches.values())).shape,
+            # tensor_shape=next(iter(kv_caches.values())).shape,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
         )
+        # TODO when MAMBA is present, we should assume all backends to behave like FI! Strides are 
+        # re-adjusted so its num_blocks first!
+        # hybrid ssm requires the layout of attention to be (num_blocks, 2, hidden_size) so that the blocks can be shared between attention layers and mamba layers
 
         if self.use_host_buffer:
             self.initialize_host_xfer_buffer(kv_caches=kv_caches)
@@ -1422,56 +1442,99 @@ class NixlConnectorWorker:
 
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
-        self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
+
+        # FIXME temp assert
+        assert self.kv_topo.split_k_and_v
+
         for layer_name, cache_or_caches in xfer_buffers.items():
-            cache_list = (
-                cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
-            )
+            # Ok I see, for FA we shouldnt split..or I think actually this is fine UNLESS is_kv_layout_blocks_first (flashinfer)
+            # in that case we split only for mamba models
+            # layer_name='model.layers.5.self_attn.attn', [torch.Size([18525, 400, 4, 128]), torch.Size([18525, 400, 4, 128])]
+            print(f"{self.vllm_config.attention_config.backend=}\n\n")
+
+            # TODO special case to handle properly! refactor away
+            if self.vllm_config.attention_config.backend == AttentionBackendEnum.FLASHINFER:
+                cache_list = (
+                    cache_or_caches if "attn" not in layer_name else [cache_or_caches]
+                )
+            else:
+                # TODO assuming FA for now in this branch, we want to treat it like FI and register the whole tensor.
+                #  Stride is already adjusted by manager. Shape's not.
+                # swap [2<>num_blocks, block_size, num_kv_heads, head_size] to match FI
+                if not isinstance(self._layer_specs[layer_name], MambaSpec): 
+                    cache_list = [cache_or_caches.transpose(0, 1)]
+                else:
+                    cache_list = (
+                        cache_or_caches if self.kv_topo.split_k_and_v else [cache_or_caches]
+                    )
+                    # FIXME to patch only once when mamba is detected, so no need to check here
+                    self.kv_topo._is_kv_layout_blocks_first = True
+            if isinstance(self._layer_specs[layer_name], MambaSpec):
+                # Register the whole kv cache shared tensor, including SSM/Conv.
+                ssm, conv = cache_list
+                # assumption is ssm is first, but should work with conv first too
+                # TODO refactor away do once
+                # (5868, 3, 6144) take num_blocks away
+                self._mamba_ssm_size = (conv.numel() // conv.shape[0] * conv.element_size(), ssm.shape[1] * ssm.shape[2] * ssm.element_size())
+                cache_list = [ssm]
+
+            print(f"{layer_name=}, {[v.shape for v in cache_list]}")
+            # assert len(cache_list) == 1, f"Use FlashInfer for now!"
+            print(f"{layer_name=} strides, {[v.stride() for v in cache_list]}")
+            # TODO (NickLucche) we could eventually unify how we handle FA/FI regions,
+            # registering a single tensor for both K/V and splitting logically like FI.
             for cache in cache_list:
                 base_addr = cache.data_ptr()
+                # SS+Conv actually share the same tensor but with different offseted views, so base addr is 
+                # different. This shouldnt matter for our purposes I think, just registering regions with different
+                # sizes
                 if base_addr in seen_base_addresses:
                     # NOTE (NickLucche) HMA employs memory pooling to share tensors
                     # across groups. This results in skipping all tensors but the ones
                     # pointed to by group0. Also, generally we will have more blocks
                     # per tensor but fewer regions.
+                    print("Skipping", layer_name, "because it's already seen")
                     continue
-
                 logger.debug(
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
-                kernel_block_size = cache.shape[self.kv_topo.block_size_position]
-                if self.block_size != kernel_block_size:
-                    logger.info_once(
-                        "User-specified logical block size (%s) does not match"
-                        " physical kernel block size (%s). Using the latter. ",
-                        self.block_size,
-                        kernel_block_size,
-                    )
-                    self._physical_blocks_per_logical_kv_block = (
-                        self.block_size // kernel_block_size
-                    )
-                    self.block_size = kernel_block_size
-                    self._block_size[self.engine_id] = kernel_block_size
+                # Mamba blocks have no logical<>physical discrepancy
+                if not isinstance(self._layer_specs[layer_name], MambaSpec):
+                    kernel_block_size = cache.shape[self.kv_topo.block_size_position]
+                    if self.block_size != kernel_block_size:
+                        logger.info_once(
+                            "User-specified logical block size (%s) does not match"
+                            " physical kernel block size (%s). Using the latter. ",
+                            self.block_size,
+                            kernel_block_size,
+                        )
+                        self._physical_blocks_per_logical_kv_block = (
+                            self.block_size // kernel_block_size
+                        )
+                        self.block_size = kernel_block_size
+                        self._block_size[self.engine_id] = kernel_block_size
 
                 seen_base_addresses.append(base_addr)
-                curr_tensor_size_bytes = cache.numel() * cache.element_size()
+                # page_size_bytes = prod(cache.shape[1:])*element_size, but it also 
+                # counts *padding* for tensors that do not expose it in .shape (Mamba).
+                # FIXME For FA, refactor to get num_blocks dim from kv_topo (it won't be dim0..)
+                curr_tensor_size_bytes = cache.shape[0] * self._layer_specs[layer_name].page_size_bytes 
+                print(f"{curr_tensor_size_bytes=}, {self._layer_specs[layer_name].page_size_bytes=}\n\n")
 
                 if tensor_size_bytes is None:
                     tensor_size_bytes = curr_tensor_size_bytes
                     self.num_blocks = cache.shape[0]
-
                 assert cache.shape[0] == self.num_blocks, (
                     "All kv cache tensors must have the same number of blocks"
                 )
-
+                # [(2,)NHD] FA, [conv*ssm] for mamba ==> conv*ssm == NHD as num_blocks is the same
                 self.block_len_per_layer.append(
                     curr_tensor_size_bytes // self.num_blocks
                 )
-                self.slot_size_per_layer.append(
-                    self.block_len_per_layer[-1] // self.block_size
-                )
-
+                print(f"{self.block_len_per_layer[-1]=} \n")
+                print(f"{tensor_size_bytes=}, {curr_tensor_size_bytes=}\n\n")
                 if not self.use_mla:
+                    # This is ok with mamba too
                     # Different kv cache shape is not supported by HeteroTP
                     assert tensor_size_bytes == curr_tensor_size_bytes, (
                         "All kv cache tensors must have the same size"
@@ -1483,7 +1546,7 @@ class NixlConnectorWorker:
                     (base_addr, curr_tensor_size_bytes, self.device_id, "")
                 )
 
-        logger.debug(
+        logger.info(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
         )
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
@@ -1491,6 +1554,7 @@ class NixlConnectorWorker:
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
+        print(f"{self.num_regions=}, {self.hma_group_size=}\n\n", flush=True)
         self.num_layers = len(xfer_buffers.keys())
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
@@ -1502,24 +1566,27 @@ class NixlConnectorWorker:
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
+        print(f"{self.kv_topo.is_kv_layout_blocks_first=}\n\n")
+        # TODO this is only relevant for heterogeneous TP, doubling here then halving blocks
+        # has no effect on accuracy (just on efficiency)
         if self.kv_topo.is_kv_layout_blocks_first:
-            for i in range(len(self.slot_size_per_layer)):
-                assert self.slot_size_per_layer[i] % 2 == 0
-                self.slot_size_per_layer[i] //= 2
-
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
             # with joint KV for each block. This minimizes the overhead in
             # registerMem allowing faster descs queries. In order to be able to
             # split on kv_heads dim as required by heterogeneous TP, one must
             # be able to index K/V separately. Hence we double the number
             # of 'virtual' regions here and halve `block_len` below.
+            # Similarly for Mamba layers, we register SSM+Conv as a single region and 
+            # then duplicate it logically to be able to index SSM/Conv separately.
             self.num_regions *= 2
 
         # Register local/src descr for NIXL xfer.
-        self.seen_base_addresses = seen_base_addresses
         self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
             self.register_local_xfer_handler(self.block_size)
         )
+        # TODO if mamba overwrite handler
+        # FIXME refactor and make sure it holds for heteroTP
+        self._mamba_offset = len(self.kv_caches_base_addr[self.engine_id][self.tp_rank]) * self.num_blocks
 
         # After KV Caches registered, listen for new connections.
         agent_metadata = NixlAgentMetadata(
@@ -1561,37 +1628,50 @@ class NixlConnectorWorker:
 
         block_size_ratio = self.block_size // block_size
         blocks_data = []
-        for i, base_addr in enumerate(self.seen_base_addresses):
-            # The new block_len is using prefill block_len;
-            # and num_blocks is multiple with N
-            kv_block_len = (
-                self.get_backend_aware_kv_block_len(layer_idx=i) // block_size_ratio
-            )
-            block_len_per_layer = self.block_len_per_layer[i] // block_size_ratio
-            num_blocks = self.num_blocks * block_size_ratio
-            for block_id in range(num_blocks):
-                block_offset = block_id * block_len_per_layer
-                addr = base_addr + block_offset
-                # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, self.device_id))
-
-            if self.kv_topo.is_kv_layout_blocks_first:
-                # Separate and interleave K/V regions to maintain the same
-                # descs ordering. This is needed for selecting contiguous heads
-                # when split across TP ranks.
+        print("MAMBA SSM SIZE", self._mamba_ssm_size, "\n")
+        local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
+        def register_blocks(blocks_data: list[tuple[int, int, int]], mamba: bool):
+            for i, base_addr in enumerate(local_base_addresses):
+                # The new block_len is using prefill block_len;
+                # and num_blocks is multiple with N
+                kv_block_len = (
+                    self.get_backend_aware_kv_block_len(layer_idx=i, first_split=True, mamba=mamba) // block_size_ratio
+                )
+                print(f"{i=}, {kv_block_len=}, {type(kv_block_len)=}\n", flush=True)
+                block_len_per_layer = self.block_len_per_layer[i] // block_size_ratio
+                num_blocks = self.num_blocks * block_size_ratio
                 for block_id in range(num_blocks):
                     block_offset = block_id * block_len_per_layer
                     addr = base_addr + block_offset
-                    # Register addresses for V cache (K registered first).
-                    v_addr = addr + kv_block_len
-                    blocks_data.append((v_addr, kv_block_len, self.device_id))
-        logger.debug(
-            "Created %s blocks for src engine %s and rank %s on device id %s",
-            len(blocks_data),
-            self.engine_id,
-            self.tp_rank,
-            self.device_id,
-        )
+                    # (addr, len, device id)
+                    blocks_data.append((addr, kv_block_len, self.device_id))
+
+                if self.kv_topo.is_kv_layout_blocks_first:
+                    # TODO heavily improve integration here
+                    second_split = (
+                        self.get_backend_aware_kv_block_len(layer_idx=i, first_split=False, mamba=mamba)
+                    )
+                    print(f"{i=}, {second_split=}, {type(second_split)=}\n", flush=True)
+                    # Separate and interleave K/V regions to maintain the same
+                    # descs ordering. This is needed for selecting contiguous heads
+                    # when split across TP ranks.
+                    for block_id in range(num_blocks):
+                        block_offset = block_id * block_len_per_layer
+                        addr = base_addr + block_offset
+                        # Register addresses for V cache (K registered first).
+                        v_addr = addr + kv_block_len
+                        blocks_data.append((v_addr, second_split, self.device_id))
+            logger.info(
+                "[INFO] Created %s blocks for src engine %s and rank %s on device id %s",
+                len(blocks_data),
+                self.engine_id,
+                self.tp_rank,
+                self.device_id,
+            )
+        register_blocks(blocks_data, mamba=False)
+        if any(self._is_mamba):
+            print("REgistering Local Mamba blocks\n", flush=True)
+            register_blocks(blocks_data, mamba=True)
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
         # NIXL_INIT_AGENT to be used for preparations of local descs.
@@ -1732,48 +1812,57 @@ class NixlConnectorWorker:
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
 
         # Register all remote blocks, but only the corresponding kv heads.
-        for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            # Read our whole local region size from remote.
-            local_block_len = self.get_backend_aware_kv_block_len(layer_idx=i)
-            remote_kv_block_len = local_block_len // block_size_ratio
-            if block_size_ratio > 1:
-                # using remote kv_block_len as transfer unit
-                local_block_len = remote_kv_block_len
+        # TODO elaborate comment that we create two views
+        def register_remote_descs(blocks_data: list[tuple[int, int, int]], mamba_descs: bool):
+            for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
+                # Read our whole local region size from remote.
+                local_block_len = self.get_backend_aware_kv_block_len(layer_idx=i, first_split=True, mamba=mamba_descs)
+                print(f"Add agent {i=}, {local_block_len=}\n", flush=True)
+                remote_kv_block_len = local_block_len // block_size_ratio
+                if block_size_ratio > 1:
+                    # using remote kv_block_len as transfer unit
+                    local_block_len = remote_kv_block_len
 
-            if tp_ratio < 0 and not self.use_mla:
-                # Remote tp is bigger: read a chunk of local region from remote
-                local_block_len = local_block_len // (-tp_ratio)
-            rank_offset = (
-                self.tp_rank % tp_ratio * remote_kv_block_len
-                if indexes_into_remote
-                else 0
-            )
-            for block_id in range(nixl_agent_meta.num_blocks):
-                block_offset = block_id * nixl_agent_meta.block_lens[i]
-                # For each block, grab the heads chunk belonging to rank_i
-                # of size remote_nheads // tp_ratio, which correspond to
-                # self.block_len == remote_block_len//tp_ratio bytes.
-                addr = base_addr + block_offset + rank_offset
-                # (addr, len, device id)
-                blocks_data.append((addr, local_block_len, nixl_agent_meta.device_id))
+                if tp_ratio < 0 and not self.use_mla:
+                    # Remote tp is bigger: read a chunk of local region from remote
+                    local_block_len = local_block_len // (-tp_ratio)
+                rank_offset = (
+                    self.tp_rank % tp_ratio * remote_kv_block_len
+                    if indexes_into_remote
+                    else 0
+                )
 
-            if self.kv_topo.is_kv_layout_blocks_first:
-                # With FlashInfer index V separately to allow head splitting.
+                # Assume same num_blocks for mamba and fa
                 for block_id in range(nixl_agent_meta.num_blocks):
                     block_offset = block_id * nixl_agent_meta.block_lens[i]
+                    # For each block, grab the heads chunk belonging to rank_i
+                    # of size remote_nheads // tp_ratio, which correspond to
+                    # self.block_len == remote_block_len//tp_ratio bytes.
                     addr = base_addr + block_offset + rank_offset
-                    v_addr = addr + nixl_agent_meta.block_lens[i] // 2
-                    blocks_data.append(
-                        (v_addr, local_block_len, nixl_agent_meta.device_id)
-                    )
+                    # (addr, len, device id)
+                    blocks_data.append((addr, local_block_len, nixl_agent_meta.device_id))
 
-        logger.debug(
-            "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
-            len(blocks_data),
-            engine_id,
-            remote_tp_rank,
-            self.tp_rank,
-        )
+                if self.kv_topo.is_kv_layout_blocks_first:
+                    # With FlashInfer index V separately to allow head splitting.
+                    second_split = self.get_backend_aware_kv_block_len(layer_idx=i, first_split=False, mamba=mamba_descs)
+                    for block_id in range(nixl_agent_meta.num_blocks):
+                        block_offset = block_id * nixl_agent_meta.block_lens[i]
+                        addr = base_addr + block_offset + rank_offset
+                        v_addr = addr + local_block_len
+                        blocks_data.append(
+                            (v_addr, second_split, nixl_agent_meta.device_id)
+                        )
+
+            logger.debug(
+                "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
+                len(blocks_data),
+                engine_id,
+                remote_tp_rank,
+                self.tp_rank,
+            )
+        register_remote_descs(blocks_data, mamba_descs=False)
+        if any(self._is_mamba):
+            register_remote_descs(blocks_data, mamba_descs=True)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
@@ -2263,6 +2352,7 @@ class NixlConnectorWorker:
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
                 remote_rank
             ]
+            print(f"READ BLOCKS REQUEST: {req_id}, {meta.local_physical_block_ids=}, {meta.remote.block_ids=}\n\n", flush=True)
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
@@ -2417,6 +2507,7 @@ class NixlConnectorWorker:
                 dst_engine_id=dst_engine_id,
                 remote_rank=remote_rank,
             )
+            raise e
             if meta := self._recving_metadata.get(request_id):
                 for group_block_ids in meta.local_block_ids:
                     self._invalid_block_ids.update(group_block_ids)
@@ -2457,7 +2548,15 @@ class NixlConnectorWorker:
         When HMA is enabled number of descriptors across kv cache groups might differ.
         A single flattened array is returned for all groups anyway.
         """
+        # print(f"get_block_descs_ids input: {block_ids=}\n")
         region_ids = np.arange(self.num_regions)
+        # NOTE (NickLucche) SSM and Attention blocks regions can be exchanged 
+        # arbitrarily by manager. Therefore, descs are duplicated for SSM and Attention
+        # like so: desc_handle->[descs_attn (all regions) | descs_ssm (all regions)].
+        # This is like having two "low-level views" of the same storage.
+        block_ids = [[block+self._mamba_offset for block in group] if self._is_mamba[i] else group for i, group in enumerate(block_ids)]
+        # print(f"input get_block_descs_ids after processing: {block_ids=}\n", flush=True)
+
         # NOTE (NickLucche) With HMA, every kv group has the same number of layers and
         # layers from different groups share the same kv tensor.
         # eg block_ids=[[1, 2], [3]]->blocks [1, 2] need to be read across all regions,
@@ -2472,6 +2571,7 @@ class NixlConnectorWorker:
         region_ids = region_ids[:, None]
         block_ids = np.concatenate(block_ids)[None, :]
         descs_ids = region_ids * num_blocks + block_ids
+        # print(f"get_block_descs_ids output: {descs_ids=}\n\n", flush=True)
         return descs_ids.flatten()
 
     def _logical_to_kernel_block_ids(self, block_ids: BlockIds) -> BlockIds:
@@ -2486,16 +2586,19 @@ class NixlConnectorWorker:
         block_arange = np.arange(0, self._physical_blocks_per_logical_kv_block).reshape(
             1, -1
         )
+        # Mamba blocks have no logical<>physical discrepancy
+        group_specs = self.kv_cache_config.kv_cache_groups
         return [
             BlockTable.map_to_kernel_blocks(
                 np.array(group),
                 self._physical_blocks_per_logical_kv_block,
                 block_arange,
             ).tolist()
-            for group in block_ids
+            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec) else group
+            for i, group in enumerate(block_ids)
         ]
 
-    def get_backend_aware_kv_block_len(self, layer_idx: int) -> int:
+    def get_backend_aware_kv_block_len(self, layer_idx: int, first_split: bool = True, mamba: bool = False) -> int:
         """
         Get the block length for one K/V element (K and V have the same size).
 
@@ -2503,11 +2606,19 @@ class NixlConnectorWorker:
         block, as K and V are in separate regions.
         For FlashInfer, this is half the length of the whole block, as K and V
         share the same region.
+        TODO for SSM..
         """
         assert self.kv_topo is not None
         if self.kv_topo.is_kv_layout_blocks_first:
             # For indexing only half (either just the K or V part).
-            block_len = self.block_len_per_layer[layer_idx] // 2
+            # FIXME improve interface here hacky design
+            if mamba:
+                # TODO optimization skip padding altogether, return conv size on second split (padding can be big)!
+                # TODO we could generalize to first/second split even for k/v (same size)
+                # block_len = self._mamba_ssm_size[1] if first_split else self.block_len_per_layer[layer_idx] - self._mamba_ssm_size[1]
+                block_len = self._mamba_ssm_size[first_split]
+            else:
+                block_len = self.block_len_per_layer[layer_idx] // 2
         else:
             block_len = self.block_len_per_layer[layer_idx]
         return block_len
