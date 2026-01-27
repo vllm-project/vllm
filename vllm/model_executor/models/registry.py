@@ -359,6 +359,7 @@ _MULTIMODAL_MODELS = {
     ),
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
+    "KimiK25ForConditionalGeneration": ("kimi_k25", "KimiK25ForConditionalGeneration"),  # noqa: E501
     "LightOnOCRForConditionalGeneration": (
         "lightonocr",
         "LightOnOCRForConditionalGeneration",
