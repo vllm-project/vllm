@@ -168,12 +168,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
 
-        # Draft tokens propagation - for spec-dec + struct outputs.
-        self.draft_tokens_handler = DraftTokensHandler(self.device)
-
-        # KV Connector if configured.
-        self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
-
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -499,8 +493,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         numtoks_iter = map(num_tokens_per_req.get, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
-        idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
-        idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
+        idx_mapping_list = [
+            self.req_states.req_id_to_index[req_id] for req_id in req_ids
+        ]
+        idx_mapping_np = np.array(idx_mapping_list, dtype=np.int32)
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         # Get the number of draft tokens for each request.
