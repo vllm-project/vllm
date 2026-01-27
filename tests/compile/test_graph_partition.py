@@ -8,6 +8,7 @@ import torch
 from torch.fx.experimental.proxy_tensor import make_fx
 
 from vllm.compilation.backends import split_graph
+from vllm.compilation.fx_utils import find_op_nodes, is_func
 
 
 def test_getitem_moved_to_producer_subgraph():
@@ -154,11 +155,7 @@ def test_sym_size_moved_across_split_boundary():
     gm = make_fx(model_fn, tracing_mode="symbolic")(x, y)
 
     # Verify the graph contains sym_size operations
-    sym_size_nodes = [
-        node
-        for node in gm.graph.nodes
-        if node.op == "call_function" and "sym_size" in str(node.target)
-    ]
+    sym_size_nodes = list(find_op_nodes(torch.ops.aten.sym_size, gm.graph))
     assert len(sym_size_nodes) > 0, (
         "Test setup failed: graph should contain sym_size operations"
     )
@@ -178,21 +175,17 @@ def test_sym_size_moved_across_split_boundary():
     # Find which subgraph contains the view operation
     view_subgraph = None
     for item in split_items:
-        for node in item.graph.graph.nodes:
-            if node.op == "call_function" and "view" in str(node.target).lower():
-                view_subgraph = item
-                break
-        if view_subgraph:
+        view_nodes = list(find_op_nodes(torch.ops.aten.view, item.graph.graph))
+        if view_nodes:
+            view_subgraph = item
             break
 
     assert view_subgraph is not None, "Should have a subgraph with view operation"
 
     # Verify sym_size operations are in the SAME subgraph as view
-    sym_size_in_view_subgraph = [
-        node
-        for node in view_subgraph.graph.graph.nodes
-        if node.op == "call_function" and "sym_size" in str(node.target)
-    ]
+    sym_size_in_view_subgraph = list(
+        find_op_nodes(torch.ops.aten.sym_size, view_subgraph.graph.graph)
+    )
     assert len(sym_size_in_view_subgraph) > 0, (
         "sym_size operations should be in the same subgraph as their consumer "
         "(view). This ensures torch.Size doesn't cross subgraph boundaries."
@@ -216,12 +209,12 @@ def test_sym_size_moved_across_split_boundary():
     sym_size_indices = [
         i
         for i, node in enumerate(consumer_nodes)
-        if node.op == "call_function" and "sym_size" in str(node.target)
+        if is_func(node, torch.ops.aten.sym_size.int)
     ]
     view_indices = [
         i
         for i, node in enumerate(consumer_nodes)
-        if node.op == "call_function" and "view" in str(node.target).lower()
+        if is_func(node, torch.ops.aten.view.default)
     ]
 
     max_sym_size_idx = max(sym_size_indices)
@@ -237,40 +230,66 @@ def test_sym_size_moved_across_split_boundary():
     assert torch.allclose(output_original, output_split), "Output mismatch after split"
 
 
-def test_sym_size_with_multiple_consumers_in_different_subgraphs():
+def test_sym_size_replicated_to_all_consumer_subgraphs():
     """
-    Test that when a sym_size result is used by consumers in multiple different
-    subgraphs, it's placed in the earliest consumer subgraph.
+    Test that sym_size operations are replicated to ALL consumer subgraphs.
+
+    This validates the pattern where each consumer subgraph computes sym_size
+    locally from the input tensor, rather than receiving it as an input:
+
+        def f(x, y, z):
+            <split>
+            sym_size = x.sym_size()  # computed locally in subgraph 2
+            y2 = y.view(sym_size)
+            <split>
+            sym_size = x.sym_size()  # computed locally in subgraph 4
+            z2 = z.view(sym_size)
+            <split>
+            sym_size = x.sym_size()  # computed locally in subgraph 6
+            w2 = w.view(sym_size)
     """
 
     def model_fn(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        # Get shape before any split points
         size = x.shape[0]
-
-        # First split point
         z1 = torch.sigmoid(x)
-
-        # Use size after first split
         y1 = y[:size]
-
-        # Second split point
         z2 = torch.sigmoid(z1)
-
-        # Use size again after second split
         y2 = y[:size]
-
-        return z2 + y1 + y2
+        z3 = torch.sigmoid(z2)
+        y3 = y[:size]
+        return z3 + y1 + y2 + y3
 
     x = torch.randn(4, 8)
     y = torch.randn(8, 8)
-    # Use symbolic tracing to generate sym_size operations
     gm = make_fx(model_fn, tracing_mode="symbolic")(x, y)
 
-    # Split on both sigmoid operations
-    split_ops = ["aten::sigmoid"]
-    split_gm, split_items = split_graph(gm, split_ops)
+    assert len(list(find_op_nodes(torch.ops.aten.sym_size, gm.graph))) > 0, (
+        "Test setup failed: graph should contain sym_size operations"
+    )
 
-    # Verify functional correctness with same-shaped inputs
-    output_original = gm(x, y)
-    output_split = split_gm(x, y)
-    assert torch.allclose(output_original, output_split), "Output mismatch after split"
+    split_gm, split_items = split_graph(gm, ["aten::sigmoid"])
+
+    # Find subgraphs that contain slice operations (consumers of sym_size)
+    subgraphs_with_slice = [
+        item
+        for item in split_items
+        if len(list(find_op_nodes(torch.ops.aten.slice, item.graph.graph))) > 0
+    ]
+
+    # Find subgraphs that contain sym_size operations
+    subgraphs_with_sym_size = [
+        item
+        for item in split_items
+        if len(list(find_op_nodes(torch.ops.aten.sym_size, item.graph.graph))) > 0
+    ]
+
+    # KEY VERIFICATION: The number of subgraphs with sym_size should equal
+    # the number of consumer subgraphs (each consumer has its own sym_size)
+    assert len(subgraphs_with_sym_size) == len(subgraphs_with_slice), (
+        f"Expected {len(subgraphs_with_slice)} subgraphs with sym_size "
+        f"(one per consumer), but found {len(subgraphs_with_sym_size)}. "
+        "This indicates sym_size was not properly replicated to all consumers."
+    )
+
+    # Verify functional correctness
+    assert torch.allclose(gm(x, y), split_gm(x, y)), "Output mismatch after split"
