@@ -143,60 +143,21 @@ def create_minimal_vllm_config(
         gpu_memory_utilization=0.9,
         swap_space=0,
         cache_dtype="auto",
-        num_gpu_blocks=None,
-        num_cpu_blocks=None,
-        sliding_window=None,
         enable_prefix_caching=False,
-        cpu_offload_gb=0,
     )
 
     scheduler_config = SchedulerConfig(
-        task="auto",
         max_num_seqs=max_num_seqs,
-        max_num_batched_tokens=None,
+        max_num_batched_tokens=8192,
         max_model_len=32768,
-        num_scheduler_steps=1,
-        multi_step_stream_outputs=False,
-        enable_chunked_prefill=None,
-        preemption_mode="swap",
-        num_lookahead_slots=0,
-        delay_factor=0.0,
-        enable_prefix_caching=False,
-        policy="fcfs",
-        send_delta_data=False,
+        enable_chunked_prefill=True,
     )
 
     parallel_config = ParallelConfig(
-        pipeline_parallel_size=1,
         tensor_parallel_size=1,
-        worker_cls="auto",
-        max_parallel_loading_workers=None,
-        disable_custom_all_reduce=False,
-        tokenizer_pool_config=None,
-        ray_workers_use_nsight=False,
-        placement_group=None,
-        distributed_executor_backend=None,
     )
 
-    compilation_config = CompilationConfig(
-        level=0,
-        backend="",
-        custom_ops=[],
-        splitting_ops=[],
-        use_inductor=True,
-        enable_fusion=True,
-        use_cudagraph=False,
-        cudagraph_num_of_warmups=0,
-        cudagraph_capture_sizes=None,
-        cudagraph_copy_inputs=False,
-        use_cudagraph_for_prefill=False,
-        enabled_custom_ops=None,
-        disabled_custom_ops=None,
-        inductor_compile_sizes=[],
-        inductor_compile_config={},
-        inductor_passes={},
-        cudagraph_backend="flashinfer",
-    )
+    compilation_config = CompilationConfig()
 
     return VllmConfig(
         model_config=model_config,
