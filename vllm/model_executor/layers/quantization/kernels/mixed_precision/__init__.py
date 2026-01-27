@@ -50,6 +50,8 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         ExllamaLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        BitBLASLinearKernel,
+        ConchLinearKernel,
         ExllamaLinearKernel,
     ],
     PlatformEnum.XPU: [
