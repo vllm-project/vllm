@@ -298,6 +298,8 @@ class AsyncLLM(EngineClient):
         prompt_text: str | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
+        model_config = self.model_config
+        encoder_config = model_config.encoder_config or {}
 
         if self.errored:
             raise EngineDeadError()
@@ -331,7 +333,8 @@ class AsyncLLM(EngineClient):
             )
 
         tok_params = TokenizeParams(
-            max_total_tokens=self.model_config.max_model_len,
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
         ).with_kwargs(tokenization_kwargs)
         tokenization_kwargs = tok_params.get_encode_kwargs()
 

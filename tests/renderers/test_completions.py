@@ -3,6 +3,7 @@
 
 import io
 from dataclasses import dataclass
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pybase64
@@ -26,7 +27,7 @@ class MockModelConfig:
     max_model_len: int = 100
     tokenizer_revision = None
     tokenizer_mode = "auto"
-    encoder_config: dict | None = None
+    encoder_config: dict[str, Any] | None = None
     enable_prompt_embeds: bool = True
     skip_tokenizer_init: bool = False
 

@@ -86,6 +86,9 @@ class TokenizeParams:
     - `-1` maps to `max_input_tokens`.
     """
 
+    do_lower_case: bool = False
+    """Whether to normalize text to lower case before tokenization."""
+
     add_special_tokens: bool = True
     """Whether to add special tokens."""
 
@@ -194,6 +197,20 @@ class TokenizeParams:
             add_special_tokens=self.add_special_tokens,
         )
 
+    def _apply_lowercase(self, text: str) -> str:
+        if self.do_lower_case:
+            text = text.lower()
+
+        return text
+
+    def _validate_text(self, text: str) -> str:
+        """Apply all validators to prompt text."""
+        # TODO: Implement https://github.com/vllm-project/vllm/pull/31366
+        for validator in (self._apply_lowercase,):
+            text = validator(text)
+
+        return text
+
     def apply_pre_tokenization(self, prompt: TextPrompt) -> TextPrompt:
         """
         Ensure that the prompt meets the requirements set out by this config.
@@ -201,7 +218,8 @@ class TokenizeParams:
 
         This method is run before tokenization occurs.
         """
-        # The place to implement https://github.com/vllm-project/vllm/pull/31366
+        prompt["prompt"] = self._validate_text(prompt["prompt"])
+
         return prompt
 
     def _apply_truncation(self, tokens: _S) -> _S:

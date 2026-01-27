@@ -30,10 +30,13 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
     # --8<-- [end:score-extra-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
             max_total_tokens_param="max_model_len",
         )
 
@@ -93,10 +96,13 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
     # --8<-- [end:rerank-extra-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
             max_total_tokens_param="max_model_len",
         )
 

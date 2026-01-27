@@ -57,10 +57,6 @@ class RendererLike(Protocol):
         error_msg = "Each prompt must be a string or an array of tokens"
 
         if isinstance(prompt_raw, str):
-            encoder_config = self.config.encoder_config or {}
-            if encoder_config.get("do_lower_case", False):
-                prompt_raw = prompt_raw.lower()
-
             return TextPrompt(prompt=prompt_raw)
 
         if isinstance(prompt_raw, list):

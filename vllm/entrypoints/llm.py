@@ -826,8 +826,12 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
+        model_config = self.model_config
+        encoder_config = model_config.encoder_config or {}
+
         tok_params = TokenizeParams(
-            max_total_tokens=self.model_config.max_model_len,
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
         ).with_kwargs(tokenization_kwargs)
 
         engine_prompts = list[_TokenizedPrompt | _TokenizedEncDecPrompt]()
@@ -863,6 +867,8 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
+        model_config = self.model_config
+        encoder_config = model_config.encoder_config or {}
         renderer = self.llm_engine.renderer
 
         chat_params = ChatParams(
@@ -879,7 +885,8 @@ class LLM:
             ),
         )
         tok_params = TokenizeParams(
-            max_total_tokens=self.model_config.max_model_len,
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=False,
         ).with_kwargs(tokenization_kwargs)
 
@@ -1426,6 +1433,8 @@ class LLM:
             generated scores in the same order as the input prompts.
         """
         model_config = self.model_config
+        encoder_config = model_config.encoder_config or {}
+
         runner_type = model_config.runner_type
         if runner_type != "pooling":
             raise ValueError(
@@ -1515,6 +1524,7 @@ class LLM:
 
         tok_params = TokenizeParams(
             max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
         ).with_kwargs(tokenization_kwargs)
         encode_kwargs = tok_params.get_encode_kwargs()
 
@@ -1703,6 +1713,9 @@ class LLM:
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> str:
+        model_config = self.model_config
+        encoder_config = model_config.encoder_config or {}
+
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
 
@@ -1722,7 +1735,8 @@ class LLM:
             )
 
         tok_params = TokenizeParams(
-            max_total_tokens=self.model_config.max_model_len,
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
         ).with_kwargs(tokenization_kwargs)
 
         tokenization_kwargs = tok_params.get_encode_kwargs()

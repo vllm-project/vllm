@@ -23,6 +23,7 @@ class EmbeddingCompletionRequest(
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         max_total_tokens = model_config.max_model_len
         pooler_config = model_config.pooler_config
+        encoder_config = model_config.encoder_config or {}
 
         if pooler_config:
             if pooler_config.enable_chunked_processing:
@@ -36,6 +37,7 @@ class EmbeddingCompletionRequest(
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_total_tokens - max_embed_len,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_model_len - max_embed_len",
@@ -53,6 +55,7 @@ class EmbeddingChatRequest(
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         max_total_tokens = model_config.max_model_len
         pooler_config = model_config.pooler_config
+        encoder_config = model_config.encoder_config or {}
 
         if pooler_config:
             if pooler_config.enable_chunked_processing:
@@ -66,6 +69,7 @@ class EmbeddingChatRequest(
             max_total_tokens=max_total_tokens,
             max_output_tokens=max_total_tokens - max_embed_len,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
             max_output_tokens_param="max_model_len - max_embed_len",
