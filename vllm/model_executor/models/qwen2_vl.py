@@ -892,7 +892,9 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         )
         return num_video_tokens
 
-    def get_image_size_with_most_features(self) -> ImageSize:
+    def get_image_size_with_most_features(
+        self, max_pixels: int | None = None
+    ) -> ImageSize:
         # NOTE: Simply processing a huge size with _get_vision_info might not give a
         # size that maximizes the number of featrues, i.e., the number of (merged)
         # patches. This is because the number of patches limits the allowed aspect
@@ -910,8 +912,11 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
-        image_processor = self.get_image_processor()
-        max_pixels = image_processor.max_pixels or image_processor.size["longest_edge"]
+        if max_pixels is None:
+            image_processor = self.get_image_processor()
+            max_pixels = (
+                image_processor.max_pixels or image_processor.size["longest_edge"]
+            )
         unit = patch_size * merge_size
         max_seq_len = max_pixels // (unit * unit)
 
@@ -1363,7 +1368,7 @@ class Qwen2VLForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

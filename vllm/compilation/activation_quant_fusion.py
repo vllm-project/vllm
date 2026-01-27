@@ -152,6 +152,7 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
                 input=result_silu_mul,
                 output_scale=output_scale,
                 input_scale=scale,
+                is_sf_swizzled_layout=True,
             )
             return at[1], at[2]
 

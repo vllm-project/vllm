@@ -1534,6 +1534,7 @@ def permute_cols(a: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
 def scaled_fp4_quant(
     input: torch.Tensor,
     input_global_scale: torch.Tensor,
+    is_sf_swizzled_layout: bool = True,
     backend: str = "none",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -1577,21 +1578,25 @@ def scaled_fp4_quant(
     else:
         # Two fp4 values will be packed into an uint8.
         output = torch.empty((m, n // 2), device=device, dtype=torch.uint8)
+        if is_sf_swizzled_layout:
+            # We use the rounded values to store the swizzled values. Due to the
+            # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
+            # So, we first pad the scales to multiples of 128 and 4. Then, the scales
+            # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
+            # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
+            round_up = lambda x, y: (x + y - 1) // y * y
+            rounded_m = round_up(m, 128)
+            scale_n = n // block_size
+            rounded_n = round_up(scale_n, 4)
+            output_scale = torch.empty(
+                (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+            )
+        else:
+            output_scale = torch.empty((m, n // 16), device=device, dtype=torch.uint8)
 
-        # We use the rounded values to store the swizzled values. Due to the
-        # requirement of the Tensor Core, the minimum tile is 128x4 for the scales.
-        # So, we first pad the scales to multiples of 128 and 4. Then, the scales
-        # (in float8_e4m3fn) are packed into an int32 for every 4 values. More:
-        # https://docs.nvidia.com/cuda/parallel-thread-execution/#tcgen05-mma-scale-factor-b-layout-4x
-        round_up = lambda x, y: (x + y - 1) // y * y
-        rounded_m = round_up(m, 128)
-        scale_n = n // block_size
-        rounded_n = round_up(scale_n, 4)
-        output_scale = torch.empty(
-            (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
+        torch.ops._C.scaled_fp4_quant(
+            output, input, output_scale, input_global_scale, is_sf_swizzled_layout
         )
-
-        torch.ops._C.scaled_fp4_quant(output, input, output_scale, input_global_scale)
 
     output_scale = output_scale.view(torch.float8_e4m3fn)
     return output, output_scale
@@ -2840,13 +2845,13 @@ if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
 
 class CPUDNNLGEMMHandler:
     def __init__(self) -> None:
-        self.handler: int | None = None
+        self.handler_tensor: torch.Tensor | None = None
         self.n = -1
         self.k = -1
 
     def __del__(self):
-        if self.handler is not None:
-            torch.ops._C.release_dnnl_matmul_handler(self.handler)
+        if self.handler_tensor is not None:
+            torch.ops._C.release_dnnl_matmul_handler(self.handler_tensor.item())
 
 
 _supports_onednn = bool(hasattr(torch.ops._C, "create_onednn_mm_handler"))
@@ -2862,8 +2867,10 @@ def create_onednn_mm(
 ) -> CPUDNNLGEMMHandler:
     handler = CPUDNNLGEMMHandler()
     handler.k, handler.n = weight.size()
-    handler.handler = torch.ops._C.create_onednn_mm_handler(
-        weight, primitive_cache_size
+    # store the handler pointer in a tensor it doesn't get inlined
+    handler.handler_tensor = torch.tensor(
+        torch.ops._C.create_onednn_mm_handler(weight, primitive_cache_size),
+        dtype=torch.int64,
     )
     return handler
 
@@ -2875,7 +2882,7 @@ def onednn_mm(
 ) -> torch.Tensor:
     output = torch.empty((*x.shape[0:-1], dnnl_handler.n), dtype=x.dtype)
     torch.ops._C.onednn_mm(
-        output, x.reshape(-1, dnnl_handler.k), bias, dnnl_handler.handler
+        output, x.reshape(-1, dnnl_handler.k), bias, dnnl_handler.handler_tensor
     )
 
     return output
@@ -2891,8 +2898,17 @@ def create_onednn_scaled_mm(
 ) -> CPUDNNLGEMMHandler:
     handler = CPUDNNLGEMMHandler()
     handler.k, handler.n = weight.size()
-    handler.handler = torch.ops._C.create_onednn_scaled_mm_handler(
-        weight, weight_scales, output_type, dynamic_quant, use_azp, primitive_cache_size
+    # store the handler pointer in a tensor so it doesn't get inlined
+    handler.handler_tensor = torch.tensor(
+        torch.ops._C.create_onednn_scaled_mm_handler(
+            weight,
+            weight_scales,
+            output_type,
+            dynamic_quant,
+            use_azp,
+            primitive_cache_size,
+        ),
+        dtype=torch.int64,
     )
     return handler
 
@@ -2945,7 +2961,13 @@ def onednn_scaled_mm(
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
     torch.ops._C.onednn_scaled_mm(
-        output, x, input_scale, input_zp, input_zp_adj, bias, dnnl_handler.handler
+        output,
+        x,
+        input_scale,
+        input_zp,
+        input_zp_adj,
+        bias,
+        dnnl_handler.handler_tensor,
     )
 
     return output
