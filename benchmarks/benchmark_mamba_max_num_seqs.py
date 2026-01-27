@@ -251,6 +251,9 @@ def find_optimal_batch_size(
             torch.cuda.empty_cache()
             break
 
+    if not results:
+        raise RuntimeError("All batch sizes caused OOM")
+
     # Find where bandwidth reaches near-peak (more stable than threshold detection)
     max_bw = max(r.effective_bandwidth_tb_s for r in results)
     near_peak_threshold = near_peak_ratio * max_bw
@@ -332,12 +335,12 @@ def main():
     throughput_headroom = 2.0
 
     near_peak_batch, recommended, results = find_optimal_batch_size(
-        config,
-        args.batch_sizes,
-        args.tensor_parallel_size,
-        compute_dtype,
-        args.bw_threshold,
-        throughput_headroom,
+        config=config,
+        batch_sizes=args.batch_sizes,
+        tp_size=args.tensor_parallel_size,
+        compute_dtype=compute_dtype,
+        bw_threshold=args.bw_threshold,
+        throughput_headroom=throughput_headroom,
     )
 
     max_bw = max(r.effective_bandwidth_tb_s for r in results)
