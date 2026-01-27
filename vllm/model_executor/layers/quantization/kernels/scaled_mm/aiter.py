@@ -6,10 +6,17 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from .cutlass import CutlassInt8ScaledMMLinearKernel
-from .ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import (
+    FP8ScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
+    Int8ScaledMMLinearLayerConfig,
+)
+
+logger = init_logger(__name__)
 
 
 class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
@@ -107,3 +114,93 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         # b to be [N, K]
         # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
         return rocm_aiter_ops.gemm_a8w8(x_q, w_q.t(), x_s, w_s, bias, out_dtype)
+
+
+# aiter bpreshuffle Kernel
+class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_rocm():
+            return False, "AITER bpreshuffle is ROCm-only"
+        if not rocm_aiter_ops.is_linear_fp8_enabled():
+            return False, "AiterBpreshuffle is disabled. Check VLLM_ROCM_USE_AITER."
+        try:
+            import aiter  # noqa: F401
+        except Exception:
+            return False, "aiter library not found."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        is_ptpc = (
+            c.activation_quant_key.scale.group_shape.is_per_token()
+            and c.weight_quant_key.scale.group_shape.is_per_channel()
+        )
+        if not is_ptpc:
+            return False, "This kernel only handles Per-Token/Per-Channel (PTPC)"
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Perform weight shuffle immediately after model loading.
+        from aiter.ops.shuffle import shuffle_weight
+
+        weight = layer.weight.data
+        N, K = weight.shape[0], weight.shape[1]
+        if N % 16 == 0 and K % 16 == 0:
+            shuffled_w = shuffle_weight(weight, layout=(16, 16))
+            layer.weight = torch.nn.Parameter(shuffled_w, requires_grad=False)
+            layer.weight_layout = "NK_SHUFFLED"
+        else:
+            raise ValueError(
+                f"Weight shape ({N}, {K}) not supported by AITeR bpreshuffle"
+            )
+
+    def apply_weights(
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        w_q, w_s, x_s, x_s_ub = self._get_layer_params(layer)
+        qinput, qinput_scale = self.quant_fp8(x, x_s, x_s_ub)
+        logger.info_once(
+            "AiterBpreshuffle: apply_weights... ABOUT TO CALL C++ KERNEL..."
+        )
+        return rocm_aiter_ops.gemm_a8w8_bpreshuffle(
+            qinput, w_q, qinput_scale, w_s, bias, self.config.out_dtype
+        )
+
+
+# aiter CK Kernel
+class AiterCKPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        return AiterBpreshufflePerTokenFp8ScaledMMLinearKernel.is_supported(
+            compute_capability
+        )
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        return AiterBpreshufflePerTokenFp8ScaledMMLinearKernel.can_implement(c)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # The CK operator directly uses the N,K layout
+        # and requires no preprocessing.
+        layer.weight_layout = "NK_NOT_SHUFFLED"
+
+    def apply_weights(
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        print("using AITER CK (Non-Shuffled) Kernel", flush=True)
+        w_q, w_s, x_s, x_s_ub = self._get_layer_params(layer)
+        qinput, qinput_scale = self.quant_fp8(x, x_s, x_s_ub)
+
+        logger.info_once(
+            "AiterCK: apply_weights... "
+            "ABOUT TO CALL C++ KERNEL (this is where it hangs)..."
+        )
+
+        return rocm_aiter_ops.gemm_a8w8(
+            qinput, w_q, qinput_scale, w_s, bias, self.config.out_dtype
+        )

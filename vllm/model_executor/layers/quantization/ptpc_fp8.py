@@ -128,6 +128,8 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
             assert getattr(layer, "weight_scale", None) is not None
         layer.input_scale = None
 
+        self.fp8_linear.process_weights_after_loading(layer)
+
     def apply(
         self,
         layer: torch.nn.Module,
