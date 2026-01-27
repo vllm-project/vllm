@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     _normalize_quant_group_shape,
+    get_fp8_min_max,
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
@@ -389,9 +390,7 @@ class MatcherQuantFP8(MatcherCustomOp):
             assert scale is None
             scale = self.make_scale(input, transposed=self.has_col_major_scales)
 
-            finfo = torch.finfo(self.quant_key.dtype)
-            fp8_min = -224.0 if current_platform.is_fp8_fnuz() else finfo.min
-            fp8_max = 224.0 if current_platform.is_fp8_fnuz() else finfo.max
+            fp8_min, fp8_max = get_fp8_min_max()
 
             _, result, scale = auto_functionalized(
                 self.QUANT_OP,
