@@ -46,22 +46,22 @@ logger = init_logger(__name__)
 # Default sequence lengths to benchmark
 # Results in tensor sizes from 16KB to 512MB (seq_len × 8192 × 2 bytes)
 DEFAULT_SEQUENCE_LENGTHS = [
-    1,      # 16KB   (1 × 8192 × 2)
-    2,      # 32KB   
-    4,      # 64KB   
-    8,      # 128KB  
-    16,     # 256KB  
-    32,     # 512KB  
-    64,     # 1MB    
-    128,    # 2MB    
-    256,    # 4MB    
-    512,    # 8MB    
-    1024,   # 16MB   
-    2048,   # 32MB   
-    4096,   # 64MB   
-    8192,   # 128MB  
-    16384,  # 256MB  
-    32768   # 512MB  (32768 × 8192 × 2)
+    1,  # 16KB   (1 × 8192 × 2)
+    2,  # 32KB
+    4,  # 64KB
+    8,  # 128KB
+    16,  # 256KB
+    32,  # 512KB
+    64,  # 1MB
+    128,  # 2MB
+    256,  # 4MB
+    512,  # 8MB
+    1024,  # 16MB
+    2048,  # 32MB
+    4096,  # 64MB
+    8192,  # 128MB
+    16384,  # 256MB
+    32768,  # 512MB  (32768 × 8192 × 2)
 ]
 
 # Fixed hidden size and dtype for all benchmarks
