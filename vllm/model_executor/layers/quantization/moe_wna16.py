@@ -365,15 +365,12 @@ class MoeWNA16Method(FusedMoEMethodBase):
         self,
         layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         assert layer.activation == "silu", "Only SiLU activation is supported."
-        topk_weights, topk_ids = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
 
         return fused_experts(
             x,

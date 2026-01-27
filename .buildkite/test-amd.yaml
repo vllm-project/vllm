@@ -71,6 +71,7 @@ steps:
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
+  - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
   - tests/tool_parsers
@@ -82,6 +83,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s renderers
   - pytest -v -s tokenizers_
   - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
@@ -162,10 +164,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/test_vision_embeds.py
-  # Need tf32 to avoid conflicting precision issue with terratorch on ROCm.
-  # TODO: Remove after next torch update
-  - VLLM_FLOAT32_MATMUL_PRECISION="tf32" pytest -v -s entrypoints/openai/test_vision_embeds.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration Test (API Server 2)
@@ -201,6 +200,21 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
+
+- label: Entrypoints Integration Test (Responses API)
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental]
+  agent_pool: mi325_1
+  # grade: Blocking
+  working_dir: "/vllm-workspace/tests"
+  fast_check: true
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai/responses
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai/responses
 
 - label: Distributed Tests (4 GPUs) # 35min
   timeout_in_minutes: 50
@@ -416,6 +430,8 @@ steps:
   timeout_in_minutes: 30
   gpu: h100
   source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
@@ -440,10 +456,12 @@ steps:
   timeout_in_minutes: 30
   gpu: b200
   source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
+    - pytest -v -s v1/attention
 
 - label: V1 Test others (CPU) # 5 mins
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
@@ -519,8 +537,7 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s samplers
-    - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
+    - pytest -v -s -m 'not skip_v1' samplers
 
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
@@ -623,8 +640,9 @@ steps:
   # grade: Blocking
   source_file_dependencies:
   - csrc/attention/
-  - vllm/attention
   - vllm/v1/attention
+    # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
+  - vllm/model_executor/layers/attention
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -692,6 +710,17 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
 
+- label: Kernels Helion Test
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_1
+  source_file_dependencies:
+  - vllm/utils/import_utils.py
+  - tests/kernels/helion/
+  commands:
+    - pip install helion
+    - pytest -v -s kernels/helion/
+
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
   torch_nightly: true
@@ -734,7 +763,7 @@ steps:
 
 - label: Quantization Test # 70min
   timeout_in_minutes: 90
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -844,7 +873,7 @@ steps:
 
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
@@ -871,6 +900,7 @@ steps:
     # Shard slow subset of standard language models tests. Only run when model
     # source is modified, or when specified test files are modified
     - pip freeze | grep -E 'torch'
+    - export TORCH_NCCL_BLOCKING_WAIT=1
     - pytest -v -s models/language -m 'core_model and slow_test' \
              --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT \
              --shard-id=$$BUILDKITE_PARALLEL_JOB
@@ -888,7 +918,7 @@ steps:
   commands:
     # Install fast path packages for testing against transformers
     # Note: also needed to run plamo2 model in vLLM
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     # Shard hybrid language model tests
     - pytest -v -s models/language/generation \
@@ -909,7 +939,7 @@ steps:
   commands:
     # Install fast path packages for testing against transformers
     # Note: also needed to run plamo2 model in vLLM
-    - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
+    - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
@@ -988,9 +1018,7 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing --ignore models/multimodal/pooling/test_prithvi_mae.py
-    # Need tf32 to avoid conflicting precision issue with terratorch on ROCm.
-    # TODO: Remove after next torch update
-    - VLLM_FLOAT32_MATMUL_PRECISION="tf32" pytest -v -s models/multimodal/pooling/test_prithvi_mae.py -m core_model
+    - pytest -v -s models/multimodal/pooling/test_prithvi_mae.py -m core_model
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
 - label: Multi-Modal Accuracy Eval (Small Models) # 5min
@@ -1104,13 +1132,13 @@ steps:
   - csrc/quantization/cutlass_w8a8/moe/
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
-  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_a2a_prepare_finalize.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
-  - vllm/attention/selector.py
   commands:
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py
@@ -1355,9 +1383,7 @@ steps:
   # end platform plugin tests
   # begin io_processor plugins test, all the code in between uses the prithvi_io_processor plugin
   - pip install -e ./plugins/prithvi_io_processor_plugin
-  # Need tf32 to avoid conflicting precision issue with terratorch on ROCm.
-  # TODO: Remove after next torch update
-  - VLLM_FLOAT32_MATMUL_PRECISION="tf32" pytest -v -s plugins_tests/test_io_processor_plugins.py
+  - pytest -v -s plugins_tests/test_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
   # end io_processor plugins test
   # begin stat_logger plugins test
@@ -1443,7 +1469,7 @@ steps:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large-amd.txt
 
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   # grade: Blocking
   timeout_in_minutes: 30
@@ -1454,7 +1480,21 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-    - VLLM_ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
+    - ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_4
+  # grade: Blocking
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+    - DP_EP=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 ##### multi gpus test #####
 ##### A100 test #####
@@ -1640,17 +1680,6 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
 
-- label: DeepSeek V2-Lite Async EPLB Accuracy
-  timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_4
-  # grade: Blocking
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
   timeout_in_minutes: 60

@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     sparse_cutlass_supported,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
 # and per-tensor-per-tensor INT8 GEMM.
@@ -41,7 +42,7 @@ ROCM_AITER_SUPPORTED_INT8_MODEL = [
     "nm-testing/tinyllama-oneshot-w8a8-channel-dynamic-token-v2",
 ]
 
-# TritonScaledMMLinearKernel only supports symmetric quantization.
+# TritonInt8ScaledMMLinearKernel only supports symmetric quantization.
 ROCM_TRITON_SCALED_MM_SUPPORTED_INT8_MODEL = [
     "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
     "nm-testing/tinyllama-oneshot-w8-channel-a8-tensor",
@@ -360,9 +361,26 @@ def test_compressed_tensors_fp8(vllm_runner):
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )
-def test_compressed_tensors_kv_cache(vllm_runner):
-    model_path = "nm-testing/TinyLlama-1.1B-compressed-tensors-kv-cache-scheme"
-    with vllm_runner(model_path, enforce_eager=True, kv_cache_dtype="fp8") as llm:
+def test_compressed_tensors_kv_cache_fp8_per_tensor(vllm_runner):
+    model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-tensor"
+    with vllm_runner(model_path) as llm:
+        output = llm.generate_greedy("Hello world!", max_tokens=4)
+        assert output
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
+def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
+    model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-attn_head"
+    try:
+        fa_version = get_flash_attn_version()
+    except Exception:
+        pytest.skip("This test requires FlashAttention backend.")
+    if fa_version is None or fa_version < 3:
+        pytest.skip("This test requires FlashAttention version >= 3.")
+
+    with vllm_runner(model_path, attention_config={"backend": "FLASH_ATTN"}) as llm:
         output = llm.generate_greedy("Hello world!", max_tokens=4)
         assert output
 
@@ -644,6 +662,9 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
         assert output
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
 @pytest.mark.parametrize(
     "args",
     [
@@ -762,7 +783,10 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
 
             input_quant_op = qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
             assert isinstance(input_quant_op, QuantFP8)
-            assert input_quant_op._forward_method == input_quant_op.forward_cuda
+            assert input_quant_op._forward_method in (
+                input_quant_op.forward_cuda,
+                input_quant_op.forward_hip,
+            )
 
         llm.apply_model(check_model)
 

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -12,14 +11,15 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
-from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import (
+    build_attn_metadata,
+    build_slot_mappings_by_layer,
+)
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
-from vllm.v1.worker.gpu.sample.metadata import SamplingMetadata
 from vllm.v1.worker.gpu.spec_decode.eagle_cudagraph import EagleCudaGraphManager
 
 logger = init_logger(__name__)
@@ -46,22 +46,22 @@ class EagleSpeculator:
         self.hidden_size = self.draft_model_config.get_hidden_size()
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
         self.vocab_size = self.draft_model_config.get_vocab_size()
-        self.pin_memory = is_pin_memory_available()
         self.dtype = vllm_config.model_config.dtype
 
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
-            inputs_embeds_size=self.inputs_embeds_size,
-            vocab_size=self.vocab_size,
-            dtype=self.dtype,
             device=device,
-            pin_memory=self.pin_memory,
         )
         self.hidden_states = torch.zeros(
             self.max_num_tokens,
             self.hidden_size,
             dtype=self.dtype,
+            device=device,
+        )
+        self.idx_mapping = torch.zeros(
+            self.max_num_reqs,
+            dtype=torch.int32,
             device=device,
         )
         self.temperature = torch.zeros(
@@ -111,7 +111,8 @@ class EagleSpeculator:
     def run_model(
         self,
         num_tokens: int,
-        attn_metadata: dict[str, Any],
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         with set_forward_context(
@@ -120,6 +121,7 @@ class EagleSpeculator:
             num_tokens=num_tokens,
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
             num_tokens_across_dp=num_tokens_across_dp,
+            slot_mapping=slot_mappings,
         ):
             ret_hidden_states = self.model(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
@@ -137,14 +139,16 @@ class EagleSpeculator:
         self,
         num_reqs: int,
         attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
         num_tokens_across_dp: torch.Tensor | None,
     ) -> None:
         pos = self.input_buffers.positions[:num_reqs]
-        query_start_loc = self.input_buffers.query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        idx_mapping = self.idx_mapping[:num_reqs]
         for step in range(1, self.num_speculative_steps):
             # Run the eagle model.
             last_hidden_states, hidden_states = self.run_model(
-                num_reqs, attn_metadata, num_tokens_across_dp
+                num_reqs, attn_metadata, slot_mappings, num_tokens_across_dp
             )
             logits = self.model.compute_logits(last_hidden_states)
 
@@ -152,8 +156,9 @@ class EagleSpeculator:
             # used for draft and target sampling.
             draft_tokens = gumbel_sample(
                 logits,
-                self.temperature[:num_reqs],
-                self.seeds[:num_reqs],
+                idx_mapping,
+                self.temperature,
+                self.seeds,
                 pos + 1,
                 apply_temperature=True,
             )
@@ -168,7 +173,9 @@ class EagleSpeculator:
                     self.hidden_states,
                     self.max_model_len,
                 )
-                self.block_tables.compute_slot_mappings(query_start_loc, pos)
+                self.block_tables.compute_slot_mappings(
+                    idx_mapping, query_start_loc, pos
+                )
 
     def capture_model(self) -> None:
         if self.num_speculative_steps == 1:
@@ -186,7 +193,6 @@ class EagleSpeculator:
     def propose(
         self,
         input_batch: InputBatch,
-        sampling_metadata: SamplingMetadata,
         # [num_tokens, hidden_size]
         last_hidden_states: torch.Tensor,
         # num_layers x [num_tokens, hidden_size]
@@ -195,10 +201,14 @@ class EagleSpeculator:
         num_sampled: torch.Tensor,
         # [num_reqs]
         num_rejected: torch.Tensor,
-        # [num_reqs]
+        # [max_num_reqs]
         last_sampled: torch.Tensor,
-        # [num_reqs]
+        # [max_num_reqs]
         next_prefill_tokens: torch.Tensor,
+        # [max_num_reqs]
+        temperature: torch.Tensor,
+        # [max_num_reqs]
+        seeds: torch.Tensor,
     ) -> torch.Tensor:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
@@ -231,29 +241,34 @@ class EagleSpeculator:
         last_hidden_states, hidden_states = self.run_model(
             num_tokens,
             input_batch.attn_metadata,
+            input_batch.slot_mappings,
             num_tokens_across_dp=None,  # FIXME
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
 
         num_reqs = input_batch.num_reqs
-        cu_num_logits = input_batch.cu_num_logits[:num_reqs]
         # NOTE(woosuk): For draft sampling, we only consider the temperature
         # and ignore the other sampling parameters such as top_k and top_p,
         # for simplicity and performance.
         # While this may slightly degrade the acceptance rate, it does not
         # affect the output distribution after rejection sampling.
-        temperature = self.temperature[:num_reqs]
-        seeds = self.seeds[:num_reqs]
-        pos = self.input_buffers.positions[:num_reqs]
+        idx_mapping = self.idx_mapping[:num_reqs]
+        idx_mapping.copy_(input_batch.idx_mapping)
+        self.temperature.copy_(temperature)
+        self.seeds.copy_(seeds)
         # Gather the values and copy them to the pre-allocated buffers.
-        torch.gather(sampling_metadata.temperature, 0, cu_num_logits, out=temperature)
-        torch.gather(sampling_metadata.seeds, 0, cu_num_logits, out=seeds)
+        pos = self.input_buffers.positions[:num_reqs]
         torch.gather(input_batch.positions, 0, last_token_indices, out=pos)
         # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
         # used for draft and target sampling.
         draft_tokens = gumbel_sample(
-            logits, temperature, seeds, pos + 1, apply_temperature=True
+            logits,
+            idx_mapping,
+            self.temperature,
+            self.seeds,
+            pos + 1,
+            apply_temperature=True,
         )
         if self.num_speculative_steps == 1:
             # Early exit.
@@ -273,10 +288,9 @@ class EagleSpeculator:
             self.max_model_len,
             self.max_num_reqs,
         )
-        query_start_loc = self.input_buffers.query_start_loc
-        query_start_loc_gpu = query_start_loc.gpu[: num_reqs + 1]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc_gpu, pos
+            idx_mapping, query_start_loc, pos
         )
 
         cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
@@ -286,10 +300,9 @@ class EagleSpeculator:
             return self.draft_tokens[:num_reqs]
 
         # Run eager mode.
-        query_start_loc.np[: num_reqs + 1] = np.arange(num_reqs + 1)
-        query_start_loc_cpu = query_start_loc.cpu[: num_reqs + 1]
-        # HACK(woosuk)
-        seq_lens_np = np.full(num_reqs, self.max_model_len, dtype=np.int32)
+        query_start_loc_cpu = torch.arange(
+            num_reqs + 1, dtype=torch.int32, device="cpu"
+        )
         block_tables = [x[:num_reqs] for x in self.block_tables.input_block_tables]
 
         # FIXME(woosuk): This is UNSAFE!!
@@ -297,16 +310,20 @@ class EagleSpeculator:
             attn_metadata_builders=self.attn_metadata_builders,
             num_reqs=num_reqs,
             num_tokens=num_reqs,
-            query_start_loc_gpu=query_start_loc_gpu,
+            query_start_loc_gpu=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens=self.input_buffers.seq_lens[:num_reqs],
-            seq_lens_np=seq_lens_np,
-            num_computed_tokens_cpu=None,  # FIXME
+            max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
         )
-        self.generate_draft(num_reqs, attn_metadata, num_tokens_across_dp=None)  # FIXME
+        slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings, self.kv_cache_config
+        )
+        self.generate_draft(
+            num_reqs, attn_metadata, slot_mappings_by_layer, num_tokens_across_dp=None
+        )  # FIXME
         return self.draft_tokens[:num_reqs]
 
 
@@ -317,6 +334,7 @@ def _prepare_eagle_inputs_kernel(
     eagle_positions_ptr,
     target_input_ids_ptr,
     target_positions_ptr,
+    idx_mapping_ptr,
     last_sampled_ptr,
     next_prefill_tokens_ptr,
     num_sampled_ptr,
@@ -325,6 +343,8 @@ def _prepare_eagle_inputs_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+
     query_start = tl.load(query_start_loc_ptr + batch_idx)
     query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
     query_len = query_end - query_start
@@ -335,11 +355,11 @@ def _prepare_eagle_inputs_kernel(
 
     num_sampled = tl.load(num_sampled_ptr + batch_idx)
     if num_sampled > 0:
-        next_token = tl.load(last_sampled_ptr + batch_idx).to(tl.int32)
+        next_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
     else:
         # Chunked prefilling.
         # Get the next prefill token.
-        next_token = tl.load(next_prefill_tokens_ptr + batch_idx)
+        next_token = tl.load(next_prefill_tokens_ptr + req_state_idx)
 
     # Shift target_input_ids by one.
     for i in range(1, query_len, BLOCK_SIZE):
@@ -367,9 +387,9 @@ def prepare_eagle_inputs(
     num_sampled: torch.Tensor,
     # [num_reqs]
     num_rejected: torch.Tensor,
-    # [num_reqs]
+    # [max_num_reqs]
     last_sampled: torch.Tensor,
-    # [num_reqs]
+    # [max_num_reqs]
     next_prefill_tokens: torch.Tensor,
 ) -> torch.Tensor:
     num_reqs = input_batch.num_reqs
@@ -384,6 +404,7 @@ def prepare_eagle_inputs(
         input_buffers.positions,
         input_batch.input_ids,
         input_batch.positions,
+        input_batch.idx_mapping,
         last_sampled,
         next_prefill_tokens,
         num_sampled,
@@ -487,7 +508,7 @@ def prepare_eagle_decode(
         input_buffers.positions,
         input_hidden_states,
         input_hidden_states.stride(0),
-        input_buffers.query_start_loc.gpu,
+        input_buffers.query_start_loc,
         input_buffers.seq_lens,
         hidden_size,
         max_model_len,

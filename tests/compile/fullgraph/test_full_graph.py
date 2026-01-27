@@ -10,10 +10,10 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ...utils import create_new_process_for_each_test
 
@@ -62,7 +62,10 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
             TEST_MODELS.append(
                 (
                     "alexm-nm/tinyllama-24-marlin24-4bit-g128",
-                    {"quantization": "gptq_marlin_24"},
+                    {
+                        "quantization": "gptq_marlin_24",
+                        "allow_deprecated_quantization": True,
+                    },
                 )
             )
 

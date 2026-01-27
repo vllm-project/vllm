@@ -209,12 +209,21 @@ if [[ $commands == *"--shard-id="* ]]; then
     wait "${pid}"
     STATUS+=($?)
   done
+  at_least_one_shard_with_tests=0
   for st in "${STATUS[@]}"; do
-    if [[ ${st} -ne 0 ]]; then
+    if [[ ${st} -ne 0 ]] && [[ ${st} -ne 5 ]]; then
       echo "One of the processes failed with $st"
       exit "${st}"
+    elif [[ ${st} -eq 5 ]]; then
+      echo "Shard exited with status 5 (no tests collected) - treating as success"
+    else # This means st is 0
+      at_least_one_shard_with_tests=1
     fi
   done
+  if [[ ${#STATUS[@]} -gt 0 && ${at_least_one_shard_with_tests} -eq 0 ]]; then
+    echo "All shards reported no tests collected. Failing the build."
+    exit 1
+  fi
 else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \

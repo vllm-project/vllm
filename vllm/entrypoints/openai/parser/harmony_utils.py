@@ -43,8 +43,8 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionToolsParam,
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
@@ -187,14 +187,9 @@ def parse_response_input(
     if "type" not in response_msg or response_msg["type"] == "message":
         role = response_msg["role"]
         content = response_msg["content"]
-        if role == "system":
-            # User is trying to set a system message. Change it to:
-            # <|start|>developer<|message|># Instructions
-            # {instructions}<|end|>
-            role = "developer"
-            text_prefix = "Instructions:\n"
-        else:
-            text_prefix = ""
+        # Add prefix for developer messages.
+        # <|start|>developer<|message|># Instructions {instructions}<|end|>
+        text_prefix = "Instructions:\n" if role == "developer" else ""
         if isinstance(content, str):
             msg = Message.from_role_and_content(role, text_prefix + content)
         else:

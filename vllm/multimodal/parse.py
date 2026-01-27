@@ -22,8 +22,7 @@ from typing_extensions import assert_never
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
-from .audio import AudioResampler
-from .base import MediaWithBytes
+from .audio import AudioResampler, AudioSpec, normalize_audio
 from .inputs import (
     AudioItem,
     HfAudioItem,
@@ -36,6 +35,7 @@ from .inputs import (
     MultiModalKwargsItems,
     VideoItem,
 )
+from .media import MediaWithBytes
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -384,6 +384,13 @@ class VideoEmbeddingItems(EmbeddingItems):
         super().__init__(data, "video", expected_hidden_size)
 
 
+class VisionChunkProcessorItems(ProcessorBatchItems[Any]):
+    """Processor items for vision chunks (unified image and video chunks)."""
+
+    def __init__(self, data: Sequence[Any]) -> None:
+        super().__init__(data, "vision_chunk")
+
+
 _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 
@@ -456,6 +463,9 @@ class MultiModalDataParser:
     Args:
         target_sr (float, optional): Enables automatic resampling of audio
             items to the model's expected sampling rate.
+        target_channels (int, optional): Target number of audio channels.
+            If provided, normalizes audio to this many channels (e.g., 1 for mono).
+            If None, audio channels are passed through unchanged.
         expected_hidden_size (int, optional): Expected hidden dimension for
             embedding inputs. If provided, validates that user-supplied
             embeddings have the correct hidden size to prevent crashes
@@ -466,6 +476,7 @@ class MultiModalDataParser:
         self,
         *,
         target_sr: float | None = None,
+        target_channels: int | None = None,
         audio_resample_method: Literal["librosa", "scipy"] = "librosa",
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
@@ -476,6 +487,7 @@ class MultiModalDataParser:
             target_sr=target_sr,
             method=audio_resample_method,
         )
+        self.target_channels = target_channels
         self.video_needs_metadata = video_needs_metadata
         self.expected_hidden_size = expected_hidden_size
 
@@ -565,6 +577,11 @@ class MultiModalDataParser:
             else:
                 new_audio = self.audio_resampler.resample(audio, orig_sr=orig_sr)
 
+            # Apply channel normalization if target_channels is set
+            if self.target_channels is not None:
+                spec = AudioSpec(target_channels=self.target_channels)
+                new_audio = normalize_audio(new_audio, spec)
+
             new_audios.append(new_audio)
 
         return AudioProcessorItems(new_audios)
@@ -642,11 +659,23 @@ class MultiModalDataParser:
 
         return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
+    def _parse_vision_chunk_data(
+        self,
+        data: ModalityData[Any],
+    ) -> ModalityDataItems[Any, Any] | None:
+        """Parse vision chunk data (unified image and video chunks)."""
+        if data is None or self._is_empty(data):
+            return None
+        if self.is_embeddings(data):
+            raise ValueError("Do not support embedding data for vision_chunk right now")
+        return VisionChunkProcessorItems(data)
+
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {
             "audio": self._parse_audio_data,
             "image": self._parse_image_data,
             "video": self._parse_video_data,
+            "vision_chunk": self._parse_vision_chunk_data,
         }
 
     def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:

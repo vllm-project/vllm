@@ -299,7 +299,7 @@ def test_compilation_config():
 
 
 def test_attention_config():
-    from vllm.attention.backends.registry import AttentionBackendEnum
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 
