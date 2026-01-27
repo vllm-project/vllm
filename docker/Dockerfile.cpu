@@ -25,7 +25,7 @@
 ######################### COMMON BASE IMAGE #########################
 FROM ubuntu:22.04 AS base-common
 
-WORKDIR /vllm-workspace
+WORKDIR /workspace
 
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
@@ -109,7 +109,7 @@ ENV VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI}
 ARG VLLM_CPU_AMXBF16=1
 ENV VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}
 
-WORKDIR /vllm-workspace/vllm
+WORKDIR /vllm-workspace
 
 # Copy build requirements
 COPY requirements/cpu-build.txt requirements/build.txt
@@ -123,13 +123,13 @@ RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/vllm-workspace/vllm/.deps,sharing=locked \
+    --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 ######################### TEST DEPS #########################
 FROM base AS vllm-test-deps
 
-WORKDIR /vllm-workspace/vllm
+WORKDIR /vllm-workspace
 
 # Copy test requirements
 COPY requirements/test.in requirements/cpu-test.in
@@ -157,7 +157,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ######################### DEV IMAGE #########################
 FROM vllm-build AS vllm-dev
 
-WORKDIR /vllm-workspace/vllm
+WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -174,7 +174,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py develop
 
-COPY --from=vllm-test-deps /vllm-workspace/vllm/requirements/cpu-test.txt requirements/test.txt
+COPY --from=vllm-test-deps /vllm-workspace/requirements/cpu-test.txt requirements/test.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/dev.txt && \
@@ -188,7 +188,7 @@ FROM vllm-test-deps AS vllm-test
 WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=vllm-build,src=/vllm-workspace/vllm/dist,target=dist \
+    --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
 
 ADD ./tests/ ./tests/
@@ -196,9 +196,6 @@ ADD ./examples/ ./examples/
 ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./.buildkite/ ./.buildkite/
-
-# Create symlink for /workspace to maintain backward compatibility
-RUN ln -sf /vllm-workspace /workspace
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -211,7 +208,7 @@ WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=bind,from=vllm-build,src=/vllm-workspace/vllm/dist,target=dist \
+    --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
 
 # Add labels to document build configuration
