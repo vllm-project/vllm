@@ -595,6 +595,9 @@ class CompilationConfig:
 
     bs_to_padded_graph_size: list[int] = field(default_factory=list, init=False)
     """Runtime map from batch size to cudagraph padded size."""
+    static_all_moe_layers: list[str] = field(default_factory=list, init=False)
+    """The names of all the MOE layers in the model
+    """
 
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
