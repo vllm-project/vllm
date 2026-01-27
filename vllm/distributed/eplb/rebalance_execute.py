@@ -6,6 +6,7 @@ The actual execution of the rearrangement.
 This involves the exchange of expert weights between GPUs.
 """
 
+from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -19,6 +20,9 @@ from torch.distributed import (
     get_global_rank,
 )
 
+import vllm.envs as envs
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -36,6 +40,137 @@ class RecvMetadata:
     """Expert ids (num_local_experts,) of remote primary experts."""
     recv_dst_rows: np.ndarray
     """Target expert indices (num_local_experts,) in local tensors to send."""
+
+
+class EplbCommunicator(ABC):
+    """Abstract EPLB communicator for expert weight transfers.
+
+    Implementations provide P2P send/recv and execution semantics.
+    """
+
+    @abstractmethod
+    def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
+        pass
+
+    @abstractmethod
+    def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
+        pass
+
+    @abstractmethod
+    def execute(self) -> None:
+        pass
+
+
+class TorchDistributedEplbCommunicator(EplbCommunicator):
+    """EPLB communicator backed by torch.distributed isend/irecv."""
+
+    def __init__(
+        self,
+        ep_group: ProcessGroup,
+        cuda_stream: torch.cuda.Stream | None = None,
+    ) -> None:
+        self._ep_group = ep_group
+        self._cuda_stream = cuda_stream
+        self._p2p_ops: list[P2POp] = []
+        self._rank_to_global = {
+            rank: get_global_rank(ep_group, rank) for rank in range(ep_group.size())
+        }
+
+    def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
+        self._p2p_ops.append(
+            P2POp(
+                torch.distributed.isend,
+                tensor,
+                self._rank_to_global[dst_rank],
+            )
+        )
+
+    def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
+        self._p2p_ops.append(
+            P2POp(
+                torch.distributed.irecv,
+                tensor,
+                self._rank_to_global[src_rank],
+            )
+        )
+
+    def execute(self) -> None:
+        if not self._p2p_ops:
+            return
+        if self._cuda_stream is not None:
+            with torch.cuda.stream(self._cuda_stream):
+                reqs = batch_isend_irecv(self._p2p_ops)
+                for req in reqs:
+                    req.wait()
+        else:
+            reqs = batch_isend_irecv(self._p2p_ops)
+            for req in reqs:
+                req.wait()
+
+
+class PyNcclEplbCommunicator(EplbCommunicator):
+    """EPLB communicator backed by PyNcclCommunicator using ncclSend/ncclRecv."""
+
+    def __init__(
+        self,
+        pynccl_comm: PyNcclCommunicator,
+        cuda_stream: torch.cuda.Stream | None = None,
+    ) -> None:
+        self._pynccl_comm = pynccl_comm
+        self._cuda_stream = cuda_stream
+        # Track if group has been started
+        self._group_started = False
+
+    def _ensure_group_started(self) -> None:
+        """Start NCCL group on first add_send/add_recv call."""
+        if not self._group_started:
+            self._pynccl_comm.group_start()
+            self._group_started = True
+
+    def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
+        self._ensure_group_started()
+        self._pynccl_comm.send(tensor, dst_rank, stream=self._cuda_stream)
+
+    def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
+        self._ensure_group_started()
+        self._pynccl_comm.recv(tensor, src_rank, stream=self._cuda_stream)
+
+    def execute(self) -> None:
+        if self._group_started:
+            self._pynccl_comm.group_end()
+            self._group_started = False
+
+
+def _create_eplb_communicator(
+    ep_group: ProcessGroup,
+    cuda_stream: torch.cuda.Stream | None,
+) -> EplbCommunicator:
+    backend = envs.VLLM_EPLB_COMMUNICATOR
+    if backend == "pynccl":
+        group_coordinator = get_ep_group()
+        device_comm = group_coordinator.device_communicator
+        pynccl_comm = None if device_comm is None else device_comm.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled or not pynccl_comm.available:
+            logger.warning(
+                "EPLB communicator 'pynccl' requested but unavailable; "
+                "falling back to torch.distributed."
+            )
+        else:
+            try:
+                return PyNcclEplbCommunicator(
+                    pynccl_comm=pynccl_comm,
+                    cuda_stream=cuda_stream,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to initialize PyNcclEplbCommunicator (%s); "
+                    "falling back to torch.distributed.",
+                    exc,
+                )
+    return TorchDistributedEplbCommunicator(
+        ep_group=ep_group,
+        cuda_stream=cuda_stream,
+    )
 
 
 # Type alias for the result of move_to_buffer or transfer_layer
@@ -248,11 +383,10 @@ def move_to_buffer(
                 for w, b in zip(expert_weights, expert_weights_buffers):
                     b[dst].copy_(w[src_local], non_blocking=True)
 
-    p2p_ops: list[P2POp] = []
-
-    # Pre-compute global ranks mapping
-    ep_size = ep_group.size()
-    rank_to_global = {rank: get_global_rank(ep_group, rank) for rank in range(ep_size)}
+    communicator = _create_eplb_communicator(
+        ep_group=ep_group,
+        cuda_stream=cuda_stream,
+    )
 
     # 2. Post sends
     if send_count > 0:
@@ -284,15 +418,8 @@ def move_to_buffer(
             if recver_pos < len(ranks_to_recv):
                 recv_ranks.append(ranks_to_recv[recver_pos])
             for dst in recv_ranks:
-                dst_global = rank_to_global[dst]
-                p2p_ops += [
-                    P2POp(
-                        torch.distributed.isend,
-                        w[src],
-                        dst_global,
-                    )
-                    for w in expert_weights
-                ]
+                for w in expert_weights:
+                    communicator.add_send(w[src], dst)
 
     # 3. Post recvs
     if recv_count > 0:
@@ -321,26 +448,11 @@ def move_to_buffer(
                 src = ranks_to_send[recver_pos // num_dst_per_sender]
             else:
                 src = ranks_to_send[recver_pos - remainder_start]
-            src_global = rank_to_global[src]
-            p2p_ops += [
-                P2POp(
-                    torch.distributed.irecv,
-                    b[dst],
-                    src_global,
-                )
-                for b in expert_weights_buffers
-            ]
+            for b in expert_weights_buffers:
+                communicator.add_recv(b[dst], src)
 
     # 4. Execute the P2P operations. The real communication happens here.
-    if p2p_ops and cuda_stream is not None:
-        with torch.cuda.stream(cuda_stream):
-            reqs = batch_isend_irecv(p2p_ops)
-            for req in reqs:
-                req.wait()
-    elif p2p_ops:
-        reqs = batch_isend_irecv(p2p_ops)
-        for req in reqs:
-            req.wait()
+    communicator.execute()
     # wait for the communication to finish
     return (
         is_unchanged,

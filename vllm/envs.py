@@ -1626,6 +1626,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
+    # Backend for EPLB expert weight communication
+    "VLLM_EPLB_COMMUNICATOR": env_with_choices(
+        "VLLM_EPLB_COMMUNICATOR",
+        "torch",
+        ["torch", "pynccl"],
+    ),
 }
 
 
