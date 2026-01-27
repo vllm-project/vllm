@@ -51,6 +51,7 @@ from vllm.v1.worker.gpu.kv_connector import (
     KVConnector,
     get_kv_connector,
 )
+from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -165,6 +166,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         # Structured outputs worker.
         self.structured_outputs_worker = StructuredOutputsWorker(self.device)
+        # LoRA-related workers.
+        self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
 
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
@@ -418,6 +421,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.supports_mm_inputs:
                 self.encoder_runner.remove_request(req_id)
             self.prompt_logprobs_worker.remove_request(req_id)
+            self.lora_state.remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
         if self.supports_mm_inputs:
@@ -436,7 +440,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 prompt_len=prompt_len,
                 prefill_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
-                lora_request=new_req_data.lora_request,
             )
             req_index = self.req_states.req_id_to_index[req_id]
 
@@ -461,6 +464,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.prompt_logprobs_worker.add_request(
                 req_id, req_index, new_req_data.sampling_params
             )
+            self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -831,7 +835,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.lora_config:
                 # Activate LoRA adapters.
-                lora_inputs = self.req_states.make_lora_inputs(
+                lora_inputs = self.lora_state.make_lora_inputs(
                     input_batch.req_ids,
                     input_batch.idx_mapping_np,
                     input_batch.num_scheduled_tokens,

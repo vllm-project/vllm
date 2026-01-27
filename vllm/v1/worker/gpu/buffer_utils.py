@@ -24,11 +24,9 @@ def async_copy_to_gpu(
     if out is None:
         assert device is not None
         out = torch.empty_like(x, device=device)
-    assert out.is_cuda
 
-    tmp = torch.empty_like(x, device="cpu", pin_memory=True)
     # CPU-to-CPU copy
-    tmp.copy_(x)
+    tmp = x.pin_memory()
     # CPU-to-GPU copy
     return out.copy_(tmp, non_blocking=True)
 
