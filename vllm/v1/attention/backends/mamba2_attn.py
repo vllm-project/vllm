@@ -168,17 +168,18 @@ class Mamba2AttentionMetadataBuilder(
                 - query_start_loc_p_cpu[req_idx].item()
             )
          
+            is_first = True
+
             while this_new_tokens > 0:
 
                 # are we starting a new sequence?
-                is_first = len(last_chunk_indices) == req_idx
-
                 if is_first and this_num_computed % block_size != 0:
                     # how many tokens to finish the block?
                     chunks_len = (
                         cdiv(this_num_computed, block_size) * block_size
                         - this_num_computed
                     )
+                    is_first = False
                 else:
                     # partition the next block into chunks
                     chunks_len = block_size
