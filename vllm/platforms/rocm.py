@@ -48,7 +48,6 @@ _ROCM_UNSUPPORTED_MODELS: list[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
-_ROCM_SWA_REASON = ()
 _ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {}
 _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
@@ -107,6 +106,12 @@ def on_gfx9() -> bool:
 
 
 @cache
+def on_gfx942() -> bool:
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx942"])
+
+
+@cache
 def on_gfx950() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     return any(arch in GPU_ARCH for arch in ["gfx950"])
@@ -156,6 +161,28 @@ def use_rocm_custom_paged_attention(
             and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN
             and sinks is None
         )
+
+
+@cache
+def flash_attn_triton_available() -> bool:
+    if not on_gfx1x():
+        return False
+    try:
+        from importlib.util import find_spec
+
+        if find_spec("flash_attn") is None:
+            return False
+        if find_spec("flash_attn.flash_attn_triton_amd") is None:
+            return False
+        if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") != "TRUE":
+            logger.info_once(
+                "Set FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE to enable "
+                "Flash Attention Triton backend on RDNA."
+            )
+            return False
+        return True
+    except ImportError:
+        return False
 
 
 class RocmPlatform(Platform):
@@ -287,10 +314,13 @@ class RocmPlatform(Platform):
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
             # Priority 3: Check for ROCM_ATTN (prefill-decode split)
-            from vllm.config import get_current_vllm_config
+            from vllm.config import get_current_vllm_config_or_none
 
-            vllm_config = get_current_vllm_config()
-            if vllm_config.attention_config.use_prefill_decode_attention:
+            vllm_config = get_current_vllm_config_or_none()
+            if (
+                vllm_config is not None
+                and vllm_config.attention_config.use_prefill_decode_attention
+            ):
                 logger.info("Using Rocm Attention backend.")
                 return AttentionBackendEnum.ROCM_ATTN.get_path()
 
@@ -340,7 +370,7 @@ class RocmPlatform(Platform):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if rocm_aiter_ops.is_enabled():
+        if rocm_aiter_ops.is_enabled() and on_gfx9():
             logger.info_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
@@ -350,6 +380,17 @@ class RocmPlatform(Platform):
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
             logger.info_once("Using Flash Attention backend for ViT model.")
+            return AttentionBackendEnum.FLASH_ATTN
+
+        # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend
+        if (
+            on_gfx1x()
+            and flash_attn_triton_available()
+            and (dtype == torch.float16 or dtype == torch.bfloat16)
+        ):
+            logger.info_once(
+                "Using Flash Attention (Triton backend) for ViT model on RDNA."
+            )
             return AttentionBackendEnum.FLASH_ATTN
 
         logger.info_once("Using Torch SDPA backend for ViT model.")

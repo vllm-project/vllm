@@ -10,7 +10,7 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -79,7 +79,7 @@ def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInf
     raise NotImplementedError(msg)
 
 
-def get_vit_attn_backend(
+def _get_vit_attn_backend(
     head_size: int,
     dtype: torch.dtype,
     *,
@@ -93,6 +93,54 @@ def get_vit_attn_backend(
         dtype,
         backend=attn_backend_override,
     )
+
+
+def get_vit_attn_backend(
+    head_size: int,
+    dtype: torch.dtype,
+) -> AttentionBackendEnum:
+    """
+    Get the attention backend for Vision Transformer.
+    """
+    try:
+        vllm_config: VllmConfig = get_current_vllm_config()
+        model_config = vllm_config.model_config
+        multimodal_config: MultiModalConfig | None = (
+            model_config.multimodal_config if model_config is not None else None
+        )
+    except AssertionError:
+        multimodal_config = None
+
+    attn_backend_override = (
+        multimodal_config.mm_encoder_attn_backend
+        if multimodal_config is not None
+        else None
+    )
+    attn_backend = _get_vit_attn_backend(
+        head_size,
+        dtype,
+        attn_backend_override=attn_backend_override,
+    )
+    return attn_backend
+
+
+def is_vit_use_data_parallel():
+    """
+    Get the tensor parallel type for Vision Transformer.
+    """
+    try:
+        vllm_config: VllmConfig = get_current_vllm_config()
+        model_config = vllm_config.model_config
+        multimodal_config: MultiModalConfig | None = (
+            model_config.multimodal_config if model_config is not None else None
+        )
+    except AssertionError:
+        multimodal_config = None
+
+    mm_encoder_tp_mode = (
+        multimodal_config.mm_encoder_tp_mode if multimodal_config is not None else None
+    )
+    return mm_encoder_tp_mode == "data"
 
 
 def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
