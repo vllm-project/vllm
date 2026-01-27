@@ -41,12 +41,15 @@ jobs:
           echo "Git describe: $(git describe --tags --always)"
 
       - name: Free disk space
-        run: |
-          # Free up disk space for the build
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/share/boost
-          df -h
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false      # Keep tool cache for Python setup
+          android: true          # ~12GB
+          dotnet: true           # ~6GB
+          haskell: true          # ~5GB
+          large-packages: true   # ~5GB
+          docker-images: true    # ~3GB
+          swap-storage: true     # ~4GB
 
       - name: Set up Python
         uses: actions/setup-python@v5
