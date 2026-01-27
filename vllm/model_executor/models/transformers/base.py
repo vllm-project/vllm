@@ -166,7 +166,7 @@ class Base(
         self.hf_to_vllm_mapper = WeightsMapper()
         orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
 
-        if Version(transformers.__version__) >= Version("5.0.0.dev0"):
+        if Version(transformers.__version__) >= Version("5.0.0"):
             from transformers.conversion_mapping import (
                 WeightRenaming,
                 get_model_conversion_mapping,

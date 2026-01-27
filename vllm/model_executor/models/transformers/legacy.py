@@ -33,7 +33,7 @@ class LegacyMixin:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         # In Transformers v5 this is handled by the conversion mapping
-        if Version(transformers.__version__) < Version("5"):
+        if Version(transformers.__version__) < Version("5.0.0"):
             # Replace legacy suffixes used for norms
             self.hf_to_vllm_mapper.orig_to_new_suffix = {
                 ".gamma": ".weight",
