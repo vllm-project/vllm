@@ -875,17 +875,21 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
-    orig_tokenize_prompt_async = mock_engine.renderer.tokenize_prompt_async
+    serving_chat = _build_serving_chat(mock_engine)
 
+    orig_render_chat_request = serving_chat.render_chat_request
     captured_prompts = []
 
-    async def tokenize_prompt_async(prompt, **kwargs):
-        captured_prompts.append(prompt)
-        return await orig_tokenize_prompt_async(prompt, **kwargs)
+    async def render_chat_request(request):
+        result = await orig_render_chat_request(request)
 
-    mock_engine.renderer.tokenize_prompt_async = tokenize_prompt_async
+        assert isinstance(result, tuple)
+        conversation, engine_prompts = result
+        captured_prompts.extend(engine_prompts)
 
-    serving_chat = _build_serving_chat(mock_engine)
+        return result
+
+    serving_chat.render_chat_request = render_chat_request
 
     # Test cache_salt
     req = ChatCompletionRequest(
@@ -897,16 +901,18 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
 
-    engine_prompt = captured_prompts[0]
-    assert "cache_salt" not in engine_prompt
+    assert len(captured_prompts) == 1
+    assert "cache_salt" not in captured_prompts[0]
+
+    captured_prompts.clear()
 
     # Test with certain cache_salt
     req.cache_salt = "test_salt"
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
 
-    engine_prompt = captured_prompts[1]
-    assert engine_prompt.get("cache_salt") == "test_salt"
+    assert len(captured_prompts) == 1
+    assert captured_prompts[0]["cache_salt"] == "test_salt"
 
 
 @pytest.mark.asyncio
@@ -1006,11 +1012,11 @@ class TestServingChatWithHarmony:
     @pytest.fixture()
     def mock_engine(self) -> AsyncLLM:
         mock_engine = MagicMock(spec=AsyncLLM)
-        mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
         mock_engine.errored = False
         mock_engine.model_config = MockModelConfig()
         mock_engine.input_processor = MagicMock()
         mock_engine.io_processor = MagicMock()
+        mock_engine.renderer = _build_renderer(mock_engine.model_config)
         return mock_engine
 
     @pytest.fixture()
@@ -1617,11 +1623,11 @@ async def test_tool_choice_validation_without_parser():
     """Test that tool_choice='required' or named tool without tool_parser
     returns an appropriate error message."""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
         engine_client=mock_engine,
