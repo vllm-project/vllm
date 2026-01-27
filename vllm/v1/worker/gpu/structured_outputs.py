@@ -23,9 +23,18 @@ class StructuredOutputsWorker:
         if not grammar_req_ids:
             return
 
-        # Copy the bitmask.
+        # Copy the bitmask to the device.
+        # NOTE: We intentionally allocate the bitmask tensor on the current stream
+        # instead of the copy stream to enable memory reuse.
+        bitmask = torch.empty(
+            grammar_bitmask.shape, dtype=torch.int32, device=self.device
+        )
+        # NOTE: Since the bitmask tensor is allocated on the current stream, we need to
+        # wait for the current stream to finish before using the bitmask tensor.
+        current_stream = torch.cuda.current_stream(self.device)
+        self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
-            bitmask = async_copy_to_gpu(grammar_bitmask, device=self.device)
+            async_copy_to_gpu(grammar_bitmask, out=bitmask)
 
         # Construct bitmask -> logits mapping
         mapping: list[int] = []
@@ -45,8 +54,9 @@ class StructuredOutputsWorker:
             )
             logits_indices = logits_indices.to(device=self.device, non_blocking=True)
 
-        # Make sure the kernel is executed after the copy is finished.
-        torch.cuda.current_stream(self.device).wait_stream(self.copy_stream)
+        # NOTE: Since bitmask and logits_indices are copied in a separate copy stream,
+        # we need to make sure the kernel is executed after the copy is finished.
+        current_stream.wait_stream(self.copy_stream)
 
         num_masks = bitmask.shape[0]
         assert num_masks == len(mapping)
