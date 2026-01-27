@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
+import itertools
 from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
@@ -569,10 +570,7 @@ def replace_vision_chunk_video_placeholder(
         prompt_raw_parts = prompt_raw.split(video_placeholder)
         if len(prompt_raw_parts) == len(video_prompts) + 1:
             prompt_raw = "".join(
-                [
-                    prompt_raw_parts[i] + video_prompts[i]
-                    for i in range(len(video_prompts))
-                ]
+                itertools.chain.from_iterable(zip(prompt_raw_parts, video_prompts))
             )
             prompt_raw += prompt_raw_parts[-1]
         else:
