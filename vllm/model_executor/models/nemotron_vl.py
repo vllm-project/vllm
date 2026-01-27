@@ -45,10 +45,6 @@ from .interfaces import (
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
-IMG_START = "<img>"
-IMG_END = "</img>"
-IMG_CONTEXT = "<image>"
-
 
 def build_transform(input_size: int):
     return T.Compose(
@@ -183,10 +179,12 @@ def image_to_pixel_values_nemotron_vl(
     min_num: int,
     max_num: int,
     use_thumbnail: bool,
+    transform: T.Compose | None = None,
 ) -> torch.Tensor:
     target_ratios = get_nemotron_vl_target_ratios(min_num, max_num)
 
-    transform = build_transform(input_size=input_size)
+    if transform is None:
+        transform = build_transform(input_size=input_size)
 
     images = dynamic_preprocess_nemotron_vl(
         image,
@@ -200,11 +198,15 @@ def image_to_pixel_values_nemotron_vl(
 
 
 class NemotronVLProcessor(InternVLProcessor):
+    IMG_START = "<img>"
+    IMG_END = "</img>"
+    IMG_CONTEXT = "<image>"
+
     def __init__(
         self,
         config: PretrainedConfig,
         tokenizer: TokenizerLike,
-        image_processor: BaseImageProcessorFast,
+        image_processor: BaseImageProcessorFast | None = None,
         *,
         min_dynamic_patch: int | None = None,
         max_dynamic_patch: int | None = None,
@@ -236,11 +238,18 @@ class NemotronVLProcessor(InternVLProcessor):
         self.min_dynamic_patch = min_dynamic_patch
         self.max_dynamic_patch = max_dynamic_patch
         self.dynamic_image_size = dynamic_image_size
-        self.use_thumbnail: bool = self.image_processor.use_thumbnail
+
+        if image_processor is not None:
+            self.use_thumbnail = image_processor.use_thumbnail
+        else:
+            self.use_thumbnail = getattr(config, "use_thumbnail", True)
 
     @property
     def image_token_id(self) -> int:
-        return self.tokenizer.get_vocab()[IMG_CONTEXT]
+        return self.tokenizer.get_vocab()[self.IMG_CONTEXT]
+
+    def _get_transform(self) -> T.Compose:
+        return build_transform(input_size=self.image_size)
 
     def get_num_image_tokens(
         self,
@@ -283,9 +292,25 @@ class NemotronVLProcessor(InternVLProcessor):
                 min_num=min_num,
                 max_num=max_num,
                 use_thumbnail=self.use_thumbnail,
+                transform=self._get_transform(),
             )
             for image in images
         ]
+
+    def _replace_image_tokens(
+        self,
+        text: list[str],
+        pixel_values_lst: list[torch.Tensor],
+    ) -> list[str]:
+        """Replace <image> placeholders with image tokens."""
+        for pixel_values in pixel_values_lst:
+            num_patches = pixel_values.shape[0]
+            feature_size = num_patches * self.num_image_token
+            image_repl = self.get_image_repl(feature_size, num_patches)
+            # Use temporary placeholder to avoid replacing tokens we just inserted
+            NVL_IMAGE_CONTEXT = image_repl.full.replace("<image>", "<NVL_IMG_CONTEXT>")
+            text = [t.replace("<image>", NVL_IMAGE_CONTEXT, 1) for t in text]
+        return [t.replace("<NVL_IMG_CONTEXT>", self.IMG_CONTEXT) for t in text]
 
     def _preprocess_image(
         self,
@@ -311,15 +336,7 @@ class NemotronVLProcessor(InternVLProcessor):
                 ),
             }
 
-            for pixel_values in pixel_values_lst:
-                num_patches = pixel_values.shape[0]
-                feature_size = num_patches * self.num_image_token
-                image_repl = self.get_image_repl(feature_size, num_patches)
-                NVL_IMAGE_CONTEXT = image_repl.full.replace(
-                    "<image>", "<NVL_IMG_CONTEXT>"
-                )
-                text = [t.replace("<image>", NVL_IMAGE_CONTEXT, 1) for t in text]
-            text = [t.replace("<NVL_IMG_CONTEXT>", IMG_CONTEXT) for t in text]
+            text = self._replace_image_tokens(text, pixel_values_lst)
         return text, image_inputs
 
     def get_image_repl(
@@ -327,10 +344,10 @@ class NemotronVLProcessor(InternVLProcessor):
         feature_size: int,
         num_patches: int | None,
     ) -> PromptUpdateDetails[str]:
-        repl_features = IMG_CONTEXT * feature_size
-        repl_full = IMG_START + repl_features + IMG_END
+        repl_features = self.IMG_CONTEXT * feature_size
+        repl_full = self.IMG_START + repl_features + self.IMG_END
 
-        return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
+        return PromptUpdateDetails.select_text(repl_full, self.IMG_CONTEXT)
 
 
 class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
@@ -396,7 +413,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
-                hf_config=config.text_config,
+                hf_config=config.get_text_config(),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
@@ -413,7 +430,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
         if isinstance(quant_config, AWQConfig):
-            text_config = config.text_config
+            text_config = config.get_text_config()
             llm_quant_config = getattr(text_config, "quantization_config", None)
             if (not quant_config.modules_to_not_convert) and (
                 llm_quant_config is not None
@@ -429,10 +446,17 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
     ):
         return AutoModel.from_config(config.vision_config, trust_remote_code=True)
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
-        vit_hidden_size = config.vit_hidden_size
-        vision_projection_hidden_size = config.projector_hidden_size
-        llm_hidden_size = config.text_config.hidden_size
+    def _init_mlp1(
+        self,
+        config: PretrainedConfig,
+        vit_hidden_size: int | None = None,
+        vision_projection_hidden_size: int | None = None,
+    ) -> nn.Module:
+        if vit_hidden_size is None:
+            vit_hidden_size = config.vit_hidden_size
+        if vision_projection_hidden_size is None:
+            vision_projection_hidden_size = config.projector_hidden_size
+        llm_hidden_size = config.get_text_config().hidden_size
 
         return nn.Sequential(
             nn.LayerNorm(
@@ -465,10 +489,18 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
             x = x.permute(0, 2, 1, 3).contiguous()
         return x
 
+    def _call_vision_model(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """Call vision model and return embeddings.
+
+        Override this method in subclasses to handle different vision model
+        interfaces (e.g., SigLIP vs C-RADIO).
+        """
+        vit_embeds = self.vision_model(x=pixel_values).features
+        return vit_embeds.to(dtype=torch.bfloat16)
+
     def extract_feature(self, pixel_values: torch.Tensor) -> torch.Tensor:
         # https://huggingface.co/nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1/blob/main/modeling.py#L177
-        vit_embeds = self.vision_model(x=pixel_values).features
-        vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
+        vit_embeds = self._call_vision_model(pixel_values)
 
         h = w = int(vit_embeds.shape[1] ** 0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
@@ -523,15 +555,16 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         image_embeds = self.extract_feature(image_input["pixel_values_flat"])
 
         num_patches = image_input["num_patches"]
+        hidden_size = self.config.get_text_config().hidden_size
 
         # Only one image in the current batch
         if len(num_patches) == 1:
-            return (image_embeds.view(-1, self.config.text_config.hidden_size),)
+            return (image_embeds.view(-1, hidden_size),)
 
         # NOTE: Image embeddings are split into separate tensors for each image
         # by the size of each embedding.
         feature_size = image_embeds.shape[1]
-        image_embeds = image_embeds.view(-1, self.config.text_config.hidden_size)
+        image_embeds = image_embeds.view(-1, hidden_size)
         image_feature_sizes = [
             num_patches * feature_size for num_patches in num_patches
         ]
