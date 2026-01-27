@@ -40,10 +40,9 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
+            max_total_tokens=None,
             max_output_tokens=0,
             add_special_tokens=self.add_special_tokens,
-            max_total_tokens_param="max_model_len",
         )
 
 
@@ -139,10 +138,9 @@ class TokenizeChatRequest(OpenAIBaseModel):
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
+            max_total_tokens=None,
             max_output_tokens=0,
             add_special_tokens=self.add_special_tokens,
-            max_total_tokens_param="max_model_len",
         )
 
 
@@ -162,10 +160,9 @@ class DetokenizeRequest(OpenAIBaseModel):
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
+            max_total_tokens=None,
             max_output_tokens=0,
             needs_detokenization=True,
-            max_total_tokens_param="max_model_len",
         )
 
 

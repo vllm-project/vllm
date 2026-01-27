@@ -69,7 +69,7 @@ class ChatParams:
 class TokenizeParams:
     """Configuration to control how prompts are tokenized."""
 
-    max_total_tokens: int
+    max_total_tokens: int | None
     """
     Maximum allowed number of input + output tokens.
     
@@ -106,8 +106,11 @@ class TokenizeParams:
     """Override this to edit the message for validation errors."""
 
     @property
-    def max_input_tokens(self) -> int:
+    def max_input_tokens(self) -> int | None:
         """Maximum allowed number of input tokens."""
+        if self.max_total_tokens is None:
+            return None
+
         return self.max_total_tokens - self.max_output_tokens
 
     def __post_init__(self) -> None:
@@ -116,7 +119,11 @@ class TokenizeParams:
         max_input_tokens = self.max_input_tokens
         truncate_prompt_tokens = self.truncate_prompt_tokens
 
-        if max_output_tokens is not None and max_output_tokens > max_total_tokens:
+        if (
+            max_output_tokens is not None
+            and max_total_tokens is not None
+            and max_output_tokens > max_total_tokens
+        ):
             raise VLLMValidationError(
                 f"{self.max_output_tokens_param}={max_output_tokens}"
                 f"cannot be greater than "
@@ -144,9 +151,7 @@ class TokenizeParams:
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
 
-        max_length = tokenization_kwargs.pop(
-            "max_length", self.max_total_tokens - self.max_output_tokens
-        )
+        max_length = tokenization_kwargs.pop("max_length", self.max_input_tokens)
         truncate_prompt_tokens = tokenization_kwargs.pop(
             "truncate_prompt_tokens", self.truncate_prompt_tokens
         )
@@ -186,14 +191,9 @@ class TokenizeParams:
 
     def get_encode_kwargs(self) -> dict[str, Any]:
         """The arguments to pass to `tokenizer.encode`."""
-        truncate_prompt_tokens = self.truncate_prompt_tokens
-
-        if truncate_prompt_tokens is not None and truncate_prompt_tokens < 0:
-            truncate_prompt_tokens = self.max_input_tokens
-
         return dict(
-            truncation=truncate_prompt_tokens is not None,
-            max_length=truncate_prompt_tokens or self.max_input_tokens,
+            truncation=self.truncate_prompt_tokens is not None,
+            max_length=self.max_input_tokens,
             add_special_tokens=self.add_special_tokens,
         )
 
@@ -233,7 +233,7 @@ class TokenizeParams:
 
     def _apply_length_check(self, tokens: _S) -> _S:
         """Apply length checks to a token sequence."""
-        if len(tokens) > self.max_input_tokens:
+        if self.max_input_tokens is not None and len(tokens) > self.max_input_tokens:
             raise VLLMValidationError(
                 f"You passed {len(tokens)} input tokens and "
                 f"requested {self.max_output_tokens} output tokens. "
