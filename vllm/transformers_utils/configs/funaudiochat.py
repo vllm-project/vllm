@@ -5,6 +5,13 @@ from __future__ import annotations
 
 from transformers import PretrainedConfig
 
+# NOTE: Temporary shim for FunAudioChat checkpoints.
+# These checkpoints use `model_type="funaudiochat"`, which is not currently
+# recognized by released Transformers, and the public checkpoint does not
+# provide an `auto_map` to enable `trust_remote_code=True`.
+# Remove this file once Transformers adds native support (or the checkpoint
+# provides an `auto_map`) and vLLM can rely on `AutoConfig.from_pretrained()`.
+
 
 class FunAudioChatAudioEncoderConfig(PretrainedConfig):
     model_type = "funaudiochat_audio_encoder"
