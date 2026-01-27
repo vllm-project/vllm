@@ -349,11 +349,15 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 activation_quant_key = kFp8DynamicTensorSym
 
-            self.fp8_linear = init_fp8_linear_kernel(
-                activation_quant_key=activation_quant_key,
-                weight_quant_key=kFp8StaticTensorSym,
-                out_dtype=torch.get_default_dtype(),
-                module_name=self.__class__.__name__,
+            self.fp8_linear = (
+                init_fp8_linear_kernel(
+                    activation_quant_key=activation_quant_key,
+                    weight_quant_key=kFp8StaticTensorSym,
+                    out_dtype=torch.get_default_dtype(),
+                    module_name=self.__class__.__name__,
+                )
+                if not current_platform.is_xpu()
+                else None
             )
 
     def create_weights(

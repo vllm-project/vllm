@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization import (
 from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
-    Fp8LinearMethod,
+    Fp8OnlineLinearMethod,
     Fp8OnlineMoEMethod,
 )
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
@@ -300,7 +300,7 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
         return out.reshape(x.shape[:-1] + (layer.ipex_output_size,))
 
 
-class XPUFp8LinearMethod(Fp8LinearMethod):
+class XPUFp8LinearMethod(Fp8OnlineLinearMethod):
     def __init__(self, quant_config: Fp8Config):
         super().__init__(quant_config)
 
