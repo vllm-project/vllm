@@ -13,7 +13,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -85,6 +84,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTokenSym,
     kNvfp4Dynamic,
     kNvfp4Static,
+    pad_nvfp4_activation_for_cutlass,
+    pad_nvfp4_weight_for_cutlass,
+    slice_nvfp4_output,
     swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -945,41 +947,48 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             a2_scale=a2_scale,
         )
 
-    def apply(
+    @property
+    def is_monolithic(self) -> bool:
+        return self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            if layer.enable_eplb:
-                raise NotImplementedError(
-                    "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
-                )
-            # TODO(rob): this validation should happen at kernel selection
-            # time in the oracle rather than here.
-            assert layer.activation == "silu", (
-                f"Expected 'silu' activation but got {layer.activation}"
+        assert self.is_monolithic
+        assert self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+        if layer.enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
             )
-            assert not layer.renormalize
-            return apply_fi_trtllm_fp8_per_tensor_moe(
-                layer=layer,
-                hidden_states=x,
-                router_logits=router_logits,
-                routing_bias=layer.e_score_correction_bias,
-                global_num_experts=layer.global_num_experts,
-                top_k=layer.top_k,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
-
-        # Expert selection
-        topk_weights, topk_ids = router.select_experts(
+        # TODO(rob): this validation should happen at kernel selection
+        # time in the oracle rather than here.
+        assert layer.activation == "silu", (
+            f"Expected 'silu' activation but got {layer.activation}"
+        )
+        assert not layer.renormalize
+        return apply_fi_trtllm_fp8_per_tensor_moe(
+            layer=layer,
             hidden_states=x,
             router_logits=router_logits,
+            routing_bias=layer.e_score_correction_bias,
+            global_num_experts=layer.global_num_experts,
+            top_k=layer.top_k,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert not self.is_monolithic
 
         # TODO(rob): this validation should happen at kernel selection
         # time in the oracle rather than here.
@@ -990,7 +999,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
         assert self.kernel is not None
-        result = self.kernel(
+        return self.kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1002,8 +1011,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
-
-        return result
 
 
 ModelOptFp8Config.LinearMethodCls = ModelOptFp8LinearMethod
@@ -1276,9 +1283,16 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.weight = Parameter(weight, requires_grad=False)
         else:
+            # Swizzle block scales and pad the packed NVFP4 weights for kernel
+            # alignment (CUTLASS/FlashInfer require K and N divisible by 32).
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
             layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
-            layer.weight = Parameter(layer.weight.data, requires_grad=False)
+
+            weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
+                layer.weight.data
+            )
+            layer.weights_padding_cols = weights_padding_cols
+            layer.weight = Parameter(weight, requires_grad=False)
 
     def apply(
         self,
@@ -1300,10 +1314,11 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             )
 
         output_dtype = x.dtype
-        output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv, self.backend)
+        x_fp4, x_blockscale = scaled_fp4_quant(
+            x, layer.input_scale_inv, is_sf_swizzled_layout=True, backend=self.backend
+        )
 
         # validate dtypes of quantized input, input block scale,
         # weight and weight_blockscale
@@ -1313,6 +1328,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         assert layer.weight_scale.dtype == torch.float8_e4m3fn
         assert layer.alpha.dtype == torch.float32
 
+        # Pad activations to match weight K-dimension padding
+        weights_padding_cols = getattr(layer, "weights_padding_cols", 0)
+        output_size = layer.output_size_per_partition
+        output_shape = [x.shape[0], output_size]
+        x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
+
         mm_args = (
             x_fp4,
             layer.weight,
@@ -1321,12 +1342,16 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.alpha,
             output_dtype,
         )
+
         if self.backend.startswith("flashinfer-"):
             backend_name = self.backend[len("flashinfer-") :]
             out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
         else:
             assert self.backend == "cutlass"
             out = cutlass_scaled_fp4_mm(*mm_args)
+
+        # Slice output to remove N-dimension padding
+        out = slice_nvfp4_output(out, output_size)
 
         if bias is not None:
             out = out + bias
@@ -1629,39 +1654,46 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def supports_eplb(self) -> bool:
         return True
 
-    def apply(
+    @property
+    def is_monolithic(self) -> bool:
+        return (
+            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+            and not self.moe.moe_parallel_config.enable_eplb
+        )
+
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
+        assert self.is_monolithic
+        assert (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
             and not layer.enable_eplb
-        ):
-            return flashinfer_trtllm_fp4_moe(
-                layer=layer,
-                x=x,
-                router_logits=router_logits,
-                top_k=layer.top_k,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                custom_routing_function=layer.custom_routing_function,
-                e_score_correction_bias=layer.e_score_correction_bias,
-            )
-
-        # Hidden_states in select_experts is only used to extract metadata
-        if isinstance(x, tuple):
-            x_routing, _ = x
-        else:
-            x_routing = x
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x_routing,
-            router_logits=router_logits,
         )
+
+        return flashinfer_trtllm_fp4_moe(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=layer.top_k,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            custom_routing_function=layer.custom_routing_function,
+            e_score_correction_bias=layer.e_score_correction_bias,
+        )
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert not self.is_monolithic
 
         # EPLB path
         if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:

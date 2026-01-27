@@ -302,7 +302,8 @@ std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a);
 
 void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
                       torch::Tensor& output_scale,
-                      torch::Tensor const& input_scale);
+                      torch::Tensor const& input_scale,
+                      bool is_sf_swizzled_layout);
 
 void scaled_fp4_experts_quant(
     torch::Tensor& output, torch::Tensor& output_scale,

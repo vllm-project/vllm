@@ -34,6 +34,7 @@ import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import DemoToolServer, MCPToolServer, ToolServer
@@ -62,7 +63,7 @@ from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
     log_non_default_args,
-    process_chat_template,
+    log_version_and_model,
     process_lora_modules,
     sanitize_message,
 )
@@ -261,6 +262,39 @@ def load_log_config(log_config_file: str | None) -> dict | None:
             "Failed to load log config from file %s: error %s", log_config_file, e
         )
         return None
+
+
+def get_uvicorn_log_config(args: Namespace) -> dict | None:
+    """
+    Get the uvicorn log config based on the provided arguments.
+
+    Priority:
+    1. If log_config_file is specified, use it
+    2. If disable_access_log_for_endpoints is specified, create a config with
+       the access log filter
+    3. Otherwise, return None (use uvicorn defaults)
+    """
+    # First, try to load from file if specified
+    log_config = load_log_config(args.log_config_file)
+    if log_config is not None:
+        return log_config
+
+    # If endpoints to filter are specified, create a config with the filter
+    if args.disable_access_log_for_endpoints:
+        from vllm.logging_utils import create_uvicorn_log_config
+
+        # Parse comma-separated string into list
+        excluded_paths = [
+            p.strip()
+            for p in args.disable_access_log_for_endpoints.split(",")
+            if p.strip()
+        ]
+        return create_uvicorn_log_config(
+            excluded_paths=excluded_paths,
+            log_level=args.uvicorn_log_level,
+        )
+
+    return None
 
 
 class AuthenticationMiddleware:
@@ -557,7 +591,8 @@ def build_app(args: Namespace) -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_: Request, exc: RequestValidationError):
         param = None
-        for error in exc.errors():
+        errors = exc.errors()
+        for error in errors:
             if "ctx" in error and "error" in error["ctx"]:
                 ctx_error = error["ctx"]["error"]
                 if isinstance(ctx_error, VLLMValidationError):
@@ -565,9 +600,9 @@ def build_app(args: Namespace) -> FastAPI:
                     break
 
         exc_str = str(exc)
-        errors_str = str(exc.errors())
+        errors_str = str(errors)
 
-        if exc.errors() and errors_str and errors_str != exc_str:
+        if errors and errors_str and errors_str != exc_str:
             message = f"{exc_str} {errors_str}"
         else:
             message = exc_str
@@ -662,9 +697,7 @@ async def init_app_state(
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
 
-    resolved_chat_template = await process_chat_template(
-        args.chat_template, engine_client, vllm_config.model_config
-    )
+    resolved_chat_template = load_chat_template(args.chat_template)
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
@@ -869,7 +902,7 @@ def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""
 
-    logger.info("vLLM API server version %s", VLLM_VERSION)
+    log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
@@ -930,8 +963,8 @@ async def run_server_worker(
     if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
         ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
-    # Load logging config for uvicorn if specified
-    log_config = load_log_config(args.log_config_file)
+    # Get uvicorn log config (from file or with endpoint filter)
+    log_config = get_uvicorn_log_config(args)
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
 
@@ -963,6 +996,7 @@ async def run_server_worker(
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
+            ssl_ciphers=args.ssl_ciphers,
             h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
             h11_max_header_count=args.h11_max_header_count,
             **uvicorn_kwargs,
