@@ -178,19 +178,18 @@ def _assert_mm_data_is_image_input(
 
 def _assert_mm_data_is_vision_chunk_input(
     mm_data: MultiModalDataDict | None,
-    image_count: int,
-    skipped_image_indices: list | None = None,
+    vision_chunk_count: int,
 ) -> None:
     assert mm_data is not None
     assert set(mm_data.keys()) == {"vision_chunk"}
 
-    image_data = mm_data.get("vision_chunk")
-    assert image_data is not None
+    vision_chunk_data = mm_data.get("vision_chunk")
+    assert vision_chunk_data is not None
 
-    assert isinstance(image_data, list) and len(image_data) == image_count
-    if skipped_image_indices is not None:
-        for i in skipped_image_indices:
-            assert image_data[i] is None
+    assert (
+        isinstance(vision_chunk_data, list)
+        and len(vision_chunk_data) == vision_chunk_count
+    )
 
 
 def _assert_mm_uuids(
@@ -2212,6 +2211,43 @@ async def test_parse_chat_messages_image_vision_chunk(
         {
             "role": "user",
             "content": f"{placeholder}\nAnalyze this image.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None], modality="vision_chunk")
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_video_vision_chunk(
+    kimi_k2_5_model_config,
+    video_url,
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this video."},
+                {
+                    "type": "video_url",
+                    "video_url": {"url": video_url},
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|kimi_k25_video_placeholder|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this video.",
         }
     ]
 
