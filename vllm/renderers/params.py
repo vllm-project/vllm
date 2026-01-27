@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeVar
 
 import torch
 
@@ -9,9 +9,6 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
-
-if TYPE_CHECKING:
-    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -71,14 +68,23 @@ class ChatParams:
 class TokenizeParams:
     """Configuration to control how prompts are tokenized."""
 
-    max_length: int | None = None
-    """Maximum allowable total input token length. If provided,
-    token inputs longer than this raise `ValueError`."""
+    max_total_tokens: int
+    """
+    Maximum allowed number of input + output tokens.
+    
+    Usually, this refers to the model's context length.
+    """
+
+    max_output_tokens: int = 0
+    """Maximum requested number of output tokens."""
 
     truncate_prompt_tokens: int | None = None
-    """Number of tokens to keep. `None` means no truncation.
-    `0` yields an empty list (and skips embeds).
-    `-1` maps to `model_config.max_model_len`."""
+    """
+    Number of tokens to keep:
+    - `None` means no truncation.
+    - `0` yields an empty list (and skips embeds).
+    - `-1` maps to `max_input_tokens`.
+    """
 
     add_special_tokens: bool = True
     """Whether to add special tokens."""
@@ -86,51 +92,61 @@ class TokenizeParams:
     needs_detokenization: bool = False
     """Whether the output prompt needs to contain text."""
 
-    @staticmethod
-    def from_config(
-        model_config: "ModelConfig",
-        *,
-        max_length: int | None = None,
-        truncate_prompt_tokens: int | None = None,
-        add_special_tokens: bool = True,
-        needs_detokenization: bool = False,
-    ) -> "TokenizeParams":
-        if truncate_prompt_tokens is not None and truncate_prompt_tokens < 0:
-            truncate_prompt_tokens = model_config.max_model_len
+    max_total_tokens_param: str = "max_total_tokens"
+    """Override this to edit the message for validation errors."""
 
-        return TokenizeParams(
-            max_length=max_length,
-            truncate_prompt_tokens=truncate_prompt_tokens,
-            add_special_tokens=add_special_tokens,
-            needs_detokenization=needs_detokenization,
-        )
+    max_output_tokens_param: str = "max_output_tokens"
+    """Override this to edit the message for validation errors."""
+
+    truncate_prompt_tokens_param: str = "truncate_prompt_tokens"
+    """Override this to edit the message for validation errors."""
+
+    @property
+    def max_input_tokens(self) -> int:
+        """Maximum allowed number of input tokens."""
+        return self.max_total_tokens - self.max_output_tokens
 
     def __post_init__(self) -> None:
+        max_total_tokens = self.max_total_tokens
+        max_output_tokens = self.max_output_tokens
+        max_input_tokens = self.max_input_tokens
         truncate_prompt_tokens = self.truncate_prompt_tokens
-        max_length = self.max_length
+
+        if max_output_tokens is not None and max_output_tokens > max_total_tokens:
+            raise VLLMValidationError(
+                f"{self.max_output_tokens_param}={max_output_tokens}"
+                f"cannot be greater than "
+                f"{self.max_total_tokens_param}={max_total_tokens=}. "
+                f"Please request fewer output tokens.",
+                parameter=self.max_output_tokens_param,
+                value=max_output_tokens,
+            )
 
         if (
-            max_length is not None
+            max_input_tokens is not None
             and truncate_prompt_tokens is not None
-            and truncate_prompt_tokens > max_length
+            and truncate_prompt_tokens > max_input_tokens
         ):
             raise VLLMValidationError(
-                f"{truncate_prompt_tokens=} cannot be greater than "
-                f"{max_length=}. Please select a smaller truncation size.",
-                parameter="truncate_prompt_tokens",
+                f"{self.truncate_prompt_tokens_param}={truncate_prompt_tokens} "
+                f"cannot be greater than {self.max_total_tokens_param} - "
+                f"{self.max_output_tokens_param} = {max_input_tokens}. "
+                f"Please request a smaller truncation size.",
+                parameter=self.truncate_prompt_tokens_param,
                 value=truncate_prompt_tokens,
             )
 
     def with_kwargs(self, tokenization_kwargs: dict[str, Any] | None):
-        if not tokenization_kwargs:
-            return self
-
-        max_length = self.max_length
+        max_length = self.max_total_tokens
+        max_input_tokens = self.max_input_tokens
         truncate_prompt_tokens = self.truncate_prompt_tokens
         add_special_tokens = self.add_special_tokens
         needs_detokenization = self.needs_detokenization
 
-        max_length = tokenization_kwargs.pop("max_length", max_length)
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
+
+        max_total_tokens = tokenization_kwargs.pop("max_length", max_length)
         truncate_prompt_tokens = tokenization_kwargs.pop(
             "truncate_prompt_tokens", truncate_prompt_tokens
         )
@@ -144,7 +160,7 @@ class TokenizeParams:
         # https://huggingface.co/docs/transformers/en/pad_truncation
         if truncation := tokenization_kwargs.pop("truncation", None):
             if truncation in (True, "longest_first"):
-                truncate_prompt_tokens = max_length
+                truncate_prompt_tokens = max_input_tokens
             elif truncation in (False, "do_not_truncate"):
                 truncate_prompt_tokens = None
             else:
@@ -159,16 +175,22 @@ class TokenizeParams:
             )
 
         return TokenizeParams(
-            max_length=max_length,
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_total_tokens - max_input_tokens,
             truncate_prompt_tokens=truncate_prompt_tokens,
             add_special_tokens=add_special_tokens,
             needs_detokenization=needs_detokenization,
         )
 
     def get_encode_kwargs(self) -> dict[str, Any]:
+        truncate_prompt_tokens = self.truncate_prompt_tokens
+
+        if truncate_prompt_tokens is not None and truncate_prompt_tokens < 0:
+            truncate_prompt_tokens = self.max_input_tokens
+
         return dict(
-            truncation=self.truncate_prompt_tokens is not None,
-            max_length=self.truncate_prompt_tokens,
+            truncation=truncate_prompt_tokens is not None,
+            max_length=truncate_prompt_tokens,
             add_special_tokens=self.add_special_tokens,
         )
 
@@ -193,13 +215,13 @@ class TokenizeParams:
 
     def _apply_length_check(self, tokens: _S) -> _S:
         """Apply length checks to a token sequence."""
-        max_length = self.max_length
-
-        if max_length is not None and len(tokens) > max_length:
+        if len(tokens) > self.max_input_tokens:
             raise VLLMValidationError(
-                f"This model's maximum context length is {max_length} tokens. "
-                f"However, your request has {len(tokens)} input tokens. "
-                "Please reduce the length of the input messages.",
+                f"You passed {len(tokens)} input tokens and "
+                f"requested {self.max_output_tokens} output tokens. "
+                f"However, the model's context length is only "
+                f"{self.max_total_tokens}. "
+                f"Please reduce the length of the input messages.",
                 parameter="input_tokens",
                 value=len(tokens),
             )

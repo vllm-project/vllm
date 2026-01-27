@@ -21,21 +21,24 @@ class EmbeddingCompletionRequest(
     PoolingBasicRequestMixin, CompletionRequestMixin, EmbedRequestMixin
 ):
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        max_total_tokens = model_config.max_model_len
         pooler_config = model_config.pooler_config
 
         if pooler_config:
             if pooler_config.enable_chunked_processing:
-                max_length = None
+                max_output_tokens = 0
             else:
-                max_length = pooler_config.max_embed_len
+                max_output_tokens = max_total_tokens - pooler_config.max_embed_len
         else:
-            max_length = model_config.max_model_len
+            max_output_tokens = 0
 
-        return TokenizeParams.from_config(
-            model_config,
-            max_length=max_length,
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=max_output_tokens,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_embed_len",
         )
 
 
@@ -48,21 +51,24 @@ class EmbeddingChatRequest(
     )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        max_total_tokens = model_config.max_model_len
         pooler_config = model_config.pooler_config
 
         if pooler_config:
             if pooler_config.enable_chunked_processing:
-                max_length = None
+                max_output_tokens = 0
             else:
-                max_length = pooler_config.max_embed_len
+                max_output_tokens = max_total_tokens - pooler_config.max_embed_len
         else:
-            max_length = model_config.max_model_len
+            max_output_tokens = 0
 
-        return TokenizeParams.from_config(
-            model_config,
-            max_length=max_length,
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=max_output_tokens,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_embed_len",
         )
 
 

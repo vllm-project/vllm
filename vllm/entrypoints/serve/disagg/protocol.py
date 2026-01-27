@@ -65,9 +65,10 @@ class GenerateRequest(BaseModel):
     )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        return TokenizeParams.from_config(
-            model_config,
-            max_length=model_config.max_model_len,
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
+            max_total_tokens_param="max_model_len",
         )
 
 

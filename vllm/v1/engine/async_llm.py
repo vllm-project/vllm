@@ -330,9 +330,9 @@ class AsyncLLM(EngineClient):
                 dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
             )
 
-        tok_params = TokenizeParams.from_config(self.model_config).with_kwargs(
-            tokenization_kwargs
-        )
+        tok_params = TokenizeParams(
+            max_total_tokens=self.model_config.max_model_len,
+        ).with_kwargs(tokenization_kwargs)
         tokenization_kwargs = tok_params.get_encode_kwargs()
 
         if isinstance(prompt, AsyncGenerator):

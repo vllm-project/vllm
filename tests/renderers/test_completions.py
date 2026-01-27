@@ -108,7 +108,8 @@ class TestRenderPrompt:
         tokens = [101, 7592, 2088]
         prompts = await renderer.render_completions_async(tokens)
         results = await renderer.tokenize_prompts_async(
-            prompts, TokenizeParams.from_config(renderer.config, max_length=100)
+            prompts,
+            TokenizeParams(max_total_tokens=100),
         )
 
         assert len(results) == 1
@@ -119,7 +120,8 @@ class TestRenderPrompt:
         token_lists = [[101, 7592, 2088], [102, 1234, 5678, 9012], [103, 4567]]
         prompts = await renderer.render_completions_async(token_lists)
         results = await renderer.tokenize_prompts_async(
-            prompts, TokenizeParams.from_config(renderer.config, max_length=100)
+            prompts,
+            TokenizeParams(max_total_tokens=100),
         )
 
         assert len(results) == 3
@@ -134,7 +136,8 @@ class TestRenderPrompt:
 
         prompts = await renderer.render_completions_async("Hello world")
         results = await renderer.tokenize_prompts_async(
-            prompts, TokenizeParams.from_config(renderer.config, max_length=100)
+            prompts,
+            TokenizeParams(max_total_tokens=100),
         )
 
         assert len(results) == 1
@@ -149,7 +152,8 @@ class TestRenderPrompt:
         text_list_input = ["Hello world", "How are you?", "Good morning"]
         prompts = await renderer.render_completions_async(text_list_input)
         results = await renderer.tokenize_prompts_async(
-            prompts, TokenizeParams.from_config(renderer.config, max_length=100)
+            prompts,
+            TokenizeParams(max_total_tokens=100),
         )
 
         assert len(results) == 3
@@ -164,7 +168,8 @@ class TestRenderPrompt:
 
         prompts = await renderer.render_completions_async("Hello world")
         results = await renderer.tokenize_prompts_async(
-            prompts, TokenizeParams.from_config(renderer.config, max_length=100)
+            prompts,
+            TokenizeParams(max_total_tokens=100),
         )
 
         assert len(results) == 1
@@ -182,8 +187,9 @@ class TestRenderPrompt:
         prompts = await renderer.render_completions_async("Hello world")
         results = await renderer.tokenize_prompts_async(
             prompts,
-            TokenizeParams.from_config(
-                renderer.config, max_length=200, truncate_prompt_tokens=50
+            TokenizeParams(
+                max_total_tokens=200,
+                truncate_prompt_tokens=50,
             ),
         )
 
@@ -205,15 +211,16 @@ class TestRenderPrompt:
         prompts = await renderer.render_completions_async("Hello world")
         results = await renderer.tokenize_prompts_async(
             prompts,
-            TokenizeParams.from_config(
-                renderer.config, max_length=200, truncate_prompt_tokens=-1
+            TokenizeParams(
+                max_total_tokens=200,
+                truncate_prompt_tokens=-1,
             ),
         )
 
         assert len(results) == 1
         call_args = mock_async_tokenizer.encode.call_args
         assert call_args.kwargs["truncation"] is True
-        assert call_args.kwargs["max_length"] == 100  # model's max_model_len
+        assert call_args.kwargs["max_length"] == 200
 
     @pytest.mark.asyncio
     async def test_token_truncation_last_elements(self, renderer):
@@ -222,8 +229,9 @@ class TestRenderPrompt:
         prompts = await renderer.render_completions_async(long_tokens)
         results = await renderer.tokenize_prompts_async(
             prompts,
-            TokenizeParams.from_config(
-                renderer.config, max_length=100, truncate_prompt_tokens=5
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=5,
             ),
         )
 
@@ -237,9 +245,10 @@ class TestRenderPrompt:
 
         prompts = await renderer.render_completions_async(long_tokens)
 
-        with pytest.raises(ValueError, match="maximum context length"):
+        with pytest.raises(ValueError, match="context length is only"):
             await renderer.tokenize_prompts_async(
-                prompts, TokenizeParams.from_config(renderer.config, max_length=100)
+                prompts,
+                TokenizeParams(max_total_tokens=100),
             )
 
     @pytest.mark.asyncio
@@ -254,9 +263,7 @@ class TestRenderPrompt:
         with pytest.raises(ValueError, match="`skip_tokenizer_init=True`"):
             await renderer_no_tokenizer.tokenize_prompts_async(
                 prompts,
-                TokenizeParams.from_config(
-                    renderer_no_tokenizer.config, max_length=100
-                ),
+                TokenizeParams(max_total_tokens=100),
             )
 
     @pytest.mark.asyncio
@@ -273,7 +280,10 @@ class TestRenderPrompt:
         prompts = await renderer.render_completions_async(tokens)
         results = await renderer.tokenize_prompts_async(
             prompts,
-            TokenizeParams.from_config(renderer.config, needs_detokenization=True),
+            TokenizeParams(
+                max_total_tokens=renderer.config.max_model_len,
+                needs_detokenization=True,
+            ),
         )
 
         assert len(results) == 1
@@ -298,7 +308,8 @@ class TestRenderEmbedPrompt:
 
         prompts = await renderer.render_completions_async(prompt_embeds=embed_bytes)
         results = await renderer.tokenize_prompts_async(
-            prompts, TokenizeParams.from_config(renderer.config)
+            prompts,
+            TokenizeParams(max_total_tokens=renderer.config.max_model_len),
         )
 
         assert len(results) == 1
@@ -318,7 +329,8 @@ class TestRenderEmbedPrompt:
             prompt_embeds=embed_bytes_list
         )
         results = await renderer.tokenize_prompts_async(
-            prompts, TokenizeParams.from_config(renderer.config)
+            prompts,
+            TokenizeParams(max_total_tokens=renderer.config.max_model_len),
         )
 
         assert len(results) == 2
@@ -335,7 +347,10 @@ class TestRenderEmbedPrompt:
         prompts = await renderer.render_completions_async(prompt_embeds=embed_bytes)
         results = await renderer.tokenize_prompts_async(
             prompts,
-            TokenizeParams.from_config(renderer.config, truncate_prompt_tokens=10),
+            TokenizeParams(
+                max_total_tokens=renderer.config.max_model_len,
+                truncate_prompt_tokens=10,
+            ),
         )
 
         assert len(results) == 1
@@ -354,7 +369,8 @@ class TestRenderEmbedPrompt:
 
             prompts = await renderer.render_completions_async(prompt_embeds=embed_bytes)
             results = await renderer.tokenize_prompts_async(
-                prompts, TokenizeParams.from_config(renderer.config)
+                prompts,
+                TokenizeParams(max_total_tokens=renderer.config.max_model_len),
             )
 
             assert len(results) == 1
@@ -368,7 +384,8 @@ class TestRenderEmbedPrompt:
 
         prompts = await renderer.render_completions_async(prompt_embeds=embed_bytes)
         results = await renderer.tokenize_prompts_async(
-            prompts, TokenizeParams.from_config(renderer.config)
+            prompts,
+            TokenizeParams(max_total_tokens=renderer.config.max_model_len),
         )
 
         assert len(results) == 1
@@ -390,7 +407,8 @@ class TestRenderEmbedPrompt:
             prompt_embeds=embed_bytes,
         )
         results = await renderer.tokenize_prompts_async(
-            prompts, TokenizeParams.from_config(renderer.config)
+            prompts,
+            TokenizeParams(max_total_tokens=renderer.config.max_model_len),
         )
 
         assert len(results) == 2

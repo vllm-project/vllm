@@ -31,11 +31,12 @@ class PoolingCompletionRequest(
     task: PoolingTask | None = None
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        return TokenizeParams.from_config(
-            model_config,
-            max_length=model_config.max_model_len,
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
         )
 
     def to_pooling_params(self):
@@ -57,11 +58,12 @@ class PoolingChatRequest(
     )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        return TokenizeParams.from_config(
-            model_config,
-            max_length=model_config.max_model_len,
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
         )
 
     def to_pooling_params(self):

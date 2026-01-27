@@ -378,23 +378,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        max_tokens = self.max_completion_tokens or self.max_tokens
+        if self.max_completion_tokens is not None:
+            max_output_tokens: int | None = self.max_completion_tokens
+            max_output_tokens_param = "max_completion_tokens"
+        else:
+            max_output_tokens = self.max_tokens
+            max_output_tokens_param = "max_tokens"
 
-        # Validate max_tokens before using it
-        if max_tokens is not None and max_tokens > model_config.max_model_len:
-            raise VLLMValidationError(
-                f"'max_completion_tokens' ({max_tokens}) cannot be greater than the "
-                f"model's maximum context length ({model_config.max_model_len}).",
-                parameter="max_completion_tokens",
-                value=max_tokens,
-            )
-
-        return TokenizeParams.from_config(
-            model_config,
-            max_length=model_config.max_model_len - (max_tokens or 0),
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=max_output_tokens or 0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             add_special_tokens=self.add_special_tokens,
             needs_detokenization=bool(self.echo and not self.return_token_ids),
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param=max_output_tokens_param,
         )
 
     # Default sampling parameters for chat completion requests

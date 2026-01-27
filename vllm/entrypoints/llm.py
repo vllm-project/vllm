@@ -817,9 +817,9 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
-        tok_params = TokenizeParams.from_config(self.model_config).with_kwargs(
-            tokenization_kwargs
-        )
+        tok_params = TokenizeParams(
+            max_total_tokens=self.model_config.max_model_len,
+        ).with_kwargs(tokenization_kwargs)
 
         engine_prompts = list[_TokenizedPrompt | _TokenizedEncDecPrompt]()
         for prompt in prompts if isinstance(prompts, Sequence) else [prompts]:
@@ -869,9 +869,9 @@ class LLM:
                 ),
             ),
         )
-        tok_params = TokenizeParams.from_config(self.model_config).with_kwargs(
-            tokenization_kwargs
-        )
+        tok_params = TokenizeParams(
+            max_total_tokens=self.model_config.max_model_len,
+        ).with_kwargs(tokenization_kwargs)
 
         engine_prompts = list[_TokenizedPrompt]()
         for conversation in conversations:
@@ -1503,9 +1503,9 @@ class LLM:
 
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
-        tok_params = TokenizeParams.from_config(model_config).with_kwargs(
-            tokenization_kwargs
-        )
+        tok_params = TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+        ).with_kwargs(tokenization_kwargs)
         encode_kwargs = tok_params.get_encode_kwargs()
 
         if model_config.is_cross_encoder:
@@ -1718,9 +1718,9 @@ class LLM:
                 dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
             )
 
-        tok_params = TokenizeParams.from_config(self.model_config).with_kwargs(
-            tokenization_kwargs
-        )
+        tok_params = TokenizeParams(
+            max_total_tokens=self.model_config.max_model_len,
+        ).with_kwargs(tokenization_kwargs)
 
         tokenization_kwargs = tok_params.get_encode_kwargs()
         engine_request = self.input_processor.process_inputs(

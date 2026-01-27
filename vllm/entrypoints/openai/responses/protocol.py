@@ -261,22 +261,12 @@ class ResponsesRequest(OpenAIBaseModel):
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        max_tokens = self.max_output_tokens
-
-        # Validate max_tokens before using it
-        if max_tokens is not None and max_tokens > model_config.max_model_len:
-            raise VLLMValidationError(
-                f"'max_output_tokens' ({max_tokens}) cannot be greater than the "
-                f"model's maximum context length ({model_config.max_model_len}).",
-                parameter="max_output_tokens",
-                value=max_tokens,
-            )
-
-        return TokenizeParams.from_config(
-            model_config,
-            max_length=model_config.max_model_len - (max_tokens or 0),
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=self.max_output_tokens or 0,
             truncate_prompt_tokens=self.truncation != "disabled",
-            add_special_tokens=not self.skip_special_tokens,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_output_tokens",
         )
 
     _DEFAULT_SAMPLING_PARAMS = {
