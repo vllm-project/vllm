@@ -1581,37 +1581,13 @@ class GPUModelRunner(
         num_scheduled_tokens_gpu = torch.from_numpy(num_scheduled_tokens).to(
             self.device, non_blocking=True
         )
-
-        # Compute seq_lens on GPU
         self.seq_lens.gpu[:num_reqs] = (
             self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens.gpu[num_reqs:].fill_(0)
-
-        # Compute positions on GPU
         self.positions.gpu[:total_num_scheduled_tokens] = (
             self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64) + arange_gpu
         )
-
-        # For M-RoPE, compute positions with delta: delta + num_computed + arange
-        # For XD-RoPE, simple incremental: num_computed + arange
-        if self.uses_mrope:
-            mrope_pos = (
-                self.mrope_position_delta.gpu[req_indices_gpu]
-                + self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
-                + arange_gpu
-            )
-            for dim in range(3):
-                self.mrope_positions.gpu[dim, :total_num_scheduled_tokens] = mrope_pos
-        elif self.uses_xdrope_dim > 0:
-            xdrope_pos = (
-                self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
-                + arange_gpu
-            )
-            for dim in range(self.uses_xdrope_dim):
-                self.xdrope_positions.gpu[dim, :total_num_scheduled_tokens] = xdrope_pos
-
-        # Compute slot mapping on GPU
         self.input_batch.block_table.compute_slot_mapping(
             req_indices_gpu, self.positions.gpu[:total_num_scheduled_tokens]
         )
@@ -1622,6 +1598,24 @@ class GPUModelRunner(
             total_num_scheduled_tokens,
             cu_num_tokens,
         )
+
+        if self.uses_mrope:
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+            mrope_pos = (
+                self.mrope_position_delta.gpu[req_indices_gpu]
+                + self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
+                + arange_gpu
+            )
+            for dim in range(3):
+                self.mrope_positions.gpu[dim, :total_num_scheduled_tokens] = mrope_pos
+        elif self.uses_xdrope_dim > 0:
+            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
+            xdrope_pos = (
+                self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
+                + arange_gpu
+            )
+            for dim in range(self.uses_xdrope_dim):
+                self.xdrope_positions.gpu[dim, :total_num_scheduled_tokens] = xdrope_pos
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
