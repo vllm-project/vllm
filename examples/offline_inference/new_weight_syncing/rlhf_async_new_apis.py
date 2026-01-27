@@ -34,7 +34,7 @@ import ray
 import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import vllm
 from vllm import SamplingParams
@@ -70,21 +70,23 @@ class MyLLM(vllm.AsyncLLMEngine):
         )
 
     async def generate_with_retry(
-        self, prompt: str, sampling_params: vllm.SamplingParams
+        self, prompt_token_ids: list[int], sampling_params: vllm.SamplingParams
     ) -> vllm.RequestOutput:
         finish_reason = "abort"
         while finish_reason == "abort":
             async for request_output in self.generate(
-                prompt, sampling_params, request_id=str(uuid.uuid4())
+                {"prompt_token_ids": prompt_token_ids},
+                sampling_params,
+                request_id=str(uuid.uuid4()),
             ):
                 output = request_output
             finish_reason = output.outputs[0].finish_reason
             if finish_reason == "abort":
                 print(
-                    f"ABORT, prompt: [{prompt}], "
-                    f"generated text: [{output.outputs[0].text}]"
+                    f"ABORT, prompt_token_ids: {prompt_token_ids}, "
+                    f"generated token_ids: {list(output.outputs[0].token_ids)}"
                 )
-            prompt += output.outputs[0].text
+            prompt_token_ids = prompt_token_ids + list(output.outputs[0].token_ids)
         return output
 
 
@@ -99,11 +101,6 @@ class TrainModel:
             model_name, dtype=torch.bfloat16
         )
         self.model.to(self.device)
-
-    def zero_weights(self):
-        """Zero out all model weights (simulates training step)."""
-        for name, p in self.model.named_parameters():
-            p.data.zero_()
 
     def get_weight_metadata(self):
         """Return weight names, dtypes, and shapes for weight transfer."""
@@ -181,6 +178,12 @@ prompts = [
     "The future of AI is",
 ]
 
+# Tokenize prompts to token IDs
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+prompt_token_ids_list = [
+    tokenizer.encode(prompt, add_special_tokens=False) for prompt in prompts
+]
+
 sampling_params = [
     SamplingParams(temperature=0, max_tokens=2),
     SamplingParams(temperature=0, max_tokens=32),
@@ -215,19 +218,14 @@ ray.get([train_handle, inference_handle])
 
 
 generation_futures = [
-    llm.generate_with_retry.remote(prompt, params)
-    for prompt, params in zip(prompts, sampling_params)
+    llm.generate_with_retry.remote(prompt_token_ids, params)
+    for prompt_token_ids, params in zip(prompt_token_ids_list, sampling_params)
 ]
 
 finished, pending = ray.wait(generation_futures, num_returns=1)
 
 # Pause generation in preparation for weight sync
 ray.get(llm.pause_generation.remote(wait_for_inflight_requests=False))
-
-# Simulate a training step by zeroing out all model weights.
-# In a real RLHF training loop the weights would be updated using the gradient
-# from an RL objective such as PPO on a reward model.
-# ray.get(train_model.zero_weights.remote())
 
 # Synchronize the updated weights to the inference engine using batched API.
 # Collect all weight metadata from the training actor
@@ -267,7 +265,8 @@ print("-" * 50)
 print("Requests that completed BEFORE weight change:")
 print("-" * 50)
 for output in finished_outputs:
-    print(f"Prompt: {output.prompt!r}")
+    prompt_text = tokenizer.decode(output.prompt_token_ids)
+    print(f"Prompt: {prompt_text!r}")
     print(f"Generated (with original weights): {output.outputs[0].text!r}")
     print("-" * 50)
 
@@ -275,11 +274,13 @@ for output in finished_outputs:
 print("Requests that were PAUSED and RESUMED after weight change:")
 print("-" * 50)
 for output in pending_outputs:
+    # Decode the full prompt token IDs (original + generated before pause)
+    full_prompt_text = tokenizer.decode(output.prompt_token_ids)
     # Find the original prompt by checking which one this output started with
-    original_prompt = next(p for p in prompts if output.prompt.startswith(p))
-    # output.prompt contains original prompt + text generated before pause
+    original_prompt = next(p for p in prompts if full_prompt_text.startswith(p))
+    # output.prompt_token_ids contains original prompt + tokens generated before pause
     # output.outputs[0].text is what was generated after resuming with new weights
-    text_before_pause = output.prompt[len(original_prompt) :]
+    text_before_pause = full_prompt_text[len(original_prompt) :]
     text_after_pause = output.outputs[0].text
     print(f"Original prompt: {original_prompt!r}")
     print(f"Generated before weight change: {text_before_pause!r}")
