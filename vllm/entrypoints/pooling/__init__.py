@@ -36,7 +36,7 @@ def register_pooling_api_routers(
 
         app.include_router(embed_router)
 
-    if "score" in supported_tasks:
+    if "score" in supported_tasks or "embed" in supported_tasks:
         from vllm.entrypoints.pooling.score.api_router import router as score_router
 
         app.include_router(score_router)

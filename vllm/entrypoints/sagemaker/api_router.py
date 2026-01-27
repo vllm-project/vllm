@@ -10,42 +10,12 @@ import pydantic
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from vllm.entrypoints.openai.api_server import (
-    base,
-)
-from vllm.entrypoints.openai.chat_completion.api_router import (
-    chat,
-    create_chat_completion,
-)
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.completion.api_router import (
-    completion,
-    create_completion,
-)
-from vllm.entrypoints.openai.completion.protocol import (
-    CompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.api_server import base
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.classify.api_router import classify, create_classify
-from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
-from vllm.entrypoints.pooling.embed.api_router import create_embedding, embedding
-from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
-from vllm.entrypoints.pooling.pooling.api_router import create_pooling, pooling
-from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
-from vllm.entrypoints.pooling.score.api_router import (
-    create_score,
-    do_rerank,
-    rerank,
-    score,
-)
-from vllm.entrypoints.pooling.score.protocol import RerankRequest, ScoreRequest
 from vllm.entrypoints.serve.instrumentator.health import health
+from vllm.tasks import POOLING_TASKS, SupportedTask
 
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
 # (requires typing_extensions >= 4.13)
@@ -53,26 +23,88 @@ RequestType = Any
 GetHandlerFn = Callable[[Request], OpenAIServing | None]
 EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
 
-# NOTE: Items defined earlier take higher priority
-INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = [
-    (ChatCompletionRequest, (chat, create_chat_completion)),
-    (CompletionRequest, (completion, create_completion)),
-    (EmbeddingRequest, (embedding, create_embedding)),
-    (ClassificationRequest, (classify, create_classify)),
-    (ScoreRequest, (score, create_score)),
-    (RerankRequest, (rerank, do_rerank)),
-    (PoolingRequest, (pooling, create_pooling)),
-]
 
-# NOTE: Construct the TypeAdapters only once
-INVOCATION_VALIDATORS = [
-    (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
-    for request_type, (get_handler, endpoint) in INVOCATION_TYPES
-]
+def get_invocation_types(supported_tasks: tuple["SupportedTask", ...]):
+    # NOTE: Items defined earlier take higher priority
+    INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = []
+
+    if "generate" in supported_tasks:
+        from vllm.entrypoints.openai.chat_completion.api_router import (
+            chat,
+            create_chat_completion,
+        )
+        from vllm.entrypoints.openai.chat_completion.protocol import (
+            ChatCompletionRequest,
+        )
+        from vllm.entrypoints.openai.completion.api_router import (
+            completion,
+            create_completion,
+        )
+        from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+
+        INVOCATION_TYPES += [
+            (ChatCompletionRequest, (chat, create_chat_completion)),
+            (CompletionRequest, (completion, create_completion)),
+        ]
+
+    if "embed" in supported_tasks:
+        from vllm.entrypoints.pooling.embed.api_router import (
+            create_embedding,
+            embedding,
+        )
+        from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest
+
+        INVOCATION_TYPES += [
+            (EmbeddingRequest, (embedding, create_embedding)),
+        ]
+
+    if "classify" in supported_tasks:
+        from vllm.entrypoints.pooling.classify.api_router import (
+            classify,
+            create_classify,
+        )
+        from vllm.entrypoints.pooling.classify.protocol import ClassificationRequest
+
+        INVOCATION_TYPES += [
+            (ClassificationRequest, (classify, create_classify)),
+        ]
+
+    if "score" in supported_tasks:
+        from vllm.entrypoints.pooling.score.api_router import do_rerank, rerank
+        from vllm.entrypoints.pooling.score.protocol import RerankRequest
+
+        INVOCATION_TYPES += [
+            (RerankRequest, (rerank, do_rerank)),
+        ]
+
+    if "score" in supported_tasks or "embed" in supported_tasks:
+        from vllm.entrypoints.pooling.score.api_router import create_score, score
+        from vllm.entrypoints.pooling.score.protocol import ScoreRequest
+
+        INVOCATION_TYPES += [
+            (ScoreRequest, (score, create_score)),
+        ]
+
+    if any(task in POOLING_TASKS for task in supported_tasks):
+        from vllm.entrypoints.pooling.pooling.api_router import create_pooling, pooling
+        from vllm.entrypoints.pooling.pooling.protocol import PoolingRequest
+
+        INVOCATION_TYPES += [
+            (PoolingRequest, (pooling, create_pooling)),
+        ]
+
+    return INVOCATION_TYPES
 
 
-def attach_router(app: FastAPI):
+def attach_router(app: FastAPI, supported_tasks: tuple["SupportedTask", ...]):
     router = APIRouter()
+
+    # NOTE: Construct the TypeAdapters only once
+    INVOCATION_TYPES = get_invocation_types(supported_tasks)
+    INVOCATION_VALIDATORS = [
+        (pydantic.TypeAdapter(request_type), (get_handler, endpoint))
+        for request_type, (get_handler, endpoint) in INVOCATION_TYPES
+    ]
 
     @router.post("/ping", response_class=Response)
     @router.get("/ping", response_class=Response)
