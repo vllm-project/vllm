@@ -1512,11 +1512,16 @@ class GPUModelRunner(
         self.discard_request_mask.np[:num_reqs] = optimistic_seq_lens_np < num_tokens_np
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        # Sync num_computed_tokens to GPU.
+        # Sync num_computed_tokens and num_accepted_tokens to GPU.
         self.num_computed_tokens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs]
         )
         self.num_computed_tokens.copy_to_gpu(num_reqs)
+        self.num_accepted_tokens.np[:num_reqs] = (
+            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+        )
+        self.num_accepted_tokens.np[num_reqs:].fill(1)
+        self.num_accepted_tokens.copy_to_gpu()
         # For async spec decode: compute cumulatively on GPU for continuing
         # requests (old_value + valid_sampled_count), bypassing CPU's optimistic
         # values entirely. This avoids needing prev_num_draft_len.
