@@ -334,11 +334,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # Create mask for valid LoRA tokens
         has_lora = token_lora_expanded >= 0  # (num_tokens, 1)
 
-        topk_ids_lora = torch.where(
-            has_lora,
-            token_lora_expanded * num_experts + topk_ids,
-            torch.tensor(-1, dtype=topk_ids.dtype, device=topk_ids.device),
-        )
+        topk_ids_lora = token_lora_expanded * num_experts + topk_ids
+        topk_ids_lora = topk_ids_lora.masked_fill(~has_lora, -1)
 
         # Call standard moe_align_block_size with num_expert_lora + 1 virtual
         # experts (the extra slot absorbs non-LoRA tokens harmlessly).
@@ -350,6 +347,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             pad_sorted_ids=pad_sorted_ids,
         )
 
+        # If no tokens have active LoRA adapters, zero out num_tokens_post_pad
+        # so the downstream kernel exits immediately.
         return sorted_ids, expert_ids, num_tokens_post_pad
 
     def add_lora_fused_moe(

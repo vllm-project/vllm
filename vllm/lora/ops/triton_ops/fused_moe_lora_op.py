@@ -452,6 +452,7 @@ def _fused_moe_lora(
         dtype=output.dtype,
         device=device,
     )
+
     use_gdc = supports_pdl(device) and not fully_sharded
     _fused_moe_lora_shrink(
         a_intermediate_cache1,
@@ -506,6 +507,7 @@ def _fused_moe_lora(
         expert_ids,
         num_tokens_post_padded,
         top_k_num,
+        adapter_enabled,
         ## adding for kernel
         device,
         N,
