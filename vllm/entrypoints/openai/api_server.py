@@ -532,7 +532,6 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
 
     register_sagemaker_api_router(app, supported_tasks)
 
-
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import (
             register_generate_api_routers,
