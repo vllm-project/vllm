@@ -15,10 +15,9 @@ from einops import rearrange
 from timm.layers import LayerNorm, LayerNorm2d
 from timm.models.regnet import RegStage
 from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
-from transformers.modeling_utils import no_init_weights
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
@@ -361,7 +360,6 @@ def _build_hcxvision_hf_processor(
 def init_vision_tower_for_hcxvision(
     vision_config,
     quant_config: QuantizationConfig | None,
-    multimodal_config: MultiModalConfig | None,
     *,
     use_nth_layer: int | None = None,
     require_post_norm: bool | None = None,
@@ -379,7 +377,6 @@ def init_vision_tower_for_hcxvision(
         return CLIPVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -388,7 +385,6 @@ def init_vision_tower_for_hcxvision(
         return SiglipVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -606,7 +602,6 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # init configs
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
         # text_config
         text_config = config.text_config
         if text_config.model_type in ["gpt2", "hyperclovax", "llama"]:
@@ -625,30 +620,28 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             config, vision_config
         )
 
-        # init models & parameters
-        with no_init_weights():  # weight will be loaded in from_pretrained
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_model = init_vision_tower_for_hcxvision(
                 vision_config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 use_nth_layer=getattr(config, "use_nth_layer", -1),
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
-        self.mm_projector = self._init_mm_projector(config, text_config, vision_config)
+            self.mm_projector = self._init_mm_projector(
+                config, text_config, vision_config
+            )
 
-        self.lm_head_vocab_size = getattr(
-            text_config, "padded_vocab_size", text_config.vocab_size
-        )
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+            if config.anyres:
+                self.image_newline = nn.Parameter(
+                    torch.empty(text_config.hidden_size, dtype=self.dtype)
+                )
 
-        if config.anyres:
-            self.image_newline = nn.Parameter(
-                torch.empty(text_config.hidden_size, dtype=self.dtype)
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
             )
 
         self.config = config
@@ -726,9 +719,6 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return modalities
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(
         self,
         **kwargs: object,
@@ -757,7 +747,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

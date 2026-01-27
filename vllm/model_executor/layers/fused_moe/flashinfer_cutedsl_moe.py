@@ -6,13 +6,22 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     scaled_fp4_grouped_quantize,
     silu_and_mul_scaled_nvfp4_experts_quantize,
 )
@@ -20,54 +29,54 @@ from vllm.utils.flashinfer import (
 logger = init_logger(__name__)
 
 
-def is_valid_flashinfer_cutedsl_fused_moe(
-    hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
-) -> bool:
-    """
-    Check if the given problem size is supported by the FlashInfer CuteDSL MoE
-    kernel.
-    """
-    if not has_flashinfer_cutedsl_grouped_gemm_nt_masked():
-        logger.debug_once(
-            "FlashInferCuteDSLExperts disabled: "
-            "flashinfer_cutedsl_fused_moe not available."
-        )
-        return False
-    # Data type checks
-    if (
-        w1.dtype != torch.uint8
-        or w2.dtype != torch.uint8
-        or hidden_states.dtype not in [torch.float32, torch.float16, torch.bfloat16]
-    ):
-        logger.debug_once(
-            "FlashInferCuteDSLExperts disabled: w1/w2 must be torch.uint8 "
-            f"(got w1={w1.dtype}, w2={w2.dtype}), hidden_states must be "
-            f"float32, float16, or bfloat16 (got {hidden_states.dtype})."
-        )
-        return False
-    return True
-
-
 class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        out_dtype: torch.dtype,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        num_dispatchers: int,
     ):
-        super().__init__(quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert quant_config.quant_dtype == "nvfp4", (
             "Only nvfp4 quantization are currently supported."
         )
-        self.out_dtype = out_dtype
+        self.out_dtype = moe_config.in_dtype
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_device_capability_family(100)
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kNvfp4Static, kNvfp4Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     def supports_expert_map(self) -> bool:
         return False
