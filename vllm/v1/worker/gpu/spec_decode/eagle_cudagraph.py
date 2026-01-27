@@ -87,6 +87,11 @@ class EagleCudaGraphManager:
         # Capture the graph.
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
+
+        # Sync offloader's copy stream before capture.
+        # Ensure any pre-capture prefetches from offloader are complete.
+        get_offloader().sync_prev_onload()
+
         with torch.cuda.graph(graph, self.pool):
             generate_fn(num_tokens, attn_metadata, num_tokens_across_dp)
             # Join offloader's copy stream after forward to avoid unjoined

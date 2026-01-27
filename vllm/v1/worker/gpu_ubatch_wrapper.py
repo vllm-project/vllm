@@ -256,6 +256,10 @@ class UBatchWrapper:
                 sorted_results = [value for position, value in sorted(results)]
                 result = torch.cat(sorted_results, dim=0)
                 cudagraph_metadata.outputs = result
+                # Join offloader's copy stream after forward to avoid unjoined
+                # stream error. The last layer's start_prefetch forks copy_stream,
+                # but wait_prefetch only happens in the next forward pass.
+                get_offloader().join_after_forward()
             self.cudagraphs[num_tokens] = cudagraph_metadata
         return cudagraph_metadata.outputs
 

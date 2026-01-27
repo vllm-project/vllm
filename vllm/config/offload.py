@@ -50,15 +50,18 @@ class OffloadConfig:
 
     @model_validator(mode="after")
     def validate_offload_config(self) -> "OffloadConfig":
-        """Validate that offload_num_in_group <= offload_group_size."""
-        if (
-            self.offload_group_size > 0
-            and self.offload_num_in_group > self.offload_group_size
-        ):
-            raise ValueError(
-                f"offload_num_in_group ({self.offload_num_in_group}) must be "
-                f"<= offload_group_size ({self.offload_group_size})"
-            )
+        """Validate offload configuration constraints."""
+        if self.offload_group_size > 0:
+            if self.offload_num_in_group > self.offload_group_size:
+                raise ValueError(
+                    f"offload_num_in_group ({self.offload_num_in_group}) must be "
+                    f"<= offload_group_size ({self.offload_group_size})"
+                )
+            if self.offload_prefetch_step < 1:
+                raise ValueError(
+                    f"offload_prefetch_step ({self.offload_prefetch_step}) must be "
+                    f">= 1 when V2 offloading is enabled (offload_group_size > 0)"
+                )
         return self
 
     def compute_hash(self) -> str:
