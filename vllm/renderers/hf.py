@@ -504,20 +504,19 @@ def rebuild_mm_uuids_from_mm_data(
     if vision_chunks is None:
         return mm_uuids
 
-    new_uuids = dict(mm_uuids)
-    vision_chunk_uuids = []
-
-    for item in vision_chunks:
-        # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
-        assert isinstance(item, dict)
-        uuid_val = item.get("uuid")
-        if uuid_val is not None:
-            vision_chunk_uuids.append(uuid_val)
+    assert all(isinstance(item, dict) for item in vision_chunks), (
+        "Expected all vision_chunk items to be dicts"
+    )
+    vision_chunks = cast(list[dict[str, Any]], vision_chunks)
+    vision_chunk_uuids = [
+        uuid_val for item in vision_chunks if (uuid_val := item.get("uuid")) is not None
+    ]
 
     if vision_chunk_uuids:
-        new_uuids["vision_chunk"] = vision_chunk_uuids
+        mm_uuids = dict(mm_uuids)
+        mm_uuids["vision_chunk"] = vision_chunk_uuids
 
-    return new_uuids
+    return mm_uuids
 
 
 def build_video_prompts_from_mm_data(
@@ -549,9 +548,10 @@ def build_video_prompts_from_mm_data(
             video_prompts_dict[video_idx].append(prompt)
 
     # Build prompts in video order
-    video_prompts = []
-    for video_idx in sorted(video_prompts_dict.keys()):
-        video_prompts.append("".join(video_prompts_dict[video_idx]))
+    video_prompts = [
+        "".join(video_prompts_dict[video_idx])
+        for video_idx in sorted(video_prompts_dict.keys())
+    ]
 
     return video_prompts
 
