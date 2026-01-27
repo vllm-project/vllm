@@ -537,12 +537,6 @@ class GPUModelRunner(
             self.async_output_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.Event()
 
-        # PP + async scheduling: token-id channel state for non-last PP ranks.
-        # _pp_prev_sampled_token_ids_cpu: [num_reqs, 1 or max_gen_len]
-        self._pp_prev_sampled_token_ids_cpu: torch.Tensor | None = None
-        self._pp_prev_sampled_token_ids_ready_event: torch.Event | None = None
-        self._pp_prev_sampled_req_ids: list[str] | None = None
-
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
             self.compilation_config.cudagraph_capture_sizes
@@ -1017,48 +1011,26 @@ class GPUModelRunner(
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker.
-                if (
-                    self.use_async_scheduling
-                    and get_pp_group().world_size > 1
-                    and self._pp_prev_sampled_token_ids_cpu is not None
-                ):
-                    # use token ids broadcast from the last PP stage
-                    if (
-                        event := self._pp_prev_sampled_token_ids_ready_event
-                    ) is not None:
-                        event.synchronize()
-                    if not self._pp_prev_sampled_req_ids:
-                        new_token_ids: list[int] = []
-                    else:
-                        prev_map = {
-                            rid: idx
-                            for idx, rid in enumerate(self._pp_prev_sampled_req_ids)
-                        }
-                        prev_idx = prev_map.get(req_id)
-                        if prev_idx is None:
-                            new_token_ids = []
-                        else:
-                            row_tensor = self._pp_prev_sampled_token_ids_cpu[prev_idx]
-                            # `row_tensor` is 1D ([max_gen_len]) where -1 means padding
-                            neg1_idx = (row_tensor == -1).nonzero(as_tuple=True)[0]
-                            end = (
-                                int(neg1_idx[0].item())
-                                if neg1_idx.numel()
-                                else int(row_tensor.numel())
-                            )
-                            new_token_ids = row_tensor[:end].tolist()
-                else:
-                    new_token_ids = req_data.new_token_ids[i]
+                new_token_ids = req_data.new_token_ids[i]
                 # Add the sampled token(s) from the previous step (if any).
                 # This doesn't include "unverified" tokens like spec tokens.
                 num_new_tokens = (
                     num_computed_tokens + len(new_token_ids) - req_state.num_tokens
                 )
-                if num_new_tokens == 1:
-                    # Avoid slicing list in most common case.
-                    req_state.output_token_ids.append(new_token_ids[-1])
-                elif num_new_tokens > 0:
-                    req_state.output_token_ids.extend(new_token_ids[-num_new_tokens:])
+                if num_new_tokens > 0:
+                    # TODO(wentao): we may remove the new_token_ids handling logic
+                    # for async scheduling + PP or even for PP
+                    # new_token_ids is split in _make_cached_request_data
+                    # we don't guarantee the length of new_token_ids is always correct
+                    if len(new_token_ids) >= num_new_tokens:
+                        # truncate when new_token_ids is longers
+                        new_token_ids = new_token_ids[-num_new_tokens:]
+                    else:
+                        # pad -1 when new_token_ids is shorter
+                        new_token_ids = [-1] * (
+                            num_new_tokens - len(new_token_ids)
+                        ) + new_token_ids
+                    req_state.output_token_ids.extend(new_token_ids)
             elif num_output_tokens < len(req_state.output_token_ids):
                 # Some output tokens were discarded due to a sync-KV-load
                 # failure. Align the cached state.
@@ -3614,7 +3586,7 @@ class GPUModelRunner(
         if self.execute_model_state is None:
             # receive sampled token ids from the last PP rank.
             if self.use_async_scheduling and get_pp_group().world_size > 1:
-                self._pp_receive_and_cache_sampled_token_ids()
+                self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # type: ignore[return-value]
 
@@ -3658,7 +3630,9 @@ class GPUModelRunner(
         if self.use_async_scheduling:
             pp = get_pp_group()
             if pp.world_size > 1 and pp.is_last_rank:
-                self._pp_broadcast_sampled_token_ids(sampler_output.sampled_token_ids)
+                self._pp_broadcast_prev_sampled_token_ids(
+                    sampler_output.sampled_token_ids
+                )
 
         self._draft_token_ids = None
         self._draft_token_req_ids = None
@@ -3794,57 +3768,45 @@ class GPUModelRunner(
 
         return async_output
 
-    def _pp_receive_and_cache_sampled_token_ids(self) -> None:
-        """Receive sampled token ids broadcast from last PP stage and cache them.
-
-        Note: this must be called by non-last PP ranks for every sample_tokens() RPC
-        in PP + async scheduling mode
-        """
-        pp = get_pp_group()
-        src = pp.world_size - 1
-        broadcasted = pp.broadcast_tensor_dict(None, src=src)
-        assert broadcasted is not None
-        sampled_token_ids = broadcasted["pp_sampled_token_ids"]
-        req_ids = broadcasted["pp_req_ids"]
-        self._pp_prev_sampled_req_ids = req_ids
-        self._pp_cache_sampled_token_ids(sampled_token_ids)
-
-    def _pp_broadcast_sampled_token_ids(self, sampled_token_ids: torch.Tensor) -> None:
-        """Broadcast sampled token ids from last PP stage and cache locally."""
+    def _pp_broadcast_prev_sampled_token_ids(
+        self, sampled_token_ids: torch.Tensor
+    ) -> None:
+        """Broadcast sampled token ids (GPU) from last PP stage"""
         pp = get_pp_group()
         assert pp.is_last_rank
-        src = pp.world_size - 1
-        # include req_id ordering so earlier stages can map req_id -> row.
-        self._pp_prev_sampled_req_ids = self.input_batch.req_ids.copy()
-        pp.broadcast_tensor_dict(
-            {
-                "pp_sampled_token_ids": sampled_token_ids,
-                "pp_req_ids": self._pp_prev_sampled_req_ids,
-            },
-            src=src,
+        assert torch.distributed.is_initialized()
+        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+        assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
+            "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
+        )
+        src_global_rank = pp.ranks[pp.world_size - 1]
+        torch.distributed.broadcast(
+            sampled_token_ids, src=src_global_rank, group=pp.device_group
         )
 
-    def _pp_cache_sampled_token_ids(self, sampled_token_ids: torch.Tensor) -> None:
-        """Initiate an async CPU copy of sampled token ids for later consumption."""
-        # last rank already has the tokens
-        if get_pp_group().is_last_rank:
-            return
+    def _pp_receive_prev_sampled_token_ids_to_input_batch(self) -> None:
+        """Receive sampled token ids broadcast from last PP stage"""
+        pp = get_pp_group()
+        assert not pp.is_last_rank
+        assert torch.distributed.is_initialized()
+        num_reqs = self.input_batch.num_reqs
+        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+        recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
+        src_global_rank = pp.ranks[pp.world_size - 1]
+        torch.distributed.broadcast(recv, src=src_global_rank, group=pp.device_group)
+        self.input_batch.prev_sampled_token_ids = recv
 
-        assert self.async_output_copy_stream is not None
-
-        # kick off an async copy to CPU
-        default_stream = torch.cuda.current_stream()
-        event = torch.Event()
-        with torch.cuda.stream(self.async_output_copy_stream):
-            # wait for the default stream to complete
-            self.async_output_copy_stream.wait_stream(default_stream)
-            # ensurethis tensor is still in use by the copy stream
-            sampled_token_ids.record_stream(self.async_output_copy_stream)
-            self._pp_prev_sampled_token_ids_cpu = sampled_token_ids.to(
-                "cpu", non_blocking=True
-            )
-            event.record()
-        self._pp_prev_sampled_token_ids_ready_event = event
+        # construct `prev_req_id_to_index` here so `_prepare_input_ids`
+        # can map req_id -> previous batch row
+        discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[
+            0
+        ].tolist()
+        discard_req_indices_set = set(discard_req_indices)
+        self.input_batch.prev_req_id_to_index = {
+            req_id: i
+            for i, req_id in enumerate(self.input_batch.req_ids)
+            if i not in discard_req_indices_set
+        }
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
