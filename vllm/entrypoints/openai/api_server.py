@@ -957,12 +957,6 @@ async def run_server_worker(
 ) -> None:
     """Run a single API server worker."""
 
-    if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
-        ToolParserManager.import_tool_parser(args.tool_parser_plugin)
-
-    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
-        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
-
     # Get uvicorn log config (from file or with endpoint filter)
     log_config = get_uvicorn_log_config(args)
     if log_config is not None:
