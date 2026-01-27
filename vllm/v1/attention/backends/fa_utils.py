@@ -89,6 +89,12 @@ def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
             )
             fa_version = 2
 
+        if requires_alibi and fa_version == 4:
+            logger.warning_once(
+                "Cannot use FA version 4 with ALiBi, defaulting to FA version 2."
+            )
+            fa_version = 2
+
         if not is_fa_version_supported(fa_version):
             logger.error(
                 "Cannot use FA version %d is not supported due to %s",
