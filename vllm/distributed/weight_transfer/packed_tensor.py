@@ -51,7 +51,12 @@ def packed_broadcast_producer(
                 # Pack the tensors
                 while True:
                     # Apply post processing and convert to linearized uint8 tensor
-                    tensor = post_iter_func(next(iterator)).view(torch.uint8).view(-1)
+                    tensor = (
+                        post_iter_func(next(iterator))
+                        .contiguous()
+                        .view(torch.uint8)
+                        .view(-1)
+                    )
                     packing_tensor_list[buffer_idx].append(tensor)
                     packing_tensor_sizes[buffer_idx] += tensor.numel()
                     if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
@@ -109,10 +114,10 @@ def packed_broadcast_consumer(
         Returns:
             unpacked List[(name, tensor)]
         """
-        unpacked_tensors = packed_tensor.split_with_sizes(tensor_sizes)
+        unpacked_tensors = packed_tensor.split(tensor_sizes)
 
         unpacked_list = [
-            (name, tensor.view(dtype).view(*shape))
+            (name, tensor.contiguous().view(dtype).view(*shape))
             for name, shape, dtype, tensor in zip(
                 names, shapes, dtypes, unpacked_tensors
             )
