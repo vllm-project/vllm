@@ -22,11 +22,15 @@ from starlette.datastructures import State
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorInfo,
+    ErrorResponse,
+)
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.server_utils import (
@@ -36,7 +40,6 @@ from vllm.entrypoints.openai.server_utils import (
     log_response,
     validation_exception_handler,
 )
-from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
 )
@@ -459,7 +462,7 @@ def _log_non_streaming_response(response_body: list) -> None:
         logger.info("response_body={<binary_data>}")
 
 
-def build_app(args: Namespace) -> FastAPI:
+def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
@@ -469,10 +472,7 @@ def build_app(args: Namespace) -> FastAPI:
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
-
-    from vllm.entrypoints.openai.basic.api_router import register_basic_api_routers
-
-    register_basic_api_routers(app)
+    app.include_router(router)
 
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
@@ -503,13 +503,6 @@ def build_app(args: Namespace) -> FastAPI:
         )
 
         register_translations_api_router(app)
-
-    if "realtime" in supported_tasks:
-        from vllm.entrypoints.openai.realtime.api_router import (
-            attach_router as register_realtime_api_router,
-        )
-
-        register_realtime_api_router(app)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import register_pooling_api_routers
@@ -629,20 +622,7 @@ async def init_app_state(
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
     state.args = args
-    supported_tasks = await engine_client.get_supported_tasks()
-    logger.info("Supported tasks: %s", supported_tasks)
-
     resolved_chat_template = load_chat_template(args.chat_template)
-
-    if args.tool_server == "demo":
-        tool_server: ToolServer | None = DemoToolServer()
-        assert isinstance(tool_server, DemoToolServer)
-        await tool_server.init_and_validate()
-    elif args.tool_server:
-        tool_server = MCPToolServer()
-        await tool_server.add_tool_server(args.tool_server)
-    else:
-        tool_server = None
 
     # Merge default_mm_loras into the static lora_modules
     default_mm_loras = (
@@ -683,11 +663,6 @@ async def init_app_state(
         init_transcription_state(
             engine_client, state, args, request_logger, supported_tasks
         )
-
-    if "realtime" in supported_tasks:
-        from vllm.entrypoints.openai.realtime.api_router import init_realtime_state
-
-        init_realtime_state(engine_client, state, args, request_logger, supported_tasks)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import init_pooling_state
