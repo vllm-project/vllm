@@ -102,6 +102,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             tensor.element_size() * tensor.stride(0) * min_block_size_factor
             for tensor in src_tensors
         ]
+        self.total_block_size_in_bytes = sum(self.block_size_in_bytes)
 
         assert len(src_tensors) > 0
         self.gpu_to_cpu: bool = self.src_tensors[0].is_cuda
@@ -162,6 +163,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
         with torch.cuda.stream(stream):
+            start_event.record(stream)
             for src_tensor, dst_tensor, block_size_in_bytes in zip(
                 self.src_tensors,
                 self.dst_tensors,
@@ -173,7 +175,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                     block_size_in_bytes,
                     src_to_dst_tensor,
                 )
-            event.record(stream)
+            end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
         self._transfers.append(
