@@ -167,7 +167,16 @@ class RocmAttentionBackend(AttentionBackend):
         # ROCM paged attention kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
         # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
-        return [16, 32]
+
+        # However, The limitations in [16, 32] are reasonable for a native C++ kernel,
+        # but vLLM should allow support for non-standard sizes via the Triton path,
+        # as addressed in this PR: https://github.com/vllm-project/vllm/pull/31380,
+        # where the Triton kernel under rocm_atten does not support inference
+        # for a non-standard qwen3-next model with a block_size of 544.
+        # We have fixed the Triton kernel so that the standard model uses the original
+        # bit-addressing logic, while the non-standard model
+        # uses our optimized kernel logic.
+        return [16, 32, 544]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -321,7 +330,14 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache, self.num_kv_heads, self.head_size
         )
 
-        if self.kv_sharing_target_layer_name is None:
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
+        if (
+            self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
 
@@ -373,8 +389,8 @@ class RocmAttentionImpl(AttentionImpl):
         # Compute attention and update output up to `num_actual_tokens`.
         chunked_prefill_paged_decode(
             query=query[:num_actual_tokens],
-            key=key[:num_actual_tokens],
-            value=value[:num_actual_tokens],
+            key=key[:num_actual_tokens] if key is not None else None,
+            value=value[:num_actual_tokens] if value is not None else None,
             output=output[:num_actual_tokens],
             kv_cache_dtype=self.kv_cache_dtype,
             key_cache=key_cache,

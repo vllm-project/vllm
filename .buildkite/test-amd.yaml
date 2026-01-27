@@ -71,6 +71,7 @@ steps:
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
+  - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
   - tests/tool_parsers
@@ -82,6 +83,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s renderers
   - pytest -v -s tokenizers_
   - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
@@ -428,6 +430,8 @@ steps:
   timeout_in_minutes: 30
   gpu: h100
   source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
@@ -452,10 +456,12 @@ steps:
   timeout_in_minutes: 30
   gpu: b200
   source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
+    - pytest -v -s v1/attention
 
 - label: V1 Test others (CPU) # 5 mins
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
@@ -634,8 +640,9 @@ steps:
   # grade: Blocking
   source_file_dependencies:
   - csrc/attention/
-  - vllm/attention
   - vllm/v1/attention
+    # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
+  - vllm/model_executor/layers/attention
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -702,6 +709,17 @@ steps:
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
+
+- label: Kernels Helion Test
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_1
+  source_file_dependencies:
+  - vllm/utils/import_utils.py
+  - tests/kernels/helion/
+  commands:
+    - pip install helion
+    - pytest -v -s kernels/helion/
 
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
@@ -855,7 +873,7 @@ steps:
 
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
@@ -1114,7 +1132,7 @@ steps:
   - csrc/quantization/cutlass_w8a8/moe/
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
-  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_a2a_prepare_finalize.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
@@ -1260,7 +1278,7 @@ steps:
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdmultinode]
   agent_pool: mi325_4
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
@@ -1274,15 +1292,15 @@ steps:
   - tests/distributed/
   - tests/examples/offline_inference/data_parallel.py
   commands:
-  - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
-    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
+  - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)  | grep 'Same node test passed'   | grep 'Node count test passed'
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py 
+    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py 
     - python3 ../examples/offline_inference/data_parallel.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
-    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py 
+    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py 
     - python3 ../examples/offline_inference/data_parallel.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code
 
 - label: Distributed Tests (2 GPUs) # 68min
@@ -1451,7 +1469,7 @@ steps:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large-amd.txt
 
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   # grade: Blocking
   timeout_in_minutes: 30
@@ -1462,10 +1480,10 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-    - VLLM_ATTENTION_BACKEND=ROCM_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   # grade: Blocking
   timeout_in_minutes: 15
@@ -1476,7 +1494,7 @@ steps:
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-    - VLLM_ATTENTION_BACKEND=ROCM_ATTN DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - DP_EP=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 ##### multi gpus test #####
 ##### A100 test #####
@@ -1662,17 +1680,6 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
 
-- label: DeepSeek V2-Lite Async EPLB Accuracy
-  timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_4
-  # grade: Blocking
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_async_eplb.sh 0.25 1319 8030
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
   timeout_in_minutes: 60

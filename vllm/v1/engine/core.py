@@ -23,7 +23,6 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.gc_utils import (
@@ -149,8 +148,8 @@ class EngineCore:
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
-        self.mm_receiver_cache = engine_receiver_cache_from_config(
-            vllm_config, mm_registry
+        self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
+            vllm_config
         )
 
         # If a KV connector is initialized for scheduler, we want to collect
@@ -912,6 +911,17 @@ class EngineCoreProc(EngineCore):
                 set_process_title("EngineCore")
             decorate_logs()
 
+            if data_parallel and vllm_config.kv_transfer_config is not None:
+                # modify the engine_id and append the local_dp_rank to it to ensure
+                # that the kv_transfer_config is unique for each DP rank.
+                vllm_config.kv_transfer_config.engine_id = (
+                    f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+                )
+                logger.debug(
+                    "Setting kv_transfer_config.engine_id to %s",
+                    vllm_config.kv_transfer_config.engine_id,
+                )
+
             parallel_config.data_parallel_index = dp_rank
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
@@ -1285,17 +1295,6 @@ class DPEngineCoreProc(EngineCoreProc):
         assert dp_size > 1
         assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
-
-        if vllm_config.kv_transfer_config is not None:
-            # modify the engine_id and append the local_dp_rank to it to ensure
-            # that the kv_transfer_config is unique for each DP rank.
-            vllm_config.kv_transfer_config.engine_id = (
-                f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
-            )
-            logger.debug(
-                "Setting kv_transfer_config.engine_id to %s",
-                vllm_config.kv_transfer_config.engine_id,
-            )
 
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()

@@ -239,23 +239,21 @@ class OpenCUAForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
             multimodal_config.is_multimodal_pruning_enabled()
         )
 
-        if multimodal_config.get_limit_per_prompt("image"):
+        with self._mark_tower_model(vllm_config, "image"):
             self.visual = OpenCUAVisionTransformer(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
-                multimodal_config=self.multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
-        else:
-            self.visual = None
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen2ForCausalLM"],
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen2ForCausalLM"],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors

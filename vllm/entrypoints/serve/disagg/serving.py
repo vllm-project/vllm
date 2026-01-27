@@ -23,7 +23,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     GenerateResponse,

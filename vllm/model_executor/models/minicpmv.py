@@ -1028,25 +1028,29 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.multimodal_config = multimodal_config
 
         self.version = get_version_by_config(self.config)
-        self.llm = self.init_llm(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "llm")
-        )
-        self.vpm = self.init_vision_module(
-            config, quant_config, prefix=maybe_prefix(prefix, "vpm")
-        )
-        self.vision_dim = (
-            self.vpm.embed_dim
-            if self.version == (2, 0)
-            else self.vpm.embeddings.embed_dim
-        )
-        self.embed_dim = self.config.hidden_size
 
-        self.resampler = self.init_resampler(
-            self.embed_dim,
-            self.vision_dim,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "resampler"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.llm = self.init_llm(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "llm")
+            )
+
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vpm = self.init_vision_module(
+                config, quant_config, prefix=maybe_prefix(prefix, "vpm")
+            )
+            self.vision_dim = (
+                self.vpm.embed_dim
+                if self.version == (2, 0)
+                else self.vpm.embeddings.embed_dim
+            )
+            self.embed_dim = self.config.hidden_size
+
+            self.resampler = self.init_resampler(
+                self.embed_dim,
+                self.vision_dim,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "resampler"),
+            )
 
         self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
 
@@ -1134,9 +1138,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         return multimodal_embeddings
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.llm
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
@@ -1146,7 +1147,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
