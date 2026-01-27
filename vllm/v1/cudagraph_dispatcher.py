@@ -168,13 +168,6 @@ class CudagraphDispatcher:
 
         self._compute_bs_to_padded_graph_size()
 
-        # Early exit if cudagraphs are disabled
-        if cudagraph_mode == CUDAGraphMode.NONE:
-            self.keys_initialized = True
-            return
-
-        self._compute_bs_to_padded_graph_size()
-
         # Track whether we have LoRA config (always specialize on count)
         self.has_lora_config = self.vllm_config.lora_config is not None
 
