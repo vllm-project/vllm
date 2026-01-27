@@ -51,10 +51,128 @@ class OnlineWeightLoaderMixin:
     3. Tracks loading progress using CopyNumelCounter
     4. Calls a callback when all weights are loaded
 
-    Classes using this mixin should call `_create_moe_weight_loader` in their
-    `create_weights` method and implement `_on_all_moe_weights_loaded` to
-    handle post-loading processing (e.g., quantization, kernel setup).
+    Classes using this mixin should:
+    - Call `_mixin_create_weights` from their `create_weights` method
+    - Implement `_create_scale_parameters` to create quantization-specific scales
+    - Implement `process_weights_after_loading` for quantization and kernel setup
     """
+
+    def _mixin_create_weights(
+        self,
+        layer: Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        extra_weight_attrs: dict,
+    ) -> None:
+        """
+        Shared weight creation logic for online MoE quantization.
+
+        Creates weights on meta device with a patched weight loader that
+        tracks loading progress. Subclasses must implement
+        `_create_scale_parameters` for quantization-specific scales.
+        """
+        # Store layer dimensions
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.hidden_size = hidden_size
+        layer.num_experts = num_experts
+        layer.orig_dtype = params_dtype
+
+        # Patch weight loader to track loading and trigger quantization
+        weight_loader = extra_weight_attrs["weight_loader"]
+        new_extra_weight_attrs = extra_weight_attrs.copy()
+        new_extra_weight_attrs["weight_loader"] = self._create_moe_weight_loader(
+            layer, weight_loader, extra_weight_attrs
+        )
+        extra_weight_attrs = new_extra_weight_attrs
+
+        # WEIGHTS (on meta device, materialized JIT in patched_weight_loader)
+        w13_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size,
+                device="meta",
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight", w13_weight)
+        set_weight_attrs(w13_weight, extra_weight_attrs)
+
+        w2_weight = torch.nn.Parameter(
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                device="meta",
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_weight", w2_weight)
+        set_weight_attrs(w2_weight, extra_weight_attrs)
+
+        # Stash device for JIT materialization
+        layer._load_device = torch.get_default_device()
+
+        # Let subclass create quantization-specific scale parameters
+        self._create_scale_parameters(
+            layer,
+            num_experts,
+            intermediate_size_per_partition,
+            hidden_size,
+            extra_weight_attrs,
+        )
+
+    def _create_scale_parameters(
+        self,
+        layer: Module,
+        num_experts: int,
+        intermediate_size_per_partition: int,
+        hidden_size: int,
+        extra_weight_attrs: dict,
+    ) -> None:
+        """
+        Create and register scale parameters for quantization.
+
+        Calls `_create_scale_tensors` (which subclasses must implement) to get
+        the scale tensors, then registers them and sets weight attributes.
+        """
+        w13_weight_scale, w2_weight_scale = self._create_scale_tensors(
+            layer,
+            num_experts,
+            intermediate_size_per_partition,
+            hidden_size,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+    def _create_scale_tensors(
+        self,
+        layer: Module,
+        num_experts: int,
+        intermediate_size_per_partition: int,
+        hidden_size: int,
+    ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
+        """
+        Create scale tensors for quantization. Subclasses must implement.
+
+        Args:
+            layer: The MoE layer module (can be used to set extra attributes)
+            num_experts: Number of experts
+            intermediate_size_per_partition: Intermediate size per partition
+            hidden_size: Hidden size
+
+        Returns:
+            Tuple of (w13_weight_scale, w2_weight_scale) parameters
+        """
+        raise NotImplementedError(
+            "Subclasses must implement _create_scale_tensors"
+        )
 
     def _create_moe_weight_loader(
         self,

@@ -1070,54 +1070,29 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        layer.intermediate_size_per_partition = intermediate_size_per_partition
-        layer.hidden_size = hidden_size
-        layer.num_experts = num_experts
-        layer.orig_dtype = params_dtype
+        # Use shared mixin logic for weight creation
+        self._mixin_create_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            extra_weight_attrs,
+        )
+
+    def _create_scale_tensors(
+        self,
+        layer: Module,
+        num_experts: int,
+        intermediate_size_per_partition: int,
+        hidden_size: int,
+    ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
+        """Create FP8 per-expert scale tensors."""
         layer.weight_block_size = None
+        layer.w13_input_scale = None
+        layer.w2_input_scale = None
 
-        # We are doing online quantization, patch the weight loader
-        # to call `process_weights_after_loading` in a streaming fashion
-        # as soon as the last weight chunk is loaded.
-        weight_loader = extra_weight_attrs["weight_loader"]
-        new_extra_weight_attrs = extra_weight_attrs.copy()
-        new_extra_weight_attrs["weight_loader"] = self._create_moe_weight_loader(
-            layer, weight_loader, extra_weight_attrs
-        )
-        extra_weight_attrs = new_extra_weight_attrs
-
-        # WEIGHTS
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size,
-                # materialized just-in-time in `patched_weight_loader`
-                device="meta",
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
-
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                # materialized just-in-time in `patched_weight_loader`
-                device="meta",
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-        # stash the correct device for `patched_weight_loader`
-        layer._load_device = torch.get_default_device()
-
-        # WEIGHT_SCALES
+        # WEIGHT_SCALES (per-expert for FP8)
         # Allocate 2 scales for w1 and w3 respectively.
         # They will be combined to a single scale after weight loading.
         w13_weight_scale = torch.nn.Parameter(
@@ -1126,13 +1101,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
         w2_weight_scale = torch.nn.Parameter(
             torch.ones(num_experts, dtype=torch.float32), requires_grad=False
         )
-        layer.register_parameter("w13_weight_scale", w13_weight_scale)
-        layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
-
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
+        return w13_weight_scale, w2_weight_scale
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
