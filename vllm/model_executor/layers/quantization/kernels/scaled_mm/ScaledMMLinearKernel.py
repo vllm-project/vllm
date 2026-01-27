@@ -53,13 +53,24 @@ _ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT)
 _ConfigT = TypeVar("_ConfigT", bound=ScaledMMLinearLayerConfig)
 
 
-class FP8LinearKernel(ABC):
+class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
     @classmethod
     @abstractmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         raise NotImplementedError
+
+    @classmethod
+    @abstractmethod
+    def can_implement(cls, c: _ConfigT) -> tuple[bool, str | None]:
+        raise NotImplementedError
+
+    def __init__(self, c: _ConfigT, layer_param_names: Sequence[str]) -> None:
+        assert self.can_implement(c)[0]
+        assert self.is_supported()[0]
+        self.config = c
+        self.layer_param_names = layer_param_names
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -73,19 +84,6 @@ class FP8LinearKernel(ABC):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
-
-
-class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], FP8LinearKernel, ABC):
-    @classmethod
-    @abstractmethod
-    def can_implement(cls, c: _ConfigT) -> tuple[bool, str | None]:
-        raise NotImplementedError
-
-    def __init__(self, c: _ConfigT, layer_param_names: Sequence[str]) -> None:
-        assert self.can_implement(c)[0]
-        assert self.is_supported()[0]
-        self.config = c
-        self.layer_param_names = layer_param_names
 
     # return a covariant type in the subclass
     @abstractmethod

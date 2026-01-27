@@ -5,9 +5,6 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8LinearKernel,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
@@ -32,11 +29,18 @@ _FP8ParamsT = tuple[
 ]
 
 
-class FP8WoQLinearKernel(FP8LinearKernel, ABC):
+class FP8WoQLinearKernel(ABC):
     """
     FP8 WoQ kernel for GPUs that lack FP8 hardware support.
     Leverages the Marlin kernel for fast weight-only FP8 quantization.
     """
+
+    @classmethod
+    @abstractmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        raise NotImplementedError
 
     @classmethod
     @abstractmethod
@@ -50,3 +54,16 @@ class FP8WoQLinearKernel(FP8LinearKernel, ABC):
         assert self.can_implement(c)[0]
         assert self.is_supported()[0]
         self.config = c
+
+    @abstractmethod
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
