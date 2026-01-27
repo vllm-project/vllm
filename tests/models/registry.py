@@ -776,7 +776,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "KimiK25ForConditionalGeneration": _HfExamplesInfo(
-        "moonshotai/Kimi-K2.5-VL-Preview",
+        "moonshotai/Kimi-K2.5",
         trust_remote_code=True,
     ),
     "LightOnOCRForConditionalGeneration": _HfExamplesInfo(
