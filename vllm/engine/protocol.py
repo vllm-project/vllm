@@ -15,6 +15,7 @@ from vllm.renderers import RendererLike
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.async_llm import StreamingInput
 from vllm.v1.engine.input_processor import InputProcessor
 
 
@@ -49,7 +50,7 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
