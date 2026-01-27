@@ -21,6 +21,7 @@ class CustomRoutingRouter(BaseRouter):
         renormalize: bool = True,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        routed_scaling_factor: float = 1.0,
     ):
         super().__init__(
             top_k=top_k,
@@ -31,6 +32,7 @@ class CustomRoutingRouter(BaseRouter):
         )
         self.custom_routing_function = custom_routing_function
         self.renormalize = renormalize
+        self.routed_scaling_factor = routed_scaling_factor
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -54,7 +56,8 @@ class CustomRoutingRouter(BaseRouter):
             topk=self.top_k,
             renormalize=self.renormalize,
         )
-
+        if self.routed_scaling_factor != 1.0:
+            topk_weights *= self.routed_scaling_factor 
         return topk_weights.to(torch.float32), topk_ids.to(
             torch.int32 if indices_type is None else indices_type
         )

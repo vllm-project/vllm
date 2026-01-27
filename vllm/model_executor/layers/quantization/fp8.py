@@ -1019,6 +1019,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             topk_ids,
             inplace=self.use_inplace,
             activation=layer.activation,
+            activation_limit=getattr(layer, "activation_limit", None),
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,

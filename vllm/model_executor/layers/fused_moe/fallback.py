@@ -168,6 +168,7 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        activation_limit: float | None = None,
     ):
         experts = self._select_experts_impl(hidden_states, w1, w2)
         experts.apply(
@@ -186,4 +187,5 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
             workspace2,
             expert_tokens_meta,
             apply_router_weight_on_input,
+            activation_limit
         )

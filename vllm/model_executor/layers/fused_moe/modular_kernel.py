@@ -414,6 +414,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         self.quant_config = quant_config
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
+        self.activation_limit: float | None = None
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -711,9 +712,14 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         return N if is_no_mul else N // 2
 
     def activation(
-        self, activation: str, output: torch.Tensor, input: torch.Tensor
+        self, activation: str, output: torch.Tensor, input: torch.Tensor, activation_limit: float | None = None
     ) -> None:
-        apply_moe_activation(activation, output, input)
+        apply_moe_activation(
+            activation,
+            output,
+            input,
+            activation_limit=activation_limit,
+        )
 
     def enable_chunking(self):
         return (
@@ -741,6 +747,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         workspace2: torch.Tensor,
         expert_tokens_meta: ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        activation_limit: float | None = None
     ) -> None:
         """
         This function computes the intermediate result of a Mixture of Experts
@@ -1139,6 +1146,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
+        activation_limit: float | None = None
     ) -> torch.Tensor:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1214,6 +1222,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 workspace2=workspace2,
                 expert_tokens_meta=c_expert_tokens_meta,
                 apply_router_weight_on_input=apply_router_weight_on_input,
+                activation_limit=activation_limit,
             )
 
         return fused_out
@@ -1297,6 +1306,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        activation_limit: float | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
@@ -1325,6 +1335,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
+
+        # Propagate any activation parameters to the experts implementation.
+        self.fused_experts.activation_limit = activation_limit
 
         if inplace and self.shared_experts is None and not disable_inplace():
             output = hidden_states
@@ -1358,6 +1371,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
+            activation_limit=activation_limit
         )
 
         return self._finalize(

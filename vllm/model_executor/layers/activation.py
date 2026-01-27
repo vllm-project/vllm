@@ -22,6 +22,29 @@ from vllm.utils.collection_utils import LazyDict
 logger = init_logger(__name__)
 
 
+def swigluoai_step_and_mul_out(
+    out: torch.Tensor,
+    x: torch.Tensor,
+    limit: float,
+) -> torch.Tensor:
+    """Out-variant of swigluoai-step activation.
+
+    Writes into `out`:
+      silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
+    """
+    # Prefer the fused custom op when available (CUDA); fallback to PyTorch ops
+    # otherwise.
+    if x.is_cuda and hasattr(torch.ops._C, "swigluoai_step_and_mul"):
+        torch.ops._C.swigluoai_step_and_mul(out, x, limit)
+    else:
+        gate, up = x.chunk(2, dim=-1)
+        gate = F.silu(gate)
+        gate = gate.clamp(max=limit)
+        up = up.clamp(min=-limit, max=limit)
+        out.copy_(gate * up)
+    return out
+
+
 # --8<-- [start:fatrelu_and_mul]
 @CustomOp.register("fatrelu_and_mul")
 class FatreluAndMul(CustomOp):
@@ -302,6 +325,46 @@ class SwigluOAIAndMul(CustomOp):
 
     def extra_repr(self) -> str:
         return f"alpha={repr(self.alpha)}, limit={repr(self.limit)}"
+
+
+# --8<-- [start:swigluoai_step_and_mul]
+@CustomOp.register("swigluoai_step_and_mul")
+class SwigluOAIStepAndMul(CustomOp):
+    """An activation function for SwiGLU with clamping.
+
+    Computes x -> silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
+    where d = x.shape[-1] // 2.
+
+    Shapes:
+        x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
+        return: (num_tokens, d) or (batch_size, seq_len, d)
+    """
+
+    # --8<-- [end:swigluoai_step_and_mul]
+
+    def __init__(self, limit: float):
+        super().__init__()
+        if limit is None:
+            raise ValueError("SwigluOAIStepAndMul requires limit to be set.")
+        self.limit = limit
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        gate, up = x.chunk(2, dim=-1)
+        gate = F.silu(gate)
+        gate = gate.clamp(max=self.limit)
+        up = up.clamp(min=-self.limit, max=self.limit)
+        return gate * up
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        output_shape = x.shape[:-1] + (d,)
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        swigluoai_step_and_mul_out(out, x, self.limit)
+        return out
+
+    def extra_repr(self) -> str:
+        return f"limit={repr(self.limit)}"
 
 
 # --8<-- [start:gelu_new]

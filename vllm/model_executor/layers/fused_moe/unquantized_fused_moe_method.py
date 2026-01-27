@@ -344,6 +344,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             topk_ids=topk_ids,
             inplace=self.use_inplace,
             activation=layer.activation,
+            activation_limit=getattr(layer, "activation_limit", None),
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,

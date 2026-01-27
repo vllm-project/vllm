@@ -122,6 +122,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "qwen3coder_tool_parser",
         "Qwen3CoderToolParser",
     ),
+    "qwen3_coder_rl": (
+        "qwen3coder_tool_parser_rl",
+        "Qwen3CoderToolParserRL",
+    ),
     "qwen3_xml": (
         "qwen3xml_tool_parser",
         "Qwen3XMLToolParser",
