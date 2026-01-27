@@ -167,8 +167,19 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
         logger.info_once("Using ipex marlin backend on XPU")
         return Mxfp4Backend.MARLIN
     elif current_platform.is_rocm() and has_triton_kernels():
-        logger.info_once("Using Triton backend")
-        return Mxfp4Backend.TRITON
+        # triton_kernels requires MFMA instructions, only available on gfx9 (CDNA)
+        # gfx1x (RDNA/Navi) uses WMMA instead and is not supported
+        from vllm.platforms.rocm import on_gfx9
+
+        if on_gfx9():
+            logger.info_once("Using Triton backend on gfx9")
+            return Mxfp4Backend.TRITON
+        else:
+            logger.warning_once(
+                "MXFP4 MoE triton_kernels require MFMA instructions "
+                "(gfx9/CDNA only). Falling back to NONE backend."
+            )
+            return Mxfp4Backend.NONE
 
     return Mxfp4Backend.NONE
 
