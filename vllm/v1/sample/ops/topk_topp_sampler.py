@@ -33,6 +33,16 @@ class TopKTopPSampler(nn.Module):
             and current_platform.is_cuda()
         ):
             if envs.VLLM_USE_FLASHINFER_SAMPLER:
+                from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+                capability = current_platform.get_device_capability()
+                assert capability is not None
+                if not FlashInferBackend.supports_compute_capability(capability):
+                    capability_str = capability.as_version_str()
+                    raise RuntimeError(
+                        "FlashInfer does not support compute capability "
+                        f"{capability_str}, unset VLLM_USE_FLASHINFER_SAMPLER=1."
+                    )
                 # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
                 logger.info_once(
                     "Using FlashInfer for top-p & top-k sampling.",
@@ -164,6 +174,8 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # FIXME: Fix aiter_sampler's accuracy issue and remove this flag
+        DISABLE_AITER_SAMPLER = True
         """Optimized ROCm/aiter path (same structure as forward_cuda)."""
         if (k is None and p is None) or generators:
             if generators:
@@ -176,6 +188,8 @@ class TopKTopPSampler(nn.Module):
             "processed_logits",
             "processed_logprobs",
         ), "aiter sampler does not support returning logits/logprobs."
+        if DISABLE_AITER_SAMPLER:
+            return self.forward_native(logits, generators, k, p)
         return self.aiter_sample(logits, k, p, generators), None
 
     def aiter_sample(

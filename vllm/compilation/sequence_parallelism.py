@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -9,6 +11,7 @@ import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 from vllm.config import VllmConfig
+from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -25,9 +28,11 @@ from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 logger = init_logger(__name__)
 
 
-def get_first_out_wrapper(fn):
+def get_first_out_wrapper(
+    fn: Callable[..., Sequence[torch.Tensor]],
+) -> Callable[..., torch.Tensor]:
     @functools.wraps(fn)
-    def wrapper(*args):
+    def wrapper(*args: Any) -> torch.Tensor:
         return fn(*args)[0]
 
     return wrapper
@@ -40,8 +45,8 @@ class _SequenceParallelPatternHelper:
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
-    ):
+        device: str | None,
+    ) -> None:
         self.epsilon = epsilon
         self.dtype = dtype
         self.device = device
@@ -63,21 +68,21 @@ class _SequenceParallelPatternHelper:
 
 
 class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
 
-    def get_inputs(self):
+    def get_inputs(self) -> list[torch.Tensor]:
         input = torch.empty([1, 8, 4], device=self.device, dtype=self.dtype)
         arg3_1 = torch.empty([4], device=self.device, dtype=self.dtype)
 
         return [input, arg3_1]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             input: torch.Tensor,
             arg3_1: torch.Tensor,
-        ):
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
             rmsnorm = self.rmsnorm_matcher(all_reduce, arg3_1)
 
@@ -86,7 +91,7 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
         def replacement(
             input: torch.Tensor,
             arg3_1: torch.Tensor,
-        ):
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
 
             rmsnorm = self.rmsnorm_matcher(reduce_scatter, arg3_1)
@@ -99,11 +104,11 @@ class FirstAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
 
 
 class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
 
-    def get_inputs(self):
+    def get_inputs(self) -> list[torch.Tensor]:
         mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
 
         residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
@@ -115,7 +120,7 @@ class MiddleAllReduceRMSNormPattern(_SequenceParallelPatternHelper):
             rms_norm_weights,
         ]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             residual: torch.Tensor,
             mm_1: torch.Tensor,
@@ -161,24 +166,24 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         self,
         epsilon: float,
         dtype: torch.dtype,
-        device: str,
-    ):
+        device: str | None,
+    ) -> None:
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
-    def get_inputs(self):
+    def get_inputs(self) -> list[torch.Tensor]:
         input = torch.zeros([1, 8, 4], device=self.device, dtype=self.dtype)
         weight = torch.empty([4], device=self.device, dtype=self.dtype)
         scale = torch.tensor(1.0, device=self.device, dtype=torch.float32)
         return [input, weight, scale]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             input: torch.Tensor,
             weight: torch.Tensor,
             scale: torch.Tensor,
-        ):
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
             rms = self.rmsnorm_matcher(all_reduce, weight)
             quant, _ = self.quant_matcher(rms, scale)
@@ -188,7 +193,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             input: torch.Tensor,
             weight: torch.Tensor,
             scale: torch.Tensor,
-        ):
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
             rms = self.rmsnorm_matcher(reduce_scatter, weight)
             quant, _ = self.quant_matcher(rms, scale)
@@ -202,12 +207,12 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 
 
 class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
-    def __init__(self, epsilon: float, dtype: torch.dtype, device: str):
+    def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
         self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
-    def get_inputs(self):
+    def get_inputs(self) -> list[torch.Tensor]:
         mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
         residual = torch.empty([4, 4], device=self.device, dtype=self.dtype)
         rms_norm_weights = torch.empty([4, 4], device=self.device, dtype=self.dtype)
@@ -215,7 +220,7 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
 
         return [residual, mm_1, rms_norm_weights, scale]
 
-    def register(self, pm_pass: PatternMatcherPass):
+    def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             residual: torch.Tensor,
             mm_1: torch.Tensor,
@@ -301,10 +306,10 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     """
 
     @enable_fake_mode
-    def __init__(self, config: VllmConfig):
+    def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
-        # Used to cleanup redundant views created temporarily
+        # Used to clean up redundant views created temporarily
         # to circumvent residual shape change issues
         self.noop_cleanup = NoOpEliminationPass(config)
         self.noop_cleanup.pass_name = f"{self.pass_name}.{self.noop_cleanup.pass_name}"
@@ -333,7 +338,7 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
 
         self.dump_patterns(config, self.patterns)
 
-    def is_applicable(self, shape: int | None) -> bool:
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
         # When sequence parallelism is enabled, the residual tensor from RMSNorm
         # needs to be split along the sequence dimension. However, this dimension
         # is symbolic during piecewise compilation, and splitting symbolic shapes
@@ -353,10 +358,13 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         ):
             return True
         tp_size = get_tensor_model_parallel_world_size()
-        return shape is not None and shape % tp_size == 0
+        result: bool = (compile_range.is_single_size()) and (
+            compile_range.end % tp_size == 0
+        )
+        return result
 
     @VllmInductorPass.time_and_log
-    def __call__(self, graph: fx.Graph):
+    def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
         # Clean up reshape nodes

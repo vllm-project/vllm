@@ -28,11 +28,11 @@ import torch
 from torch import nn
 from transformers import Exaone4Config
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -72,6 +72,7 @@ class Exaone4GatedMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
         bias: bool = False,
         prefix: str = "",
     ) -> None:
@@ -88,6 +89,7 @@ class Exaone4GatedMLP(nn.Module):
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -176,7 +178,6 @@ class Exaone4Attention(nn.Module):
         set_default_rope_theta(config, default_theta=1000000)
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
@@ -450,7 +451,6 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -490,7 +490,7 @@ class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

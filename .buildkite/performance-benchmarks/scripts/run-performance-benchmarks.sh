@@ -49,7 +49,11 @@ check_cpus() {
     echo "Need at least 1 NUMA to run benchmarking."
     exit 1
   fi
-  declare -g gpu_type="cpu"
+  if [[ "$(uname -m)" == "aarch64" ]] || [[ "$(uname -m)" == "arm64" ]]; then
+    declare -g gpu_type="arm64-cpu"
+  else
+    declare -g gpu_type="cpu"
+  fi
   echo "GPU type is $gpu_type"
 }
 
@@ -110,7 +114,8 @@ json2envs() {
 wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
-  timeout 1200 bash -c '
+  local timeout_val="1200"
+  timeout "$timeout_val" bash -c '
     until curl -X POST localhost:8000/v1/completions; do
       sleep 1
     done' && return 0 || return 1
@@ -206,8 +211,8 @@ run_latency_tests() {
 
     # check if there is enough GPU to run the test
     tp=$(echo "$latency_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ]; then
-      pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size')
+    if [[ "$ON_CPU" == "1" ]]; then
+      pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size // 1')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
@@ -275,8 +280,8 @@ run_throughput_tests() {
 
     # check if there is enough GPU to run the test
     tp=$(echo "$throughput_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ]; then
-      pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size')
+    if [[ "$ON_CPU" == "1" ]]; then
+      pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size // 1')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
@@ -316,12 +321,44 @@ run_throughput_tests() {
 run_serving_tests() {
   # run serving tests using `vllm bench serve` command
   # $1: a json file specifying serving test cases
+  #
+  # Supported JSON formats:
+  # 1) Plain format: top-level array
+  #    [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
+  #
+  # 2) Default parameters field + plain format tests
+  #    {
+  #      "defaults": { ... },
+  #      "tests": [ { "test_name": "...", "server_parameters": {...}, ... }, ... ]
+  #    }
 
   local serving_test_file
   serving_test_file=$1
 
   # Iterate over serving tests
-  jq -c '.[]' "$serving_test_file" | while read -r params; do
+  jq -c '
+    if type == "array" then
+      # Plain format: test cases array
+      .[]
+    elif (type == "object" and has("tests")) then
+      # merge the default parameters into each test cases
+      . as $root
+      | ($root.defaults // {}) as $d
+      | ($root.tests // [])[]
+      # default qps / max_concurrency from defaults if missing
+      | .qps_list = (.qps_list // $d.qps_list)
+      | .max_concurrency_list = (.max_concurrency_list // $d.max_concurrency_list)
+      # merge envs / params: test overrides defaults
+      | .server_environment_variables =
+          (($d.server_environment_variables // {}) + (.server_environment_variables // {}))
+      | .server_parameters =
+          (($d.server_parameters // {}) + (.server_parameters // {}))
+      | .client_parameters =
+          (($d.client_parameters // {}) + (.client_parameters // {}))
+    else
+      error("Unsupported serving test file format: must be array or object with .tests")
+    end
+  ' "$serving_test_file" | while read -r params; do
     # get the test name, and append the GPU type back to it.
     test_name=$(echo "$params" | jq -r '.test_name')
     if [[ ! "$test_name" =~ ^serving_ ]]; then
@@ -335,28 +372,33 @@ run_serving_tests() {
       continue
     fi
 
-    # get client and server arguments
+    # get client and server arguments (after merged the default parameters)
     server_params=$(echo "$params" | jq -r '.server_parameters')
     server_envs=$(echo "$params" | jq -r '.server_environment_variables')
     client_params=$(echo "$params" | jq -r '.client_parameters')
+
     server_args=$(json2args "$server_params")
     server_envs=$(json2envs "$server_envs")
     client_args=$(json2args "$client_params")
+
+    # qps_list
     qps_list=$(echo "$params" | jq -r '.qps_list')
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
     echo "Running over qps list $qps_list"
+
+    # max_concurrency_list (fallback to num_prompts if missing)
     max_concurrency_list=$(echo "$params" | jq -r '.max_concurrency_list')
     if [[ -z "$max_concurrency_list" || "$max_concurrency_list" == "null" ]]; then
-        num_prompts=$(echo "$client_params" | jq -r '.num_prompts')
-        max_concurrency_list="[$num_prompts]"
+      num_prompts=$(echo "$client_params" | jq -r '.num_prompts')
+      max_concurrency_list="[$num_prompts]"
     fi
     max_concurrency_list=$(echo "$max_concurrency_list" | jq -r '.[] | @sh')
     echo "Running over max concurrency list $max_concurrency_list"
 
     # check if there is enough resources to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ]; then
-      pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size')
+    if [[ "$ON_CPU" == "1" ]]; then
+      pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size // 1')
       world_size=$(($tp*$pp))
       if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
@@ -458,9 +500,9 @@ run_serving_tests() {
 main() {
   local ARCH
   ARCH=''
-  if [ "$ON_CPU" == "1" ];then
-     check_cpus
-     ARCH='-cpu'
+  if [[ "$ON_CPU" == "1" ]]; then
+    check_cpus
+    ARCH="-$gpu_type"
   else
      check_gpus
      ARCH="$arch_suffix"

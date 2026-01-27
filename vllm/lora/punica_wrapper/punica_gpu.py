@@ -45,7 +45,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     ):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
 
-        self.max_loras = kwargs["max_loras"]
+        self.lora_config = kwargs["lora_config"]
+        self.max_loras = self.lora_config.max_loras
 
         self.token_mapping_meta = LoRAKernelMeta.make(
             self.max_loras, max_num_batched_tokens, device=device
@@ -360,8 +361,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self,
         y: torch.Tensor,
         x: torch.Tensor,
-        lora_a_stacked: list[torch.Tensor],
-        lora_b_stacked: list[torch.Tensor],
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
         topk_weights: torch.Tensor,
         sorted_token_ids: torch.Tensor,
         expert_ids: torch.Tensor,

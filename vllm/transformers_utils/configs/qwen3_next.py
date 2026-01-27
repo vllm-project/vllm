@@ -17,7 +17,6 @@
 """Qwen3-Next model configuration"""
 
 from transformers.configuration_utils import PretrainedConfig, layer_type_validation
-from transformers.modeling_rope_utils import rope_config_validation
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
@@ -104,8 +103,8 @@ class Qwen3NextConfig(PretrainedConfig):
                     Only used with 'llama3'. Scaling factor applied to low frequency components of the RoPE
                 `high_freq_factor` (`float`, *optional*):
                     Only used with 'llama3'. Scaling factor applied to high frequency components of the RoPE
-        partial_rotary_factor (`float`, *optional*, defaults to 0.25):
-            Percentage of the query and keys which will have rotary embedding.
+                `partial_rotary_factor` (`float`, *optional*, defaults to 0.25):
+                    Percentage of the query and keys which will have rotary embedding.
         attention_bias (`bool`, *optional*, defaults to `False`):
             Whether to use a bias in the query, key, value and output projection layers during self-attention.
         attention_dropout (`float`, *optional*, defaults to 0.0):
@@ -199,7 +198,6 @@ class Qwen3NextConfig(PretrainedConfig):
         use_cache=True,
         tie_word_embeddings=False,
         rope_parameters=None,
-        partial_rotary_factor=0.25,
         attention_bias=False,
         attention_dropout=0.0,
         head_dim=256,
@@ -240,12 +238,14 @@ class Qwen3NextConfig(PretrainedConfig):
         rope_theta = kwargs.pop("rope_theta", 10000.0)
         if "rope_theta" not in rope_parameters:
             rope_parameters["rope_theta"] = rope_theta
+        partial_rotary_factor = kwargs.pop("partial_rotary_factor", 0.25)
+        if "partial_rotary_factor" not in rope_parameters:
+            rope_parameters["partial_rotary_factor"] = partial_rotary_factor
         self.rope_parameters = rope_parameters
         self.partial_rotary_factor = partial_rotary_factor
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.head_dim = head_dim
-        rope_config_validation(self)
 
         self.layer_types = layer_types
         if self.layer_types is None:

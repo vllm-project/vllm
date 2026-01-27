@@ -17,7 +17,7 @@ from pydantic_core import core_schema
 logger = logging.getLogger("mkdocs")
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
-ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
+ARGPARSE_DOC_DIR = ROOT_DIR / "docs/generated/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
 
@@ -92,8 +92,12 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
 
 
 bench_latency = auto_mock("vllm.benchmarks", "latency")
+bench_mm_processor = auto_mock("vllm.benchmarks", "mm_processor")
 bench_serve = auto_mock("vllm.benchmarks", "serve")
 bench_sweep_plot = auto_mock("vllm.benchmarks.sweep.plot", "SweepPlotArgs")
+bench_sweep_plot_pareto = auto_mock(
+    "vllm.benchmarks.sweep.plot_pareto", "SweepPlotParetoArgs"
+)
 bench_sweep_serve = auto_mock("vllm.benchmarks.sweep.serve", "SweepServeArgs")
 bench_sweep_serve_sla = auto_mock(
     "vllm.benchmarks.sweep.serve_sla", "SweepServeSLAArgs"
@@ -158,7 +162,8 @@ class MarkdownFormatter(HelpFormatter):
             if action.help:
                 self._markdown_output.append(f"{action.help}\n\n")
 
-            if (default := action.default) != SUPPRESS:
+            # None usually means the default is determined at runtime
+            if (default := action.default) != SUPPRESS and default is not None:
                 # Make empty string defaults visible
                 if default == "":
                     default = '""'
@@ -219,8 +224,10 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         "run-batch": create_parser(openai_run_batch.make_arg_parser),
         # Benchmark CLI
         "bench_latency": create_parser(bench_latency.add_cli_args),
+        "bench_mm_processor": create_parser(bench_mm_processor.add_cli_args),
         "bench_serve": create_parser(bench_serve.add_cli_args),
         "bench_sweep_plot": create_parser(bench_sweep_plot.add_cli_args),
+        "bench_sweep_plot_pareto": create_parser(bench_sweep_plot_pareto.add_cli_args),
         "bench_sweep_serve": create_parser(bench_sweep_serve.add_cli_args),
         "bench_sweep_serve_sla": create_parser(bench_sweep_serve_sla.add_cli_args),
         "bench_throughput": create_parser(bench_throughput.add_cli_args),

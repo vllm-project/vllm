@@ -9,12 +9,12 @@ import torch
 from torch import nn
 from transformers import FalconH1Config
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -24,6 +24,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -242,16 +244,11 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
 
-        if hasattr(config, "partial_rotary_factor"):
-            rotary_dim = self.head_dim * config.partial_rotary_factor
-        elif hasattr(config, "attn_rotary_emb"):
-            rotary_dim = config.attn_rotary_emb  # for backward compatibility
-        else:
-            rotary_dim = self.head_dim  # default
+        rotary_dim = getattr(config, "attn_rotary_emb", self.head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=True,
@@ -462,7 +459,7 @@ class FalconH1Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -510,7 +507,6 @@ class FalconH1ForCausalLM(
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     @classmethod
     def get_mamba_state_dtype_from_config(
@@ -557,6 +553,10 @@ class FalconH1ForCausalLM(
             conv_kernel=hf_config.mamba_d_conv,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
@@ -602,7 +602,7 @@ class FalconH1ForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

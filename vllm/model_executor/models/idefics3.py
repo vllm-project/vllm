@@ -42,23 +42,26 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    MultiModalDataItems,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer,
 )
-from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+)
 from .llama import LlamaModel
 from .utils import AutoWeightsLoader, maybe_prefix
 
@@ -338,6 +341,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
+        mm_kwargs = {"input_data_format": "channels_last", **mm_kwargs}
         processed_outputs = super()._call_hf_processor(
             prompt,
             mm_data,
@@ -555,7 +559,7 @@ class Idefics3Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -575,8 +579,6 @@ class Idefics3Model(nn.Module):
     dummy_inputs=Idefics3DummyInputsBuilder,
 )
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -606,9 +608,16 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.model = Idefics3Model(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=LlamaModel,
+            tower_targets={"image": (Idefics3VisionTransformer, Idefics3Connector)},
+        ):
+            self.model = Idefics3Model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "model"),
+            )
+
         self.image_token_id = self.config.image_token_id
 
         self.lm_head = ParallelLMHead(
@@ -671,9 +680,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
         num_patches = image_input["num_patches"]
         return [e.flatten(0, 1) for e in image_features.split(num_patches.tolist())]
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -683,7 +689,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -715,3 +721,21 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             connector="model.connector",
             tower_model="model.vision_model",
         )
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        scale_factor = hf_config.scale_factor
+
+        return num_image_tokens * scale_factor**2
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        hf_config = self.config
+        scale_factor = hf_config.scale_factor
+
+        return num_vision_tokens // scale_factor**2

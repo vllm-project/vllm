@@ -37,7 +37,7 @@ logger = init_logger(__name__)
 # use `rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()`
 # for envs checks which does not require @cache anymore.
 # triton kernel is torch compile compatible.
-# does not require direct registeration.
+# does not require direct registration.
 # use `rocm_aiter_ops.triton_fp4_gemm_dynamic_qaunt`.
 @cache
 def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
@@ -153,7 +153,12 @@ try:
         fake_impl=gemm_with_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
-except (ImportError, AttributeError):
+except (ImportError, AttributeError, RuntimeError):
+    if current_platform.is_rocm():
+        logger.warning(
+            "AITER is not found or QuarkOCP_MX is not supported on the current "
+            "platform. QuarkOCP_MX quantization will not be available."
+        )
     dynamic_mxfp4_quant = gemm_afp4wfp4 = None
 
 

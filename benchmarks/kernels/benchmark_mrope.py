@@ -37,9 +37,9 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import set_random_seed
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -94,12 +94,11 @@ def benchmark_mrope(
     benchmark_iter: int = 100,
     csv_writer=None,
 ):
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     # the parameters to compute the q k v size based on tp_size
     mrope_helper_class = get_rope(
         head_size=head_dim,
-        rotary_dim=head_dim,
         max_position=max_position,
         is_neox_style=is_neox_style,
         rope_parameters=rope_parameters,

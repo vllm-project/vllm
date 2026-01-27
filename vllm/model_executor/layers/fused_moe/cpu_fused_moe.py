@@ -1,27 +1,45 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import weakref
 from collections.abc import Callable
 
 import torch
 from torch.nn import functional as F
 
 from vllm import _custom_ops as ops
+from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
+from vllm.utils.torch_utils import direct_register_custom_op
+
+_CPU_MOE_LAYER_CACHE = {}
 
 
-def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
-    d = x.shape[-1] // 2
-    return F.silu(x[..., :d]) * x[..., d:]
-
-
-def swigluoai_and_mul(
-    x: torch.Tensor, alpha: float = 1.702, limit: float = 7.0
+def _swigluoai_forward_native(
+    x: torch.Tensor,
+    alpha: float = 1.702,
+    limit: float = 7.0,
 ) -> torch.Tensor:
-    d = x.shape[-1] // 2
-    gate, up = x[..., :d], x[..., d:]
-    gate = gate.clamp(max=limit)
+    """PyTorch-native implementation of SwigluOAIAndMul.forward_native.
+
+    Standalone function to avoid instantiating SwigluOAIAndMul (a CustomOp)
+    which would trigger get_current_vllm_config() before config is set.
+    """
+    gate, up = x[..., ::2], x[..., 1::2]
+    gate = gate.clamp(min=None, max=limit)
     up = up.clamp(min=-limit, max=limit)
-    glu = gate * torch.sigmoid(alpha * gate)
-    return (up + 1) * glu
+    glu = gate * torch.sigmoid(gate * alpha)
+    gated_output = (up + 1) * glu
+    return gated_output
+
+
+# Map activation names to their native forward functions.
+# Uses static methods or standalone functions to avoid instantiating CustomOp
+# classes, which would call get_current_vllm_config() before config is set.
+_CPU_MOE_ACT_FN: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
+    "silu": SiluAndMul.forward_native,
+    "swigluoai": _swigluoai_forward_native,
+}
 
 
 def grouped_topk(
@@ -189,8 +207,105 @@ class SGLFusedMOE:
 
 class CPUFusedMOE:
     def __init__(self, layer: torch.nn.Module) -> None:
-        use_onednn_mm = ops._supports_onednn and ops.is_onednn_acl_supported()
+        use_grouped_gemm, isa = self.check_grouped_gemm(layer)
+        self.isa = isa
+        if use_grouped_gemm:
+            self.forward_method = self.forward_grouped_gemm
+            self.init_moe_grouped_gemm(layer=layer)
+        else:
+            self.forward_method = self.forward_torch
+            self.init_moe_torch(layer=layer)
 
+    def __call__(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: int | None = None,
+        num_expert_group: int | None = None,
+        global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
+        custom_routing_function: Callable | None = None,
+        scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
+        e_score_correction_bias: torch.Tensor | None = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+    ) -> torch.Tensor:
+        assert activation in _CPU_MOE_ACT_FN, f"{activation} is not supported."
+        assert not apply_router_weight_on_input
+
+        topk_weights, topk_ids = select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            use_grouped_topk=use_grouped_topk,
+            top_k=top_k,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+        )
+
+        return self.forward_method(
+            layer,
+            x,
+            topk_weights,
+            topk_ids,
+            activation,
+            global_num_experts,
+        )
+
+    def check_grouped_gemm(
+        self,
+        layer: torch.nn.Module,
+    ) -> tuple[bool, str]:
+        if not hasattr(torch.ops._C, "prepack_moe_weight"):
+            return False, "none"
+
+        dtype = layer.w13_weight.dtype
+        w13_input_size = layer.w13_weight.size(2)
+        w13_output_size = layer.w13_weight.size(1)
+        w2_input_size = layer.w2_weight.size(2)
+        w2_output_size = layer.w2_weight.size(1)
+
+        if not (w13_output_size % 32 == 0 and w2_output_size % 32 == 0):
+            return False, "none"
+
+        supports_amx = torch._C._cpu._is_amx_tile_supported()
+
+        if (
+            supports_amx
+            and dtype == torch.bfloat16
+            and w13_input_size % 32 == 0
+            and w2_input_size % 32 == 0
+        ):
+            return True, "amx"
+
+        if supports_amx:
+            return False, "none"
+
+        return True, "vec"
+
+    def init_moe_grouped_gemm(
+        self,
+        layer: torch.nn.Module,
+    ) -> None:
+        new_w13 = cpu_prepack_moe_weight(layer.w13_weight, self.isa)
+        replace_parameter(layer, "w13_weight", new_w13)
+        new_w2 = cpu_prepack_moe_weight(layer.w2_weight, self.isa)
+        replace_parameter(layer, "w2_weight", new_w2)
+
+    def init_moe_torch(
+        self,
+        layer: torch.nn.Module,
+    ) -> None:
+        use_onednn_mm = ops._supports_onednn and ops.is_onednn_acl_supported()
         num_experts = layer.w13_weight.size(0)
         has_w13_bias = hasattr(layer, "w13_bias")
         has_w2_bias = hasattr(layer, "w2_bias")
@@ -223,83 +338,112 @@ class CPUFusedMOE:
                 layer.down_linear.append(
                     lambda x, w=layer_w2_weight, b=layer_w2_bias: F.linear(x, w, b)
                 )
+
         if use_onednn_mm:  # remove weight
             layer.w13_weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
             layer.w2_weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
 
-    def __call__(
+        _CPU_MOE_LAYER_CACHE[id(layer)] = weakref.ref(layer)
+
+    def forward_grouped_gemm(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
-        router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
+        input: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
         global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
     ) -> torch.Tensor:
-        assert activation in {"silu", "swigluoai"}, f"{activation} is not supported."
-        assert not apply_router_weight_on_input
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            routed_scaling_factor=routed_scaling_factor,
-            e_score_correction_bias=e_score_correction_bias,
+        output = cpu_fused_moe(
+            input,
+            layer.w13_weight,
+            layer.w2_weight,
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
+            topk_weights,
+            topk_ids,
+            activation,
+            self.isa,
+        )
+        return output
+
+    def forward_torch(
+        self,
+        layer: torch.nn.Module,
+        input: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int = -1,
+    ) -> torch.Tensor:
+        output = torch.empty_like(input)
+        layer_id = id(layer)
+        torch.ops.vllm.cpu_fused_moe_torch(
+            layer_id,
+            output,
+            input,
+            topk_weights,
+            topk_ids,
+            activation,
+            global_num_experts,
         )
 
-        # Ref code from https://github.com/sgl-project/sglang/blob/716e682721397df103f347d22da8bd46c6016dab/python/sglang/srt/layers/moe/fused_moe_native.py#L53
-        len_experts = global_num_experts
+        return output
 
-        cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))
-        cnts.scatter_(1, topk_ids.to(torch.int64), 1)
-        tokens_per_expert = cnts.sum(dim=0)
-        idxs = topk_ids.view(-1).argsort()
 
-        sorted_tokens = x[idxs // topk_ids.shape[1]]
-        tokens_per_expert = tokens_per_expert.cpu().numpy()
+def cpu_fused_moe_torch(
+    layer_id: int,
+    output: torch.Tensor,
+    input: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: str,
+    global_num_experts: int = -1,
+) -> None:
+    layer = _CPU_MOE_LAYER_CACHE[layer_id]()
 
-        outputs = []
-        start_idx = 0
+    # Ref code from https://github.com/sgl-project/sglang/blob/716e682721397df103f347d22da8bd46c6016dab/python/sglang/srt/layers/moe/fused_moe_native.py#L53
+    len_experts = global_num_experts
 
-        for i, num_tokens in enumerate(tokens_per_expert):
-            end_idx = start_idx + num_tokens
-            if num_tokens == 0:
-                continue
-            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
+    cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))
+    cnts.scatter_(1, topk_ids.to(torch.int64), 1)
+    tokens_per_expert = cnts.sum(dim=0)
+    idxs = topk_ids.view(-1).argsort()
 
-            gate_up = layer.gate_up_linear[i](tokens_for_this_expert)
-            if activation == "swigluoai":
-                gate_up = swigluoai_and_mul(gate_up)
-            else:
-                gate_up = silu_and_mul(gate_up)
-            expert_out = layer.down_linear[i](gate_up)
-            outputs.append(expert_out)
-            start_idx = end_idx
+    sorted_tokens = input[idxs // topk_ids.shape[1]]
+    tokens_per_expert = tokens_per_expert.cpu().numpy()
 
-        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
-        new_x = torch.empty_like(outs)
+    outputs = []
+    start_idx = 0
 
-        new_x[idxs] = outs
-        final_out = (
-            new_x.view(*topk_ids.shape, -1)
-            .type(topk_weights.dtype)
-            .mul_(topk_weights.unsqueeze(dim=-1))
-            .sum(dim=1)
-            .type(new_x.dtype)
-        )
-        return final_out
+    for i, num_tokens in enumerate(tokens_per_expert):
+        end_idx = start_idx + num_tokens
+        if num_tokens == 0:
+            continue
+        tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
+
+        gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
+        gate_up = _CPU_MOE_ACT_FN[activation](gate_up)
+        expert_out = layer.down_linear[i](gate_up)  # type: ignore
+        outputs.append(expert_out)
+        start_idx = end_idx
+
+    outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
+    new_x = torch.empty_like(outs)
+
+    new_x[idxs] = outs
+    final_out = (
+        new_x.view(*topk_ids.shape, -1)
+        .type(topk_weights.dtype)
+        .mul_(topk_weights.unsqueeze(dim=-1))
+        .sum(dim=1)
+        .type(new_x.dtype)
+    )
+    output.copy_(final_out)
+
+
+direct_register_custom_op(
+    op_name="cpu_fused_moe_torch",
+    op_func=cpu_fused_moe_torch,
+    mutates_args=["output"],
+)

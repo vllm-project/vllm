@@ -3,9 +3,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from dataclasses import fields
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import jsonschema
 import pytest
@@ -21,15 +20,9 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.sampling_params import (
-    GuidedDecodingParams,
     SamplingParams,
     StructuredOutputsParams,
 )
-
-if TYPE_CHECKING:
-    from vllm.config.model import TokenizerMode
-else:
-    TokenizerMode = str
 
 NGRAM_SPEC_CONFIG = {
     "model": "[ngram]",
@@ -46,11 +39,15 @@ EAGLE_SPEC_CONFIG = {
 
 PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "xgrammar", "auto", None),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
+    # FIXME: Since "auto" will use Mistral tokenizer and these backends do not support
+    # it, we skip these tests for now.
+    # ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", None),
+    # ("mistralai/Ministral-8B-Instruct-2410", "lm-format-enforcer", "auto", None),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", None),
     pytest.param(
         "mistralai/Ministral-8B-Instruct-2410",
         "lm-format-enforcer",
-        "auto",
+        "hf",
         None,
         marks=pytest.mark.skip(
             reason=(
@@ -80,7 +77,7 @@ PARAMS_MODELS_BACKENDS_TOKENIZER_MODE = [
     # ("mistralai/Ministral-8B-Instruct-2410", "outlines", "mistral", None),
     # ("Qwen/Qwen2.5-1.5B-Instruct", "guidance", "auto"),
     ("mistralai/Ministral-8B-Instruct-2410", "outlines", "auto", NGRAM_SPEC_CONFIG),
-    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "auto", NGRAM_SPEC_CONFIG),
+    ("mistralai/Ministral-8B-Instruct-2410", "guidance", "hf", NGRAM_SPEC_CONFIG),
     ("Qwen/Qwen2.5-1.5B-Instruct", "xgrammar", "auto", NGRAM_SPEC_CONFIG),
     ("meta-llama/Meta-Llama-3.1-8B-Instruct", "xgrammar", "auto", EAGLE_SPEC_CONFIG),
 ]
@@ -89,6 +86,10 @@ PARAMS_MODELS_TOKENIZER_MODE = [
     ("mistralai/Ministral-8B-Instruct-2410", "auto"),
     ("Qwen/Qwen2.5-1.5B-Instruct", "auto"),
 ]
+
+platform_args = {}
+if current_platform.is_rocm():
+    platform_args["async_scheduling"] = False
 
 
 class CarType(str, Enum):
@@ -102,23 +103,6 @@ class CarDescription(BaseModel):
     brand: str
     model: str
     car_type: CarType
-
-
-def test_guided_decoding_deprecated():
-    with pytest.warns(DeprecationWarning, match="GuidedDecodingParams is deprecated.*"):
-        guided_decoding = GuidedDecodingParams(json_object=True)
-
-    structured_outputs = StructuredOutputsParams(json_object=True)
-    assert fields(guided_decoding) == fields(structured_outputs)
-
-    with pytest.warns(DeprecationWarning, match="guided_decoding is deprecated.*"):
-        sp1 = SamplingParams(guided_decoding=guided_decoding)
-
-    with pytest.warns(DeprecationWarning, match="guided_decoding is deprecated.*"):
-        sp2 = SamplingParams.from_optional(guided_decoding=guided_decoding)
-
-    assert sp1 == sp2
-    assert sp1.structured_outputs == guided_decoding
 
 
 @pytest.mark.parametrize(
@@ -151,7 +135,10 @@ def test_structured_output(
         ),
         seed=120,
         tokenizer_mode=tokenizer_mode,
+        load_format="auto" if not model_name.startswith("mistralai/") else "hf",
+        config_format="auto" if not model_name.startswith("mistralai/") else "hf",
         speculative_config=speculative_config,
+        **platform_args,
     )
 
     #
@@ -626,7 +613,7 @@ Make the response as short as possible.
 
 
 @pytest.mark.parametrize(
-    "model_name, backend, tokenizer_mode, reasoning_parser, speculative_config",  # noqa: E501
+    "model_name, backend, tokenizer_mode, reasoning_parser, speculative_config, async_scheduling",  # noqa: E501
     [
         (
             "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
@@ -634,16 +621,19 @@ Make the response as short as possible.
             "auto",
             "deepseek_r1",
             NGRAM_SPEC_CONFIG,
+            False,
         ),
-        ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None),
+        ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None, False),
+        ("Qwen/Qwen3-1.7B", "xgrammar", "auto", "deepseek_r1", None, True),
     ],
 )
 def test_structured_output_with_reasoning_matrices(
     backend: str,
-    tokenizer_mode: TokenizerMode,
+    tokenizer_mode: str,
     reasoning_parser: str,
     model_name: str,
     speculative_config: dict[str, Any] | None,
+    async_scheduling: bool,
 ):
     if current_platform.is_tpu() and speculative_config:
         pytest.skip("TPU does not support speculative decoding")
@@ -664,6 +654,7 @@ def test_structured_output_with_reasoning_matrices(
         ),
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config,
+        async_scheduling=async_scheduling,
     )
     tokenizer = llm.get_tokenizer()
     reasoner = ReasoningParserManager.get_reasoning_parser(reasoning_parser)(
@@ -720,6 +711,8 @@ def test_structured_output_auto_mode(
         max_model_len=1024,
         structured_outputs_config=dict(backend="auto"),
         tokenizer_mode=tokenizer_mode,
+        load_format="auto",
+        config_format="auto",
     )
 
     sampling_params = SamplingParams(
@@ -891,13 +884,11 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
                 output_json = json.loads(generated_text)
 
 
-@pytest.mark.parametrize("guided_decoding_backend", ["xgrammar"])
-def test_structured_output_with_structural_tag(
-    guided_decoding_backend: str,
-):
+@pytest.mark.parametrize("backend", ["xgrammar"])
+def test_structured_output_with_structural_tag(backend: str):
     llm = LLM(
         model="Qwen/Qwen2.5-1.5B-Instruct",
-        guided_decoding_backend=guided_decoding_backend,
+        structured_outputs_config=StructuredOutputsConfig(backend=backend),
     )
 
     structural_tag_config = {
@@ -915,7 +906,7 @@ def test_structured_output_with_structural_tag(
     sampling_params = SamplingParams(
         temperature=0.0,
         max_tokens=500,
-        guided_decoding=StructuredOutputsParams(
+        structured_outputs=StructuredOutputsParams(
             structural_tag=json.dumps(structural_tag_config)
         ),
     )

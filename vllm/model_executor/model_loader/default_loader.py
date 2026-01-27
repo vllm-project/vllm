@@ -30,7 +30,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     safetensors_weights_iterator,
 )
-from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
 
@@ -96,8 +96,25 @@ class DefaultModelLoader(BaseModelLoader):
         load_format = self.load_config.load_format
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
-        # Some quantized models use .pt files for storing the weights.
+
+        # First check for 'auto' format that mistral files format are present.
+        # This is to load mistral models with official format by default.
         if load_format == "auto":
+            load_format = (
+                "mistral"
+                if len(
+                    list_filtered_repo_files(
+                        model_name_or_path=model_name_or_path,
+                        allow_patterns=["consolidated*.safetensors"],
+                        revision=revision,
+                    )
+                )
+                > 0
+                else "hf"
+            )
+
+        # Some quantized models use .pt files for storing the weights.
+        if load_format == "hf":
             allow_patterns = ["*.safetensors", "*.bin"]
         elif load_format == "safetensors" or load_format == "fastsafetensors":
             use_safetensors = True
@@ -222,22 +239,6 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.use_tqdm_on_load,
                     self.load_config.pt_load_map_location,
                 )
-
-        if current_platform.is_tpu():
-            from vllm.platforms.tpu import USE_TPU_INFERENCE
-
-            if not USE_TPU_INFERENCE:
-                # In PyTorch XLA, we should call `torch_xla.sync`
-                # frequently so that not too many ops are accumulated
-                # in the XLA program.
-                import torch_xla
-
-                def _xla_weights_iterator(iterator: Generator):
-                    for weights in iterator:
-                        yield weights
-                        torch_xla.sync(wait=False)
-
-                weights_iterator = _xla_weights_iterator(weights_iterator)
 
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()

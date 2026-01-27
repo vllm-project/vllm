@@ -153,12 +153,21 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is ColumnParallelLinear or (
-            type(source_layer) is MergedColumnParallelLinear
-            and len(packed_modules_list) == 1
-        )
+        if type(source_layer) is ColumnParallelLinear:
+            return True
+        if type(source_layer) is MergedColumnParallelLinear:
+            if len(packed_modules_list) != 1:
+                return False
+            # Exclude layers with 3+ output sizes - those are handled by
+            # MergedColumnParallelLinearVariableSliceWithLoRA since this
+            # class's slice_lora_b assumes exactly 2 slices.
+            return not (
+                hasattr(source_layer, "output_sizes")
+                and len(source_layer.output_sizes) >= 3
+            )
+        return False
 
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -246,8 +255,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
         self.reset_lora(index)
 
@@ -272,7 +281,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         return (
             type(source_layer) is MergedColumnParallelLinear
@@ -338,7 +347,7 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 1
 
@@ -396,7 +405,7 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         return type(source_layer) is QKVParallelLinear and len(packed_modules_list) == 3
 
@@ -434,7 +443,7 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -480,7 +489,7 @@ class MergedColumnParallelLinearWithShardedLoRA(MergedColumnParallelLinearWithLo
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -516,7 +525,7 @@ class QKVParallelLinearWithShardedLoRA(QKVParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -565,7 +574,7 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         # specifying kwargs so they can be easily accessed in decorator
         return super().can_replace_layer(
@@ -575,3 +584,75 @@ class MergedQKVParallelLinearWithShardedLoRA(MergedQKVParallelLinearWithLoRA):
             model_config=model_config,
             decorate=False,
         )
+
+
+class MergedColumnParallelLinearVariableSliceWithLoRA(
+    MergedColumnParallelLinearWithLoRA
+):
+    """MergedColumnParallelLinear with variable number of slices (3+).
+
+    This handles cases where the checkpoint has a single weight for the whole
+    module (not split into slices), but the layer itself has multiple slices.
+    """
+
+    @classmethod
+    @_not_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: PretrainedConfig | None = None,
+    ) -> bool:
+        # Support MergedColumnParallelLinear with 3 or more slices
+        # (2 slices are handled by MergedColumnParallelLinearWithLoRA)
+        if type(source_layer) is not MergedColumnParallelLinear:
+            return False
+
+        # If packed_modules_list has 3+ items, use this class
+        if len(packed_modules_list) >= 3:
+            return True
+
+        # If packed_modules_list has exactly 2 items, let
+        # MergedColumnParallelLinearWithLoRA handle it
+        if len(packed_modules_list) == 2:
+            return False
+
+        # If packed_modules_list is empty or has 1 item,
+        # check the layer's output_sizes.
+        # This handles cases where the checkpoint has a single weight
+        # but the layer has multiple slices (3+)
+        return (
+            hasattr(source_layer, "output_sizes")
+            and len(source_layer.output_sizes) >= 3
+        )
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+    ):
+        """Override to handle single tensor weights
+        that need to be split into slices."""
+        self.reset_lora(index)
+
+        # Handle case where checkpoint has single tensor weights
+        # lora_a shape: (rank, input_size) - same for all slices, duplicate it
+        if isinstance(lora_a, torch.Tensor):
+            lora_a = [lora_a] * self.n_slices
+
+        # lora_b shape: (total_output_size, rank) -
+        # split along dim 0 based on output_sizes
+        if isinstance(lora_b, torch.Tensor):
+            output_sizes = self.base_layer.output_sizes
+            lora_b_list = []
+            start_idx = 0
+            for output_size in output_sizes:
+                end_idx = start_idx + output_size
+                lora_b_list.append(lora_b[start_idx:end_idx, :])
+                start_idx = end_idx
+            lora_b = lora_b_list
+
+        # Now call parent's set_lora which expects lists
+        super().set_lora(index, lora_a, lora_b)

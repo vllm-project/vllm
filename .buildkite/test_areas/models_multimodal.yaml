@@ -1,0 +1,79 @@
+group: Models - Multimodal
+depends_on: 
+  - image-build
+steps:
+- label: Multi-Modal Models (Standard) # 60min
+  timeout_in_minutes: 80
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
+    - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+
+- label: Multi-Modal Processor Test (CPU)
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  device: cpu
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+
+- label: Multi-Modal Processor # 44min
+  timeout_in_minutes: 60
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+
+- label: Multi-Modal Accuracy Eval (Small Models) # 50min
+  timeout_in_minutes: 70
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - vllm/multimodal/
+  - vllm/inputs/
+  - vllm/v1/core/
+  commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+
+- label: Multi-Modal Models (Extended) 1
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
+
+- label: Multi-Modal Models (Extended) 2
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+
+- label: Multi-Modal Models (Extended) 3
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+
+# This test is used only in PR development phase to test individual models and should never run on main
+- label: Custom Models
+  optional: true
+  commands:
+    - echo 'Testing custom models...'
+    # PR authors can temporarily add commands below to test individual models
+    # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
+    # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*

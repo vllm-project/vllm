@@ -44,13 +44,17 @@ _REASONING_PARSERS_TO_REGISTER = {
         "granite_reasoning_parser",
         "GraniteReasoningParser",
     ),
+    "holo2": (
+        "holo2_reasoning_parser",
+        "Holo2ReasoningParser",
+    ),
     "hunyuan_a13b": (
         "hunyuan_a13b_reasoning_parser",
         "HunyuanA13BReasoningParser",
     ),
     "kimi_k2": (
-        "deepseek_r1_reasoning_parser",
-        "DeepSeekR1ReasoningParser",
+        "kimi_k2_reasoning_parser",
+        "KimiK2ReasoningParser",
     ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",

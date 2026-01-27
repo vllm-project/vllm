@@ -2,15 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, overload
 
 import torch
 import torch.nn as nn
 from torch.func import functional_call
+from torch.nn.modules.module import register_module_module_registration_hook
 from transformers import PretrainedConfig
-from typing_extensions import deprecated
 
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -211,8 +212,8 @@ class AutoWeightsLoader:
                     continue
 
                 raise ValueError(
-                    f"Attempted to load nested weight '{weight_qualname}' "
-                    f"into a single parameter '{base_prefix}'"
+                    f"Attempted to load nested weight {weight_qualname!r} "
+                    f"into a single parameter {base_prefix!r}"
                 )
 
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -251,7 +252,7 @@ class AutoWeightsLoader:
         module: nn.Module,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
-        if isinstance(module, PPMissingLayer):
+        if isinstance(module, (StageMissingLayer, PPMissingLayer)):
             return
 
         # Avoid infinite recursion since this function is typically
@@ -313,9 +314,14 @@ class AutoWeightsLoader:
 
                     continue
 
+                desc_param_keys = {
+                    base_prefix + k for k, _ in module.named_parameters(recurse=True)
+                }
                 msg = (
-                    f"There is no module or parameter named '{prefix}' "
-                    f"in {type(self.module).__name__}"
+                    f"There is no module or parameter named {prefix!r} "
+                    f"in {self.module._get_name()}. "
+                    f"The available parameters belonging to {base_prefix} "
+                    f"({module._get_name()}) are: {desc_param_keys}"
                 )
                 raise ValueError(msg)
 
@@ -481,54 +487,6 @@ def _merge_multimodal_embeddings(
     return inputs_embeds
 
 
-@deprecated(
-    "`merge_multimodal_embeddings` has been replaced with "
-    "`SupportsMultiModal.embed_input_ids` and will be "
-    "removed in v0.12."
-)
-def merge_multimodal_embeddings(
-    input_ids: torch.Tensor,
-    inputs_embeds: torch.Tensor,
-    multimodal_embeddings: NestedTensors,
-    placeholder_token_id: int | list[int],
-) -> torch.Tensor:
-    """
-    Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
-    positions in `inputs_embeds` corresponding to placeholder tokens in
-    `input_ids`.
-
-    `placeholder_token_id` can be a list of token ids (e.g, token ids
-    of img_start, img_break, and img_end tokens) when needed: This means
-    the order of these tokens in the `input_ids` MUST MATCH the order of
-    their embeddings in `multimodal_embeddings` since we need to
-    slice-merge instead of individually scattering.
-
-    For example, if input_ids is "TTTTTSIIIBIIIBIIIETTT", where
-    - T is text token
-    - S is image start token
-    - I is image embedding token
-    - B is image break token
-    - E is image end token.
-
-    Then the image embeddings (that correspond to I's) from vision encoder
-    must be padded with embeddings of S, B, and E in the same order of
-    input_ids for a correct embedding merge.
-
-    Note:
-        This updates `inputs_embeds` in place.
-    """
-    if isinstance(placeholder_token_id, list):
-        is_multimodal = isin_list(input_ids, placeholder_token_id)
-    else:
-        is_multimodal = input_ids == placeholder_token_id
-
-    return _merge_multimodal_embeddings(
-        inputs_embeds,
-        multimodal_embeddings=multimodal_embeddings,
-        is_multimodal=is_multimodal,
-    )
-
-
 def isin_list(
     elements: torch.Tensor,
     test_elements_list: list[int],
@@ -539,6 +497,100 @@ def isin_list(
     ).to(device=elements.device, non_blocking=True)
 
     return torch.isin(elements, test_elements)
+
+
+class StageMissingLayer(nn.Module):
+    def __init__(self, stage_name: str, module: nn.Module | None = None) -> None:
+        super().__init__()
+
+        self.stage_name = stage_name
+
+        # Don't register this as a child module in order to
+        # avoid missing keys when loading weights
+        self.__dict__["module"] = module
+
+    def __getattr__(self, name: str):
+        return getattr(self.__dict__["module"], name)
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(f"{self} should not be called")
+
+    def extra_repr(self) -> str:
+        return f"stage_name={self.stage_name!r}"
+
+
+@contextmanager
+def collect_children(
+    module: nn.Module,
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """
+    Within this context, collect all direct child assignments to `module`,
+    returning a list of children names that is internally updated until the
+    context is exited.
+
+    If `targets` is set, instead collect descendents of `module`
+    that are an instance of `targets`, even if they aren't direct children.
+    """
+    children_names = list[str]()
+
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                children_names.append(name)
+
+        with register_module_module_registration_hook(hook):
+            yield children_names
+    else:
+        yield children_names
+
+        for name, module_ in module.named_modules():
+            if isinstance(module_, targets):
+                children_names.append(name)
+
+
+@contextmanager
+def no_init_weights(
+    module: nn.Module,
+    placeholder: Callable[[nn.Module], nn.Module],
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """
+    Within this context, prevent weight initialization from using device memory and
+    replace direct child assignments to `module` with the result of `placeholder()`.
+
+    If `targets` is set, instead prevent weight initialization and
+    replace assignments where the child is an instance of `targets`,
+    even if they aren't direct children of `module`.
+    """
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                return placeholder(submodule)
+
+            return submodule
+
+        with register_module_module_registration_hook(hook), torch.device("meta"):
+            yield
+    else:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if isinstance(module_, targets):
+                submodule.to("meta")  # Free memory
+            if isinstance(submodule, targets):
+                submodule.to("meta")  # Free memory
+                return placeholder(submodule)
+
+            return submodule
+
+        # Not all descendents are targeted, so we can't use a blanket
+        # `torch.device("meta")` context
+        with register_module_module_registration_hook(hook):
+            yield
 
 
 class LayerFn(Protocol):
@@ -672,7 +724,7 @@ def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
 
     missing_layer_names = []
     for name, module in model.named_modules():
-        if isinstance(module, PPMissingLayer):
+        if isinstance(module, (StageMissingLayer, PPMissingLayer)):
             # NOTE: the trailing dot is used to match the prefix of the layer.
             # without the dot, we could match a layer that is not missing,
             # e.g., 'encoder.layer.1' would match 'encoder.layer.11'
@@ -684,7 +736,7 @@ def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
 
 def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
     """Check if a parameter is missing in a pipeline parallel model."""
-    if isinstance(model, PPMissingLayer):
+    if isinstance(model, (StageMissingLayer, PPMissingLayer)):
         return True
 
     return any(
@@ -879,3 +931,16 @@ def process_eagle_weight(
         model.has_own_lm_head = True
     if "embed_tokens" in name:
         model.has_own_embed_tokens = True
+
+
+def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
+    """Given a signed vision feature layer, get the number of hidden layers
+       needed to leverage it.
+
+    Args:
+        feature_layer_index: Index of a required layer in the visual encoder.
+        num_hidden_layers: The total number of hidden layers in the visual encoder.
+    """
+    if feature_layer_index < 0:
+        return num_hidden_layers + feature_layer_index + 1
+    return feature_layer_index

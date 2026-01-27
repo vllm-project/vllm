@@ -2,17 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.attention.selector import get_mamba_attn_backend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
 
 
 class MambaBase(AttentionLayerBase):
@@ -59,6 +56,7 @@ class MambaBase(AttentionLayerBase):
             block_size=mamba_block_size,
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
+            mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
             num_speculative_blocks=(
                 vllm_config.speculative_config.num_speculative_tokens
                 if vllm_config.speculative_config
@@ -66,6 +64,6 @@ class MambaBase(AttentionLayerBase):
             ),
         )
 
-    def get_attn_backend(self) -> type["AttentionBackend"]:
+    def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""
         return get_mamba_attn_backend(self.mamba_type)

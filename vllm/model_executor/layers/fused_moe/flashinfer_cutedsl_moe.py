@@ -4,14 +4,24 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     scaled_fp4_grouped_quantize,
     silu_and_mul_scaled_nvfp4_experts_quantize,
 )
@@ -19,54 +29,54 @@ from vllm.utils.flashinfer import (
 logger = init_logger(__name__)
 
 
-def is_valid_flashinfer_cutedsl_fused_moe(
-    hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
-) -> bool:
-    """
-    Check if the given problem size is supported by the FlashInfer CuteDSL MoE
-    kernel.
-    """
-    if not has_flashinfer_cutedsl_grouped_gemm_nt_masked():
-        logger.debug_once(
-            "FlashInferCuteDSLExperts disabled: "
-            "flashinfer_cutedsl_fused_moe not available."
-        )
-        return False
-    # Data type checks
-    if (
-        w1.dtype != torch.uint8
-        or w2.dtype != torch.uint8
-        or hidden_states.dtype not in [torch.float32, torch.float16, torch.bfloat16]
-    ):
-        logger.debug_once(
-            "FlashInferCuteDSLExperts disabled: w1/w2 must be torch.uint8 "
-            f"(got w1={w1.dtype}, w2={w2.dtype}), hidden_states must be "
-            f"float32, float16, or bfloat16 (got {hidden_states.dtype})."
-        )
-        return False
-    return True
-
-
 class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        out_dtype: torch.dtype,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        num_dispatchers: int,
     ):
-        super().__init__(quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
         assert quant_config.quant_dtype == "nvfp4", (
             "Only nvfp4 quantization are currently supported."
         )
-        self.out_dtype = out_dtype
+        self.out_dtype = moe_config.in_dtype
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.BatchedExperts,
-            mk.FusedMoEActivationFormat.BatchedExperts,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_device_capability_family(100)
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kNvfp4Static, kNvfp4Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return True
 
     def supports_expert_map(self) -> bool:
         return False
@@ -90,6 +100,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
@@ -109,7 +120,8 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-        output_shape = (local_num_experts, M, K)
+        K_dim = K * 2 if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH else K
+        output_shape = (local_num_experts, M, K_dim)
         workspace2 = (local_num_experts, M, N)
         workspace1 = output_shape
         return (workspace1, workspace2, output_shape)
@@ -144,9 +156,18 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert hidden_states.ndim == 3
         assert self.w1_scale.ndim == 3
         assert self.w2_scale.ndim == 3
+
+        input_global_scale = (
+            None if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH else self.a1_gscale
+        )
+        flashinfer_hidden_states = (
+            (hidden_states, a1q_scale)
+            if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH
+            else hidden_states
+        )
         flashinfer_cutedsl_moe_masked(
-            hidden_states=hidden_states,
-            input_global_scale=self.a1_gscale,
+            hidden_states=flashinfer_hidden_states,
+            input_global_scale=input_global_scale,
             w1=w1,
             w1_blockscale=self.w1_scale,
             w1_alpha=self.g1_alphas,
@@ -172,7 +193,7 @@ def get_cute_dtype(input: torch.Tensor) -> str:
 
 
 def flashinfer_cutedsl_moe_masked(
-    hidden_states: torch.Tensor,
+    hidden_states: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     input_global_scale: torch.Tensor,
     w1: torch.Tensor,
     w1_blockscale: torch.Tensor,
@@ -190,7 +211,10 @@ def flashinfer_cutedsl_moe_masked(
     kernels.
 
     Args:
-        hidden_states (torch.Tensor): [num_experts, m, k], bf16
+        hidden_states: Either of the following case
+            * torch.Tensor: [num_experts, m, k], bf16
+            * tuple[torch.Tensor, torch.Tensor]: [num_experts, m, k // 2],
+                  uint8, [num_experts, m, k // 16], float8_e4m3fn
         input_global_scale (torch.Tensor): (l,)
         w1 (torch.Tensor): fp4 weights, [l, 2 * n, k // 2], uint8
         w1_blockscale (torch.Tensor): blockscale factors, e4m3,
@@ -207,9 +231,6 @@ def flashinfer_cutedsl_moe_masked(
     """
 
     # === Assertions on dtypes ===
-    assert input_global_scale.dtype == torch.float32, (
-        f"input_global_scale must be float32, got {input_global_scale.dtype}"
-    )
     assert w1.dtype == torch.uint8, f"w1 must be uint8, got {w1.dtype}"
     assert w1_blockscale.dtype == torch.float8_e4m3fn, (
         f"w1_blockscale must be float8_e4m3fn, got {w1_blockscale.dtype}"
@@ -230,7 +251,32 @@ def flashinfer_cutedsl_moe_masked(
 
     # === Assertions on shapes ===
     n = w2.shape[-1] * 2  # intermediate dimension
-    num_experts, m, k = hidden_states.shape
+    if isinstance(hidden_states, tuple):
+        assert input_global_scale is None, (
+            "input_global_scale is needed when input needs quant"
+        )
+
+        aq = hidden_states[0].view(torch.uint8)
+        aq_sf = hidden_states[1].view(torch.float8_e4m3fn)
+        # m, k_by_2, num_experts = aq.shape
+        num_experts, m, k_by_2 = aq.shape
+        k = k_by_2 * 2
+        aq = aq.permute(1, 2, 0)
+    else:
+        num_experts, m, k = hidden_states.shape
+
+        assert input_global_scale.dtype == torch.float32, (
+            f"input_global_scale must be float32, got {input_global_scale.dtype}"
+        )
+        assert input_global_scale.shape == (num_experts,), (
+            f"input_global_scale must be (l,), got {input_global_scale.shape}"
+        )
+
+        aq, aq_sf = scaled_fp4_grouped_quantize(
+            hidden_states,
+            masked_m,
+            input_global_scale,
+        )
 
     assert w1.shape[-2] == 2 * n, f"w1 last-2 dim must be 2*n, got {w1.shape}"
     assert w1.shape[-1] * 2 == k, (
@@ -241,9 +287,6 @@ def flashinfer_cutedsl_moe_masked(
         n // 2,
     ), f"w2 shape mismatch, got {w2.shape[-2:]}, expected {(k, n // 2)}"
 
-    assert input_global_scale.shape == (num_experts,), (
-        f"input_global_scale must be (l,), got {input_global_scale.shape}"
-    )
     assert w1_alpha.shape == (num_experts,), (
         f"w1_alpha must be (l,), got {w1_alpha.shape}"
     )
@@ -254,12 +297,6 @@ def flashinfer_cutedsl_moe_masked(
         f"w2_alpha must be (l,), got {w2_alpha.shape}"
     )
 
-    aq, aq_sf = scaled_fp4_grouped_quantize(
-        hidden_states,
-        masked_m,
-        input_global_scale,
-    )
-
     workspace = workspace.permute(1, 2, 0)  # requirement of kernel
     sf_vec_size = 16
     assert aq_sf.dtype == torch.float8_e4m3fn
@@ -267,7 +304,10 @@ def flashinfer_cutedsl_moe_masked(
     ab_dtype = "float4_e2m1fn"
     sf_dtype = "float8_e4m3fn"
 
-    c_dtype = get_cute_dtype(hidden_states)
+    if isinstance(hidden_states, tuple):
+        c_dtype = "bfloat16"
+    else:
+        c_dtype = get_cute_dtype(hidden_states)
 
     # Gemm1
     flashinfer_cutedsl_grouped_gemm_nt_masked(
@@ -305,42 +345,3 @@ def flashinfer_cutedsl_moe_masked(
         alpha_dtype=get_cute_dtype(w2_alpha),
     )  # in logical [m, k, l]
     out = out.permute(2, 0, 1)
-
-
-def flashinfer_cutedsl_moe_fp4(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    inplace: bool = False,
-    activation: str = "silu",
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-) -> torch.Tensor:
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-        create_flashinfer_prepare_finalize,
-    )
-
-    fused_experts = mk.FusedMoEModularKernel(
-        create_flashinfer_prepare_finalize(use_dp=False),  # could be swapped later
-        FlashInferCuteDSLExperts(
-            out_dtype=hidden_states.dtype,
-            quant_config=quant_config,
-        ),
-    )
-
-    return fused_experts(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=inplace,
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )

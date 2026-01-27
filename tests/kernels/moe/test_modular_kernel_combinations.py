@@ -15,7 +15,8 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from .modular_kernel_tools.common import (
     Config,
@@ -46,6 +47,12 @@ meets_multi_gpu_requirements = pytest.mark.skipif(
     reason="Requires deep_ep or deep_gemm or pplx or flashinfer packages",
 )
 
+if current_platform.is_fp8_fnuz():
+    pytest.skip(
+        "Tests in this file require float8_e4m3fn and platform does not support",
+        allow_module_level=True,
+    )
+
 
 def format_result(verbose, msg, ex=None):
     if ex is not None:
@@ -71,7 +78,11 @@ def rank_worker(
     weights: WeightTensors,
     verbose: bool,
 ):
-    current_platform.seed_everything(pgi.rank)
+    # Initialize workspace manager in child process
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+
+    set_random_seed(pgi.rank)
 
     # sanity check
     from vllm import envs
@@ -294,6 +305,7 @@ def test_modular_kernel_combinations_singlegpu(
     chunk_size: int | None,
     world_size: int,
     pytestconfig,
+    workspace_init,
 ):
     """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
     and those tests will be skipped on unsupported hardware."""

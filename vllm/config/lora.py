@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -11,6 +10,7 @@ from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -55,6 +55,11 @@ class LoRAConfig:
     per prompt. When run in offline mode, the lora IDs for n modalities
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
+    enable_tower_connector_lora: bool = False
+    """If `True`, LoRA support for the tower (vision encoder) and connector 
+    of multimodal models will be enabled. This is an experimental feature and 
+    currently only supports some MM models such as the Qwen VL series. The default 
+    is False."""
 
     def compute_hash(self) -> str:
         """
@@ -73,8 +78,9 @@ class LoRAConfig:
         factors.append(self.max_loras)
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
+        factors.append(self.enable_tower_connector_lora)
 
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     @model_validator(mode="after")
@@ -84,7 +90,7 @@ class LoRAConfig:
         elif self.max_cpu_loras < self.max_loras:
             raise ValueError(
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
-                f"max_loras ({self.max_loras})"
+                f"max_loras ({self.max_loras})."
             )
 
         return self

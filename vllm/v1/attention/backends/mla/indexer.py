@@ -5,28 +5,33 @@ from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    MultipleOf,
-)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, is_deep_gemm_supported
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
+    split_prefill_chunks,
 )
 
 logger = init_logger(__name__)
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [
-        1 if current_platform.is_rocm() else 64
-    ]
+    @staticmethod
+    def get_name() -> str:
+        return "DEEPSEEK_V32_INDEXER"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [1 if current_platform.is_rocm() else 64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -62,6 +67,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     cu_seqlen_ks: torch.Tensor
     cu_seqlen_ke: torch.Tensor
     cu_seq_lens: torch.Tensor
+    token_to_seq: torch.Tensor
     total_seq_lens: int
     token_start: int
     token_end: int
@@ -176,40 +182,15 @@ def kv_spans_from_batches(
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
-    # NOTE(Chen): 2 is a magic number for controlling the prefill buffer size.
-    # May be tuned later.
-    return max_model_len * 2
-
-
-def split_prefill_chunks(
-    seq_lens_cpu: torch.Tensor, max_prefill_buffer_size: int, reqs_start: int
-) -> list[tuple[int, int]]:
-    """
-    Split the prefill chunks into a list of tuples of (reqs_start, reqs_end)
-    such that the total sequence length of each chunk is less than the
-    maximum prefill buffer size.
-
-    Args:
-        seq_lens_cpu: The sequence lengths of the prefill requests.
-        max_prefill_buffer_size: The maximum prefill buffer size.
-        reqs_start: The start index of the prefill requests.
-
-    Returns:
-        A list of tuples of (reqs_start, reqs_end).
-    """
-    chunk_seq_ids = []
-    total_seq_lens = 0
-    for i in range(reqs_start, len(seq_lens_cpu)):
-        cur_seq_len = seq_lens_cpu[i].item()
-        assert cur_seq_len <= max_prefill_buffer_size
-        total_seq_lens += cur_seq_len
-        if total_seq_lens > max_prefill_buffer_size:
-            chunk_seq_ids.append((reqs_start, i))
-            reqs_start = i
-            total_seq_lens = cur_seq_len
-    if total_seq_lens > 0:
-        chunk_seq_ids.append((reqs_start, len(seq_lens_cpu)))
-    return chunk_seq_ids
+    # NOTE(Chen): 40 is a magic number for controlling the prefill buffer size.
+    # Each entry is 128 fp8 bytes and 4 scale bytes for a total of 132 bytes.
+    # The flashmla_sparse backend uses a workspace size of 5 * max_model_len.
+    # The memory usage of the workspace there is 576 * 2 bytes; so we size this as
+    # (576 * 2 // 132) * 5 = 40 to maximize this workspace size while still fitting
+    # within the flashmla_sparse workspace.
+    # For DeepSeek-V3.2, the max_model_len is 163840.
+    #   40 * 163840 * 132 = 865075200 bytes = 825 MB
+    return max_model_len * 40
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
@@ -258,6 +239,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         token_start = query_start_loc_cpu[reqs_start].item()
         token_end = query_start_loc_cpu[reqs_end].item()
         total_seq_lens = seq_lens_cpu[reqs_start:reqs_end].sum()
+        seq_idx = torch.arange(0, reqs_end - reqs_start, dtype=torch.int32)
+        token_to_seq = torch.repeat_interleave(
+            seq_idx, seq_lens_cpu[reqs_start:reqs_end]
+        ).to(self.device)
         assert total_seq_lens <= self.max_prefill_buffer_size
         cu_seq_lens = (
             torch.cat(
@@ -273,6 +258,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             cu_seqlen_ks=cu_seqlen_ks,
             cu_seqlen_ke=cu_seqlen_ke,
             cu_seq_lens=cu_seq_lens,
+            token_to_seq=token_to_seq,
             total_seq_lens=total_seq_lens,
             block_table=block_table[reqs_start:reqs_end],
             token_start=token_start,
@@ -302,9 +288,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         prefill_metadata = None
         if num_prefills > 0:
             chunk_seq_ids = split_prefill_chunks(
-                common_attn_metadata.seq_lens_cpu,
+                common_attn_metadata.seq_lens_cpu[num_decodes:],
                 self.max_prefill_buffer_size,
-                num_decodes,
+                request_offset=num_decodes,
             )
             chunks = [
                 self.build_one_prefill_chunk(

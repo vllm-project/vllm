@@ -144,9 +144,9 @@ class KVConnectorFactory:
 # only load the files corresponding to the current connector.
 
 KVConnectorFactory.register_connector(
-    "SharedStorageConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector",
-    "SharedStorageConnector",
+    "ExampleConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.example_connector",
+    "ExampleConnector",
 )
 
 KVConnectorFactory.register_connector(
@@ -180,6 +180,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "MoRIIOConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector",
+    "MoRIIOConnector",
+)
+
+KVConnectorFactory.register_connector(
     "OffloadingConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector",
     "OffloadingConnector",
@@ -189,4 +195,9 @@ KVConnectorFactory.register_connector(
     "DecodeBenchConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector",
     "DecodeBenchConnector",
+)
+KVConnectorFactory.register_connector(
+    "MooncakeConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector",
+    "MooncakeConnector",
 )

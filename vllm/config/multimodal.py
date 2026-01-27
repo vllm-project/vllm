@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
-
-if TYPE_CHECKING:
-    from vllm.attention.backends.registry import AttentionBackendEnum
-else:
-    AttentionBackendEnum = Any
+from vllm.utils.hashing import safe_hash
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @dataclass
@@ -112,6 +108,12 @@ class MultiModalConfig:
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
     `"shm"`."""
+    mm_encoder_only: bool = False
+    """
+    When enabled, skips the language component of the model.
+
+    This is usually only valid in disaggregated Encoder process.
+    """
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using tensor
     parallelism (TP).
@@ -128,7 +130,7 @@ class MultiModalConfig:
     mm_encoder_attn_backend: AttentionBackendEnum | None = None
     """Optional override for the multi-modal encoder attention backend when
     using vision transformers. Accepts any value from
-    `vllm.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
+    `vllm.v1.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -170,8 +172,11 @@ class MultiModalConfig:
     def _validate_mm_encoder_attn_backend(
         cls, value: str | AttentionBackendEnum | None
     ) -> AttentionBackendEnum | None:
-        # We need to import the real type here (deferred to avoid circular import).
-        from vllm.attention.backends.registry import AttentionBackendEnum
+        if isinstance(value, str) and value.upper() == "XFORMERS":
+            raise ValueError(
+                "Attention backend 'XFORMERS' has been removed (See PR #29262 for "
+                "details). Please select a supported attention backend."
+            )
 
         if value is None or isinstance(value, AttentionBackendEnum):
             return value
@@ -208,9 +213,10 @@ class MultiModalConfig:
         factors: list[Any] = [
             self.mm_encoder_attn_backend.name
             if self.mm_encoder_attn_backend is not None
-            else None
+            else None,
+            self.mm_encoder_tp_mode,
         ]
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def get_limit_per_prompt(self, modality: str) -> int:

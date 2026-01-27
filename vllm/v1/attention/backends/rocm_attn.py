@@ -7,13 +7,6 @@ from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionType,
-)
-from vllm.attention.ops.chunked_prefill_paged_decode import chunked_prefill_paged_decode
-from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -21,11 +14,22 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
+    AttentionImpl,
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
+    chunked_prefill_paged_decode,
+)
+from vllm.v1.attention.ops.paged_attn import PagedAttention
+from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+    triton_reshape_and_cache_flash,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -124,7 +128,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             prefix_kv_lens = torch.tensor(
                 [common_prefix_len], dtype=torch.int32, device=self.device
             )
-            suffix_kv_lens = common_attn_metadata.seq_lens_cpu - common_prefix_len
+            suffix_kv_lens = common_attn_metadata.seq_lens.cpu() - common_prefix_len
             suffix_kv_lens = suffix_kv_lens.to(self.device)
         else:
             cu_prefix_query_lens = None
@@ -152,7 +156,27 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
 
 class RocmAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # ROCM paged attention kernel only supports block sizes 16 and 32
+        # due to shared memory (LDS) constraints on AMD GPUs.
+        # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
+
+        # However, The limitations in [16, 32] are reasonable for a native C++ kernel,
+        # but vLLM should allow support for non-standard sizes via the Triton path,
+        # as addressed in this PR: https://github.com/vllm-project/vllm/pull/31380,
+        # where the Triton kernel under rocm_atten does not support inference
+        # for a non-standard qwen3-next model with a block_size of 544.
+        # We have fixed the Triton kernel so that the standard model uses the original
+        # bit-addressing logic, while the non-standard model
+        # uses our optimized kernel logic.
+        return [16, 32, 544]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -165,7 +189,7 @@ class RocmAttentionBackend(AttentionBackend):
             raise ValueError(
                 f"Head size {head_size} is not supported by {attn_type}. "
                 f"Supported head sizes are: {cls.get_supported_head_sizes()}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
+                "Set --attention-backend=FLEX_ATTENTION to use "
                 "FlexAttention backend which supports all head sizes."
             )
 
@@ -238,12 +262,9 @@ class RocmAttentionImpl(AttentionImpl):
 
         RocmAttentionBackend.validate_head_size(head_size)
 
-        if attn_type != AttentionType.DECODER:
+        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
-                "Encoder self-attention and "
-                "encoder/decoder cross-attention "
-                "are not implemented for "
-                "RocmAttentionImpl"
+                "Encoder self-attention is not implemented for RocmAttentionImpl"
             )
 
         self.fp8_dtype = current_platform.fp8_dtype()
@@ -309,19 +330,48 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache, self.num_kv_heads, self.head_size
         )
 
-        if self.kv_sharing_target_layer_name is None:
+        # key and value may be None in the case of cross attention. They are
+        # calculated once based on the output from the encoder and then cached
+        # in KV cache.
+        if (
+            self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
-            PagedAttention.write_to_paged_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+
+            # Get the actual block_size from value_cache
+            # value_cache shape: [num_blocks, num_heads, head_size, block_size]
+            block_size = value_cache.shape[3]
+            # Determine if it is a power of 2
+            is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
+
+            if is_pow2:
+                # Normal 16, 32, 64, etc., use vLLM native HIP C++ logic
+                PagedAttention.write_to_paged_cache(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
+            else:
+                # Case B: Non-standard blocks (e.g., 544 in Qwen3),
+                # force using our modified Triton logic
+                triton_reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
@@ -339,8 +389,8 @@ class RocmAttentionImpl(AttentionImpl):
         # Compute attention and update output up to `num_actual_tokens`.
         chunked_prefill_paged_decode(
             query=query[:num_actual_tokens],
-            key=key[:num_actual_tokens],
-            value=value[:num_actual_tokens],
+            key=key[:num_actual_tokens] if key is not None else None,
+            value=value[:num_actual_tokens] if value is not None else None,
             output=output[:num_actual_tokens],
             kv_cache_dtype=self.kv_cache_dtype,
             key_cache=key_cache,

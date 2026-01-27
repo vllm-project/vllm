@@ -18,7 +18,10 @@ from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.openai.protocol import IOProcessorRequest, IOProcessorResponse
+from vllm.entrypoints.pooling.pooling.protocol import (
+    IOProcessorRequest,
+    IOProcessorResponse,
+)
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -346,8 +349,10 @@ class PrithviMultimodalDataProcessor(IOProcessor):
                 {
                     "prompt_token_ids": [1],
                     "multi_modal_data": {
-                        "pixel_values": window.to(torch.float16)[0],
-                        "location_coords": location_coords.to(torch.float16),
+                        "image": {
+                            "pixel_values": window.to(torch.float16)[0],
+                            "location_coords": location_coords.to(torch.float16),
+                        }
                     },
                 }
             )

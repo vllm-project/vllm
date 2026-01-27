@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import multiprocessing
 import os
 
+import multiprocess as mp
 import numpy as np
 import pytest
 import torch
@@ -20,10 +20,12 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.utils.system_utils import update_environment_variables
 
+mp.set_start_method("spawn", force=True)
+
 
 def distributed_run(fn, world_size):
     number_of_processes = world_size
-    processes: list[multiprocessing.Process] = []
+    processes: list[mp.Process] = []
     for i in range(number_of_processes):
         env: dict[str, str] = {}
         env["RANK"] = str(i)
@@ -32,7 +34,7 @@ def distributed_run(fn, world_size):
         env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
         env["MASTER_ADDR"] = "localhost"
         env["MASTER_PORT"] = "12345"
-        p = multiprocessing.Process(target=fn, args=(env,))
+        p = mp.Process(target=fn, args=(env,))
         processes.append(p)
         p.start()
 

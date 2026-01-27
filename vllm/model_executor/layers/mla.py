@@ -4,9 +4,9 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -24,18 +24,19 @@ class MLAModules:
     q_b_proj: torch.nn.Module | None
     q_proj: torch.nn.Module | None
     indexer: torch.nn.Module | None
-    indexer_rotary_emb: torch.nn.Module | None
     is_sparse: bool
     topk_indices_buffer: torch.Tensor | None
+    indexer_rotary_emb: torch.nn.Module | None = None
 
 
-@CustomOp.register("multi_head_latent_attention")
-class MultiHeadLatentAttentionWrapper(CustomOp):
-    """MLA layer registered as CustomOp to allow OOT backends to add
+# --8<-- [start:multi_head_latent_attention]
+@PluggableLayer.register("multi_head_latent_attention")
+class MultiHeadLatentAttentionWrapper(PluggableLayer):
+    """Pluggable MLA layer which allows OOT backends to add
     custom implementations of the outer MLA layer (including rope & o_proj).
-    Note that currently MLA ignores the enable/disable mechanism of CustomOp
-    because there is only one in-tree implementation in forward_native.
-    TODO: implement this with a new PluggableLayer mechanism.
+    Note that currently oot platforms can still use CustomOp.register_oot to
+    replace MLA layer entirly, although we use PluggableLayer to register
+    this layer now.
 
     This class takes positions and hidden_states as input.
     The input tensors can either contain prefill tokens or decode tokens.
@@ -46,6 +47,8 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
        multi-query attention to decode tokens separately.
     3. Return the output tensor.
     """
+
+    # --8<-- [end:multi_head_latent_attention]
 
     def __init__(
         self,
@@ -107,10 +110,11 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
 
         self.prefix = prefix
 
-    def forward_native(
+    def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
@@ -159,6 +163,9 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
                 hidden_states, q_c, positions, self.indexer_rope_emb
             )
 
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
+
         attn_out = self.mla_attn(
             q,
             kv_c_normed,
@@ -167,6 +174,3 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         )
 
         return self.o_proj(attn_out)[0]
-
-    def forward_cuda(self, *args, **kwargs):
-        return self.forward_native(*args, **kwargs)

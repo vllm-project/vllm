@@ -16,7 +16,7 @@ from vllm.config import (
 )
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
-from vllm.lora.models import LoRAMapping
+from vllm.lora.model_manager import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.v1.worker.gpu_worker import Worker
 
@@ -33,14 +33,16 @@ def test_worker_apply_lora(qwen3_lora_files):
             lora_requests, lora_mapping
         )
 
+    model_config = ModelConfig(
+        MODEL_PATH,
+        seed=0,
+        dtype="float16",
+        max_model_len=127,
+        enforce_eager=True,
+    )
+
     vllm_config = VllmConfig(
-        model_config=ModelConfig(
-            MODEL_PATH,
-            seed=0,
-            dtype="float16",
-            max_model_len=127,
-            enforce_eager=True,
-        ),
+        model_config=model_config,
         load_config=LoadConfig(
             download_dir=None,
             load_format="dummy",
@@ -50,7 +52,14 @@ def test_worker_apply_lora(qwen3_lora_files):
             tensor_parallel_size=1,
             data_parallel_size=1,
         ),
-        scheduler_config=SchedulerConfig("generate", 32, 32, 32),
+        scheduler_config=SchedulerConfig(
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+            runner_type="generate",
+            max_num_batched_tokens=32,
+            max_num_seqs=32,
+            max_num_partial_prefills=32,
+        ),
         device_config=DeviceConfig("cuda"),
         cache_config=CacheConfig(
             block_size=16,
