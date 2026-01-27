@@ -114,7 +114,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_a_stacked,
             y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
+            *self.token_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
             scale,
         )
 
@@ -155,7 +157,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_b_stacked,
             y,
-            *self.token_mapping_meta.meta_args(num_tokens),
+            *self.token_mapping_meta.meta_args(
+                num_tokens, self.lora_config.specialize_active_lora
+            ),
             offset_start=offset_start,
             add_inputs=True,
         )
@@ -187,10 +191,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x.unsqueeze(dim=0),
             (lora_b_stacked,),
             y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
+            *self.token_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
             offset_start=0,
             add_inputs=add_inputs,
-            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
     def add_lora_linear(
@@ -300,18 +305,20 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             [lora_a_stacked],
             buffer.unsqueeze(dim=0),
-            *self.prompt_mapping_meta.meta_args(x.size(0)),
+            *self.prompt_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
             scale,
-            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
 
         lora_expand(
             buffer.unsqueeze(dim=0),
             [lora_b_stacked],
             y,
-            *self.prompt_mapping_meta.meta_args(buffer.size(0)),
+            *self.prompt_mapping_meta.meta_args(
+                buffer.size(0), self.lora_config.specialize_active_lora
+            ),
             add_inputs=True,
-            specialize_active_lora=self.lora_config.specialize_active_lora,
         )
         y = y.view_as(y_org)
 
