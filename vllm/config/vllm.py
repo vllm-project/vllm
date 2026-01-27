@@ -23,7 +23,6 @@ from pydantic.dataclasses import dataclass
 import vllm.envs as envs
 from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
@@ -915,7 +914,7 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
-
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
         if (
             self.model_config
             and vllm_is_batch_invariant()
