@@ -142,10 +142,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         repeat_cols = 4
         repeat_rows = 1 if quant_config.per_act_token_quant else a1.size(0)
-
+        # TODO(bnell): always pass quant_config.a1_scale?
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
-            quant_config.a1_scale,
+            (None if quant_config.per_act_token_quant else quant_config.a1_scale),
             quant_dtype=quant_config.quant_dtype,
             per_act_token_quant=quant_config.per_act_token_quant,
             block_shape=quant_config.block_shape,
