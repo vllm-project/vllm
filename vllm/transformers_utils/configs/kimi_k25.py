@@ -12,30 +12,6 @@ from transformers.configuration_utils import PretrainedConfig
 
 
 class KimiK25VisionConfig(PretrainedConfig):
-    """Vision configuration for Kimi-K2.5 (vision tower + mm projector).
-
-    Args:
-        Vision Tower Parameters:
-            patch_size: Patch size for vision tower.
-            init_pos_emb_height: Initial position embedding height.
-            init_pos_emb_width: Initial position embedding width.
-            init_pos_emb_time: Initial position embedding time dimension.
-            pos_emb_type: Type of position embedding.
-            num_attention_heads: Number of attention heads in vision tower.
-            num_hidden_layers: Number of hidden layers in vision tower.
-            hidden_size: Hidden size of vision tower.
-            intermediate_size: Intermediate size in vision tower FFN.
-            merge_kernel_size: Kernel size for spatial patch merging.
-            video_attn_type: Type of video attention.
-            merge_type: Type of merge operation.
-
-        MM Projector Parameters:
-            mm_projector_type: Type of multimodal projector.
-            mm_hidden_size: Hidden size for projector (defaults to hidden_size).
-            projector_hidden_act: Activation function for projector.
-            projector_ln_eps: Layer norm epsilon for projector.
-    """
-
     model_type = "kimi_k25_vision"
 
     def __init__(

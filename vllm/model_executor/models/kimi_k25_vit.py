@@ -218,14 +218,6 @@ class MoonVision3dPatchEmbed(nn.Module):
             raise NotImplementedError(f"Not support pos_emb_type: {pos_emb_type}")
 
     def forward(self, x: torch.Tensor, grid_thws: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x (L, Channels): input tensor
-            grid_hws (N, 3): temporal, height and width
-
-        Returns:
-            (L, Cout) tensor
-        """
         x = self.proj(x).view(x.size(0), -1)
         # apply positional embedding
         x = self.pos_emb(x, grid_thws)
