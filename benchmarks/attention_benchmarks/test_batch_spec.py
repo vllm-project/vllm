@@ -14,7 +14,6 @@ from batch_spec import (
     format_batch_spec,
     get_batch_stats,
     parse_batch_spec,
-    parse_manual_batch,
 )
 from benchmark import generate_batch_specs_from_ranges
 
@@ -117,18 +116,6 @@ def test_batch_stats():
     )
 
 
-def test_manual_batch():
-    """Test manual batch specification."""
-    print("\nTesting manual batch...")
-
-    requests = parse_manual_batch(["1,1024", "2048,2048", "1,2048"])
-    assert len(requests) == 3
-    assert requests[0].as_tuple() == (1, 1024)
-    assert requests[1].as_tuple() == (2048, 2048)
-    assert requests[2].as_tuple() == (1, 2048)
-    print("  ✓ Manual batch: 3 requests")
-
-
 def test_error_handling():
     """Test error handling."""
     print("\nTesting error handling...")
@@ -138,12 +125,6 @@ def test_error_handling():
         raise AssertionError("Should have raised ValueError")
     except ValueError:
         print("  ✓ Invalid spec raises ValueError")
-
-    try:
-        parse_manual_batch(["1024,512"])  # kv < q
-        raise AssertionError("Should have raised ValueError")
-    except ValueError:
-        print("  ✓ Invalid kv_len raises ValueError")
 
 
 def test_range_generation_simple():
@@ -255,7 +236,6 @@ def main():
     test_extend_patterns()
     test_formatting()
     test_batch_stats()
-    test_manual_batch()
     test_error_handling()
     test_range_generation_simple()
     test_range_generation_multiple()

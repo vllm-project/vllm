@@ -6,7 +6,6 @@
 import csv
 import json
 import math
-import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -297,64 +296,6 @@ class BenchmarkResult:
         }
 
 
-class BenchmarkRunner:
-    """Base class for running attention benchmarks."""
-
-    def __init__(self, config: BenchmarkConfig):
-        self.config = config
-        self.device = torch.device(config.device)
-        torch.cuda.set_device(self.device)
-
-    def run(self, **kwargs) -> BenchmarkResult:
-        """
-        Run benchmark with current configuration.
-
-        Returns:
-            BenchmarkResult with timing and memory statistics
-        """
-        raise NotImplementedError
-
-    def _time_kernel(self, fn, warmup: int = 3, repeats: int = 10) -> dict:
-        """
-        Time a kernel function with warmup and multiple repeats.
-
-        Args:
-            fn: Callable to time
-            warmup: Number of warmup iterations
-            repeats: Number of measurement iterations
-
-        Returns:
-            Dict with timing statistics
-        """
-        # Warmup
-        for _ in range(warmup):
-            fn()
-        torch.cuda.synchronize()
-
-        # Measure
-        times = []
-        for _ in range(repeats):
-            torch.cuda.synchronize()
-            start = time.time()
-            fn()
-            torch.cuda.synchronize()
-            times.append(time.time() - start)
-
-        return {
-            "mean": np.mean(times),
-            "std": np.std(times),
-            "min": np.min(times),
-            "max": np.max(times),
-        }
-
-    def _get_memory_stats(self) -> dict:
-        """Get current CUDA memory statistics."""
-        return {
-            "allocated_mb": torch.cuda.memory_allocated(self.device) / 1024**2,
-            "reserved_mb": torch.cuda.memory_reserved(self.device) / 1024**2,
-        }
-
-
 class ResultsFormatter:
     """Format and display benchmark results."""
 
@@ -541,3 +482,22 @@ def setup_mla_dims(model_name: str = "deepseek-v3") -> dict:
 def get_attention_scale(head_dim: int) -> float:
     """Compute attention scale factor (1/sqrt(d))."""
     return 1.0 / math.sqrt(head_dim)
+
+
+def is_mla_backend(backend: str) -> bool:
+    """
+    Check if backend is an MLA backend using the backend's is_mla() property.
+
+    Args:
+        backend: Backend name (e.g., "CUTLASS_MLA", "FLASHINFER_MLA")
+
+    Returns:
+        True if the backend is an MLA backend, False otherwise
+    """
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    try:
+        backend_class = AttentionBackendEnum[backend.upper()].get_class()
+        return backend_class.is_mla()
+    except (KeyError, ValueError, ImportError):
+        return False

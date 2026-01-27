@@ -64,32 +64,6 @@ class BatchRequest:
         return (self.q_len, self.kv_len)
 
 
-def parse_manual_batch(batch_args: list[str]) -> list[BatchRequest]:
-    """
-    Parse manual batch pairs ['q,kv', ...] into list of BatchRequest.
-
-    Args:
-        batch_args: List of strings in format "q_len,kv_len"
-
-    Returns:
-        List of BatchRequest objects
-
-    Raises:
-        ValueError: If format is invalid or kv_len < q_len
-    """
-    requests = []
-    for s in batch_args:
-        try:
-            q_str, kv_str = s.split(",")
-            q, kv = int(q_str), int(kv_str)
-            if kv < q:
-                raise ValueError(f"kv_len ({kv}) must be >= q_len ({q})")
-            requests.append(BatchRequest(q_len=q, kv_len=kv))
-        except Exception as e:
-            raise ValueError(f"Invalid batch pair '{s}': {e}") from e
-    return requests
-
-
 def _parse_size(size_str: str, k_suffix: str) -> int:
     """Parse size string with optional 'k' suffix."""
     size = int(size_str)

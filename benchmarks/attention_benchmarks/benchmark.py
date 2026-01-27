@@ -43,6 +43,7 @@ from common import (
     ModelParameterSweep,
     ParameterSweep,
     ResultsFormatter,
+    is_mla_backend,
 )
 
 
@@ -57,16 +58,34 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
     """Run MLA benchmark with appropriate backend."""
     from mla_runner import run_mla_benchmark as run_mla
 
-    result_dict = run_mla(config.backend, config, **kwargs)
+    return run_mla(config.backend, config, **kwargs)
 
-    return BenchmarkResult(
-        config=config,
-        mean_time=result_dict["mean"],
-        std_time=result_dict["std"],
-        min_time=result_dict["min"],
-        max_time=result_dict["max"],
-        throughput_tokens_per_sec=result_dict["throughput"],
-    )
+
+def run_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
+    """
+    Run a single benchmark with proper backend selection.
+
+    Args:
+        config: BenchmarkConfig with backend, batch_spec, and model params
+        **kwargs: Additional arguments passed to MLA benchmarks
+
+    Returns:
+        BenchmarkResult (may have error field set on failure)
+    """
+    try:
+        if is_mla_backend(config.backend):
+            return run_mla_benchmark(config, **kwargs)
+        else:
+            return run_standard_attention_benchmark(config)
+    except Exception as e:
+        return BenchmarkResult(
+            config=config,
+            mean_time=float("inf"),
+            std_time=0,
+            min_time=float("inf"),
+            max_time=float("inf"),
+            error=str(e),
+        )
 
 
 def run_model_parameter_sweep(
@@ -105,45 +124,25 @@ def run_model_parameter_sweep(
                     config_args = base_config_args.copy()
                     config_args[sweep.param_name] = value
 
-                    # Create descriptive backend name
-                    backend_label = sweep.get_label(backend, value)
-                    config = BenchmarkConfig(
-                        backend=backend_label, batch_spec=spec, **config_args
+                    # Create config with original backend for running
+                    clean_config = BenchmarkConfig(
+                        backend=backend, batch_spec=spec, **config_args
                     )
 
-                    try:
-                        # Create clean config with original backend name for actual run
-                        clean_config = replace(config, backend=backend)
+                    # Run benchmark
+                    result = run_benchmark(clean_config)
 
-                        # Determine if MLA backend
-                        if backend in [
-                            "cutlass_mla",
-                            "flashinfer_mla",
-                            "flashattn_mla",
-                            "flashmla",
-                        ]:
-                            result = run_mla_benchmark(clean_config)
-                        else:
-                            result = run_standard_attention_benchmark(clean_config)
+                    # Replace backend with labeled version for display
+                    backend_label = sweep.get_label(backend, value)
+                    labeled_config = replace(result.config, backend=backend_label)
+                    result = replace(result, config=labeled_config)
+                    all_results.append(result)
 
-                        # Replace result's config with labeled version
-                        result = replace(result, config=config)
-                        all_results.append(result)
-
-                    except Exception as e:
+                    if not result.success:
                         console.print(
                             f"[red]Error {backend} {spec} {sweep.param_name}="
-                            f"{value}: {e}[/]"
+                            f"{value}: {result.error}[/]"
                         )
-                        result = BenchmarkResult(
-                            config=config,
-                            mean_time=float("inf"),
-                            std_time=0,
-                            min_time=float("inf"),
-                            max_time=float("inf"),
-                            error=str(e),
-                        )
-                        all_results.append(result)
 
                     pbar.update(1)
 
@@ -288,50 +287,30 @@ def run_parameter_sweep(
         for backend in backends:
             for spec in batch_specs:
                 for value in sweep_values:
-                    # Create config with descriptive backend name
-                    backend_label = sweep.get_label(backend, value)
+                    # Create config with original backend for running
                     config = BenchmarkConfig(
-                        backend=backend_label, batch_spec=spec, **base_config_args
+                        backend=backend, batch_spec=spec, **base_config_args
                     )
 
-                    try:
-                        # Create clean config with original backend name for actual run
-                        clean_config = replace(config, backend=backend)
+                    # Prepare kwargs for benchmark runner
+                    kwargs = {}
+                    if value != "auto":
+                        kwargs[sweep.param_name] = value
 
-                        # Prepare kwargs for benchmark runner
-                        kwargs = {}
-                        if value != "auto":
-                            kwargs[sweep.param_name] = value
+                    # Run benchmark
+                    result = run_benchmark(config, **kwargs)
 
-                        # Determine if MLA backend
-                        if backend in [
-                            "cutlass_mla",
-                            "flashinfer_mla",
-                            "flashattn_mla",
-                            "flashmla",
-                        ]:
-                            result = run_mla_benchmark(clean_config, **kwargs)
-                        else:
-                            result = run_standard_attention_benchmark(clean_config)
+                    # Replace backend with labeled version for display
+                    backend_label = sweep.get_label(backend, value)
+                    labeled_config = replace(result.config, backend=backend_label)
+                    result = replace(result, config=labeled_config)
+                    all_results.append(result)
 
-                        # Replace result's config with labeled version
-                        result = replace(result, config=config)
-                        all_results.append(result)
-
-                    except Exception as e:
+                    if not result.success:
                         console.print(
                             f"[red]Error {backend} {spec} {sweep.param_name}="
-                            f"{value}: {e}[/]"
+                            f"{value}: {result.error}[/]"
                         )
-                        result = BenchmarkResult(
-                            config=config,
-                            mean_time=float("inf"),
-                            std_time=0,
-                            min_time=float("inf"),
-                            max_time=float("inf"),
-                            error=str(e),
-                        )
-                        all_results.append(result)
 
                     pbar.update(1)
 
@@ -881,33 +860,11 @@ def main():
                         profile_memory=args.profile_memory,
                     )
 
-                    try:
-                        # Determine if MLA backend
-                        if backend in [
-                            "cutlass_mla",
-                            "flashinfer_mla",
-                            "flashattn_mla",
-                            "flashmla",
-                        ]:
-                            result = run_mla_benchmark(config)
-                        else:
-                            result = run_standard_attention_benchmark(config)
+                    result = run_benchmark(config)
+                    all_results.append(result)
 
-                        all_results.append(result)
-                    except Exception as e:
-                        console.print(f"[red]Error {backend} {spec}: {e}[/]")
-                        import traceback
-
-                        traceback.print_exc()
-                        result = BenchmarkResult(
-                            config=config,
-                            mean_time=float("inf"),
-                            std_time=0,
-                            min_time=float("inf"),
-                            max_time=float("inf"),
-                            error=str(e),
-                        )
-                        all_results.append(result)
+                    if not result.success:
+                        console.print(f"[red]Error {backend} {spec}: {result.error}[/]")
 
                     pbar.update(1)
 

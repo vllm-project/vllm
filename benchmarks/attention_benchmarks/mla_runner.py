@@ -13,7 +13,13 @@ import importlib
 import numpy as np
 import torch
 from batch_spec import parse_batch_spec
-from common import MockHfConfig, MockKVBProj, MockLayer, setup_mla_dims
+from common import (
+    BenchmarkResult,
+    MockHfConfig,
+    MockKVBProj,
+    MockLayer,
+    setup_mla_dims,
+)
 
 from vllm.config import (
     CacheConfig,
@@ -588,7 +594,7 @@ def _run_single_benchmark(
     backend_cfg: dict,
     mla_dims: dict,
     device: torch.device,
-) -> dict:
+) -> BenchmarkResult:
     """
     Run a single benchmark iteration.
 
@@ -602,7 +608,7 @@ def _run_single_benchmark(
         device: Target device
 
     Returns:
-        Dict with timing statistics
+        BenchmarkResult with timing statistics
     """
     # Parse batch spec
     requests = parse_batch_spec(config.batch_spec)
@@ -673,19 +679,21 @@ def _run_single_benchmark(
         elapsed_ms = start.elapsed_time(end)
         times.append(elapsed_ms / 1000.0 / config.num_layers)
 
-    return {
-        "mean": np.mean(times),
-        "std": np.std(times),
-        "min": np.min(times),
-        "max": np.max(times),
-        "throughput": total_q / np.mean(times) if times else 0,
-    }
+    mean_time = float(np.mean(times))
+    return BenchmarkResult(
+        config=config,
+        mean_time=mean_time,
+        std_time=float(np.std(times)),
+        min_time=float(np.min(times)),
+        max_time=float(np.max(times)),
+        throughput_tokens_per_sec=total_q / mean_time if mean_time > 0 else 0,
+    )
 
 
 def _run_mla_benchmark_batched(
     backend: str,
     configs_with_params: list[tuple],  # [(config, threshold, num_splits), ...]
-) -> list[dict]:
+) -> list[BenchmarkResult]:
     """
     Unified batched MLA benchmark runner for all backends.
 
@@ -701,7 +709,7 @@ def _run_mla_benchmark_batched(
             - num_splits: num_kv_splits (CUTLASS only)
 
     Returns:
-        List of dicts with timing statistics
+        List of BenchmarkResult objects
     """
     if not configs_with_params:
         return []
@@ -785,7 +793,7 @@ def run_mla_benchmark(
     config,
     reorder_batch_threshold: int | None = None,
     num_kv_splits: int | None = None,
-) -> dict:
+) -> BenchmarkResult | list[BenchmarkResult]:
     """
     Unified MLA benchmark runner for all backends.
 
@@ -801,7 +809,7 @@ def run_mla_benchmark(
         num_kv_splits: Number of KV splits for CUTLASS (single config mode only)
 
     Returns:
-        Dict with timing statistics (single mode) or list of dicts (batched mode)
+        BenchmarkResult (single mode) or list of BenchmarkResult (batched mode)
     """
     # Normalize to batched mode: (config, threshold, num_splits)
     if isinstance(config, list):
