@@ -334,7 +334,7 @@ def test_attention_quant_pattern(
         # This also captures the FP4 case
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
     if backend == AttentionBackendEnum.FLASH_ATTN and (
-        not current_platform.is_device_capability((9, 0))
+        not current_platform.has_device_capability((9, 0))
     ):
         pytest.skip("FlashAttention 3 FP8 output fusion requires Hopper (SM90+)")
 
