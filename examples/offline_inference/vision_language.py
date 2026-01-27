@@ -15,7 +15,7 @@ from dataclasses import asdict
 from typing import NamedTuple
 
 from huggingface_hub import snapshot_download
-from transformers import AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
@@ -287,6 +287,40 @@ def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Eagle2.5-VL
+def run_eagle2_5(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "nvidia/Eagle2.5-8B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    # Stop tokens for Eagle2.5 (Qwen2 based)
+    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
+    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
+    stop_token_ids = [token_id for token_id in stop_token_ids if token_id is not None]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        stop_token_ids=stop_token_ids,
+    )
+
+
 # Ernie4.5-VL
 def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "baidu/ERNIE-4.5-VL-28B-A3B-PT"
@@ -510,6 +544,42 @@ def run_glm4_5v_fp8(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
         enforce_eager=True,
         tensor_parallel_size=4,
+    )
+
+    if modality == "image":
+        placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+    elif modality == "video":
+        placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+
+    prompts = [
+        (
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            f"{placeholder}"
+            f"{question}<|assistant|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# GLM-OCR
+def run_glm_ocr(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "zai-org/GLM-OCR"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        mm_processor_kwargs={
+            "size": {"shortest_edge": 12544, "longest_edge": 47040000},
+            "fps": 1,
+        },
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
     )
 
     if modality == "image":
@@ -769,6 +839,33 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Kanana-V
+def run_kanana_v(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "kakaocorp/kanana-1.5-v-3b-instruct"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Keye-VL
 def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "Kwai-Keye/Keye-VL-8B-Preview"
@@ -867,6 +964,37 @@ def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model="lightonai/LightOnOCR-1B",
         limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+def run_lfm2_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "LiquidAI/LFM2-VL-450M"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    processor = AutoProcessor.from_pretrained(model_name)
+    messages = [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "image"}, {"type": "text", "text": question}],
+            }
+        ]
+        for question in questions
+    ]
+    prompts = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
     )
 
     return ModelRequestData(
@@ -1160,6 +1288,36 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
 
     prompts = [
         f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Molmo2
+def run_molmo2(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "allenai/Molmo2-8B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        dtype="bfloat16",
+        limit_mm_per_prompt={modality: 1},
+        max_num_batched_tokens=36864,
+    )
+
+    if modality == "image":
+        placeholder = "<|image|>"
+    elif modality == "video":
+        placeholder = "<|video|>"
+    else:
+        raise ValueError(f"Unsupported modality for molmo2: {modality}")
+
+    prompts = [
+        f"{placeholder}<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n"
         for question in questions
     ]
 
@@ -1767,6 +1925,32 @@ def run_step3(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# StepVL10B
+def run_step_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "stepfun-ai/Step3-VL-10B"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_batched_tokens=4096,
+        tensor_parallel_size=1,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+        reasoning_parser="deepseek_r1",
+    )
+
+    prompts = [
+        "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
+        f"<im_patch>{question} <|EOT|><|BOT|>assistant\n<think>\n"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # omni-research/Tarsier-7b
 def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1831,6 +2015,7 @@ model_example_map = {
     "deepseek_vl_v2": run_deepseek_vl2,
     "deepseek_ocr": run_deepseek_ocr,
     "dots_ocr": run_dots_ocr,
+    "eagle2_5": run_eagle2_5,
     "ernie45_vl": run_ernie45_vl,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
@@ -1839,16 +2024,19 @@ model_example_map = {
     "glm4_1v": run_glm4_1v,
     "glm4_5v": run_glm4_5v,
     "glm4_5v_fp8": run_glm4_5v_fp8,
+    "glm_ocr": run_glm_ocr,
     "h2ovl_chat": run_h2ovl,
     "hunyuan_vl": run_hunyuan_vl,
     "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
     "interns1": run_interns1,
     "internvl_chat": run_internvl,
+    "kanana_v": run_kanana_v,
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
     "lightonocr": run_lightonocr,
+    "lfm2_vl": run_lfm2_vl,
     "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -1860,6 +2048,7 @@ model_example_map = {
     "minimax_vl_01": run_minimax_vl_01,
     "mistral3": run_mistral3,
     "molmo": run_molmo,
+    "molmo2": run_molmo2,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "ovis": run_ovis,
@@ -1880,6 +2069,7 @@ model_example_map = {
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
     "step3": run_step3,
+    "stepvl": run_step_vl,
     "tarsier": run_tarsier,
     "tarsier2": run_tarsier2,
 }
@@ -1887,8 +2077,10 @@ model_example_map = {
 
 MODELS_NEED_VIDEO_METADATA = [
     "glm4_1v",
+    "glm_ocr",
     "glm4_5v",
     "glm4_5v_fp8",
+    "molmo2",
     "qwen3_vl",
     "qwen3_vl_moe",
 ]

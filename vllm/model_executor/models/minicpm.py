@@ -90,6 +90,7 @@ class MiniCPMMoE(nn.Module):
         intermediate_size: int,
         params_dtype: torch.dtype | None = None,
         tp_size: int | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
@@ -108,6 +109,7 @@ class MiniCPMMoE(nn.Module):
             bias=False,
             params_dtype=self.params_dtype,
             quant_config=None,
+            prefix=f"{prefix}.gate",
         )
 
         self.ws = nn.Parameter(
@@ -298,10 +300,7 @@ class MiniCPMAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        orig_dtype = q.dtype
-        q, k = q.float(), k.float()
         q, k = self.rotary_emb(positions, q, k)
-        q, k = q.to(orig_dtype), k.to(orig_dtype)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -352,6 +351,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 hidden_act=self.config.hidden_act,
                 hidden_act_param=getattr(self.config, "hidden_act_param", 0.0),
                 quant_config=self.quant_config,
+                prefix=f"{self.prefix}.mlp",
             )
         else:
             self.mlp = MiniCPMMoE(
@@ -359,6 +359,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 top_k=self.config.num_experts_per_tok,
                 hidden_size=self.config.hidden_size,
                 intermediate_size=self.config.intermediate_size,
+                prefix=f"{self.prefix}.mlp",
             )
 
     def forward(
@@ -439,7 +440,7 @@ class MiniCPMModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -619,7 +620,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

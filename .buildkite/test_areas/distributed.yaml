@@ -5,7 +5,7 @@ steps:
 - label: Distributed Comm Ops
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_devices: 2
   source_file_dependencies:
   - vllm/distributed
   - tests/distributed
@@ -18,7 +18,7 @@ steps:
 - label: Distributed (2 GPUs)
   timeout_in_minutes: 90
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_devices: 2
   source_file_dependencies:
   - vllm/compilation/
   - vllm/distributed/
@@ -54,7 +54,7 @@ steps:
 - label: Distributed Tests (4 GPUs)
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
   - tests/distributed/test_utils
@@ -103,8 +103,8 @@ steps:
 
 - label: Distributed Tests (8 GPUs)(H100)
   timeout_in_minutes: 10
-  gpu: h100
-  num_gpus: 8
+  device: h100
+  num_devices: 8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - examples/offline_inference/torchrun_dp_example.py
@@ -120,9 +120,9 @@ steps:
   - torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 - label: Distributed Tests (4 GPUs)(A100)
-  gpu: a100
+  device: a100
   optional: true
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
   - vllm/
   commands:
@@ -133,26 +133,34 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
-- label: Distributed Tests (2 GPUs)(H200)
-  gpu: h200
+- label: Sequence Parallel Tests (H100)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  device: h100
+  optional: true
+  num_devices: 2
+  commands:
+    - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+    # Run sequence parallel tests
+    - pytest -v -s tests/distributed/test_sequence_parallel.py
+    - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
+
+- label: Distributed Tests (2 GPUs)(H100)
+  device: h100
   optional: true
   working_dir: "/vllm-workspace/"
-  num_gpus: 2
+  num_devices: 2
   commands:
     - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
-    - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
-    - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
-    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'
-    - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/distributed/test_sequence_parallel.py
     - pytest -v -s tests/distributed/test_context_parallel.py
-    - CUDA_VISIBLE_DEVICES=1,2 VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+    - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
 - label: Distributed Tests (2 GPUs)(B200)
-  gpu: b200
+  device: b200
   optional: true
   working_dir: "/vllm-workspace/"
-  num_gpus: 2
+  num_devices: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
@@ -161,8 +169,9 @@ steps:
 - label: 2 Node Test (4 GPUs)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_devices: 2
   num_nodes: 2
+  no_plugin: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
@@ -176,18 +185,29 @@ steps:
 - label: Distributed NixlConnector PD accuracy (4 GPUs)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    - bash v1/kv_connector/nixl_integration/tp_config_sweep_accuracy_test.sh
+    - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: DP EP Distributed NixlConnector PD accuracy tests (4 GPUs)
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: Pipeline + Context Parallelism (4 GPUs))
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
@@ -197,3 +217,45 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
+
+- label: Hopper Fusion E2E Tests (H100)
+  timeout_in_minutes: 70
+  working_dir: "/vllm-workspace/"
+  device: h100
+  optional: true
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/compilation/
+  # can affect pattern matching
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/layers/activation.py
+  - vllm/model_executor/layers/quantization/input_quant_fp8.py
+  - tests/compile/test_fusion_attn.py
+  commands:
+    - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+    # skip Llama-4 since it does not fit on this device
+    - pytest -v -s tests/compile/test_fusion_attn.py -k 'not Llama-4'
+
+- label: Hopper Fusion Distributed E2E Tests (2xH100)
+  timeout_in_minutes: 70
+  working_dir: "/vllm-workspace/"
+  device: h100
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/compilation/
+  # can affect pattern matching
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/layers/activation.py
+  - vllm/model_executor/layers/quantization/input_quant_fp8.py
+  - tests/compile/distributed/test_fusions_e2e.py
+  commands:
+    - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+    # Run all e2e fusion tests
+    - pytest -v -s tests/compile/distributed/test_fusions_e2e.py -k 'not Llama-4'
+    - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py

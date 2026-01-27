@@ -4,9 +4,6 @@
 from argparse import Namespace
 
 from vllm import LLM, EngineArgs
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.config import AttentionConfig
-from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
@@ -23,14 +20,9 @@ def parse_args():
 
 
 def main(args: Namespace):
-    if current_platform.is_rocm():
-        args.attention_config = AttentionConfig(
-            backend=AttentionBackendEnum.FLEX_ATTENTION
-        )
-
     # Sample prompts.
-    text_1 = "What is the capital of France?"
-    texts_2 = [
+    query = "What is the capital of France?"
+    documents = [
         "The capital of Brazil is Brasilia.",
         "The capital of France is Paris.",
     ]
@@ -40,13 +32,13 @@ def main(args: Namespace):
     llm = LLM(**vars(args))
 
     # Generate scores. The output is a list of ScoringRequestOutputs.
-    outputs = llm.score(text_1, texts_2)
+    outputs = llm.score(query, documents)
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)
-    for text_2, output in zip(texts_2, outputs):
+    for document, output in zip(documents, outputs):
         score = output.outputs.score
-        print(f"Pair: {[text_1, text_2]!r} \nScore: {score}")
+        print(f"Pair: {[query, document]!r} \nScore: {score}")
         print("-" * 60)
 
 

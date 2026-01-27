@@ -3,10 +3,19 @@
 
 import math
 from collections.abc import Mapping
+from typing import Literal, cast
 
+import numpy as np
 import torch
+from mistral_common.protocol.instruct.chunk import RawAudio
+from mistral_common.protocol.transcription.request import (
+    StreamingMode,
+    TranscriptionRequest,
+)
+from mistral_common.tokens.tokenizers.audio import Audio
 
-from vllm.config.vllm import VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.voxtral import (
@@ -21,12 +30,13 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsOptionalItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.processor import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
 
 from .utils import (
     _flatten_embeddings,
@@ -102,6 +112,18 @@ class TimeEmbedding(torch.nn.Module):
         return torch.cat((emb.cos(), emb.sin()), dim=-1)  # (B, D) or (B, T, D)
 
 
+def _expand_tensor(input_tensor: torch.Tensor, scaling: int) -> torch.Tensor:
+    # 1. Multiply by the scaling factor (e.g. 4)
+    base = input_tensor * scaling
+
+    # 2. Create the offsets, e.g. [0, 1, 2, 3]
+    offsets = torch.arange(scaling, device=input_tensor.device)
+
+    # 3. Use broadcasting, e.g. (N, 1) + (4,) results in (N, 4)
+    # Then flatten back to 1D
+    return (base.unsqueeze(1) + offsets).view(-1)
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     VoxtralStreamingMultiModalProcessor,
     info=VoxtralProcessingInfo,
@@ -151,7 +173,7 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -165,8 +187,9 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             inputs_embeds.shape[0] * pool_size, inputs_embeds.shape[1] // pool_size
         )
 
-        audio_hidden_states = self.whisper_encoder.whisper_encoder.forward_layers(
-            inputs_embeds
+        whisper_positions = _expand_tensor(positions, pool_size)
+        audio_hidden_states = self.whisper_encoder.whisper_encoder(
+            inputs_embeds, whisper_positions
         )
 
         num_tokens, audio_hidden_size = audio_hidden_states.shape
@@ -187,10 +210,14 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             device=inputs_embeds.device,
             dtype=inputs_embeds.dtype,
         )
-        inputs_embeds = inputs_embeds + self.time_embedding(time_tensor)
+        t_cond = self.time_embedding(time_tensor)
 
         hidden_states = self.language_model.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            t_cond=t_cond,
         )
 
         return hidden_states
@@ -205,13 +232,17 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             "For streaming you must provide an audio input at every step."
         )
 
-        multiple_of = self.audio_config.raw_audio_length_per_tok
-        assert all(
-            (this_audio := audio.shape[0]) % multiple_of == 0 for audio in audio_inputs
-        ), (
-            f"Every input audio waveform has to be a multiple of {multiple_of}, but"
-            f" one is {this_audio} with {(this_audio / multiple_of)=}."
-        )
+        def _truncate_left(
+            sample: torch.Tensor, mult_of: int, pos: int
+        ) -> torch.Tensor:
+            assert pos in [0, 1], pos
+            if (ctx := sample.shape[pos] % mult_of) != 0:
+                sample = sample[ctx:] if pos == 0 else sample[:, ctx:]
+                assert sample.shape[pos] > 0, (
+                    f"Sample is empty after truncation with ctx {ctx}"
+                )
+
+            return sample
 
         mel_features = [
             self.whisper_encoder.compute_whisper_melspec(audio).to(
@@ -219,11 +250,16 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             )
             for audio in audio_inputs
         ]
+
+        # we truncate the left most mel feature
+        # if the sequence length in impair
+        mel_features = [_truncate_left(mel, 2, 1) for mel in mel_features]
+
         seq_lens = [mel.shape[1] for mel in mel_features]
         # [total_num_20ms_frames, hidden_size]
         audio_embeddings = self.whisper_encoder.whisper_encoder.forward_conv(
             mel_features
-        )[0]
+        )
         conv_stride = self.whisper_encoder.whisper_encoder.total_stride
         audio_embeddings_per_sample = audio_embeddings.split(
             [s // conv_stride for s in seq_lens], dim=0
@@ -231,13 +267,55 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
 
         # audio_embeddings per sample need to be divisible by 4
         pool_size = self.config.audio_config.block_pool_size
-        assert all(
-            (this_shape := sample.shape[0]) % pool_size == 0
+
+        audio_embeddings_per_sample = [
+            _truncate_left(sample, pool_size, 0)
             for sample in audio_embeddings_per_sample
-        ), f"Every audio embedding has to be a multiple of 4, but one is {this_shape}."
+        ]
 
         audio_embeddings_per_sample = [
             e.view(e.shape[0] // pool_size, e.shape[1] * pool_size)
             for e in audio_embeddings_per_sample
         ]
         return audio_embeddings_per_sample
+
+    @classmethod
+    def get_speech_to_text_config(
+        cls, model_config: ModelConfig, task_type: str
+    ) -> SpeechToTextConfig:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio_config = tokenizer.instruct.audio_encoder.audio_config
+        sample_rate = audio_config.sampling_rate
+        return SpeechToTextConfig(
+            max_audio_clip_s=None,  # only limited by memory
+            sample_rate=sample_rate,
+            min_energy_split_window_size=None,
+        )
+
+    @classmethod
+    # for speech-to-text transcription
+    def get_generation_prompt(
+        cls,
+        audio: np.ndarray,
+        model_config: ModelConfig,
+        stt_config: SpeechToTextConfig,
+        language: str | None,
+        task_type: Literal["transcribe", "translate"],
+        request_prompt: str,
+        to_language: str | None,
+    ) -> PromptType:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
+
+        req = TranscriptionRequest(
+            model=model_config.model,
+            audio=RawAudio.from_audio(audio),
+            language=language,
+            streaming=StreamingMode.OFFLINE,
+        )
+
+        tokenized = tokenizer.instruct.encode_transcription(req)
+        audio = (tokenized.audios[0].audio_array, stt_config.sample_rate)
+        prompts_dict = {"multi_modal_data": {"audio": audio}}
+        prompts_dict["prompt_token_ids"] = tokenized.tokens
+        return cast(PromptType, prompts_dict)
