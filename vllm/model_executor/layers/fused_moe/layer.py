@@ -584,9 +584,6 @@ class FusedMoE(CustomOp):
         # Create initial moe_config with original hidden_size
         # This is needed to determine is_mxfp4_quant for rounding decision
         self.moe_config: FusedMoEConfig = _create_moe_config(hidden_size)
-        self.moe_config_use_flashinfer_cutlass_kernels = (
-            self.moe_config.use_flashinfer_cutlass_kernels
-        )
 
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -1181,76 +1178,38 @@ class FusedMoE(CustomOp):
                 for quant_name in ["mxfp4", "quark"]
             ):
                 # Validate weight_name is recognized
-                if shard_id is None:
-                    if not (
-                        ".w13_" in weight_name
-                        or ".gate_up_proj" in weight_name
-                        or ".w2_" in weight_name
-                        or ".down_proj" in weight_name
-                    ):
-                        raise ValueError(
-                            f"Cannot infer shard_id from weight_name: {weight_name}"
-                        )
-                else:
-                    _ = shard_id  # shard_id provided but not used here
+                if shard_id is None and not (
+                    ".w13_" in weight_name
+                    or ".gate_up_proj" in weight_name
+                    or ".w2_" in weight_name
+                    or ".down_proj" in weight_name
+                ):
+                    raise ValueError(
+                        f"Cannot infer shard_id from weight_name: {weight_name}"
+                    )
 
-                # For mxfp4/quark, weights are already pre-sliced at model loading level
-                # loaded_weight is already TP-sharded, so we use load_full=True
+                # For mxfp4/quark, loaded_weight is already pre-sliced at model level
+                # and in special packed format. Use slicing to handle potential
+                # dimension mismatches due to intermediate_size rounding for alignment.
 
-                # Handle bias separately - simple copy since it's 1D per expert
-                if "bias" in weight_name:
-                    if expert_id is None:
-                        # All experts: [num_experts, intermediate_size_per_partition]
-                        dim1 = loaded_weight.shape[1]
+                # All experts at once: loaded_weight shape is [num_experts, dim1, ...]
+                if expert_id is None:
+                    dim1 = loaded_weight.shape[1]
+                    if "bias" in weight_name:
                         param.data[:, :dim1].copy_(loaded_weight)
                     else:
-                        # Single expert: [intermediate_size_per_partition]
-                        expert_data = param.data[expert_id]
-                        dim1 = loaded_weight.shape[0]
-                        expert_data.data[:dim1].copy_(loaded_weight)
-                    return True if return_success else None
+                        dim2 = loaded_weight.shape[2]
+                        param.data[:, :dim1, :dim2].copy_(loaded_weight)
 
-                # Handle weights and scales
-                # For mxfp4/quark, loaded_weight is already pre-sliced at model level
-                # and in special packed format, so direct copy is the right approach
-                # Cannot use _load_w13/_load_w2 as they expect different shapes
-
-                # Helper function to copy with potential padding for size mismatches
-                def _copy_with_padding(dest: torch.Tensor, src: torch.Tensor):
-                    """Copy src to dest, padding with zeros if src is smaller
-                    due to rounding."""
-                    if dest.shape == src.shape:
-                        dest.copy_(src)
-                    else:
-                        # Mismatch due to intermediate_size rounding for mxfp4 alignment
-                        # Copy what we can and leave the rest as initialized zeros
-                        logger.debug_once(
-                            "Shape mismatch during weight loading "
-                            "(expected for mxfp4 alignment): "
-                            f"dest.shape={dest.shape}, src.shape={src.shape}"
-                        )
-                        slices = tuple(
-                            slice(0, min(d, s)) for d, s in zip(dest.shape, src.shape)
-                        )
-                        dest[slices].copy_(src[slices])
-
-                if expert_id is None:
-                    # All experts at once - iterate through each expert
-                    # For mxfp4/quark, the loaded_weight shape is:
-                    # [num_experts, intermediate_size_per_partition, ...]
-                    for expert_idx in range(loaded_weight.shape[0]):
-                        expert_weight = loaded_weight[expert_idx]
-                        expert_data = param.data[expert_idx]
-
-                        # Copy with padding
-                        # if parameter was rounded larger than checkpoint
-                        _copy_with_padding(expert_data, expert_weight)
+                # Single expert loading: loaded_weight shape is [dim1, ...]
                 else:
-                    # Single expert loading
                     expert_data = param.data[expert_id]
-
-                    # Copy with padding if parameter was rounded larger than checkpoint
-                    _copy_with_padding(expert_data, loaded_weight)
+                    dim1 = loaded_weight.shape[0]
+                    if "bias" in weight_name:
+                        expert_data.data[:dim1].copy_(loaded_weight)
+                    else:
+                        dim2 = loaded_weight.shape[1]
+                        expert_data.data[:dim1, :dim2].copy_(loaded_weight)
 
                 return True if return_success else None
             return False if return_success else None
