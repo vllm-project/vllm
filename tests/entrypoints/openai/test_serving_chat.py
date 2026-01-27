@@ -886,14 +886,20 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     # By default, cache_salt in the engine prompt is not set
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
-    engine_prompt = serving_chat._process_inputs.await_args_list[0].args[1]
+
+    engine_prompt = serving_chat.renderer.tokenize_prompt_async.await_args_list[0].args[
+        0
+    ]
     assert "cache_salt" not in engine_prompt
 
     # Test with certain cache_salt
     req.cache_salt = "test_salt"
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
-    engine_prompt = serving_chat._process_inputs.await_args_list[1].args[1]
+
+    engine_prompt = serving_chat.renderer.tokenize_prompt_async.await_args_list[1].args[
+        0
+    ]
     assert engine_prompt.get("cache_salt") == "test_salt"
 
 
