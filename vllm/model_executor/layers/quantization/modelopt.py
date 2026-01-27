@@ -1536,29 +1536,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def do_post_quant_allgather(self):
         return self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
 
-    def prepare_dp_allgather_tensor(
-        self,
-        layer: FusedMoE,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        """Optionally prepare extra tensors to carry through DP allgather/EP."""
-        if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            raise RuntimeError(
-                "prepare_dp_allgather_tensor is only supported for "
-                "FlashInfer TRTLLM NVFP4 MoE backend."
-            )
-
-        import flashinfer
-
-        hidden_states_fp4, hidden_states_sf = flashinfer.fp4_quantize(
-            hidden_states,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
-        )
-        extra_tensors: list[torch.Tensor] = [hidden_states_sf]
-        return hidden_states_fp4, extra_tensors
-
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
@@ -1578,7 +1555,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def is_monolithic(self) -> bool:
         return (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
-            # NOTE(rob): this will not work until the Naive P/F is merged.
             and not self.moe.moe_parallel_config.use_all2all_kernels
         )
 

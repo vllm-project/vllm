@@ -1797,44 +1797,13 @@ class FusedMoE(CustomOp):
         )
 
         with sp_ctx:
-            extra_tensors = None
             if do_naive_dispatch_combine:
-                post_quant_allgather = (
-                    self.quant_method is not None
-                    and self.dp_size > 1
-                    and self.use_ep
-                    and getattr(self.quant_method, "do_post_quant_allgather", False)
-                )
-                if post_quant_allgather:
-                    hidden_states_to_dispatch, extra_tensors = (
-                        self.quant_method.prepare_dp_allgather_tensor(
-                            self, hidden_states, router_logits
-                        )
-                    )
-                else:
-                    hidden_states_to_dispatch = hidden_states
-
                 dispatch_res = get_ep_group().dispatch_router_logits(
-                    hidden_states_to_dispatch,
+                    hidden_states,
                     router_logits,
                     self.is_sequence_parallel,
-                    extra_tensors=extra_tensors,
                 )
-                if extra_tensors is not None:
-                    (
-                        orig_hidden_states,
-                        router_logits,
-                        extra_tensors_combined,
-                    ) = dispatch_res
-                    hidden_states_combined = (
-                        orig_hidden_states,
-                        extra_tensors_combined[0],
-                    )
-                else:
-                    hidden_states_combined, router_logits = dispatch_res
-                    orig_hidden_states = hidden_states_combined
-            else:
-                orig_hidden_states = hidden_states
+                hidden_states_combined, router_logits = dispatch_res
 
             # Run shared experts before matrix multiply.
             # because matrix multiply maybe modify the hidden_states.
@@ -1858,10 +1827,6 @@ class FusedMoE(CustomOp):
             # Matrix multiply.
             x = hidden_states_combined if do_naive_dispatch_combine else hidden_states
 
-            # TODO(bnell): deal with fp4 flashinfer tuple hidden states hack (#30014).
-            # Figure out nicer way to do this.
-            x_orig = orig_hidden_states if do_naive_dispatch_combine else hidden_states
-
             if self.quant_method.is_monolithic:
                 final_hidden_states = self.quant_method.apply_monolithic(
                     layer=self,
@@ -1870,7 +1835,7 @@ class FusedMoE(CustomOp):
                 )
             else:
                 topk_weights, topk_ids = self.router.select_experts(
-                    hidden_states=x_orig,
+                    hidden_states=x,
                     router_logits=router_logits,
                 )
 
@@ -1879,7 +1844,7 @@ class FusedMoE(CustomOp):
 
                 final_hidden_states = self.quant_method.apply(
                     layer=self,
-                    x=x,  # The type signture of this is wrong due to the hack.
+                    x=x,
                     topk_weights=topk_weights,
                     topk_ids=topk_ids,
                 )

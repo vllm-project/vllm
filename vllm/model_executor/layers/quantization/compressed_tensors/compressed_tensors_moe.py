@@ -593,7 +593,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     def is_monolithic(self) -> bool:
         return (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
-            # NOTE(rob): this will not work until the Naive P/F is merged.
             and not self.moe.moe_parallel_config.use_all2all_kernels
         )
 
