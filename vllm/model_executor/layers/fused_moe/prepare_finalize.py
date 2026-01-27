@@ -90,7 +90,11 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             a1q, topk_weights, topk_ids, scales = res
             assert scales is not None and len(scales) == 1
             a1q_scale = scales[0]
-            if quant_config.quant_dtype == "nvfp4":
+            # Apply swizzling after a2a if the MoE kernel needs it.
+            if (
+                quant_config.quant_dtype == "nvfp4"
+                and quant_config.is_nvfp4_scale_swizzled
+            ):
                 assert a1q_scale is not None
                 if a1q_scale.element_size() == 1:
                     a1q_scale = a1q_scale.view(torch.uint8)
