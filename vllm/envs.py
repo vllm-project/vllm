@@ -291,16 +291,11 @@ def use_aot_compile() -> bool:
     from vllm.model_executor.layers.batch_invariant import (
         vllm_is_batch_invariant,
     )
-    from vllm.platforms import current_platform
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = (
         "1"
-        if is_torch_equal_or_newer("2.10.0.dev")
-        and not disable_compile_cache()
-        # Disabling AOT_COMPILE for CPU
-        # See: https://github.com/vllm-project/vllm/issues/32033
-        and not current_platform.is_cpu()
+        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
         else "0"
     )
 
@@ -785,6 +780,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Backend for Video IO
     # - "opencv": Default backend that uses OpenCV stream buffered backend.
+    # - "identity": Returns raw video bytes for model processor to handle.
     #
     # Custom backend implementations can be registered
     # via `@VIDEO_LOADER_REGISTRY.register("my_custom_video_loader")` and
