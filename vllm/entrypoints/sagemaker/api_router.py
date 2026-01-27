@@ -10,7 +10,7 @@ import pydantic
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from vllm.entrypoints.openai.api_server import base
+from vllm.entrypoints.openai.basic.api_router import base
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.utils import validate_json_request
