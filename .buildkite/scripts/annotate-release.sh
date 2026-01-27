@@ -62,9 +62,9 @@ docker push vllm/vllm-openai:latest-aarch64-cu130
 docker push vllm/vllm-openai:v${RELEASE_VERSION}-aarch64-cu130
 
 docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-rocm
-docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-rocm vllm/vllm-openai-rocm:latest-rocm
+docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-rocm vllm/vllm-openai-rocm:latest
 docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-rocm vllm/vllm-openai-rocm:v${RELEASE_VERSION}-rocm
-docker push vllm/vllm-openai-rocm:latest-rocm
+docker push vllm/vllm-openai-rocm:latest
 docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}-rocm
 
 Create multi-arch manifest:
