@@ -15,7 +15,7 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
-from vllm.config.utils import CompileFactors, Range
+from vllm.config.utils import CompileFactors, Range, normalize_value
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -155,13 +155,13 @@ def get_inductor_factors() -> list[Any]:
     # summarize system state
     from torch._inductor.codecache import CacheBase
 
-    system_factors = CacheBase.get_system()
+    system_factors = normalize_value(CacheBase.get_system())
     factors.append(system_factors)
 
     # summarize pytorch state
     from torch._inductor.codecache import torch_key
 
-    torch_factors = torch_key()
+    torch_factors = normalize_value(torch_key())
     factors.append(torch_factors)
     return factors
 
