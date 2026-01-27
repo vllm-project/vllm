@@ -1934,7 +1934,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 
-        SUPPORTED_W_A = [
+        SUPPORTED_W_A: list[tuple[QuantKey | None, QuantKey | None]] = [
             (None, None),
             (kInt8StaticChannelSym, None),
         ]
