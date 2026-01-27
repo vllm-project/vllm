@@ -158,6 +158,15 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
 
+        if self.mla_attn.attn_backend.accept_output_buffer:
+            output = torch.empty(
+                (hidden_states.shape[0], self.num_heads * self.v_head_dim),
+                dtype=q.dtype,
+                device=q.device,
+            )
+        else:
+            output = None
+
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(
                 hidden_states, q_c, positions, self.indexer_rope_emb
@@ -170,7 +179,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q,
             kv_c_normed,
             k_pe,
-            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            output,
         )
 
         return self.o_proj(attn_out)[0]
