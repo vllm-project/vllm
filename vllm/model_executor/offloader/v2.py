@@ -283,51 +283,13 @@ class OffloaderV2(BaseOffloader):
         Call this:
         1. Before capturing a CUDA graph
         2. Before replaying a CUDA graph (if prefetches were issued outside)
-
-        Also resets _prefetch_in_capture flags. This is critical for piecewise
-        cudagraph mode where multiple subgraphs are captured sequentially.
-        Each subgraph's prefetches must be tracked independently - we can't
-        wait on events recorded in a different subgraph's capture.
         """
         torch.cuda.current_stream().wait_stream(self.copy_stream)
-
-        # Reset flags so only prefetches started in THIS capture are tracked.
-        # This prevents cross-capture event waits which cause cudaErrorInvalidValue.
-        for offloader in self.module_offloaders:
-            offloader._prefetch_in_capture = False
 
     def _start_prefetch(self, layer_idx: int):
         """Called by custom op - start async copy to static buffer."""
         offloader = self.module_offloaders[layer_idx]
         offloader.start_onload_to_static()
-
-    def _join_copy_stream(self, layer_idx: int):
-        """Called by custom op - join copy_stream back to compute stream.
-
-        Used after the last layer's start_prefetch to ensure copy_stream is
-        rejoined before CUDA graph capture ends. The start_prefetch forks
-        copy_stream into the capture, but the corresponding wait_prefetch
-        only happens in the next forward pass. During capture, this would
-        leave copy_stream unjoined, causing cudaErrorStreamCaptureUnjoined.
-
-        During capture, we check if the prefetch was started during the same
-        capture. If not (e.g., from post_init or warmup), we skip the wait
-        because:
-        1. sync_before_graph_capture() ensures pre-capture work is complete
-        2. We can't wait on pre-capture events during capture (would cause
-           cudaErrorStreamCaptureIsolation)
-        """
-        offloader = self.module_offloaders[layer_idx]
-
-        # During capture, skip wait for pre-capture prefetches.
-        # sync_before_graph_capture() ensures pre-capture work is complete.
-        if (
-            torch.cuda.is_current_stream_capturing()
-            and not offloader._prefetch_in_capture
-        ):
-            return
-
-        torch.cuda.current_stream().wait_event(offloader._copy_done_event)
 
     def join_after_forward(self):
         """Join copy_stream after model forward completes.
@@ -544,7 +506,6 @@ class _ModuleOffloader:
                 gpu_buffer = offloader._gpu_buffer
                 assert cpu_storage is not None, "CPU storage not initialized"
                 assert gpu_buffer is not None, "GPU buffer not assigned"
-                # Async copy from pinned CPU storage to GPU buffer
                 gpu_buffer.copy_(cpu_storage, non_blocking=True)
 
         # Record completion event for _wait_for_layer to use
