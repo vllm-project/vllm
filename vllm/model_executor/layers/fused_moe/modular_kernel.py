@@ -184,13 +184,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return
 
-    def supports_async(self) -> bool:
-        """
-        Indicates whether or not this class implements prepare_async and
-        finalize_async.
-        """
-        return False
-
     @abstractmethod
     def prepare(
         self,
@@ -253,6 +246,13 @@ class FusedMoEPrepareAndFinalize(ABC):
         raise NotImplementedError(
             f"prepare_monolithic not supported for {self.__class__.__name__}"
         )
+
+    def supports_async(self) -> bool:
+        """
+        Indicates whether or not this class implements prepare_async and
+        finalize_async.
+        """
+        return False
 
     def prepare_async(
         self,
