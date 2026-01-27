@@ -4,15 +4,8 @@ from enum import Enum
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
-)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
@@ -74,18 +67,6 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     )
     gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
         torch.float8_e4m3fn
-    )
-
-
-def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-    moe: FusedMoEConfig | None, use_deepseek_fp8_block_scale: bool = False
-) -> mk.FusedMoEPrepareAndFinalize:
-    """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
-    use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
-    # Propagate block-scale flag so prepare/finalize can skip act quantization
-    # and inform the kernel to consume per-block weight scales.
-    return create_flashinfer_prepare_finalize(
-        use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
     )
 
 

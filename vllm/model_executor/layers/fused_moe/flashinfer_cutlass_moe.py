@@ -80,21 +80,19 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         # Preprocess scales for FlashInfer CUTLASS kernel.
         if self.quant_config.is_per_tensor:
+            assert quant_config.w1_scale is not None
+            assert quant_config.w2_scale is not None
+            assert quant_config.a1_scale is not None
+            assert quant_config.a2_scale is not None
+
             self._a1_gscale = 1.0 / quant_config.a1_scale
             self._a2_gscale = 1.0 / quant_config.a2_scale
             self._g1_alphas = (quant_config.w1_scale * quant_config.a1_scale).squeeze()
             self._g2_alphas = (quant_config.w2_scale * quant_config.a2_scale).squeeze()
 
-    @staticmethod
-    def expects_unquantized_inputs(
-        moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
-    ) -> bool:
-        # NVFP4 TP kernels and FP8 block-quantized kernels apply
-        # input quantization inside FusedMoEPermuteExpertsUnpermute.
-        return (
-            quant_config.use_nvfp4_w4a4
-            and not moe_config.moe_parallel_config.use_all2all_kernels
-        ) or (quant_config.use_fp8_w8a8 and quant_config.is_block_quantized)
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -151,10 +149,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # FLASHINFER_CUTLASS currently uses its down P/F, which does not
         # work with SP. This will be removed in follow up after we get
         # rid of the FlashInfer specific P/F function.
-        return (
-            moe_parallel_config.dp_size == 1
-            or moe_parallel_config.dp_size == moe_parallel_config.ep_size
-        )
+        # TODO: the per-tensor fp8 kernels don't work with MNNVL FI A2As.
+        return not moe_parallel_config.is_sequence_parallel
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -201,8 +197,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         workspace1 = (M, K)
         workspace2 = (0,)
-        # For TP, the quantization is fused with fused_moe call.
-        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" and self.use_dp else K)
+        # For NVFP4, the output is stored in a packed int8 format,
+        # so the actual hidden dim is 2x the size of K here.
+        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" else K)
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
         return (workspace1, workspace2, output_shape)

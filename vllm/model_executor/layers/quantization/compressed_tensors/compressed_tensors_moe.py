@@ -42,7 +42,6 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
-    make_fp8_moe_kernel_for_mkm,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
@@ -52,16 +51,12 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     is_global_sf_supported_for_nvfp4_backend,
     make_mxfp4_moe_quant_config,
     make_nvfp4_moe_kernel,
-    make_nvfp4_moe_kernel_for_mkm,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,
-)
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
@@ -237,7 +232,6 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         self.group_size = 32
         self.mxfp4_backend = NvFp4MoeBackend.MARLIN
         self.experts_cls = MarlinExperts
-        self.kernel: mk.FusedMoEModularKernel | None = None
 
     def create_weights(
         self,
@@ -314,7 +308,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             w13_scale=layer.w13_weight_scale, w2_scale=layer.w2_weight_scale
         )
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: FusedMoE) -> None:
         layer.w13_weight = torch.nn.Parameter(
             layer.w13_weight_packed.data, requires_grad=False
         )
@@ -329,10 +323,12 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None:
-            self.kernel = make_nvfp4_moe_kernel(
+            self.moe_mk = make_nvfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
+                shared_experts=layer.shared_experts,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
             )
 
     def apply(
@@ -342,8 +338,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel is not None
-        return self.kernel(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -374,18 +370,9 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             activation_key=None if use_a16 else kNvfp4Dynamic,
         )
 
-        # Delay creation of the kernel until after process-weights.
-        self.kernel: mk.FusedMoEModularKernel | None = None
-
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is not None:
-            return self.kernel.prepare_finalize.topk_indices_dtype()
-        return None
 
     def create_weights(
         self,
@@ -500,7 +487,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(w2_input_scale, extra_weight_attrs)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: FusedMoE) -> None:
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
@@ -561,53 +548,34 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer.w13_input_scale = a13_scale
         layer.w2_input_scale = a2_scale
 
-        # Setup modular kernel for TP case and naive DP/EP case.
-        # In non-naive DP/EP case, we will create a ModularKernelMethod.
-        # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
-        # in both cases.
+        # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if (
-            not self.moe.moe_parallel_config.use_all2all_kernels
-            or self.moe.moe_parallel_config.use_naive_all2all_kernels
-        ):
-            assert self.experts_cls is not None
-            self.kernel = make_nvfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                experts_cls=self.experts_cls,
-            )
+        assert self.experts_cls is not None
+        self.moe_mk = make_nvfp4_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            shared_experts=layer.shared_experts,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+        )
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            return None
-        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-            # For no-EP case, don't use the MKM framework.
-            if not self.moe.moe_parallel_config.use_all2all_kernels:
-                return None
-
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=False,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        return make_nvfp4_moe_kernel_for_mkm(
-            moe_config=self.moe,
-            quant_config=self.moe_quant_config,
-            experts_cls=self.experts_cls,
-            prepare_finalize=prepare_finalize,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
@@ -658,8 +626,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel is not None
-        return self.kernel(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -732,15 +700,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             activation_key=activation_key,
             allow_vllm_cutlass=True,
         )
-
-        # Delay creation of the kernel until after process-weights.
-        self.kernel: mk.FusedMoEModularKernel | None = None
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is not None:
-            return self.kernel.prepare_finalize.topk_indices_dtype()
-        return None
 
     def create_weights(
         self,
@@ -901,7 +860,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: FusedMoE) -> None:
         # Allow for accessing weights and scales in standard way.
         w13 = layer.w13_weight
         w2 = layer.w2_weight
@@ -963,49 +922,34 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
         # in both cases.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config and (
-            (not self.moe.moe_parallel_config.use_all2all_kernels)
-            or self.moe.moe_parallel_config.use_naive_all2all_kernels
-        ):
+        if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.kernel, self.use_inplace = make_fp8_moe_kernel(
+            self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
             )
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            return None
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            # For no-EP case, don't use the MKM framework.
-            if not self.moe.moe_parallel_config.use_all2all_kernels:
-                return None
-
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=self.block_quant,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        return make_fp8_moe_kernel_for_mkm(
-            moe_config=self.moe,
-            quant_config=self.moe_quant_config,
-            experts_cls=self.experts_cls,
-            prepare_finalize=prepare_finalize,
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
@@ -1058,8 +1002,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
-        assert self.kernel is not None
-        return self.kernel(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,

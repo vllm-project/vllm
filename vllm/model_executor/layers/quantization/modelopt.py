@@ -26,7 +26,6 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
-    make_fp8_moe_kernel_for_mkm,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
@@ -35,7 +34,6 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
-    make_nvfp4_moe_kernel_for_mkm,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
@@ -53,12 +51,6 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    build_flashinfer_fp4_cutlass_moe_prepare_finalize,
-)
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
     process_fp8_input_tensor_strategy_moe,
@@ -81,6 +73,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTokenSym,
     kNvfp4Dynamic,
     kNvfp4Static,
+    pad_nvfp4_activation_for_cutlass,
+    pad_nvfp4_weight_for_cutlass,
+    slice_nvfp4_output,
     swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -733,47 +728,23 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             activation_key=kFp8StaticTensorSym,
         )
 
-        # Delay creation of the kernel until after process-weights.
-        self.kernel: mk.FusedMoEModularKernel | None = None
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is not None:
-            return self.kernel.prepare_finalize.topk_indices_dtype()
-        return None
-
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        # TRT LLM not supported with all2all yet.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            return None
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            # For no-EP case, don't use the MKM framework.
-            if not self.moe.moe_parallel_config.use_all2all_kernels:
-                return None
-
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=False,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        return make_fp8_moe_kernel_for_mkm(
-            moe_config=self.moe,
-            quant_config=self.moe_quant_config,
-            experts_cls=self.experts_cls,
-            prepare_finalize=prepare_finalize,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
 
     def create_weights(
@@ -857,7 +828,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -885,13 +856,14 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-
         assert self.experts_cls is not None
-        self.kernel, self.use_inplace = make_fp8_moe_kernel(
+        self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -976,8 +948,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel is not None
-        return self.kernel(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1261,9 +1233,16 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.weight = Parameter(weight, requires_grad=False)
         else:
+            # Swizzle block scales and pad the packed NVFP4 weights for kernel
+            # alignment (CUTLASS/FlashInfer require K and N divisible by 32).
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
             layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
-            layer.weight = Parameter(layer.weight.data, requires_grad=False)
+
+            weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
+                layer.weight.data
+            )
+            layer.weights_padding_cols = weights_padding_cols
+            layer.weight = Parameter(weight, requires_grad=False)
 
     def apply(
         self,
@@ -1285,7 +1264,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             )
 
         output_dtype = x.dtype
-        output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(
@@ -1300,6 +1278,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         assert layer.weight_scale.dtype == torch.float8_e4m3fn
         assert layer.alpha.dtype == torch.float32
 
+        # Pad activations to match weight K-dimension padding
+        weights_padding_cols = getattr(layer, "weights_padding_cols", 0)
+        output_size = layer.output_size_per_partition
+        output_shape = [x.shape[0], output_size]
+        x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
+
         mm_args = (
             x_fp4,
             layer.weight,
@@ -1308,12 +1292,16 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.alpha,
             output_dtype,
         )
+
         if self.backend.startswith("flashinfer-"):
             backend_name = self.backend[len("flashinfer-") :]
             out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
         else:
             assert self.backend == "cutlass"
             out = cutlass_scaled_fp4_mm(*mm_args)
+
+        # Slice output to remove N-dimension padding
+        out = slice_nvfp4_output(out, output_size)
 
         if bias is not None:
             out = out + bias
@@ -1341,50 +1329,27 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             activation_key=kNvfp4Dynamic,
         )
 
-        # Delay creation of the kernel until after process-weights.
-        self.kernel: mk.FusedMoEModularKernel | None = None
-
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is not None:
-            return self.kernel.prepare_finalize.topk_indices_dtype()
-        return None
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            return None
-        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-            # For no-EP case, don't use the MKM framework.
-            if not self.moe.moe_parallel_config.use_all2all_kernels:
-                return None
-            # For now, fp4 moe only works with the flashinfer dispatcher.
-            prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-                self.moe
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        return make_nvfp4_moe_kernel_for_mkm(
-            moe_config=self.moe,
-            quant_config=self.moe_quant_config,
-            experts_cls=self.experts_cls,
-            prepare_finalize=prepare_finalize,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
 
     def uses_weight_scale_2_pattern(self) -> bool:
@@ -1509,7 +1474,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: FusedMoE) -> None:
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
@@ -1556,21 +1521,16 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
-        # Setup modular kernel for TP case and naive DP/EP case.
-        # In non-naive DP/EP case, we will create a ModularKernelMethod.
-        # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
-        # in both cases.
+        # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if (
-            not self.moe.moe_parallel_config.use_all2all_kernels
-            or self.moe.moe_parallel_config.use_naive_all2all_kernels
-        ):
-            assert self.experts_cls is not None
-            self.kernel = make_nvfp4_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                experts_cls=self.experts_cls,
-            )
+        assert self.experts_cls is not None
+        self.moe_mk = make_nvfp4_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            experts_cls=self.experts_cls,
+            shared_experts=layer.shared_experts,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+        )
 
     @property
     def do_post_quant_allgather(self):
@@ -1651,8 +1611,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel is not None
-        return self.kernel(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,

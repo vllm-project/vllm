@@ -102,6 +102,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         num_experts: int,
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
     ) -> Callable:
         has_scales = token_scales is not None
 
@@ -173,6 +174,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_topk_weights,
             a1_scale,
             quant_config,
+            defer_input_quant=defer_input_quant,
         )
 
     def _receiver(
@@ -186,6 +188,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_topk_weights: torch.Tensor | None,
         a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool,
     ) -> mk.PrepareResultType:
         if event.event is not None:
             event.current_stream_wait()
@@ -220,11 +223,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_num_tokens_per_expert_list, device=expert_x.device
         )
 
-        # Dispatch and Quant
-        # DeepEP kernels only support dispatching block-quantized
-        # activation scales.
-        # Dispatch in bfloat16 and quantize afterwards
-        if not quant_config.is_block_quantized:
+        # * For non-block quant, dispatch in b16 and quantize now as
+        #   DeepEP kernels only support dispatching block scales.
+        # * For expert kernels that require unquantized inputs,
+        #   defer quantization to FusedMoEExpertsPermuteUnpermute.
+        if not quant_config.is_block_quantized and not defer_input_quant:
             # Quantize after dispatch.
             expert_x_scale = None
             if expert_x.numel() != 0:
@@ -250,6 +253,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.ReceiverType:
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -259,8 +263,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        if quant_config.is_block_quantized:
-            # Quant and Dispatch
+        # * DeepEP only supports fp8 block scales so quantize
+        #   before the dispatch for these models.
+        # * For all other quantization, dispatch after.
+        # * For expert kernels that require unquantized inputs,
+        #   defer quantization to FusedMoEExpertsPermuteUnpermute.
+        if quant_config.is_block_quantized and not defer_input_quant:
             a1q, a1q_scale = self._quantize_input(a1, quant_config)
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
@@ -268,7 +276,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         else:
             a1q = a1
             a1q_scale = None
-            a1_post_scale = quant_config.a1_scale
+            a1_post_scale = (
+                quant_config.a1_gscale
+                if quant_config.quant_dtype == "nvfp4"
+                else quant_config.a1_scale
+            )
 
         return self._do_dispatch(
             tokens=a1q,
@@ -278,6 +290,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_experts=num_experts,
             a1_scale=a1_post_scale,
             quant_config=quant_config,
+            defer_input_quant=defer_input_quant,
         )
 
     def prepare(
@@ -289,6 +302,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         receiver = self.prepare_async(
             a1,
@@ -298,6 +312,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_map,
             apply_router_weight_on_input,
             quant_config,
+            defer_input_quant,
         )
         return receiver()
 
