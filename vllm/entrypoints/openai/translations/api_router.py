@@ -3,7 +3,7 @@
 
 
 from http import HTTPStatus
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, FastAPI, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -24,6 +24,17 @@ from vllm.entrypoints.utils import (
     with_cancellation,
 )
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from argparse import Namespace
+
+    from starlette.datastructures import State
+
+    from vllm.engine.protocol import EngineClient
+    from vllm.entrypoints.logger import RequestLogger
+    from vllm.tasks import SupportedTask
+else:
+    RequestLogger = Any
 
 logger = init_logger(__name__)
 
@@ -115,3 +126,34 @@ async def create_translations(
 
 def attach_router(app: FastAPI):
     app.include_router(router)
+
+
+def init_transcription_state(
+    engine_client: "EngineClient",
+    state: "State",
+    args: "Namespace",
+    request_logger: RequestLogger | None,
+    supported_tasks: tuple["SupportedTask", ...],
+):
+    state.openai_serving_transcription = (
+        OpenAIServingTranscription(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
+        )
+        if "transcription" in supported_tasks
+        else None
+    )
+    state.openai_serving_translation = (
+        OpenAIServingTranslation(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
+        )
+        if "transcription" in supported_tasks
+        else None
+    )

@@ -51,10 +51,6 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
-from vllm.entrypoints.openai.translations.serving import (
-    OpenAIServingTranscription,
-    OpenAIServingTranslation,
-)
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
@@ -70,6 +66,7 @@ from vllm.entrypoints.utils import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.tasks import POOLING_TASKS
 from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -480,7 +477,7 @@ def _log_non_streaming_response(response_body: list) -> None:
         logger.info("response_body={<binary_data>}")
 
 
-def build_app(args: Namespace) -> FastAPI:
+def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> FastAPI:
     if args.disable_fastapi_docs:
         app = FastAPI(
             openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
@@ -490,52 +487,61 @@ def build_app(args: Namespace) -> FastAPI:
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
+
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
     register_vllm_serve_api_routers(app)
-    from vllm.entrypoints.openai.chat_completion.api_router import (
-        attach_router as register_chat_api_router,
-    )
 
-    register_chat_api_router(app)
-
-    from vllm.entrypoints.openai.responses.api_router import (
-        attach_router as register_responses_api_router,
-    )
-
-    register_responses_api_router(app)
-    from vllm.entrypoints.openai.translations.api_router import (
-        attach_router as register_translations_api_router,
-    )
-
-    register_translations_api_router(app)
-
-    from vllm.entrypoints.openai.completion.api_router import (
-        attach_router as register_completion_api_router,
-    )
-
-    register_completion_api_router(app)
-    from vllm.entrypoints.anthropic.api_router import (
-        attach_router as register_anthropic_api_router,
-    )
-
-    register_anthropic_api_router(app)
     from vllm.entrypoints.openai.models.api_router import (
         attach_router as register_models_api_router,
     )
 
     register_models_api_router(app)
-    from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
 
-    register_sagemaker_routes(router)
-    app.include_router(router)
+    from vllm.entrypoints.sagemaker.api_router import (
+        attach_router as register_sagemaker_api_router,
+    )
+
+    register_sagemaker_api_router(app)
+
+    if "generate" in supported_tasks:
+        from vllm.entrypoints.openai.chat_completion.api_router import (
+            attach_router as register_chat_api_router,
+        )
+
+        register_chat_api_router(app)
+
+        from vllm.entrypoints.openai.responses.api_router import (
+            attach_router as register_responses_api_router,
+        )
+
+        register_responses_api_router(app)
+
+        from vllm.entrypoints.openai.completion.api_router import (
+            attach_router as register_completion_api_router,
+        )
+
+        register_completion_api_router(app)
+
+        from vllm.entrypoints.anthropic.api_router import (
+            attach_router as register_anthropic_api_router,
+        )
+
+        register_anthropic_api_router(app)
+
+    if "transcription" in supported_tasks:
+        from vllm.entrypoints.openai.translations.api_router import (
+            attach_router as register_translations_api_router,
+        )
+
+        register_translations_api_router(app)
+
+    if any(task in POOLING_TASKS for task in supported_tasks):
+        from vllm.entrypoints.pooling import register_pooling_api_routers
+
+        register_pooling_api_routers(app, supported_tasks)
 
     app.root_path = args.root_path
-
-    from vllm.entrypoints.pooling import register_pooling_api_routers
-
-    register_pooling_api_routers(app)
-
     app.add_middleware(
         CORSMiddleware,
         allow_origins=args.allowed_origins,
@@ -636,36 +642,13 @@ def build_app(args: Namespace) -> FastAPI:
     return app
 
 
-async def init_app_state(
-    engine_client: EngineClient,
-    state: State,
-    args: Namespace,
-) -> None:
-    vllm_config = engine_client.vllm_config
-
-    if args.served_model_name is not None:
-        served_model_names = args.served_model_name
-    else:
-        served_model_names = [args.model]
-
-    if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
-    else:
-        request_logger = None
-
-    base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
-    ]
-
-    state.engine_client = engine_client
-    state.log_stats = not args.disable_log_stats
-    state.vllm_config = vllm_config
-    state.args = args
-    supported_tasks = await engine_client.get_supported_tasks()
-    logger.info("Supported tasks: %s", supported_tasks)
-
-    resolved_chat_template = load_chat_template(args.chat_template)
-
+async def init_generate_state(
+    engine_client: "EngineClient",
+    state: "State",
+    args: "Namespace",
+    request_logger: RequestLogger | None,
+    supported_tasks: tuple["SupportedTask", ...],
+):
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
         assert isinstance(tool_server, DemoToolServer)
@@ -675,27 +658,8 @@ async def init_app_state(
         await tool_server.add_tool_server(args.tool_server)
     else:
         tool_server = None
+    resolved_chat_template = load_chat_template(args.chat_template)
 
-    # Merge default_mm_loras into the static lora_modules
-    default_mm_loras = (
-        vllm_config.lora_config.default_mm_loras
-        if vllm_config.lora_config is not None
-        else {}
-    )
-
-    default_mm_loras = (
-        vllm_config.lora_config.default_mm_loras
-        if vllm_config.lora_config is not None
-        else {}
-    )
-    lora_modules = process_lora_modules(args.lora_modules, default_mm_loras)
-
-    state.openai_serving_models = OpenAIServingModels(
-        engine_client=engine_client,
-        base_model_paths=base_model_paths,
-        lora_modules=lora_modules,
-    )
-    await state.openai_serving_models.init_static_loras()
     state.openai_serving_responses = (
         OpenAIServingResponses(
             engine_client,
@@ -756,37 +720,6 @@ async def init_app_state(
         if "generate" in supported_tasks
         else None
     )
-    state.openai_serving_tokenization = OpenAIServingTokenization(
-        engine_client,
-        state.openai_serving_models,
-        request_logger=request_logger,
-        chat_template=resolved_chat_template,
-        chat_template_content_format=args.chat_template_content_format,
-        trust_request_chat_template=args.trust_request_chat_template,
-        log_error_stack=args.log_error_stack,
-    )
-    state.openai_serving_transcription = (
-        OpenAIServingTranscription(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
-            enable_force_include_usage=args.enable_force_include_usage,
-        )
-        if "transcription" in supported_tasks
-        else None
-    )
-    state.openai_serving_translation = (
-        OpenAIServingTranslation(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
-            enable_force_include_usage=args.enable_force_include_usage,
-        )
-        if "transcription" in supported_tasks
-        else None
-    )
     state.anthropic_serving_messages = (
         AnthropicServingMessages(
             engine_client,
@@ -820,9 +753,77 @@ async def init_app_state(
         else None
     )
 
-    from vllm.entrypoints.pooling import init_pooling_state
 
-    await init_pooling_state(engine_client, state, args)
+async def init_app_state(
+    engine_client: EngineClient,
+    state: State,
+    args: Namespace,
+    supported_tasks: tuple["SupportedTask", ...],
+) -> None:
+    vllm_config = engine_client.vllm_config
+
+    if args.served_model_name is not None:
+        served_model_names = args.served_model_name
+    else:
+        served_model_names = [args.model]
+
+    if args.enable_log_requests:
+        request_logger = RequestLogger(max_log_len=args.max_log_len)
+    else:
+        request_logger = None
+
+    base_model_paths = [
+        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
+    ]
+
+    state.engine_client = engine_client
+    state.log_stats = not args.disable_log_stats
+    state.vllm_config = vllm_config
+    state.args = args
+    resolved_chat_template = load_chat_template(args.chat_template)
+
+    # Merge default_mm_loras into the static lora_modules
+    default_mm_loras = (
+        vllm_config.lora_config.default_mm_loras
+        if vllm_config.lora_config is not None
+        else {}
+    )
+    lora_modules = process_lora_modules(args.lora_modules, default_mm_loras)
+
+    state.openai_serving_models = OpenAIServingModels(
+        engine_client=engine_client,
+        base_model_paths=base_model_paths,
+        lora_modules=lora_modules,
+    )
+    await state.openai_serving_models.init_static_loras()
+    state.openai_serving_tokenization = OpenAIServingTokenization(
+        engine_client,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        log_error_stack=args.log_error_stack,
+    )
+
+    if "generate" in supported_tasks:
+        await init_generate_state(
+            engine_client, state, args, request_logger, supported_tasks
+        )
+
+    if "transcription" in supported_tasks:
+        from vllm.entrypoints.openai.translations.api_router import (
+            init_transcription_state,
+        )
+
+        init_transcription_state(
+            engine_client, state, args, request_logger, supported_tasks
+        )
+
+    if any(task in POOLING_TASKS for task in supported_tasks):
+        from vllm.entrypoints.pooling import init_pooling_state
+
+        init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
@@ -939,9 +940,11 @@ async def run_server_worker(
         args,
         client_config=client_config,
     ) as engine_client:
-        app = build_app(args)
+        supported_tasks = await engine_client.get_supported_tasks()
+        logger.info("Supported tasks: %s", supported_tasks)
 
-        await init_app_state(engine_client, app.state, args)
+        app = build_app(args, supported_tasks)
+        await init_app_state(engine_client, app.state, args, supported_tasks)
 
         logger.info(
             "Starting vLLM API server %d on %s",

@@ -7,7 +7,7 @@ from typing import Any
 
 import model_hosting_container_standards.sagemaker as sagemaker_standards
 import pydantic
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.entrypoints.openai.api_server import (
@@ -71,7 +71,9 @@ INVOCATION_VALIDATORS = [
 ]
 
 
-def register_sagemaker_routes(router: APIRouter):
+def attach_router(app: FastAPI):
+    router = APIRouter()
+
     @router.post("/ping", response_class=Response)
     @router.get("/ping", response_class=Response)
     @sagemaker_standards.register_ping_handler
@@ -123,4 +125,4 @@ def register_sagemaker_routes(router: APIRouter):
         res = base(raw_request).create_error_response(message=msg)
         return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
-    return router
+    app.include_router(router)
