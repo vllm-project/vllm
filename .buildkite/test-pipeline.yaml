@@ -64,6 +64,7 @@ steps:
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
+  - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
   - tests/tool_parsers
@@ -75,6 +76,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s renderers
   - pytest -v -s tokenizers_
   - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
@@ -374,6 +376,8 @@ steps:
   timeout_in_minutes: 30
   gpu: h100
   source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
@@ -396,10 +400,12 @@ steps:
   timeout_in_minutes: 30
   gpu: b200
   source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
+    - pytest -v -s v1/attention
 
 - label: V1 Test others (CPU) # 5 mins
   source_file_dependencies:
@@ -562,8 +568,9 @@ steps:
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
   - csrc/attention/
-  - vllm/attention
   - vllm/v1/attention
+    # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
+  - vllm/model_executor/layers/attention
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -623,6 +630,56 @@ steps:
     - pytest -v -s kernels/moe/test_deepgemm.py
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
+
+- label: Kernels Helion Test
+  timeout_in_minutes: 30
+  gpu: h100
+  source_file_dependencies:
+  - vllm/utils/import_utils.py
+  - tests/kernels/helion/
+  commands:
+    - pip install helion
+    - pytest -v -s kernels/helion/
+
+  
+- label: Kernels FP8 MoE Test (1 H100)
+  timeout_in_minutes: 90
+  gpu: h100
+  num_gpus: 1
+  optional: true
+  commands:
+    - pytest -v -s kernels/moe/test_cutlass_moe.py
+    - pytest -v -s kernels/moe/test_flashinfer.py
+    - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
+    - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
+    - pytest -v -s kernels/moe/test_moe.py
+    # - pytest -v -s kernels/moe/test_block_fp8.py - failing on main
+    - pytest -v -s kernels/moe/test_block_int8.py
+    - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
+    - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
+
+- label: Kernels FP8 MoE Test (2 H100s)
+  timeout_in_minutes: 90
+  gpu: h100
+  num_gpus: 2
+  optional: true
+  commands:
+    - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
+    - pytest -v -s kernels/moe/test_deepep_moe.py
+    - pytest -v -s kernels/moe/test_pplx_cutlass_moe.py
+    # - pytest -v -s kernels/moe/test_pplx_moe.py - failing on main
+  
+- label: Kernels Fp4 MoE Test (B200)
+  timeout_in_minutes: 60
+  gpu: b200
+  num_gpus: 1
+  optional: true
+  commands:
+    - pytest -v -s kernels/moe/test_cutedsl_moe.py
+    - pytest -v -s kernels/moe/test_flashinfer_moe.py
+    - pytest -v -s kernels/moe/test_nvfp4_moe.py
+    - pytest -v -s kernels/moe/test_ocp_mx_moe.py
+
 
 - label: Model Executor Test # 23min
   timeout_in_minutes: 35
@@ -961,7 +1018,7 @@ steps:
   - csrc/quantization/cutlass_w8a8/moe/
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
-  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_a2a_prepare_finalize.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
@@ -1260,7 +1317,7 @@ steps:
   - pytest -v -s distributed/test_distributed_oot.py
   - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
   - pytest -v -s models/test_oot_registration.py # it needs a clean process
-  - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
+  - pytest -v -s plugins/lora_resolvers # unit tests for lora resolver plugins
 
 - label: Pipeline + Context Parallelism Test # 45min
   timeout_in_minutes: 60
