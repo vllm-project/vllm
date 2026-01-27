@@ -565,5 +565,5 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="projector",
-            tower_model=["sam_model", "qwen2_model"],
+            tower_model=["sam_model", "vision_model"],
         )
