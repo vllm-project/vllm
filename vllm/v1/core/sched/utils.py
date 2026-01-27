@@ -13,6 +13,7 @@ proper EOS token emission.
 """
 
 import contextlib
+from collections.abc import Sequence
 
 from vllm.logger import init_logger
 from vllm.v1.request import Request, RequestStatus
@@ -72,7 +73,7 @@ INFINITE_LOOP_MIN_TOKENS = 60
 INFINITE_LOOP_WINDOW_SIZE = 30
 
 
-def _compute_sequence_hash(tokens: list, start: int, length: int) -> int:
+def _compute_sequence_hash(tokens: Sequence[int], start: int, length: int) -> int:
     """Compute a hash for a subsequence of tokens using polynomial rolling hash.
 
     This provides efficient comparison capability for detecting repeated patterns.
@@ -103,7 +104,7 @@ def _compute_sequence_hash(tokens: list, start: int, length: int) -> int:
     return hash_val
 
 
-def _detect_infinite_loop(output_token_ids: list) -> bool:
+def _detect_infinite_loop(output_token_ids: Sequence[int]) -> bool:
     """Detect if the model has entered an infinite loop state.
 
     Uses a sliding window approach with hash-based comparison for efficiency.
