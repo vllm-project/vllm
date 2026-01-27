@@ -6,7 +6,6 @@ import torch
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItem
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
-from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
 
@@ -31,8 +30,6 @@ class EncoderRunner:
         )
         self.req_id_to_mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
         self.encoder_cache: dict[str, torch.Tensor] = {}
-
-        self.tmp_is_mm_embed = UvaBufferPool(max_num_tokens, torch.bool)
 
     def add_request(self, req_id: str, mm_features: list[MultiModalFeatureSpec]):
         self.req_id_to_mm_features[req_id] = mm_features
@@ -114,7 +111,7 @@ class EncoderRunner:
             total_num_scheduled_tokens,
             dtype=torch.bool,
             device="cpu",
-            pin_memory=False,
+            pin_memory=True,
         )
         for i, req_id in enumerate(req_ids):
             if not is_prefilling[i]:
@@ -163,7 +160,7 @@ class EncoderRunner:
                 mm_embeds.append(mm_embeds_item)
 
         # Copy the is_mm_embed tensor to the GPU.
-        is_mm_embed = self.tmp_is_mm_embed.copy_to_gpu(is_mm_embed)
+        is_mm_embed = is_mm_embed.to(device=self.device, non_blocking=True)
         return mm_embeds, is_mm_embed
 
     @torch.inference_mode()
