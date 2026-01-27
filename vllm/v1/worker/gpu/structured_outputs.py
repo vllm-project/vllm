@@ -4,14 +4,25 @@ import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class StructuredOutputsWorker:
-    def __init__(self, device: torch.device):
+    def __init__(
+        self,
+        max_num_logits: int,
+        vocab_size: int,
+        device: torch.device,
+    ):
+        self.grammar_bitmask = torch.zeros(
+            (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
+        )
         self.device = device
-        self.copy_stream = torch.cuda.Stream(device)
+
+        self.copy_stream = torch.cuda.Stream()
+        self.event = torch.cuda.Event()
 
     def apply_grammar_bitmask(
         self,
@@ -23,18 +34,15 @@ class StructuredOutputsWorker:
         if not grammar_req_ids:
             return
 
-        # Copy the bitmask to the device.
-        # NOTE: We intentionally allocate the bitmask tensor on the current stream
-        # instead of the copy stream to enable memory reuse.
-        bitmask = torch.empty(
-            grammar_bitmask.shape, dtype=torch.int32, device=self.device
-        )
-        # NOTE: Since the bitmask tensor is allocated on the current stream, we need to
-        # wait for the current stream to finish before using the bitmask tensor.
-        current_stream = torch.cuda.current_stream(self.device)
-        self.copy_stream.wait_stream(current_stream)
+        # NOTE: We should wait for any previous kernel using the bitmask buffer
+        # to complete before overwriting it.
+        self.copy_stream.wait_event(self.event)
+
+        # Asynchronously copy the bitmask to GPU.
         with torch.cuda.stream(self.copy_stream):
-            async_copy_to_gpu(grammar_bitmask, out=bitmask)
+            bitmask = async_copy_to_gpu(
+                grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
+            )
 
         # Construct bitmask -> logits mapping
         mapping: list[int] = []
@@ -47,15 +55,15 @@ class StructuredOutputsWorker:
             logits_end_idx = cu_num_logits[req_idx + 1]
             mapping.extend(range(logits_start_idx, logits_end_idx))
 
-        # Copy the mapping.
+        # Asynchronously copy the mapping to GPU.
         with torch.cuda.stream(self.copy_stream):
             logits_indices = torch.tensor(
                 mapping, dtype=torch.int32, device="cpu", pin_memory=True
             )
-            logits_indices = logits_indices.to(device=self.device, non_blocking=True)
+            logits_indices = logits_indices.to(self.device, non_blocking=True)
 
-        # NOTE: Since bitmask and logits_indices are copied in a separate copy stream,
-        # we need to make sure the kernel is executed after the copy is finished.
+        # Ensure all async copies are complete before launching the kernel.
+        current_stream = torch.cuda.current_stream()
         current_stream.wait_stream(self.copy_stream)
 
         num_masks = bitmask.shape[0]
@@ -72,6 +80,10 @@ class StructuredOutputsWorker:
             vocab_size,
             BLOCK_SIZE=BLOCK_SIZE,
         )
+
+        # Record an event so future iterations can wait for this kernel to finish
+        # before reusing the bitmask buffer.
+        self.event.record(current_stream)
 
 
 # Adapted from
