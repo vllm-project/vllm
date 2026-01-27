@@ -125,7 +125,7 @@ class RendererLike(Protocol):
         params: TokenizeParams,
     ) -> TokensPrompt | EmbedsPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
-            prompt = params.apply_pre_tokenization(prompt)
+            prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
 
             tokenizer = self.get_tokenizer()
             prompt_token_ids = tokenizer.encode(
@@ -143,7 +143,7 @@ class RendererLike(Protocol):
             prompt_text = tokenizer.decode(prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
             prompt["prompt"] = prompt_text  # type: ignore[typeddict-unknown-key]
 
-        return params.apply_post_tokenization(prompt)  # type: ignore[arg-type]
+        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
     def tokenize_prompts(
         self,
@@ -158,7 +158,7 @@ class RendererLike(Protocol):
         params: TokenizeParams,
     ) -> TokensPrompt | EmbedsPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
-            prompt = params.apply_pre_tokenization(prompt)
+            prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
 
             tokenizer = self.get_async_tokenizer()
             prompt_token_ids = await tokenizer.encode(
@@ -176,7 +176,7 @@ class RendererLike(Protocol):
             prompt_text = await tokenizer.decode(prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
             prompt["prompt"] = prompt_text  # type: ignore[typeddict-unknown-key]
 
-        return params.apply_post_tokenization(prompt)  # type: ignore[arg-type]
+        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
     async def tokenize_prompts_async(
         self,

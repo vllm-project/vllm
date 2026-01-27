@@ -9,6 +9,7 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
+from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
@@ -201,32 +202,50 @@ class TokenizeParams:
             add_special_tokens=self.add_special_tokens,
         )
 
-    def _apply_lowercase(self, text: str) -> str:
+    def _apply_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
         if self.do_lower_case:
             text = text.lower()
 
         return text
 
-    def _validate_text(self, text: str) -> str:
+    def _validate_text(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply all validators to prompt text."""
         # TODO: Implement https://github.com/vllm-project/vllm/pull/31366
         for validator in (self._apply_lowercase,):
-            text = validator(text)
+            text = validator(tokenizer, text)
 
         return text
 
-    def apply_pre_tokenization(self, prompt: TextPrompt) -> TextPrompt:
+    def apply_pre_tokenization(
+        self,
+        tokenizer: TokenizerLike | None,
+        prompt: TextPrompt,
+    ) -> TextPrompt:
         """
         Ensure that the prompt meets the requirements set out by this config.
         If that is not possible, raise a `VLLMValidationError`.
 
         This method is run before tokenization occurs.
         """
-        prompt["prompt"] = self._validate_text(prompt["prompt"])
+        prompt["prompt"] = self._validate_text(tokenizer, prompt["prompt"])
 
         return prompt
 
-    def _apply_length_check(self, tokens: _S) -> _S:
+    def _apply_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply truncation to a token sequence."""
+        max_length: int | None = self.get_encode_kwargs()["max_length"]
+
+        if max_length is None or max_length >= len(tokens):
+            return tokens
+        if max_length == 0:
+            return tokens[:0]  # type: ignore[return-value]
+
+        if getattr(tokenizer, "truncation_side", "left") == "left":
+            return tokens[-max_length:]  # type: ignore[return-value]
+
+        return tokens[:max_length]  # type: ignore[return-value]
+
+    def _apply_length_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply length checks to a token sequence."""
         max_input_tokens = self.max_input_tokens
 
@@ -244,15 +263,19 @@ class TokenizeParams:
 
         return tokens
 
-    def _validate_tokens(self, tokens: _S) -> _S:
+    def _validate_tokens(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply all validators to a token sequence."""
-        for validator in (self._apply_length_check,):
-            tokens = validator(tokens)
+        for validator in (
+            self._apply_truncation,
+            self._apply_length_check,
+        ):
+            tokens = validator(tokenizer, tokens)
 
         return tokens
 
     def apply_post_tokenization(
         self,
+        tokenizer: TokenizerLike | None,
         prompt: TokensPrompt | EmbedsPrompt,
     ) -> TokensPrompt | EmbedsPrompt:
         """
@@ -263,11 +286,13 @@ class TokenizeParams:
         """
         if "prompt_token_ids" in prompt:
             prompt["prompt_token_ids"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]
-                prompt["prompt_token_ids"]  # type: ignore[typeddict-item]
+                tokenizer,
+                prompt["prompt_token_ids"],  # type: ignore[typeddict-item]
             )
         if "prompt_embeds" in prompt:
             prompt["prompt_embeds"] = self._validate_tokens(  # type: ignore[typeddict-unknown-key]
-                prompt["prompt_embeds"]  # type: ignore[typeddict-item]
+                tokenizer,
+                prompt["prompt_embeds"],  # type: ignore[typeddict-item]
             )
 
         return prompt
