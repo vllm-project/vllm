@@ -22,8 +22,7 @@ __all__ = ["CompressedTensorsW4A16Fp4"]
 
 
 class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
-    def __init__(self, has_input_global_scale: bool = False):
-        self.has_input_global_scale = has_input_global_scale
+    def __init__(self):
         self.group_size = 16
 
     @classmethod
@@ -79,30 +78,16 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
 
         layer.register_parameter("weight_scale", weight_scale)
 
-        if self.has_input_global_scale:
-            input_global_scale = PerTensorScaleParameter(
-                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
-                weight_loader=weight_loader,
-            )
-            layer.register_parameter("input_global_scale", input_global_scale)
-
     def process_weights_after_loading(self, layer) -> None:
         # Process parameters for marlin repacking
 
         # Rename weight_packed to weight that marlin expects
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         del layer.weight_packed
-        # Rename weight_global_scale to weight_scale_2 that marlin expects
-        # Note: ct stores the inverse of what is expected by the marlin kernel
-        layer.weight_scale_2 = Parameter(
+        # ct stores the inverse of what is expected by the marlin kernel
+        layer.weight_global_scale = Parameter(
             1 / layer.weight_global_scale.max().to(torch.float32), requires_grad=False
         )
-        del layer.weight_global_scale
-
-        if self.has_input_global_scale:
-            layer.input_global_scale = torch.nn.Parameter(
-                layer.input_global_scale.data, requires_grad=False
-            )
 
         prepare_fp4_layer_for_marlin(layer)
 
@@ -116,7 +101,7 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
-            weight_scale_2=layer.weight_scale_2,
+            weight_global_scale=layer.weight_global_scale,
             workspace=layer.workspace,
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
