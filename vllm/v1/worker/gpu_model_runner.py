@@ -3797,9 +3797,7 @@ class GPUModelRunner(
 
         # construct `prev_req_id_to_index` here so `_prepare_input_ids`
         # can map req_id -> previous batch row
-        discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[
-            0
-        ].tolist()
+        discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[0]
         discard_req_indices_set = set(discard_req_indices)
         self.input_batch.prev_req_id_to_index = {
             req_id: i
