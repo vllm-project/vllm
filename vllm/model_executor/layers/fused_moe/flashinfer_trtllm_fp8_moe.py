@@ -107,8 +107,11 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        """TRTLLMGenKernel does not support EPLB."""
-        return not moe_parallel_config.enable_eplb
+        """TRTLLMGenKernel is monolithic, so it only supports TP or naive DP/EP."""
+        return not moe_parallel_config.use_all2all_kernels or (
+            moe_parallel_config.use_naive_all2all_kernels
+            and not moe_parallel_config.enable_eplb
+        )
 
     def supports_chunking(self) -> bool:
         return False
