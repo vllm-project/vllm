@@ -94,7 +94,11 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import get_max_tokens, sanitize_message
+from vllm.entrypoints.utils import (
+    _validate_truncation_size,
+    get_max_tokens,
+    sanitize_message,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, PromptType, TokensPrompt
 from vllm.inputs.parse import (
