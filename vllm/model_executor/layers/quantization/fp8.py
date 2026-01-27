@@ -1104,23 +1104,23 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         )
         return w13_weight_scale, w2_weight_scale
 
-    def quantize_and_setup_kernel(self, layer: Module) -> None:
-        """Quantize weights to FP8 and setup the kernel."""
-        # If checkpoint is fp16, quantize in place.
-        fp8_dtype = current_platform.fp8_dtype()
-        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
-        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
+    def get_quantized_dtype(self) -> torch.dtype:
+        return current_platform.fp8_dtype()
 
-        for expert in range(layer.local_num_experts):
-            w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
-                layer.w13_weight[expert, :, :]
-            )
-            w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
-                layer.w2_weight[expert, :, :]
-            )
+    def quantize_expert(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return ops.scaled_fp8_quant(weight)
 
+    def setup_kernel(
+        self,
+        layer: Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> None:
+        """Setup the kernel after quantization."""
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
             layer,

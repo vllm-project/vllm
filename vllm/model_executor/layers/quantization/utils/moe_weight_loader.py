@@ -64,8 +64,32 @@ class MoeQuantizationCallbacks(Protocol):
         """
         ...
 
-    def quantize_and_setup_kernel(self, layer: Module) -> None:
-        """Quantize weights and setup the kernel."""
+    def get_quantized_dtype(self) -> torch.dtype:
+        """Return the target dtype for quantized weights (e.g., int8, fp8)."""
+        ...
+
+    def quantize_expert(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize a single expert's weight tensor.
+
+        Args:
+            weight: Weight tensor of shape [out_features, in_features]
+
+        Returns:
+            Tuple of (quantized_weight, scale) where scale shape depends on
+            the quantization method (per-tensor or per-channel).
+        """
+        ...
+
+    def setup_kernel(
+        self,
+        layer: Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> None:
         ...
 
 
@@ -261,7 +285,27 @@ class MoeOnlineWeightLoader:
         self._materialize_dummy_weights(layer)
 
         # Quantize weights and setup kernel
-        self.callbacks.quantize_and_setup_kernel(layer)
+        self.quantize_and_setup_kernel(layer)
+
+    def quantize_and_setup_kernel(self, layer: Module) -> None:
+        # Get target dtype and create output tensors
+        quantized_dtype = self.callbacks.get_quantized_dtype()
+        w13 = torch.empty_like(layer.w13_weight, dtype=quantized_dtype)
+        w2 = torch.empty_like(layer.w2_weight, dtype=quantized_dtype)
+        w13_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+
+        # Quantize each expert
+        for expert in range(layer.local_num_experts):
+            w13[expert, :, :], w13_scale[expert] = self.callbacks.quantize_expert(
+                layer.w13_weight[expert, :, :]
+            )
+            w2[expert, :, :], w2_scale[expert] = self.callbacks.quantize_expert(
+                layer.w2_weight[expert, :, :]
+            )
+
+        # Setup kernel with quantized weights
+        self.callbacks.setup_kernel(layer, w13, w2, w13_scale, w2_scale)
 
     def _materialize_dummy_weights(self, layer: Module) -> None:
         """Materialize weights that are still on meta device (dummy weights)."""

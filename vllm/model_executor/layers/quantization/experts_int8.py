@@ -142,62 +142,40 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         )
         return w13_weight_scale, w2_weight_scale
 
-    def quantize_and_setup_kernel(self, layer: Module) -> None:
-        """Quantize weights to int8 and setup the modular kernel."""
-        # Quantize fp16/bf16 weights to int8 with per-channel scales
-        w13, w13_scale = self._quantize_to_int8(layer.w13_weight)
-        w2, w2_scale = self._quantize_to_int8(layer.w2_weight)
+    def get_quantized_dtype(self) -> torch.dtype:
+        return torch.int8
 
-        # Replace parameters with quantized versions
+    def quantize_expert(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize a single expert's weight to int8 with per-channel scales."""
+        # weight shape: [out_features, in_features]
+        vmax = torch.iinfo(torch.int8).max
+        channel_max = torch.max(torch.abs(weight), dim=1)[0]
+        scales = channel_max / vmax
+        # Avoid division by zero
+        scales = torch.where(scales == 0, torch.ones_like(scales), scales)
+        # Quantize
+        int8_weight = (
+            torch.round(weight / scales.unsqueeze(1)).clamp(-vmax, vmax).to(torch.int8)
+        )
+        return int8_weight, scales
+
+    def setup_kernel(
+        self,
+        layer: Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> None:
+        """Setup the modular kernel after quantization."""
+        # Update layer weights with quantized versions
         layer.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
         layer.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
         layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
         layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
 
-        # Setup modular kernel
-        self._setup_kernel(layer)
-
-    def _quantize_to_int8(
-        self, weight: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Quantize a weight tensor to int8 with per-channel scales.
-
-        Args:
-            weight: Tensor of shape [num_experts, out_features, in_features]
-
-        Returns:
-            Tuple of (quantized_weight, scales) where scales has shape
-            [num_experts, out_features]
-        """
-        num_experts = weight.shape[0]
-        int8_weight = torch.empty_like(weight, dtype=torch.int8)
-        scales = torch.empty(
-            (num_experts, weight.shape[1]), dtype=torch.float32, device=weight.device
-        )
-
-        vmax = torch.iinfo(torch.int8).max
-
-        for expert in range(num_experts):
-            expert_weight = weight[expert]  # [out_features, in_features]
-            # Per-channel (per-row) quantization
-            channel_max = torch.max(torch.abs(expert_weight), dim=1)[0]
-            expert_scales = channel_max / vmax
-            # Avoid division by zero
-            expert_scales = torch.where(
-                expert_scales == 0, torch.ones_like(expert_scales), expert_scales
-            )
-            scales[expert] = expert_scales
-
-            # Quantize
-            int8_weight[expert] = torch.round(
-                expert_weight / expert_scales.unsqueeze(1)
-            ).clamp(-vmax, vmax).to(torch.int8)
-
-        return int8_weight, scales
-
-    def _setup_kernel(self, layer: Module) -> None:
-        """Setup the modular kernel after quantization."""
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
 
         # Only setup modular kernel for non-all2all or naive all2all cases
