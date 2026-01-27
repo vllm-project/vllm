@@ -74,9 +74,6 @@ class StructuredOutputManager:
             self.tokenizer = cached_tokenizer_from_config(
                 model_config=self.vllm_config.model_config
             )
-            reasoning_parser = (
-                self.vllm_config.structured_outputs_config.reasoning_parser
-            )
             reasoning_parser_plugin = (
                 self.vllm_config.structured_outputs_config.reasoning_parser_plugin
             )
