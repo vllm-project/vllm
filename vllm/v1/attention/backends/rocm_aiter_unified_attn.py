@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
-from vllm.v1.attention.backend import AttentionType
+from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
@@ -188,7 +188,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
     def do_kv_cache_update(
         self,
-        layer: torch.nn.Module,
+        layer: AttentionLayer,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
