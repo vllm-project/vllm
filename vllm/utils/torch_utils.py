@@ -567,6 +567,121 @@ def aux_stream() -> torch.cuda.Stream | None:
     return _aux_stream
 
 
+@contextlib.contextmanager
+def run_on_aux_stream(
+    stream: torch.cuda.Stream | None = None,
+    skip_if_main_stream: bool = False,
+):
+    """
+    Context manager for running operations on the auxiliary CUDA stream.
+
+    This context manager handles the synchronization needed to safely run
+    operations on a separate CUDA stream and wait for them to complete.
+
+    On entry:
+        - The aux stream waits for the current (main) stream to complete
+          any pending work (ensures input tensors are ready)
+    On exit:
+        - The main stream waits for the aux stream to complete
+          (ensures output tensors are ready for use on the main stream)
+
+    Args:
+        stream: Optional CUDA stream to use. If None, uses aux_stream().
+        skip_if_main_stream: If True and stream is the current stream,
+            yields without any stream switching (avoids unnecessary overhead).
+
+    Yields:
+        The stream being used, or None if no stream switching occurred.
+
+    Example:
+        # Clone tensor before switching to avoid race conditions
+        hidden_states_clone = hidden_states.clone()
+        hidden_states_clone.record_stream(aux_stream())
+
+        with run_on_aux_stream() as stream:
+            if stream is not None:
+                output = some_operation(hidden_states_clone)
+
+    Note:
+        - If stream is None (e.g., on non-CUDA platforms), yields None
+          and no operations are performed.
+        - For tensors created in the aux stream that will be used on the
+          main stream, the exit synchronization ensures they are ready.
+        - For input tensors passed to the aux stream, use record_stream()
+          to prevent premature deallocation.
+    """
+    if stream is None:
+        stream = aux_stream()
+
+    if stream is None:
+        # Non-CUDA platform, nothing to do
+        yield None
+        return
+
+    if skip_if_main_stream and stream == current_stream():
+        yield None
+        return
+
+    # Wait for main stream work to complete before starting on aux stream
+    stream.wait_stream(current_stream())
+
+    try:
+        with torch.cuda.stream(stream):
+            yield stream
+    finally:
+        # Wait for aux stream work to complete before continuing on main stream
+        current_stream().wait_stream(stream)
+
+
+@contextlib.contextmanager
+def separate_stream(defer_sync: bool = False):
+    """Context manager for running code on a separate CUDA stream.
+
+    Args:
+        defer_sync: If True, returns a sync callable instead of
+            auto-synchronizing. If False, synchronizes automatically
+            on context exit.
+
+    Yields:
+        A sync callable that can be used to synchronize with the
+        separate stream. Safe to call multiple times (only syncs once).
+
+    Example:
+        # Auto-sync on exit
+        with separate_stream():
+            overlap_op()
+
+        # Deferred sync
+        with separate_stream(defer_sync=True) as sync:
+            overlap_op()
+
+        # ... do other work on default stream ...
+        sync()  # Synchronize when ready
+    """
+    stream = aux_stream()
+
+    if stream is None:
+        # Non-CUDA platform, yield a no-op sync function
+        yield lambda: None
+        return
+
+    event = torch.cuda.Event()
+    synced = False
+
+    def sync():
+        nonlocal synced
+        if not synced:
+            event.synchronize()
+            synced = True
+
+    with torch.cuda.stream(stream):
+        yield sync
+        event.record(stream)
+
+    if not defer_sync:
+        sync()
+
+
 @lru_cache(maxsize=8)
 def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
     # Note: cuda_visible_devices is not used, but we keep it as an argument for

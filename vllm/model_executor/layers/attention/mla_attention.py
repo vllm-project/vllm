@@ -217,6 +217,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
+from vllm.utils.torch_utils import aux_stream
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionLayer,
@@ -1376,6 +1377,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
+        # Flag indicating whether the prefill backend requires workspace buffer
+        # zeroing (only TRT-LLM ragged attention needs this)
+        self._uses_trtllm_workspace_fill = False
+        # Event to synchronize workspace buffer fill operation across streams
+        self._workspace_fill_event: torch.cuda.Event | None = None
+
         if use_trtllm_ragged_deepseek_prefill():
             logger.info_once(
                 "Using TRT-LLM ragged DeepSeek prefill for MLA", scope="local"
@@ -1385,6 +1392,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             )
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
+            self._uses_trtllm_workspace_fill = True
         elif use_flashinfer_prefill():
             logger.info_once("Using FlashInfer prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
@@ -1624,6 +1632,40 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             return ret[0], ret[1].transpose(0, 1).contiguous()
         return ret
 
+    def _start_workspace_fill_async(self, prefill: MLACommonPrefillMetadata) -> None:
+        """Start workspace buffer fill in auxiliary stream for overlap.
+
+        This launches workspace_buffer.fill_(0) in a separate CUDA stream
+        so it can overlap with compute operations (e.g., kv_b_proj, gather).
+        The main stream must call _wait_workspace_fill() before using the buffer.
+        """
+        if not self._uses_trtllm_workspace_fill:
+            return
+
+        assert prefill.workspace_buffer is not None
+        stream = aux_stream()
+        if stream is not None:
+            # Create event lazily
+            if self._workspace_fill_event is None:
+                self._workspace_fill_event = torch.cuda.Event()
+            # Launch fill in auxiliary stream
+            with torch.cuda.stream(stream):
+                prefill.workspace_buffer.fill_(0)
+            # Record event so main stream can wait
+            self._workspace_fill_event.record(stream)
+        else:
+            # Fallback: fill synchronously on current stream
+            prefill.workspace_buffer.fill_(0)
+
+    def _wait_workspace_fill(self) -> None:
+        """Wait for async workspace buffer fill to complete.
+
+        Must be called before using the workspace buffer after
+        _start_workspace_fill_async().
+        """
+        if self._workspace_fill_event is not None:
+            torch.cuda.current_stream().wait_event(self._workspace_fill_event)
+
     def _run_prefill_context_chunk_trtllm_ragged(
         self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
     ):
@@ -1641,7 +1683,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             device=q.device,
             dtype=q.dtype,
         )
-        prefill.workspace_buffer.fill_(0)
+        # Wait for async fill started by _start_workspace_fill_async()
+        self._wait_workspace_fill()
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
@@ -1709,6 +1752,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
         for i in range(iters):
+            # Start workspace buffer fill in aux stream to overlap with
+            # gather_and_maybe_dequant_cache, kv_b_proj, and _concat_k_nope_k_pe
+            self._start_workspace_fill_async(prefill_metadata)
+
             toks = prefill_metadata.chunked_context.seq_tot[i]
             ops.gather_and_maybe_dequant_cache(
                 src_cache=kv_c_and_k_pe_cache,
@@ -1782,6 +1829,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         workspace = prefill_metadata.chunked_context.workspace
 
         for i in range(iters):
+            # Start workspace buffer fill in aux stream to overlap with
+            # cp_gather_cache, all_gather, reorg_kvcache, and kv_b_proj
+            self._start_workspace_fill_async(prefill_metadata)
+
             toks = prefill_metadata.chunked_context.seq_tot[i]
             ops.cp_gather_cache(
                 src_cache=kv_c_and_k_pe_cache,
