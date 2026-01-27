@@ -1310,7 +1310,7 @@ class LLM:
         lora_request: list[LoRARequest] | LoRARequest | None,
         tokenization_kwargs: dict[str, Any],
     ) -> list[ScoringRequestOutput]:
-        tokenizer = self.llm_engine.get_tokenizer()
+        tokenizer = self.get_tokenizer()
 
         encoded_output = self.encode(
             text_1 + text_2,
@@ -1348,7 +1348,7 @@ class LLM:
         score_template: str | None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.model_config
-        tokenizer = self.llm_engine.get_tokenizer()
+        tokenizer = self.get_tokenizer()
 
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError("Score API is not supported for Mistral tokenizer")
