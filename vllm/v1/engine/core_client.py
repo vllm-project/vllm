@@ -98,6 +98,9 @@ class EngineCoreClient(ABC):
                 # External load balancer - client per DP rank.
                 return DPAsyncMPClient(*client_args)
             # Internal load balancer - client balances to all DP ranks.
+            # Choose routing strategy based on config
+            if parallel_config.enable_prefix_aware_routing:
+                return PrefixAwareDPLBAsyncMPClient(*client_args)
             return DPLBAsyncMPClient(*client_args)
         return AsyncMPClient(*client_args)
 
@@ -1189,6 +1192,68 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                               engine: EngineIdentity) -> None:
         await self._send_input(EngineCoreRequestType.ABORT, request_ids,
                                engine)
+
+
+class PrefixAwareDPLBAsyncMPClient(DPLBAsyncMPClient):
+    """Data parallel load-balancing client with prefix-aware routing.
+
+    Routes requests with the same token prefix to the same engine to improve
+    cache hit rates, while load-balancing new prefixes across engines.
+    """
+
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 executor_class: type[Executor],
+                 log_stats: bool,
+                 client_addresses: Optional[dict[str, str]] = None,
+                 client_count: int = 1,
+                 client_index: int = 0):
+        super().__init__(vllm_config, executor_class, log_stats,
+                         client_addresses, client_count, client_index)
+
+        # Map from prefix tuple to engine index
+        self.prefix_to_engine_map: dict[tuple[int, ...], int] = {}
+        self.prefix_length = vllm_config.parallel_config.prefix_routing_length
+
+    def get_core_engine_for_request(
+            self, request: EngineCoreRequest) -> EngineIdentity:
+        # Handle explicit data_parallel_rank override
+        if (eng_index := request.data_parallel_rank) is not None:
+            chosen_engine = self.core_engines[eng_index]
+            self.reqs_in_flight[request.request_id] = chosen_engine
+            return chosen_engine
+
+        # Extract prefix from the prompt token IDs
+        prefix_segment = request.prompt_token_ids[:min(
+            len(request.prompt_token_ids), self.prefix_length)]
+        prefix = tuple(prefix_segment)
+
+        current_counts = self.lb_engines
+        num_engines = len(current_counts)
+
+        if prefix in self.prefix_to_engine_map:
+            # Route to previously assigned engine for this prefix
+            eng_index = self.prefix_to_engine_map[prefix]
+        else:
+            # New prefix: find least-loaded engine
+            min_score = sys.maxsize
+            eng_index = 0
+            for i in range(num_engines):
+                idx = (self.eng_start_index + i) % num_engines
+                waiting, running = current_counts[idx]
+                score = waiting * 4 + running
+                if score < min_score:
+                    min_score = score
+                    eng_index = idx
+            # Remember this prefix->engine mapping
+            self.prefix_to_engine_map[prefix] = eng_index
+
+        # Increment local waiting count
+        current_counts[eng_index][0] += self.client_count
+
+        chosen_engine = self.core_engines[eng_index]
+        self.reqs_in_flight[request.request_id] = chosen_engine
+        return chosen_engine
 
     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale elastic EP data parallel size"""
