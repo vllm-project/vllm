@@ -11,12 +11,16 @@ from typing import Any
 def extract_field(
     args: argparse.Namespace, extra_info: dict[str, Any], field_name: str
 ) -> str:
-    if hasattr(args, field_name):
-        return getattr(args, field_name)
-    elif field_name in extra_info:
+    if field_name in extra_info:
         return extra_info[field_name]
-    else:
-        return ""
+
+    v = args
+    # For example, args.compilation_config.mode
+    for nested_field in field_name.split("."):
+        if not hasattr(v, nested_field):
+            return ""
+        v = getattr(v, nested_field)
+    return v
 
 
 def use_compile(args: argparse.Namespace, extra_info: dict[str, Any]) -> bool:
