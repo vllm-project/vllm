@@ -142,6 +142,12 @@ class BlockTable:
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
         if total_cp_world_size > 1:
+            # Note(hc): The DCP implement store kvcache with an interleave
+            # style, the kvcache for the token whose token_idx is i is
+            # always stored on the GPU whose dcp_rank equals i % cp_world_size:
+
+            # Use a "virtual block" which equals to world_size * block_size
+            # for block_table_indices calculation.
             virtual_block_size = self.block_size * total_cp_world_size
             block_table_indices = (
                 req_indices * self.max_num_blocks_per_req
@@ -149,6 +155,8 @@ class BlockTable:
             )
 
             block_numbers = self.block_table.gpu.view(-1)[block_table_indices]
+            # Use virtual_block_size for mask calculation, which marks local
+            # tokens.
             virtual_block_offsets = positions % virtual_block_size
             mask = (
                 virtual_block_offsets
@@ -156,13 +164,16 @@ class BlockTable:
                 % total_cp_world_size
                 == total_cp_rank
             )
+            # Calculate local block_offsets
             block_offsets = (
                 virtual_block_offsets
                 // (total_cp_world_size * self.cp_kv_cache_interleave_size)
                 * self.cp_kv_cache_interleave_size
                 + virtual_block_offsets % self.cp_kv_cache_interleave_size
             )
+            # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
+            # Write final slots, use -1 for not-local
             self.slot_mapping.gpu[: req_indices.shape[0]] = torch.where(
                 mask, slot_mapping, -1
             )
