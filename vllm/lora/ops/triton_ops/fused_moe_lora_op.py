@@ -84,6 +84,7 @@ def _fused_moe_lora_kernel(
     num_slice_c: tl.constexpr,
     top_k: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
+    ADD_TO_C: tl.constexpr,
     USE_B_L2_CACHE: tl.constexpr,  # new, enable .ca load for B
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -211,7 +212,11 @@ def _fused_moe_lora_kernel(
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
 
     if SPLIT_K == 1:
-        tl.store(c_ptrs, accumulator, mask=c_mask)
+        if ADD_TO_C:
+            prev = tl.load(c_ptrs, mask=c_mask, other=0.0)
+            tl.store(c_ptrs, prev + accumulator, mask=c_mask)
+        else:
+            tl.store(c_ptrs, accumulator, mask=c_mask)
     else:
         tl.atomic_add(c_ptrs, accumulator, mask=c_mask, sem="relaxed")
 
@@ -305,6 +310,7 @@ def _fused_moe_lora_shrink(
         num_slice_c=num_slices,
         top_k=1 if mul_routed_weight else top_k_num,
         MUL_ROUTED_WEIGHT=False,
+        ADD_TO_C=False,
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=True,
         **shrink_config,
@@ -408,6 +414,7 @@ def _fused_moe_lora_expand(
         num_slice_c=num_slices,
         top_k=1,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
+        ADD_TO_C=False,
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=False,
         **expand_config,
