@@ -249,7 +249,8 @@ class Base(
         # Layers before module list
         for name in pp_plan[:module_list_idx]:
             if self.pp_group.is_first_rank or (
-                self.text_config.tie_word_embeddings and self.pp_group.is_last_rank
+                getattr(self.text_config, "tie_word_embeddings", False)
+                and self.pp_group.is_last_rank
             ):
                 continue
             setattr(self.model, name, PPMissingLayer())
