@@ -60,7 +60,7 @@ from vllm.entrypoints.utils import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.tasks import POOLING_TASKS
+from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser

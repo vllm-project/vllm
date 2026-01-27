@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
 
