@@ -447,6 +447,21 @@ class PyNcclCommunicator:
             # Assume it's a raw window handle from register_comm_window_raw
             nccl_bindings.comm_window_deregister(self.comm.ptr, window)
 
+    def __del__(self):
+        """Cleanup registered windows to prevent resource leaks."""
+        # Use a copy of the list to safely modify it while iterating
+        for window in list(self._registered_windows):
+            try:
+                self.deregister_comm_window(window)
+            except Exception:
+                # Log errors during cleanup, but don't raise exceptions
+                # from __del__ as it can cause issues during interpreter shutdown
+                logger.warning(
+                    "Error deregistering NCCL window during cleanup: %s",
+                    window,
+                    exc_info=True,
+                )
+
 
 # ===================== Legacy implementation fallback =====================
 
