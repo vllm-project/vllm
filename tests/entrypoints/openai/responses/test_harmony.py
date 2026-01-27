@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import time
+from unittest.mock import Mock, patch
 
 import pytest
 import pytest_asyncio
@@ -514,7 +515,8 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
 
 def get_weather(latitude, longitude):
     response = requests.get(
-        f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m"  # noqa
+        f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m", # noqa
+        timeout=30,
     )
     data = response.json()
     return data["current"]["temperature_2m"]
@@ -805,7 +807,10 @@ async def test_function_calling_with_stream(client: OpenAI, model_name: str):
     for tc in final_tool_calls.values():
         if tc and tc.type == "function_call" and tc.name == "get_weather":
             args = json.loads(tc.arguments)
-            result = call_function(tc.name, args)
+            mock_resp = Mock()
+            mock_resp.json.return_value = {"current": {"temperature_2m": 7.3}}
+            with patch(f"{__name__}.requests.get", return_value=mock_resp):
+                result = call_function(tc.name, args)
             tool_call = tc
             input_list += [tc]
             break
