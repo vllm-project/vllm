@@ -8,15 +8,41 @@ and generates a markdown table showing what features each backend supports,
 based on the checks in AttentionBackend.validate_configuration().
 
 This approach avoids requiring CUDA/ROCm/GPU libraries to be installed.
+
+When used as a pre-commit hook, this script receives filenames as arguments
+and only runs the check if any of the relevant files were modified.
 """
 
 import argparse
 import ast
+import fnmatch
 import sys
 from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).parent.parent.parent
+
+RELEVANT_PATTERNS = [
+    "vllm/v1/attention/backends/*.py",
+    "vllm/v1/attention/backends/**/*.py",
+    "vllm/platforms/cuda.py",
+    "docs/design/attention_backends.md",
+]
+
+
+def is_relevant_file(filepath: str) -> bool:
+    """Check if a file matches any of the relevant patterns."""
+    path = Path(filepath)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(REPO_ROOT)
+        except ValueError:
+            return False
+    path_str = str(path)
+
+    return any(fnmatch.fnmatch(path_str, pattern) for pattern in RELEVANT_PATTERNS)
+
+
 BACKENDS_DIR = REPO_ROOT / "vllm" / "v1" / "attention" / "backends"
 MLA_COMMON_FILE = (
     REPO_ROOT / "vllm" / "model_executor" / "layers" / "attention" / "mla_attention.py"
@@ -772,7 +798,17 @@ def main():
         action="store_true",
         help="Check if the documentation is up to date (for pre-commit)",
     )
+    parser.add_argument(
+        "files",
+        nargs="*",
+        help="Files to check (passed by pre-commit). If none are relevant, skip.",
+    )
     args = parser.parse_args()
+
+    if args.files:
+        relevant_files = [f for f in args.files if is_relevant_file(f)]
+        if not relevant_files:
+            sys.exit(0)
 
     output_path = Path(args.output)
 

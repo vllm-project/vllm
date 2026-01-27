@@ -158,8 +158,6 @@ repos:
     name: Check attention backend documentation is up to date
     entry: python tools/pre_commit/generate_attention_backend_docs.py --check
     language: python
-    files: ^(vllm/v1/attention/backends/.*\.py|vllm/platforms/cuda\.py|docs/design/attention_backends\.md)$
-    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
