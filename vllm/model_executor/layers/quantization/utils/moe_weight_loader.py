@@ -4,6 +4,9 @@
 Shared utilities for online MoE weight loading and quantization.
 """
 
+from collections.abc import Callable
+from typing import Protocol
+
 import torch
 from torch.nn import Module
 from torch.utils._python_dispatch import TorchDispatchMode
@@ -44,20 +47,47 @@ def _copy_missing_attrs(old: torch.Tensor, new: torch.Tensor) -> None:
     set_weight_attrs(new, attrs_to_set)
 
 
-class OnlineWeightLoaderMixin:
-    """
-    Mixin providing shared weight loading patterns for online MoE quantization.
+class MoeQuantizationCallbacks(Protocol):
+    """Protocol defining callbacks that MoE quantization methods must provide."""
 
-    This mixin provides a deferred weight loading pattern that:
+    def create_scale_tensors(
+        self,
+        layer: Module,
+        num_experts: int,
+        intermediate_size_per_partition: int,
+        hidden_size: int,
+    ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
+        """Create scale tensors for quantization.
+
+        Returns:
+            Tuple of (w13_weight_scale, w2_weight_scale) parameters
+        """
+        ...
+
+    def quantize_and_setup_kernel(self, layer: Module) -> None:
+        """Quantize weights and setup the kernel."""
+        ...
+
+
+class MoeOnlineWeightLoader:
+    """
+    Handles deferred weight loading and quantization for MoE layers.
+
+    This class provides a deferred weight loading pattern that:
     1. Creates weights on meta device initially
     2. Materializes weights just-in-time when loading starts
     3. Tracks loading progress using CopyNumelCounter
-    4. Calls process_weights_after_loading when all weights are loaded
+    4. Calls quantization callback when all weights are loaded
 
-    Classes using this mixin must implement:
-    - `_create_scale_tensors`: Create quantization-specific scale tensors
-    - `_quantize_and_setup_kernel`: Quantize weights and setup the kernel
+    Usage:
+        loader = MoeOnlineWeightLoader(callbacks)
+        loader.create_weights(layer, num_experts, ...)
+        # Later, after model loading:
+        loader.process_weights_after_loading(layer)
     """
+
+    def __init__(self, callbacks: MoeQuantizationCallbacks):
+        self.callbacks = callbacks
 
     def create_weights(
         self,
@@ -69,11 +99,10 @@ class OnlineWeightLoaderMixin:
         **extra_weight_attrs,
     ) -> None:
         """
-        Shared weight creation logic for online MoE quantization.
+        Create MoE weights on meta device with deferred loading.
 
         Creates weights on meta device with a patched weight loader that
-        tracks loading progress. Subclasses must implement
-        `_create_scale_tensors` to create quantization-specific scales.
+        tracks loading progress and triggers quantization when complete.
         """
         # Store layer dimensions
         layer.intermediate_size_per_partition = intermediate_size_per_partition
@@ -119,7 +148,7 @@ class OnlineWeightLoaderMixin:
         # Stash device for JIT materialization
         layer._load_device = torch.get_default_device()
 
-        # Let subclass create quantization-specific scale parameters
+        # Create quantization-specific scale parameters
         self._create_scale_parameters(
             layer,
             num_experts,
@@ -136,13 +165,8 @@ class OnlineWeightLoaderMixin:
         hidden_size: int,
         extra_weight_attrs: dict,
     ) -> None:
-        """
-        Create and register scale parameters for quantization.
-
-        Calls `_create_scale_tensors` (which subclasses must implement) to get
-        the scale tensors, then registers them and sets weight attributes.
-        """
-        w13_weight_scale, w2_weight_scale = self._create_scale_tensors(
+        """Create and register scale parameters."""
+        w13_weight_scale, w2_weight_scale = self.callbacks.create_scale_tensors(
             layer,
             num_experts,
             intermediate_size_per_partition,
@@ -156,46 +180,15 @@ class OnlineWeightLoaderMixin:
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-    def _create_scale_tensors(
-        self,
-        layer: Module,
-        num_experts: int,
-        intermediate_size_per_partition: int,
-        hidden_size: int,
-    ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
-        """
-        Create scale tensors for quantization. Subclasses must implement.
-
-        Args:
-            layer: The MoE layer module (can be used to set extra attributes)
-            num_experts: Number of experts
-            intermediate_size_per_partition: Intermediate size per partition
-            hidden_size: Hidden size
-
-        Returns:
-            Tuple of (w13_weight_scale, w2_weight_scale) parameters
-        """
-        raise NotImplementedError(
-            "Subclasses must implement _create_scale_tensors"
-        )
-
     def _create_moe_weight_loader(
         self,
         layer: Module,
-        weight_loader,
+        weight_loader: Callable,
         extra_weight_attrs: dict,
-    ):
+    ) -> Callable:
         """
         Creates a patched weight loader that tracks loading progress
-        and calls _on_all_moe_weights_loaded when complete.
-
-        Args:
-            layer: The MoE layer module
-            weight_loader: The original weight loader function
-            extra_weight_attrs: Extra attributes to set on weights
-
-        Returns:
-            A patched weight loader function
+        and calls quantization when complete.
         """
 
         def patched_weight_loader(param, loaded_weight, *args, **kwargs):
@@ -239,10 +232,10 @@ class OnlineWeightLoaderMixin:
                 res = weight_loader(param, loaded_weight, *args, **kwargs)
             layer._loaded_numel += copy_numel_counter.copied_numel
 
-            # If we have loaded all elements, call the completion handler
+            # If we have loaded all elements, call quantization
             target_loaded_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
             if layer._loaded_numel == target_loaded_numel:
-                self._on_all_moe_weights_loaded(layer)
+                self._on_all_weights_loaded(layer)
 
                 # Delete the bookkeeping
                 del layer._loaded_numel
@@ -255,31 +248,20 @@ class OnlineWeightLoaderMixin:
 
         return patched_weight_loader
 
-    def _on_all_moe_weights_loaded(self, layer: Module) -> None:
-        """
-        Called when all MoE weights have been loaded.
-        Subclasses should override this to perform quantization and kernel setup.
-        Default implementation calls process_weights_after_loading.
-        """
+    def _on_all_weights_loaded(self, layer: Module) -> None:
+        """Called when all MoE weights have been loaded."""
         self.process_weights_after_loading(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        """
-        Process weights after loading - materialize dummy weights, quantize,
-        and setup kernel.
-
-        Subclasses must implement:
-        - `_initialize_dummy_weight(weight)`: Initialize a dummy weight tensor
-        - `_quantize_and_setup_kernel(layer)`: Quantize weights and setup kernel
-        """
+        """Process weights after loading - materialize dummy weights and quantize."""
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
         # Handle dummy weights (--load_format dummy)
         self._materialize_dummy_weights(layer)
 
-        # Subclass handles quantization and kernel setup
-        self._quantize_and_setup_kernel(layer)
+        # Quantize weights and setup kernel
+        self.callbacks.quantize_and_setup_kernel(layer)
 
     def _materialize_dummy_weights(self, layer: Module) -> None:
         """Materialize weights that are still on meta device (dummy weights)."""
@@ -306,14 +288,3 @@ class OnlineWeightLoaderMixin:
             _copy_missing_attrs(layer.w2_weight, w2_weight)
             layer.register_parameter("w2_weight", w2_weight)
             initialize_single_dummy_weight(layer.w2_weight)
-
-    def _quantize_and_setup_kernel(self, layer: Module) -> None:
-        """
-        Quantize weights and setup the kernel. Subclasses must implement.
-
-        Args:
-            layer: The MoE layer module with loaded weights
-        """
-        raise NotImplementedError(
-            "Subclasses must implement _quantize_and_setup_kernel"
-        )

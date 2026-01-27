@@ -73,7 +73,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 )
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
     CopyNumelCounter,
-    OnlineWeightLoaderMixin,
+    MoeOnlineWeightLoader,
     _copy_missing_attrs,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -1045,7 +1045,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
 
-class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
+class Fp8OnlineMoEMethod(Fp8MoEMethod):
     """MoE method for online FP8 quantization.
     Supports loading quantized FP16/BF16 model checkpoints with dynamic
     activation scaling. The weight scaling factor will be initialized after
@@ -1060,6 +1060,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
         assert not quant_config.is_checkpoint_fp8_serialized
         assert quant_config.activation_scheme == "dynamic"
         assert quant_config.weight_block_size is None
+        self.weight_loader = MoeOnlineWeightLoader(self)
 
     def create_weights(
         self,
@@ -1070,9 +1071,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        # Explicitly call mixin's create_weights (MRO would pick base class)
-        OnlineWeightLoaderMixin.create_weights(
-            self,
+        self.weight_loader.create_weights(
             layer,
             num_experts,
             hidden_size,
@@ -1080,11 +1079,11 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
             params_dtype,
             **extra_weight_attrs,
         )
-    
-    def process_weights_after_loading(self, layer: Module) -> None:
-        OnlineWeightLoaderMixin.process_weights_after_loading(self, layer)
 
-    def _create_scale_tensors(
+    def process_weights_after_loading(self, layer: Module) -> None:
+        self.weight_loader.process_weights_after_loading(layer)
+
+    def create_scale_tensors(
         self,
         layer: Module,
         num_experts: int,
@@ -1105,7 +1104,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, OnlineWeightLoaderMixin):
         )
         return w13_weight_scale, w2_weight_scale
 
-    def _quantize_and_setup_kernel(self, layer: Module) -> None:
+    def quantize_and_setup_kernel(self, layer: Module) -> None:
         """Quantize weights to FP8 and setup the kernel."""
         # If checkpoint is fp16, quantize in place.
         fp8_dtype = current_platform.fp8_dtype()

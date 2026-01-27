@@ -27,7 +27,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
-    OnlineWeightLoaderMixin,
+    MoeOnlineWeightLoader,
 )
 
 
@@ -67,7 +67,7 @@ class ExpertsInt8Config(QuantizationConfig):
         return None
 
 
-class ExpertsInt8MoEMethod(FusedMoEMethodBase, OnlineWeightLoaderMixin):
+class ExpertsInt8MoEMethod(FusedMoEMethodBase):
     """
     MoE method for online Int8 quantization.
 
@@ -84,6 +84,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase, OnlineWeightLoaderMixin):
         super().__init__(moe)
         self.quant_config = quant_config
         self.kernel: mk.FusedMoEModularKernel | None = None
+        self.weight_loader = MoeOnlineWeightLoader(self)
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
@@ -108,9 +109,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase, OnlineWeightLoaderMixin):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        # Explicitly call mixin's create_weights (MRO would pick base class)
-        OnlineWeightLoaderMixin.create_weights(
-            self,
+        self.weight_loader.create_weights(
             layer,
             num_experts,
             hidden_size,
@@ -118,11 +117,11 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase, OnlineWeightLoaderMixin):
             params_dtype,
             **extra_weight_attrs,
         )
-    
-    def process_weights_after_loading(self, layer: Module) -> None:
-        OnlineWeightLoaderMixin.process_weights_after_loading(self, layer)
 
-    def _create_scale_tensors(
+    def process_weights_after_loading(self, layer: Module) -> None:
+        self.weight_loader.process_weights_after_loading(layer)
+
+    def create_scale_tensors(
         self,
         layer: Module,
         num_experts: int,
@@ -143,7 +142,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase, OnlineWeightLoaderMixin):
         )
         return w13_weight_scale, w2_weight_scale
 
-    def _quantize_and_setup_kernel(self, layer: Module) -> None:
+    def quantize_and_setup_kernel(self, layer: Module) -> None:
         """Quantize weights to int8 and setup the modular kernel."""
         # Quantize fp16/bf16 weights to int8 with per-channel scales
         w13, w13_scale = self._quantize_to_int8(layer.w13_weight)
