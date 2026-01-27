@@ -17,8 +17,6 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
-# headless tests need a real model that supports DP configuration
-HEADLESS_MODEL_NAME = "facebook/opt-125m"
 
 _IS_ROCM = current_platform.is_rocm()
 _SERVER_STARTUP_TIMEOUT = 120
@@ -350,9 +348,3 @@ async def test_child_processes_exit_on_parent_crash():
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
-
-
-# NOTE: Additional drain tests for headless mode and multi-API server mode
-# are available as standalone scripts in tests/v1/shutdown/test_headless_drain.py
-# and tests/v1/shutdown/test_multi_api_server_drain.py. These complex multi-process
-# tests require more control over subprocess output capture than pytest provides.

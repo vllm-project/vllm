@@ -811,7 +811,6 @@ def launch_core_engines(
     executor_class: type[Executor],
     log_stats: bool,
     num_api_servers: int = 1,
-    enable_drain: bool = False,
 ) -> Iterator[
     tuple[
         CoreEngineProcManager | CoreEngineActorManager | None,
