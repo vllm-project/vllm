@@ -9,11 +9,11 @@ import json
 import httpx
 import librosa
 import numpy as np
+import openai
 import pytest
 import pytest_asyncio
 import soundfile as sf
 
-import openai
 from ...utils import RemoteOpenAIServer
 from .conftest import add_attention_backend
 
