@@ -328,12 +328,16 @@ def main():
         f"({torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB)"
     )
 
+    # Empirical headroom for overall throughput optimization (tested on B200)
+    throughput_headroom = 2.0
+
     near_peak_batch, recommended, results = find_optimal_batch_size(
         config,
         args.batch_sizes,
         args.tensor_parallel_size,
         compute_dtype,
         args.bw_threshold,
+        throughput_headroom,
     )
 
     max_bw = max(r.effective_bandwidth_tb_s for r in results)
@@ -343,7 +347,7 @@ def main():
     print(f"\n{'=' * 50}")
     print(f"RECOMMENDED --max-num-seqs: {recommended}")
     print(f"{'=' * 50}")
-    print(f"(near-peak batch {near_peak_batch} × 2x headroom)")
+    print(f"(near-peak batch {near_peak_batch} × {throughput_headroom:.1f}x headroom)")
 
 
 if __name__ == "__main__":
