@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Final, TypeAlias
+from http import HTTPStatus
+from typing import Final, cast
 
 import jinja2
 import numpy as np
@@ -27,7 +28,7 @@ from vllm.pooling_params import PoolingParams
 logger = init_logger(__name__)
 
 
-ClassificationServeContext: TypeAlias = ServeContext[ClassificationRequest]
+ClassificationServeContext = ServeContext[ClassificationRequest]
 
 
 class ServingClassification(OpenAIServing):
@@ -64,50 +65,31 @@ class ServingClassification(OpenAIServing):
         and prepare model-specific inputs.
         """
         try:
-            request_obj = ctx.request
+            ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
-            if isinstance(request_obj, ClassificationChatRequest):
-                chat_request = request_obj
-                messages = chat_request.messages
-                trust_request_chat_template = getattr(
-                    self,
-                    "trust_request_chat_template",
-                    False,
+            if isinstance(ctx.request, ClassificationChatRequest):
+                error_check_ret = self._validate_chat_template(
+                    request_chat_template=ctx.request.chat_template,
+                    chat_template_kwargs=ctx.request.chat_template_kwargs,
+                    trust_request_chat_template=self.trust_request_chat_template,
                 )
                 if error_check_ret:
                     return error_check_ret
 
-                _, ctx.engine_prompts = await self._preprocess_chat(
-                    ctx.request,
-                    ctx.request.messages,
-                    default_template=self.chat_template,
-                    default_template_content_format=self.chat_template_content_format,
-                    default_template_kwargs=None,
-                )
-                if ret:
-                    return ret
-
                 _, engine_prompts = await self._preprocess_chat(
-                    cast(ChatCompletionRequest, chat_request),
+                    ctx.request,
                     self.renderer,
-                    messages,
-                    chat_template=(
-                        chat_request.chat_template
-                        or getattr(self, "chat_template", None)
-                    ),
-                    chat_template_content_format=cast(
-                        ChatTemplateContentFormatOption,
-                        getattr(self, "chat_template_content_format", "auto"),
-                    ),
-                    add_generation_prompt=chat_request.add_generation_prompt,
-                    continue_final_message=chat_request.continue_final_message,
-                    add_special_tokens=chat_request.add_special_tokens,
+                    ctx.request.messages,
+                    chat_template=ctx.request.chat_template or self.chat_template,
+                    chat_template_content_format=self.chat_template_content_format,
+                    add_generation_prompt=ctx.request.add_generation_prompt,
+                    continue_final_message=ctx.request.continue_final_message,
+                    add_special_tokens=ctx.request.add_special_tokens,
                 )
                 ctx.engine_prompts = engine_prompts
 
-            elif isinstance(request_obj, ClassificationCompletionRequest):
-                completion_request = request_obj
-                input_data = completion_request.input
+            elif isinstance(ctx.request, ClassificationCompletionRequest):
+                input_data = ctx.request.input
                 if input_data in (None, ""):
                     return self.create_error_response(
                         "Input or messages must be provided",
@@ -121,7 +103,7 @@ class ServingClassification(OpenAIServing):
                 prompt_input = cast(str | list[str], input_data)
                 ctx.engine_prompts = await renderer.render_prompt(
                     prompt_or_prompts=prompt_input,
-                    config=self._build_render_config(completion_request),
+                    config=self._build_render_config(ctx.request),
                 )
             else:
                 return self.create_error_response("Invalid classification request type")
@@ -176,6 +158,13 @@ class ServingClassification(OpenAIServing):
             model=ctx.model_name,
             data=items,
             usage=usage,
+        )
+
+    def _build_render_config(self, request: ClassificationRequest) -> RenderConfig:
+        return RenderConfig(
+            max_length=self.max_model_len,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
+            add_special_tokens=request.add_special_tokens,
         )
 
     async def create_classify(
