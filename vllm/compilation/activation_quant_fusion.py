@@ -177,42 +177,39 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
 
 class SiluMulBlockQuantPattern:
     """
-    This pattern fuses silu_and_mul & block quantization.
+    Pattern for fusing inline SiLU+Mul with block quantization.
     
-    Fuses:
-        silu_and_mul(input) → per_token_group_quant_fp8(output, group_size)
+    Matches:
+        gate, up = split(input, dim=-1)
+        silu = sigmoid(gate) * gate  # Inline SiLU
+        result = silu * up
+        quantize(result)
     Into:
         silu_and_mul_per_block_quant(input, group_size)
-    
-    This is the GROUP/BLOCK quantization version (one scale per group of elements).
-    For PER-TOKEN quantization (one scale per entire token), use SiluMulFp8StaticQuantPattern.
     """
+    
     def __init__(
         self, 
         group_shape: GroupShape,
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
     ):
-        # Validate that it's per-token quantization (group_m must be 1)
         assert group_shape[0] == 1, (
             f"SiluMulBlockQuantPattern only supports per-token quantization "
             f"(group_m=1), got group_shape={group_shape}"
         )
         
         self.group_shape = group_shape
-        self.group_size = group_shape[1]  # Extract for convenience
+        self.group_size = group_shape[1]
         self.has_col_major_scales = has_col_major_scales
         self.is_e8m0 = is_e8m0
         self.quant_dtype = FP8_DTYPE
         
-        # Get current config for model dtype
+        from vllm.config import get_current_vllm_config
         config = get_current_vllm_config()
         self.model_dtype = config.model_config.dtype if config.model_config else None
         
-        # Create matchers for pattern detection
-        self.silu_and_mul_matcher = MatcherSiluAndMul()
-        
-        # Create quant matcher for this specific group_size
+        # Create quant matcher
         scale = ScaleDesc(torch.float32, False, group_shape)
         quant_key = QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
         self.quant_matcher = MatcherQuantFP8(
@@ -222,41 +219,34 @@ class SiluMulBlockQuantPattern:
         )
     
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        """Register this pattern with the pattern matcher."""
+        """Register pattern that matches inline SiLU+Mul operations."""
         
-        # DEFINE THE PATTERN TO MATCH
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            # Pattern: silu_and_mul → per_token_group_quant_fp8
-            result_silu_mul = self.silu_and_mul_matcher(input)
-            result_quant, scale = self.quant_matcher(result_silu_mul)
-            return result_quant, scale
+            hidden = input.shape[-1] // 2
+            gate, up = input.split(hidden, dim=-1)
+            silu = torch.sigmoid(gate) * gate
+            silu_out = silu * up
+            result, scale = self.quant_matcher(silu_out)
+            return result, scale
         
-        # DEFINE THE REPLACEMENT (fused operation)
-        def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"FUSED KERNEL TRIGGERED! input.shape={input.shape}, group_size={self.group_size}")
-            
-            # Convert to model dtype if needed
+        def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:            
             if self.model_dtype is not None:
                 input = input.to(dtype=self.model_dtype)
             
-            # Calculate output shape (half of input due to gate||up → silu(gate)*up)
             output_shape = list(input.shape)
             output_shape[-1] = output_shape[-1] // 2
             
-            # Allocate output tensor
             result = torch.empty(
                 output_shape, 
                 device=input.device, 
                 dtype=self.quant_dtype
             )
             
-            # Allocate scale tensor with proper layout
             scale = self.quant_matcher.make_scale(
                 torch.empty(output_shape, device=input.device),
                 transposed=self.has_col_major_scales
             )
             
-            # Call the fused kernel via auto_functionalized
             at = auto_functionalized(
                 torch.ops._C.silu_and_mul_per_block_quant.default,
                 result=result,
@@ -267,15 +257,14 @@ class SiluMulBlockQuantPattern:
                 is_scale_transposed=self.has_col_major_scales,
             )
             
-            # Return result and scale from auto_functionalized
             return at[1], at[2]
         
-        # REGISTER THE PATTERN
-        inputs = self.silu_and_mul_matcher.inputs()
+        input_example = torch.empty(5, 32, dtype=torch.float16, device="cuda")
+        
         register_replacement(
             pattern,
             replacement,
-            inputs,
+            [input_example],  # Example inputs
             fwd_only,
             pm_pass,
         )
@@ -305,11 +294,8 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
-        # =====================================================================
-        # NEW: Register block quantization patterns
-        # =====================================================================
         if current_platform.is_cuda():
-            # Register patterns for different group sizes and layouts
+            count = 0
             for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
                 for has_col_major_scales in [True, False]:
                     for is_e8m0 in [True, False]:
@@ -319,6 +305,8 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
                             is_e8m0=is_e8m0,
                         )
                         pattern_silu_mul_block.register(self.patterns)
+                        count += 1
+                        print(f"  Registered pattern {count}: group_size={group_shape[1]}, col_major={has_col_major_scales}, e8m0={is_e8m0}")
 
         self.dump_patterns(config, self.patterns)
 
