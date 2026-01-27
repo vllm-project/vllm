@@ -518,6 +518,18 @@ def silu_and_mul_per_block_quant(
             dtype=torch.float32,
         )
     
+    if envs.VLLM_USE_TRITON_SILU_MUL_QUANT:
+        from vllm.model_executor.layers.quantization.triton_quantization import (
+            silu_and_mul_per_block_quant_triton,
+        )
+        return silu_and_mul_per_block_quant_triton(
+            input,
+            group_size,
+            quant_dtype,
+            scale_ub,
+            is_scale_transposed,
+        )
+
     # Call the C++ kernel
     torch.ops._C.silu_and_mul_per_block_quant(
         output,
