@@ -50,6 +50,7 @@ def convert_to_pytorch_benchmark_format(
                 "extra_info": {
                     "args": vars(args),
                     "compilation_mode": extract_compilation_mode(args),
+                    "optimization_level": args.optimization_level,
                     # A boolean field used by vLLM benchmark HUD dashboard
                     "use_compile": use_compile(args),
                 },
