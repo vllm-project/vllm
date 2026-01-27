@@ -6,7 +6,7 @@
 #
 # Creates a PEP 503 compatible index.html at rocm/ pointing to the latest
 # semantic version's packages. This enables users to install with:
-#   uv pip install vllm --extra-index-url s3://vllm-rocm-wheels-embeddedllm-2/rocm
+#   uv pip install vllm --extra-index-url s3://vllm-wheels/rocm
 #
 # Usage:
 #   generate-root-index.sh [options]
@@ -16,14 +16,14 @@
 #   --version VER  Use specific version instead of auto-detecting latest
 #
 # Environment variables:
-#   S3_BUCKET   - Bucket name (default: vllm-wheels-dev)
+#   S3_BUCKET   - Bucket name (default: vllm-wheels)
 #   VARIANT     - ROCm variant (default: rocm700)
 #   DRY_RUN     - Set to 1 for preview mode (same as --dry-run)
 
 set -euo pipefail
 
 # ======== Configuration ========
-BUCKET="${S3_BUCKET:-vllm-wheels-dev}"
+BUCKET="${S3_BUCKET:-vllm-wheels}"
 VARIANT="${VARIANT:-rocm700}"
 DRY_RUN="${DRY_RUN:-0}"
 FORCE_VERSION=""
@@ -229,8 +229,5 @@ echo "Latest version: $LATEST_VERSION"
 echo "Packages indexed: $(wc -l < "$WORK_DIR/packages.txt")"
 echo ""
 echo "Install command:"
-echo "  uv pip install vllm --extra-index-url s3://$BUCKET/rocm"
-echo ""
-echo "Or with HTTPS:"
-echo "  uv pip install vllm --extra-index-url https://$BUCKET.s3.amazonaws.com/rocm/"
+echo "  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/"
 echo "========================================"
