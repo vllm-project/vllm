@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from collections.abc import Callable, Iterable, Mapping, MutableSequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
+    AsyncGenerator,
     ClassVar,
     Literal,
     Protocol,
@@ -1016,6 +1018,37 @@ class SupportsQuant:
 
 
 @runtime_checkable
+class SupportsRealtime(Protocol):
+    """The interface required for all models that support transcription."""
+    supports_realtime: ClassVar[Literal[True]] = True
+
+    @classmethod
+    async def buffer_realtime_audio(
+        cls,
+        audio_stream: AsyncGenerator[np.ndarray, None],
+        input_stream: asyncio.Queue[list[int]],
+        model_config: ModelConfig,
+    ) -> AsyncGenerator[PromptType, None]:
+        ...
+
+
+@overload
+def supports_realtime(
+    model: type[object],
+) -> TypeIs[type[SupportsRealtime]]: ...
+
+
+@overload
+def supports_realtime(model: object) -> TypeIs[SupportsRealtime]: ...
+
+
+def supports_realtime(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsRealtime]] | TypeIs[SupportsRealtime]:
+    return getattr(model, "supports_realtime", False)
+
+
+@runtime_checkable
 class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
 
@@ -1128,6 +1161,7 @@ def supports_transcription(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsTranscription]] | TypeIs[SupportsTranscription]:
     return getattr(model, "supports_transcription", False)
+
 
 
 @runtime_checkable

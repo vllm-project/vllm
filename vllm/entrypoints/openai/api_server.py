@@ -176,6 +176,12 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
 
     register_models_api_router(app)
 
+    from vllm.entrypoints.openai.realtime.api_router import (
+        attach_router as register_realtime_api_router,
+    )
+
+    register_realtime_api_router(app)
+
     from vllm.entrypoints.sagemaker.api_router import (
         attach_router as register_sagemaker_api_router,
     )
@@ -309,6 +315,18 @@ async def init_app_state(
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks
         )
+    from vllm.entrypoints.openai.realtime.serving import OpenAIServingRealtime
+
+    state.openai_serving_realtime = (
+        OpenAIServingRealtime(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            log_error_stack=args.log_error_stack,
+        )
+        if "transcription" in supported_tasks
+        else None
+    )
 
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.translations.api_router import (

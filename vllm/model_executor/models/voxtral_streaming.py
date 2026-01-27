@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import math
 from collections.abc import Mapping
-from typing import Literal, cast
+from typing import AsyncGenerator, Literal, cast
 
 import numpy as np
 import torch
@@ -15,9 +16,9 @@ from mistral_common.protocol.transcription.request import (
 from mistral_common.tokens.tokenizers.audio import Audio
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
 from vllm.model_executor.models.voxtral import (
     VoxtralDummyInputsBuilder,
     VoxtralForConditionalGeneration,
@@ -41,9 +42,12 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from .utils import (
     _flatten_embeddings,
 )
+from mistral_common.tokens.tokenizers.audio import AudioConfig
+from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
+_PRE_ALLOCATE_BUFFER_SIZE_IN_S = 30
 
 class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
     def __init__(
@@ -124,12 +128,94 @@ def _expand_tensor(input_tensor: torch.Tensor, scaling: int) -> torch.Tensor:
     return (base.unsqueeze(1) + offsets).view(-1)
 
 
+class VoxtralRealtimeBuffer:
+    def __init__(self, config: AudioConfig) -> None:
+        self._config = config
+
+        # TODO(Patrick) - move tokenizer config
+        self._look_ahead_in_ms = 2.5
+        self._look_back_in_ms = 52.5
+
+        self._sampling_rate = self._config.sampling_rate
+
+        self._look_ahead = self._get_len_in_samples(self._look_ahead_in_ms)
+        self._look_back = self._get_len_in_samples(self._look_back_in_ms)
+        self._streaming_size = self._get_len_in_samples(1000 / self._config.frame_rate)
+
+        # mutable objects
+        streaming_delay = self._get_len_in_samples(self._config.transcription_delay_ms)
+        n_left_pad_samples = (
+            self._config.raw_audio_length_per_tok * self._config.n_left_pad_tokens
+        )
+        n_left_pad_samples = 0
+        self._start = 0
+        self._end = streaming_delay + n_left_pad_samples + self._streaming_size
+
+        # always pre-allocate 30 second buffers
+        self._buffer_size = _PRE_ALLOCATE_BUFFER_SIZE_IN_S * self._sampling_rate
+        self._buffer: np.ndarray = np.empty(self._buffer_size, dtype=np.float32)
+        self._filled_buffer_len = 0
+
+    @property
+    def start_idx(self):
+        return max(self._start - self._look_back, 0)
+
+    @property
+    def end_idx(self):
+        return self._end + self._look_ahead
+
+    @property
+    def is_chunk_complete(self) -> bool:
+        return self._filled_buffer_len >= self.end_idx
+
+    def _get_len_in_samples(self, len_in_ms: float) -> int:
+        _len_in_s = self._sampling_rate * len_in_ms / 1000
+        assert _len_in_s.is_integer(), _len_in_s
+        len_in_s = int(_len_in_s)
+
+        return len_in_s
+
+    def _allocate_new_buffer(self) -> None:
+        # allocate new buffer
+        new_buffer = np.empty(self._buffer_size, dtype=np.float32)
+        left_to_copy = max(self._filled_buffer_len - self.start_idx, 0)
+
+        if left_to_copy > 0:
+            new_buffer[:left_to_copy] = self._buffer[self.start_idx: self._filled_buffer_len]
+
+        del self._buffer
+        self._buffer = new_buffer
+
+        self._filled_buffer_len = left_to_copy
+        self._start = self._look_back
+        self._end = self._start + self._streaming_size
+
+    def add_audio_chunk(self, audio_chunk: np.ndarray) -> None:
+        put_end_idx = self._filled_buffer_len + len(audio_chunk)
+
+        if put_end_idx > self._buffer_size:
+            self._allocate_new_buffer()
+
+        self._buffer[self._filled_buffer_len : self._filled_buffer_len + len(audio_chunk)] = audio_chunk
+        self._filled_buffer_len += len(audio_chunk)
+
+    def get_audio_chunk(self) -> np.ndarray | None:
+        if not self.is_chunk_complete:
+            return None
+
+        audio_chunk = self._buffer[self.start_idx: self.end_idx]
+        self._start = self._end
+        self._end += self._streaming_size
+
+        return audio_chunk
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     VoxtralStreamingMultiModalProcessor,
     info=VoxtralProcessingInfo,
     dummy_inputs=VoxtralDummyInputsBuilder,
 )
-class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
+class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -147,6 +233,66 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         )
 
         self.n_delay_tokens = int(_n_delay_tokens)
+
+    # for realtime transcription
+    @classmethod
+    async def buffer_realtime_audio(
+        cls,
+        audio_stream: AsyncGenerator[np.ndarray, None],
+        input_stream: asyncio.Queue[list[int]],
+        model_config: ModelConfig,
+    ) -> AsyncGenerator[PromptType, None]:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio_encoder = tokenizer.instruct.audio_encoder
+        config = audio_encoder.audio_config
+
+        buffer = VoxtralRealtimeBuffer(config)
+        is_first_yield = True
+
+        count = 0
+
+        async for audio in audio_stream:
+            print("audio shape", audio.shape)
+            buffer.add_audio_chunk(audio)
+
+            while (new_audio := buffer.get_audio_chunk()) is not None:
+                print("new_audio shape", new_audio.shape)
+
+                if is_first_yield:
+                    # make sure that input_stream is empty
+                    assert input_stream.empty()
+
+                    audio = Audio(new_audio, config.sampling_rate, format="wav")
+
+                    request = TranscriptionRequest(
+                        streaming=StreamingMode.ONLINE,
+                        audio=RawAudio.from_audio(audio),
+                        language=None,
+                    )
+                    # audio will be correctly padded
+                    # and correct token ids will be created
+                    audio_enc = tokenizer.mistral.encode_transcription(request)
+
+                    token_ids = audio_enc.tokens
+                    new_audio = audio_enc.audios[0].audio_array
+
+                    is_first_yield = False
+                else:
+                    # pop last element from input_stream
+                    all_outputs = await asyncio.wait_for(input_stream.get(), timeout=10.0)
+                    token_ids = all_outputs[-1:]
+
+                count += 1
+                print(f"COUNT {count}")
+                print(20 * "-" + "INPUT" + 20 * "-")
+                print("token_ids", token_ids)
+                print("audio shape", new_audio.shape)
+                print("audio", new_audio)
+
+                multi_modal_data = {"audio": (new_audio, None)}
+                yield TokensPrompt(
+                    prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+                )
 
     @property
     def audio_config(self):
