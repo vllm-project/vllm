@@ -1029,7 +1029,7 @@ class MambaMixer2(MambaBase, CustomOp):
                         num_non_spec_decode_tokens, -1, self.head_dim
                     ),
                     is_blackwell=self.is_blackwell,
-            )
+                )
 
         # ============================================================
         # Merge Outputs Back to Original Token Order
