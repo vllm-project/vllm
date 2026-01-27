@@ -26,20 +26,19 @@ class EmbeddingCompletionRequest(
 
         if pooler_config:
             if pooler_config.enable_chunked_processing:
-                max_output_tokens = 0
+                max_embed_len = max_total_tokens
             else:
-                max_embed_len = pooler_config.max_embed_len or 0
-                max_output_tokens = max_total_tokens - max_embed_len
+                max_embed_len = pooler_config.max_embed_len or max_total_tokens
         else:
-            max_output_tokens = 0
+            max_embed_len = max_total_tokens
 
         return TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            max_output_tokens=max_output_tokens,
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_total_tokens - max_embed_len,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
-            max_output_tokens_param="max_embed_len",
+            max_output_tokens_param="max_model_len - max_embed_len",
         )
 
 
@@ -57,20 +56,19 @@ class EmbeddingChatRequest(
 
         if pooler_config:
             if pooler_config.enable_chunked_processing:
-                max_output_tokens = 0
+                max_embed_len = max_total_tokens
             else:
-                max_embed_len = pooler_config.max_embed_len or 0
-                max_output_tokens = max_total_tokens - max_embed_len
+                max_embed_len = pooler_config.max_embed_len or max_total_tokens
         else:
-            max_output_tokens = 0
+            max_embed_len = max_total_tokens
 
         return TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            max_output_tokens=max_output_tokens,
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_total_tokens - max_embed_len,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
-            max_output_tokens_param="max_embed_len",
+            max_output_tokens_param="max_model_len - max_embed_len",
         )
 
 
