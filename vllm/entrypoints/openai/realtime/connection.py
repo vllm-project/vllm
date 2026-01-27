@@ -106,7 +106,7 @@ class RealtimeConnection:
                 #     raise ValueError("Invalid audio format")
 
                 # Put audio chunk in queue
-                await self.audio_queue.put(audio_array)
+                self.audio_queue.put_nowait(audio_array)
 
             except Exception as e:
                 logger.error("Failed to decode audio: %s", e)
@@ -236,7 +236,7 @@ class RealtimeConnection:
     async def cleanup(self):
         """Cleanup resources."""
         # Signal audio stream to stop
-        await self.audio_queue.put(None)
+        self.audio_queue.put_nowait(None)
 
         # Cancel generation task if running
         if self.generation_task and not self.generation_task.done():
