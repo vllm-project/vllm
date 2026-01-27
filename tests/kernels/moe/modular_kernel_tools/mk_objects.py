@@ -7,9 +7,6 @@ import torch
 # Fused experts and PrepareFinalize imports
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
@@ -255,12 +252,11 @@ if has_pplx():
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (  # noqa: E501
+        FlashInferCutlassMoEPrepareAndFinalize,
+    )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-        FlashInferCutlassMoEPrepareAndFinalize,
-        create_flashinfer_prepare_finalize,
     )
 
     register_prepare_and_finalize(
@@ -428,23 +424,6 @@ if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
         ),
     ]
 
-
-def make_prepare_finalize(
-    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-    backend: str | None,
-    moe: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig,
-) -> mk.FusedMoEPrepareAndFinalize:
-    if backend != "naive" and backend is not None:
-        prepare_finalize = maybe_make_prepare_finalize(moe, quant_config)
-        assert prepare_finalize is not None
-        return prepare_finalize
-    elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
-        return create_flashinfer_prepare_finalize(
-            use_dp=moe.moe_parallel_config.dp_size > 1
-        )
-    else:
-        return MoEPrepareAndFinalizeNoDPEP()
 
 
 def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:

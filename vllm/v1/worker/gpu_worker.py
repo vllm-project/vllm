@@ -542,6 +542,10 @@ class Worker(WorkerBase):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        """Get encoder timing stats from model runner."""
+        return self.model_runner.get_encoder_timing_stats()
+
     def annotate_profile(self, scheduler_output):
         # add trace annotation so that we can easily distinguish
         # context/generation request numbers in each iteration.
