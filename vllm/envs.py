@@ -778,6 +778,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Backend for Video IO
     # - "opencv": Default backend that uses OpenCV stream buffered backend.
+    # - "identity": Returns raw video bytes for model processor to handle.
     #
     # Custom backend implementations can be registered
     # via `@VIDEO_LOADER_REGISTRY.register("my_custom_video_loader")` and
