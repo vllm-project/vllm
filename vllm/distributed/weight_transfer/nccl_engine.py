@@ -178,6 +178,7 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
         post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor]
         | None = None,
         packed: bool = False,
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
         """Broadcast weights from trainer to vLLM workers.
 
@@ -220,7 +221,9 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
             # Use simple one-by-one broadcasting
             for item in iterator:
                 tensor = post_iter_func(item)
-                group.broadcast(tensor, src=src, stream=torch.cuda.current_stream())
+                group.broadcast(
+                    tensor, src=src, stream=stream or torch.cuda.current_stream()
+                )
 
     @staticmethod
     def stateless_init_process_group(
