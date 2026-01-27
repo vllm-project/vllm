@@ -168,8 +168,10 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         use_dp: bool,
         num_dispatchers: int = 1,
         use_deepseek_fp8_block_scale: bool = False,
+        use_ep: bool = True,
     ):
         super().__init__(use_dp, num_dispatchers, use_deepseek_fp8_block_scale)
+        self.use_ep = use_ep
 
     def prepare(
         self,
@@ -197,12 +199,15 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
                 quant_config.block_shape,
                 is_fp4_scale_swizzled=not self.use_dp,
             )
+            if not is_nvfp4:
+                # per-tensor scales are static and shouldn't be communicated
+                a1q_scale = None
         else:
             # Block-scale path: pass activations through, omit per-token scales
             a1q = a1
             a1q_scale = None
 
-        if self.use_dp:
+        if self.use_dp and self.use_ep:
             # Build gather list conditionally - omit a1q_scale if None
             # (block-scale path)
             gather_list = [topk_weights, topk_ids, a1q]
@@ -227,6 +232,8 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
             if a1q_scale.element_size() == 1:
                 a1q_scale = a1q_scale.view(torch.uint8)
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
+        elif not self.use_deepseek_fp8_block_scale and not is_nvfp4:
+            a1q_scale = quant_config.a1_scale
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -241,7 +248,7 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
     ) -> None:
         assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP)
 
-        if self.use_dp:
+        if self.use_dp and self.use_ep:
             fused_expert_output = get_dp_group().reduce_scatterv(
                 fused_expert_output, dim=0, sizes=get_local_sizes()
             )
@@ -355,6 +362,7 @@ def create_flashinfer_prepare_finalize(
     use_nvfp4: bool = False,
     enable_alltoallv: bool = False,
     use_deepseek_fp8_block_scale: bool = False,
+    use_ep: bool = True,
 ) -> FlashInferCutlassMoEPrepareAndFinalize | MoEPrepareAndFinalizeNoEP:
     """Factory function to create the appropriate FlashInfer implementation."""
 
@@ -363,8 +371,9 @@ def create_flashinfer_prepare_finalize(
             assert use_nvfp4
             return FlashInferAllToAllMoEPrepareAndFinalize(use_dp)
         return FlashInferAllGatherMoEPrepareAndFinalize(
-            use_dp=True,
+            use_dp=use_dp,
             use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
+            use_ep=use_ep,
         )
     else:
         # CUTLASS FP8 BLOCK and CUTLASS NVFP4 apply input quantization

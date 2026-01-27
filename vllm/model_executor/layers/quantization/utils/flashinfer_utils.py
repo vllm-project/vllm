@@ -171,7 +171,9 @@ def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
     # Propagate block-scale flag so prepare/finalize can skip act quantization
     # and inform the kernel to consume per-block weight scales.
     return create_flashinfer_prepare_finalize(
-        use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
+        use_dp,
+        use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale,
+        use_ep=moe.use_ep if moe is not None else False,
     )
 
 
