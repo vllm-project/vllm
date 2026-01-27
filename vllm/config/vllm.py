@@ -103,11 +103,10 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if RMS norm custom op is active and hidden size is 2880 i.e. gpt-oss;
-    otherwise Inductor handles fusion."""
+    """Enable if using AITER RMSNorm (TODO: add better checks here)
+    and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
 
-    return (
-        cfg.compilation_config.is_custom_op_enabled("rms_norm")
+    return (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_RMSNORM
         and cfg.model_config.get_hidden_size() == 2880
     )
 
