@@ -7,17 +7,8 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEParallelConfig,
-    RoutingMethodType,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kNvfp4Dynamic,
-    kNvfp4Static,
     swizzle_blockscale,
 )
 from vllm.platforms import current_platform
@@ -39,86 +30,6 @@ __all__ = [
     "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
 ]
-
-#
-# Methods used by the oracle for kernel selection.
-#
-
-
-def _supports_current_device() -> bool:
-    """Supports only Blackwell-family GPUs."""
-    p = current_platform
-    return p.is_cuda() and p.is_device_capability_family(100)
-
-
-def _supports_no_act_and_mul() -> bool:
-    """Does not support non-gated MoE (i.e. Nemotron-Nano)."""
-    return False
-
-
-def _supports_quant_scheme(
-    weight_key: QuantKey | None,
-    activation_key: QuantKey | None,
-) -> bool:
-    """Supports Nvfp4 quantization."""
-    SUPPORTED_W_A = [
-        (kNvfp4Static, kNvfp4Dynamic),
-    ]
-    return (weight_key, activation_key) in SUPPORTED_W_A
-
-
-def _supports_activation(activation: str) -> bool:
-    """Supports silu activation only."""
-    return activation in ["silu"]
-
-
-def _supports_routing_method(
-    routing_method: RoutingMethodType,
-) -> bool:
-    """Monolithic kernels need to express router support."""
-    # NOTE(rob): potentially allow others here. This is a conservative list.
-    return routing_method in [
-        RoutingMethodType.DeepSeekV3,
-        RoutingMethodType.Renormalize,
-        RoutingMethodType.RenormalizeNaive,
-        RoutingMethodType.Llama4,
-    ]
-
-
-def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-    """Supports EP."""
-    return True
-
-
-def is_supported_config_trtllm(
-    moe_config: FusedMoEConfig,
-    weight_key: QuantKey | None,
-    activation_key: QuantKey | None,
-    activation_format: mk.FusedMoEActivationFormat,
-) -> tuple[bool, str | None]:
-    """
-    This method mirrors mk.FusedMoEPermuteExpertsUnpermute.is_supported_config
-    """
-
-    def _make_reason(reason: str) -> str:
-        return f"kernel does not support {reason}"
-
-    if not _supports_current_device():
-        return False, _make_reason("current device")
-    elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
-        return False, _make_reason("no act_and_mul MLP layer")
-    elif not _supports_activation(moe_config.activation):
-        return False, _make_reason(f"{moe_config.activation} activation")
-    elif not _supports_quant_scheme(weight_key, activation_key):
-        return False, _make_reason("quantization scheme")
-    elif not _supports_parallel_config(moe_config.moe_parallel_config):
-        return False, _make_reason("parallel config")
-    elif not _supports_routing_method(moe_config.routing_method):
-        return False, _make_reason("routing method")
-    elif activation_format != mk.FusedMoEActivationFormat.Standard:
-        return False, _make_reason("activation format")
-
-    return True, None
 
 
 def is_flashinfer_fp4_cutlass_moe_available() -> bool:
