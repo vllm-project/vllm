@@ -18,9 +18,9 @@ from starlette.background import BackgroundTask, BackgroundTasks
 from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import EmbedsPrompt, TokensPrompt
+from vllm.inputs.parse import get_prompt_len
 from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
-from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
@@ -204,10 +204,7 @@ def get_max_tokens(
         # CompletionRequest (also a fallback for ChatCompletionRequest)
         max_tokens = getattr(request, "max_tokens", None)
 
-    input_length = length_from_prompt_token_ids_or_embeds(
-        prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
-        prompt.get("prompt_embeds"),  # type: ignore[arg-type]
-    )
+    input_length = get_prompt_len(prompt)
     default_max_tokens = max_model_len - input_length
     max_output_tokens = current_platform.get_max_output_tokens(input_length)
 

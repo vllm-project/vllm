@@ -117,7 +117,8 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import EmbedsPrompt, TokensPrompt
+from vllm.inputs.parse import get_prompt_len
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
@@ -289,13 +290,14 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_server = tool_server
 
     def _validate_generator_input(
-        self, engine_prompt: TokensPrompt
+        self,
+        engine_prompt: TokensPrompt | EmbedsPrompt,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
-        if self.max_model_len <= len(engine_prompt["prompt_token_ids"]):
+        prompt_len = get_prompt_len(engine_prompt)
+        if self.max_model_len <= prompt_len:
             error_message = (
-                "The engine prompt length"
-                f" {len(engine_prompt['prompt_token_ids'])} "
+                f"The engine prompt length {prompt_len} "
                 f"exceeds the max_model_len {self.max_model_len}. "
                 "Please reduce prompt."
             )
@@ -305,6 +307,7 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="input",
             )
+
         return None
 
     def _validate_create_responses_input(

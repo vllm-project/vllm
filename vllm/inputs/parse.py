@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias, TypedDict
 
 from typing_extensions import TypeIs
 
+from vllm.utils import length_from_prompt_token_ids_or_embeds
+
 from .data import (
     EmbedsPrompt,
     ExplicitEncoderDecoderPrompt,
@@ -97,4 +99,11 @@ def get_prompt_components(prompt: PromptType) -> PromptComponents:
         text=prompt.get("prompt"),  # type: ignore[arg-type]
         token_ids=prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
         embeds=prompt.get("prompt_embeds"),
+    )
+
+
+def get_prompt_len(prompt: TokensPrompt | EmbedsPrompt):
+    return length_from_prompt_token_ids_or_embeds(
+        prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        prompt.get("prompt_embeds"),  # type: ignore[arg-type]
     )
