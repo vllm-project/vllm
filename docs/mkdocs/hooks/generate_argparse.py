@@ -162,7 +162,8 @@ class MarkdownFormatter(HelpFormatter):
             if action.help:
                 self._markdown_output.append(f"{action.help}\n\n")
 
-            if (default := action.default) != SUPPRESS:
+            # None usually means the default is determined at runtime
+            if (default := action.default) != SUPPRESS and default is not None:
                 # Make empty string defaults visible
                 if default == "":
                     default = '""'
