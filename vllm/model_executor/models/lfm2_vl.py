@@ -57,6 +57,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from .vision import is_vit_use_data_parallel
 
 
 class Lfm2VLImagePixelInputs(TensorSchema):
@@ -428,10 +429,12 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
 
 class Lfm2VLMultiModalProjector(nn.Module):
     def __init__(
-        self, config: Lfm2VlConfig, use_data_parallel: bool = False, prefix: str = ""
+        self,
+        config: Lfm2VlConfig,
+        prefix: str = "",
     ):
         super().__init__()
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = is_vit_use_data_parallel()
 
         in_channels = config.vision_config.hidden_size * (config.downsample_factor**2)
         self.factor = config.downsample_factor
