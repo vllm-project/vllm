@@ -8,6 +8,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     get_tma_aligned_size,
+    is_deep_gemm_e8m0_used,
 )
 
 from .InputQuantKernel import (
@@ -95,6 +96,10 @@ def per_token_group_quant_fp8_cuda(
 
 
 class CudaInputQuantKernel(InputQuantKernel[InputQuantConfig]):
+    def __init__(self, config: InputQuantConfig):
+        super().__init__(config)
+        self.use_ue8m0 = is_deep_gemm_e8m0_used()
+
     @classmethod
     def is_supported(cls):
         return current_platform.is_cuda_alike(), "Not supported on Non cuda platfrom"

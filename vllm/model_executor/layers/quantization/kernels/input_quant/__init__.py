@@ -6,7 +6,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import PlatformEnum, current_platform
 
 from .aiter import AiterInputQuantKernel
-from .cuda import CudaInputQuantKernel
+from .deep_gemm import DeepGemmInputQuantKernel
 from .InputQuantKernel import InputQuantConfig, InputQuantKernel
 from .pytorch import PytorchInputQuantKernel
 
@@ -17,7 +17,7 @@ __all__ = [
 ]
 
 _PLATFORM_PRIORITIES: dict[PlatformEnum, type[InputQuantKernel]] = {
-    PlatformEnum.CUDA: CudaInputQuantKernel,
+    PlatformEnum.CUDA: DeepGemmInputQuantKernel,
     PlatformEnum.ROCM: AiterInputQuantKernel,
 }
 
