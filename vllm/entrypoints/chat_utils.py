@@ -584,29 +584,30 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         """
         input_modality = modality.replace("_embeds", "")
         original_modality = modality
+        use_vision_chunk = (
+            self.use_unified_vision_chunk_modality
+            and original_modality in ["video", "image"]
+        )
 
         # If use_unified_vision_chunk_modality is enabled,
         # map image/video to vision_chunk
-        if self.use_unified_vision_chunk_modality and modality in ["video", "image"]:
+        if use_vision_chunk:
             # To avoid validation fail
             # because models with use_unified_vision_chunk_modality=True
             # will only accept vision_chunk modality.
             input_modality = "vision_chunk"
-
-        num_items = len(self._items_by_modality[input_modality]) + 1
+            num_items = len(self._items_by_modality[input_modality]) + 1
+        else:
+            num_items = len(self._items_by_modality[original_modality]) + 1
 
         self.mm_processor.validate_num_items(input_modality, num_items)
 
         # Track original modality for vision_chunk items
-        if self.use_unified_vision_chunk_modality and original_modality in [
-            "video",
-            "image",
-        ]:
-            input_modality_key = (
-                input_modality if "_embeds" not in input_modality else modality
-            )
-            self._items_by_modality[input_modality_key].append(item)  # type: ignore
+        if use_vision_chunk:
+            self._items_by_modality[input_modality].append(item)  # type: ignore
             self._modality_order["vision_chunk"].append(original_modality)
+        else:
+            self._items_by_modality[original_modality].append(item)
 
         return self.model_cls.get_placeholder_str(modality, num_items)
 
