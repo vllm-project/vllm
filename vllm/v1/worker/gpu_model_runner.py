@@ -1555,7 +1555,6 @@ class GPUModelRunner(
 
                 # Overwrite continuing requests with GPU-computed values
                 self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
-                # use valid_sampled_token_count_gpu to update num_accepted_tokens
                 self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
 
         # Copy mrope_position_delta for M-RoPE models.
@@ -1708,8 +1707,6 @@ class GPUModelRunner(
             max_seq_len = self.max_model_len
         else:
             max_seq_len = self.seq_lens.np[:num_reqs].max().item()
-
-        if use_spec_decode:
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
