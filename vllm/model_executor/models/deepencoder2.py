@@ -830,7 +830,6 @@ def build_qwen2_decoder_as_encoder(
         num_attention_heads=14,
         num_key_value_heads=2,
         intermediate_size=4864,
-        max_query = 400,
 ):
 
     decoder_as_encoder = Qwen2Decoder2Encoder(
@@ -839,7 +838,6 @@ def build_qwen2_decoder_as_encoder(
         num_attention_heads = num_attention_heads,
         num_key_value_heads = num_key_value_heads,
         intermediate_size = intermediate_size,
-        max_query = max_query
     )
 
     return decoder_as_encoder

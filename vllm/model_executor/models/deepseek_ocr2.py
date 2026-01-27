@@ -369,6 +369,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
             "model.layers.": "language_model.model.layers.",
             "model.norm.": "language_model.model.norm.",
             "lm_head.": "language_model.lm_head.",
+            "model.qwen2_model.": "vision_model.",
             # remove "model." prefix for other components
             "model.": "",
         }
