@@ -48,7 +48,7 @@ __host__ __device__ __forceinline__ bool is_32byte_aligned(const void* ptr) {
 // Activation and gating kernel template.
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
           bool act_first, bool use_vec, bool use_256b = false>
-__global__ void act_and_mul_kernel(
+__global__ void __maxnreg__(32) act_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const int d) {
@@ -206,7 +206,7 @@ __device__ __forceinline__ T fatrelu_kernel(const T& x, const float threshold) {
 }
 
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&, const float), bool use_vec, bool use_256b = false>
-__global__ void act_and_mul_kernel_with_param(
+__global__ void __maxnreg__(32) act_and_mul_kernel_with_param(
     scalar_t* __restrict__ out, const scalar_t* __restrict__ input, const int d,
     const float param) {
   constexpr int ARCH_MAX_VEC_SIZE = TypeTraits<use_256b>::ARCH_MAX_VEC_SIZE;
@@ -396,7 +396,7 @@ namespace vllm {
 
 // Element-wise activation kernel template.
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&), bool use_vec, bool use_256b = false>
-__global__ void activation_kernel(
+__global__ void __maxnreg__(32) activation_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., d]
     const int d) {
