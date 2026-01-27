@@ -182,7 +182,7 @@ class Base(
 
         # Standardise base model prefix
         bmp = self.model.base_model_prefix
-        expected_bmp = r"model\.\1"
+        expected_bmp = r"model.\1"
         # Handle checkpoints saved with different base model prefix
         if bmp and bmp != "model":
             different_bmp_pattern = re.compile(rf"^{bmp}\.(.+)")
