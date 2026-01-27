@@ -329,7 +329,7 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     partial_rotary_factor = getattr_iter(config, names, None, warn=True)
     ompe = getattr(config, "original_max_position_embeddings", None)
 
-    if Version(version("transformers")) < Version("5.0.0.dev0"):
+    if Version(version("transformers")) < Version("5.0.0"):
         # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
             config.rope_parameters = rope_scaling
