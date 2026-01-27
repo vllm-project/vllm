@@ -3,7 +3,7 @@
 
 
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, FastAPI, Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
