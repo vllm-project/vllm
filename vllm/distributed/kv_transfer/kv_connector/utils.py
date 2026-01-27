@@ -12,9 +12,6 @@ import torch
 
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
-    MultiConnectorKVEvents,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
@@ -127,46 +124,18 @@ class KVOutputAggregator:
                         aggregated_kv_connector_stats.aggregate(kv_connector_stats)
                     )
 
-            if kv_cache_events := kv_output.kv_cache_events:
-                # Combine kv_cache_events from all workers.
-                if combined_kv_cache_events is None:
-                    # Use the first worker's kv_cache events as start event list.
-                    combined_kv_cache_events = kv_cache_events
-                else:
-                    assert isinstance(
-                        combined_kv_cache_events,
-                        type(kv_cache_events),
-                    )
-
-                    if isinstance(kv_cache_events, MultiConnectorKVEvents):
-                        connectors_worker_kv_cache_events = (
-                            kv_cache_events.get_all_connector_events()
-                        )
-                        for (
-                            connector_name,
-                            connector_worker_kv_cache_events,
-                        ) in connectors_worker_kv_cache_events.items():
-                            if connector_worker_kv_cache_events is None:
-                                continue
-                            try:
-                                combined_connector_kv_cache_events = (
-                                    combined_kv_cache_events.get_connector_events(
-                                        connector_name
-                                    )
-                                )
-                            except KeyError:
-                                continue
-                            worker_kv_cache_events = (
-                                connector_worker_kv_cache_events.get_all_events()
-                            )
-                            combined_connector_kv_cache_events.add_events(
-                                worker_kv_cache_events
-                            )
-                            combined_connector_kv_cache_events.increment_workers(1)
-                    else:
-                        worker_kv_cache_events = kv_cache_events.get_all_events()
-                        combined_kv_cache_events.add_events(worker_kv_cache_events)
-                        combined_kv_cache_events.increment_workers(1)
+            # Combine kv_cache_events from all workers.
+            if combined_kv_cache_events is None:
+                # Use the first worker's kv_cache events as start event list.
+                combined_kv_cache_events = kv_output.kv_cache_events
+            elif kv_cache_events := kv_output.kv_cache_events:
+                assert isinstance(
+                    combined_kv_cache_events,
+                    type(kv_cache_events),
+                )
+                worker_kv_cache_events = kv_cache_events.get_all_events()
+                combined_kv_cache_events.add_events(worker_kv_cache_events)
+                combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids
 

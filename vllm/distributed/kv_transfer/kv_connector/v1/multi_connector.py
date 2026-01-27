@@ -104,32 +104,55 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
             self._prom_metrics[connector_id].observe(stats_data["data"], engine_idx)
 
 
+class ConnectorKVCacheEvents(KVCacheEvent):
+    """KV cache events grouped by connector type."""
+
+    connector_name: str
+    events: list[KVCacheEvent]
+
+
 class MultiConnectorKVEvents(KVConnectorKVEvents):
-    """KV events container for multiple connectors."""
+    """KV events for multiple connectors."""
 
     def __init__(self, data: dict[str, KVConnectorKVEvents] | None = None):
         self._data = data or {}
 
+    def add_events(self, events: list[KVCacheEvent]) -> None:
+        for event in events:
+            if not isinstance(event, ConnectorKVCacheEvents):
+                continue
+
+            connector_name = event.connector_name
+            if connector_name not in self._data:
+                continue
+
+            self._data[connector_name].add_events(event.events)
+            self._data[connector_name].increment_workers(1)
+
+    def increment_workers(self, count: int = 1) -> None:
+        pass
+
+    def get_all_events(self) -> list[KVCacheEvent]:
+        result: list[KVCacheEvent] = []
+        for connector_name, kv_events in self._data.items():
+            connector_events = kv_events.get_all_events()
+            if connector_events:
+                result.append(
+                    ConnectorKVCacheEvents(
+                        connector_name=connector_name,
+                        events=connector_events,
+                    )
+                )
+        return result
+
     def get_connector_events(self, connector_name: str) -> KVConnectorKVEvents:
         return self._data[connector_name]
-
-    def get_all_connector_events(self) -> dict[str, KVConnectorKVEvents]:
-        return self._data
 
     """ The following methods are not implemented for MultiConnectorKVEvents because
     the specific connector `KVConnectorKVEvents` methods are called instead.
     """
 
-    def add_events(self, events: list[KVCacheEvent]) -> None:
-        raise NotImplementedError
-
     def aggregate(self) -> KVConnectorKVEvents:
-        raise NotImplementedError
-
-    def increment_workers(self, count: int = 1) -> None:
-        raise NotImplementedError
-
-    def get_all_events(self) -> list[KVCacheEvent]:
         raise NotImplementedError
 
     def get_number_of_workers(self) -> int:
