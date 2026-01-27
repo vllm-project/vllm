@@ -304,7 +304,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return activation in ["silu"]
+        return activation in ["silu", "swigluoai-step"]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:

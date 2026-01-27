@@ -1946,7 +1946,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "gelu", "swigluoai"]
+        return activation in ["silu", "gelu", "swigluoai", "swigluoai-step"]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
