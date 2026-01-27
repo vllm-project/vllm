@@ -1469,13 +1469,14 @@ steps:
 
 ##### H200 test #####
 
-- label: LM Eval Large Models (H200) # optional
-  timeout_in_minutes: 60
-  gpu: h200
-  optional: true
-  num_gpus: 8
-  commands:
-    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
+# (TODO: @khluu enable when 8xH200 becomes available on CI)
+# - label: LM Eval Large Models (H200) # optional
+#   timeout_in_minutes: 60
+#   gpu: h200
+#   optional: true
+#   num_gpus: 8
+#   commands:
+#     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
 
 ##### B200 test #####
 - label: Distributed Tests (B200) # optional
