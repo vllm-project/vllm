@@ -600,7 +600,6 @@ class Lfm2VLForConditionalGeneration(
                 self.vision_tower = Siglip2Model(
                     config=vision_config,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=maybe_prefix(prefix, "vision_tower"),
                 )
             else:
@@ -770,7 +769,7 @@ class Lfm2VLForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
