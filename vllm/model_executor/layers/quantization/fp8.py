@@ -1009,9 +1009,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel is not None
+        assert self.moe_mk is not None
         assert not self.is_monolithic
-        return self.kernel(
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,

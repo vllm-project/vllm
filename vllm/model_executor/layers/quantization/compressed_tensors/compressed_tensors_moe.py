@@ -351,8 +351,8 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel is not None
-        return self.kernel(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1075,8 +1075,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
-        assert self.kernel is not None
-        return self.kernel(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,

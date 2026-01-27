@@ -14,9 +14,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    swizzle_blockscale,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
