@@ -10,6 +10,7 @@ import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import (
+    install_shutdown_handler_sync,
     run_server,
     run_server_worker,
     setup_server,
@@ -155,7 +156,6 @@ def run_headless(args: argparse.Namespace):
 
     shutdown_requested = False
 
-    # Catch SIGTERM and SIGINT to allow clean shutdown.
     def signal_handler(signum, frame):
         nonlocal shutdown_requested
         logger.debug("Received %d signal.", signum)
@@ -222,6 +222,7 @@ def run_multi_api_server(args: argparse.Namespace):
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
+    install_shutdown_handler_sync()
     listen_address, sock = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
