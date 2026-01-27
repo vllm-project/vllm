@@ -232,17 +232,22 @@ class TokenizeParams:
 
         if truncate_prompt_tokens is None or truncate_prompt_tokens >= len(tokens):
             return tokens
+        if truncate_prompt_tokens == 0:
+            return tokens[:0]  # type: ignore[return-value]
 
         return tokens[-truncate_prompt_tokens:]  # type: ignore[return-value]
 
     def _apply_length_check(self, tokens: _S) -> _S:
         """Apply length checks to a token sequence."""
-        if self.max_input_tokens is not None and len(tokens) > self.max_input_tokens:
+        max_input_tokens = self.max_input_tokens
+
+        if max_input_tokens is not None and len(tokens) > max_input_tokens:
             raise VLLMValidationError(
                 f"You passed {len(tokens)} input tokens and "
                 f"requested {self.max_output_tokens} output tokens. "
                 f"However, the model's context length is only "
-                f"{self.max_total_tokens}. "
+                f"{self.max_total_tokens}, resulting in a maximum "
+                f"input length of {max_input_tokens}. "
                 f"Please reduce the length of the input messages.",
                 parameter="input_tokens",
                 value=len(tokens),
