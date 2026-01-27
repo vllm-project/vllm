@@ -427,8 +427,13 @@ def _test_rearrange_expert_weights_with_redundancy(
         (4, 8, 8, 16),
     ],
 )
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
 def test_rearrange_expert_weights_with_redundancy(
-    world_size, num_layers, num_local_experts, num_logical_experts
+    world_size,
+    num_layers,
+    num_local_experts,
+    num_logical_experts,
+    eplb_communicator,
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
 
@@ -440,6 +445,7 @@ def test_rearrange_expert_weights_with_redundancy(
         num_layers,
         num_local_experts,
         num_logical_experts,
+        eplb_communicator=eplb_communicator,
     )
 
 
@@ -505,11 +511,13 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
     num_local_experts: int,
     num_logical_experts: int,
+    eplb_communicator: str,
 ):
     """Exercise async EPLB transfer path without MTP/spec decode."""
 
@@ -522,11 +530,13 @@ def test_async_transfer_layer_without_mtp(
         num_layers,
         num_local_experts,
         num_logical_experts,
+        eplb_communicator=eplb_communicator,
     )
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_rearrange_expert_weights_no_change(world_size):
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
+def test_rearrange_expert_weights_no_change(world_size, eplb_communicator):
     """
     Test that when the indices do not change, the weights should remain
     unchanged.
@@ -534,7 +544,11 @@ def test_rearrange_expert_weights_no_change(world_size):
 
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
-    distributed_run(_test_rearrange_expert_weights_no_change, world_size)
+    distributed_run(
+        _test_rearrange_expert_weights_no_change,
+        world_size,
+        eplb_communicator=eplb_communicator,
+    )
 
 
 def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
@@ -600,9 +614,14 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_rearrange_expert_weights_profile_mode(world_size):
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
+def test_rearrange_expert_weights_profile_mode(world_size, eplb_communicator):
     """Test profile mode (should not copy actual weights)"""
 
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
-    distributed_run(_test_rearrange_expert_weights_profile_mode, world_size)
+    distributed_run(
+        _test_rearrange_expert_weights_profile_mode,
+        world_size,
+        eplb_communicator=eplb_communicator,
+    )
