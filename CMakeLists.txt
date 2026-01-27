@@ -433,13 +433,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
     endif()
 
-<<<<<<< HEAD
-    if (MARLIN_SM75_ARCHS) 
-      file(GLOB MARLIN_TEMPLATE_SM75_KERNEL_SRC "csrc/quantization/marlin/sm75_kernel_*.cu")
-=======
     if (MARLIN_SM75_ARCHS)
-      file(GLOB MARLIN_TEMPLATE_SM75_KERNEL_SRC "csrc/quantization/gptq_marlin/sm75_kernel_*.cu")
->>>>>>> 0b5eca3fe (update to 2.9.1 PyTorch release)
+      file(GLOB MARLIN_TEMPLATE_SM75_KERNEL_SRC "csrc/quantization/marlin/sm75_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_SM75_KERNEL_SRC}"
         CUDA_ARCHS "${MARLIN_SM75_ARCHS}")
@@ -450,13 +445,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_SM75_KERNEL_SRC})
     endif()
 
-<<<<<<< HEAD
-    if (MARLIN_FP8_ARCHS) 
-      file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/marlin/sm89_kernel_*.cu")
-=======
     if (MARLIN_FP8_ARCHS)
-      file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/gptq_marlin/sm89_kernel_*.cu")
->>>>>>> 0b5eca3fe (update to 2.9.1 PyTorch release)
+      file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/marlin/sm89_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_FP8_KERNEL_SRC}"
         CUDA_ARCHS "${MARLIN_FP8_ARCHS}")
