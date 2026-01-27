@@ -255,16 +255,15 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
                     token_ids = audio_enc.tokens
                     new_audio = audio_enc.audios[0].audio_array
 
-                    print("HIHIHIHIHI")
-                    print(len(token_ids))
-                    print(token_ids)
-                    print(new_audio.shape)
-
                     is_first_yield = False
                 else:
                     # pop last element from input_stream
                     token_ids = await asyncio.wait_for(input_stream.get(), timeout=3.0)
-                    print("token_ids", token_ids)
+
+                print(20 * "-" + "INPUT" + 20 * "-")
+                print("token_ids", token_ids)
+                print("audio shape", new_audio.shape)
+                print("audio", new_audio)
 
                 multi_modal_data = {"audio": (new_audio, None)}
                 yield TokensPrompt(
