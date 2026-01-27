@@ -196,7 +196,7 @@ class TokenizeParams:
             max_length = self.max_input_tokens
 
         return dict(
-            truncation=max_length is not None,
+            truncation=self.truncate_prompt_tokens is not None,
             max_length=max_length,
             add_special_tokens=self.add_special_tokens,
         )
@@ -232,7 +232,11 @@ class TokenizeParams:
 
     def _apply_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply truncation to a token sequence."""
-        max_length: int | None = self.get_encode_kwargs()["max_length"]
+        max_length = self.truncate_prompt_tokens
+        # NOTE: We don't want to set `max_length` if it is None
+        # Otherwise no error is raised by `self._apply_length_check`
+        if max_length is not None and max_length < 0:
+            max_length = self.max_input_tokens
 
         if max_length is None or max_length >= len(tokens):
             return tokens

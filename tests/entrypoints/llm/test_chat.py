@@ -205,7 +205,7 @@ def test_chat_batch_failure_cleanup(llm_for_failure_test):
         valid_msg,
     ]
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
-    with pytest.raises(ValueError, match="context length is only"):
+    with pytest.raises(ValueError, match="longer than the maximum model length"):
         llm.chat(batch_1, sampling_params=sampling_params)
     outputs_2 = llm.chat(batch_2, sampling_params=sampling_params)
     assert len(outputs_2) == len(batch_2)
