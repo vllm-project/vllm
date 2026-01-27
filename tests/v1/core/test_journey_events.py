@@ -91,7 +91,7 @@ def test_schedule_kind_first_vs_resume():
 
 
 def test_scheduler_step_semantics():
-    """Verify scheduler_step is None for QUEUED, populated for SCHEDULED."""
+    """Verify scheduler_step is 0 for QUEUED, incremented for SCHEDULED."""
     scheduler = create_scheduler(enable_journey_tracing=True)
     request = _create_request()
 
@@ -100,7 +100,7 @@ def test_scheduler_step_semantics():
     events = _get_buffered_events(scheduler, request.client_index)
     queued = [e for e in events if e.event_type == RequestJourneyEventType.QUEUED]
     assert len(queued) == 1
-    assert queued[0].scheduler_step is None  # Before first schedule
+    assert queued[0].scheduler_step == 0  # Changed: QUEUED now uses step counter (typically 0)
 
     # SCHEDULED
     sched_output = scheduler.schedule()
@@ -307,8 +307,8 @@ def test_queued_event_emitted():
 
     assert len(queued) == 1
     assert queued[0].request_id == request.request_id
-    assert queued[0].scheduler_step is None
-    assert queued[0].phase == "PREFILL"
+    assert queued[0].scheduler_step == 0  # Changed: QUEUED now uses step counter (typically 0)
+    assert queued[0].phase == "WAITING"  # Changed: QUEUED phase is now WAITING
     assert queued[0].num_preemptions_so_far == 0
 
 

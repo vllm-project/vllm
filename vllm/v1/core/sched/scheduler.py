@@ -762,10 +762,12 @@ class Scheduler(SchedulerInterface):
                 # to avoid incorrect labeling in production
 
                 if self._enable_journey_tracing and schedule_kind is not None:
+                    core_span = self._core_spans.get(request.request_id)
                     self._emit_journey_event(
                         request,
                         RequestJourneyEventType.SCHEDULED,
                         scheduler_step=curr_step,
+                        span=core_span,
                         schedule_kind=schedule_kind,
                     )
                 # Encoder-related.
@@ -911,10 +913,14 @@ class Scheduler(SchedulerInterface):
         request.spec_token_ids.clear()
         request.num_preemptions += 1
         # Journey event: PREEMPTED
+        core_span = self._core_spans.get(request.request_id)
+        # Use current counter if scheduler_step not provided
+        step = scheduler_step if scheduler_step is not None else self.scheduler_step_counter
         self._emit_journey_event(
             request,
             RequestJourneyEventType.PREEMPTED,
-            scheduler_step=scheduler_step,
+            scheduler_step=step,
+            span=core_span,
         )
 
         # Put the request back to the waiting queue.
@@ -1307,10 +1313,12 @@ class Scheduler(SchedulerInterface):
                     and request.request_id not in self._first_token_emitted
                 ):
                     self._first_token_emitted.add(request.request_id)
+                    core_span = self._core_spans.get(request.request_id)
                     self._emit_journey_event(
                         request,
                         RequestJourneyEventType.FIRST_TOKEN,
                         scheduler_step=scheduler_output.scheduler_step,
+                        span=core_span,
                     )
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
@@ -1319,8 +1327,31 @@ class Scheduler(SchedulerInterface):
 
             routed_experts = None
             if stopped:
+                # Fetch routed_experts defensively (optional metadata, can fail)
                 try:
                     routed_experts = self._get_routed_experts(request)
+                except Exception as e:
+                    # Optional metadata - failure doesn't prevent FINISHED emission
+                    logger.debug(
+                        "Failed to get routed_experts for request %s: %s",
+                        request.request_id,
+                        e,
+                    )
+
+                # NEW: Emit FINISHED event (always, even if routed_experts failed)
+                if self._enable_journey_tracing:
+                    core_span = self._core_spans.get(request.request_id)
+                    finish_status_str = _map_finish_status(request.status)
+                    self._emit_journey_event(
+                        request,
+                        RequestJourneyEventType.FINISHED,
+                        scheduler_step=scheduler_output.scheduler_step,
+                        span=core_span,
+                        finish_status=finish_status_str,
+                    )
+
+                # Free request and cleanup
+                try:
                     kv_transfer_params = self._free_request(request)
                 finally:
                     # End core span for completed request (natural completion path)
@@ -1706,9 +1737,13 @@ class Scheduler(SchedulerInterface):
         if core_span is not None:
             self._core_spans[request.request_id] = core_span
 
-        # Journey event: QUEUED (before first schedule, so step=None)
+        # Journey event: QUEUED (before first schedule, so step is current counter)
+        core_span = self._core_spans.get(request.request_id)
         self._emit_journey_event(
-            request, RequestJourneyEventType.QUEUED, scheduler_step=None
+            request,
+            RequestJourneyEventType.QUEUED,
+            scheduler_step=self.scheduler_step_counter,
+            span=core_span,
         )
 
     def finish_requests(
@@ -1763,11 +1798,15 @@ class Scheduler(SchedulerInterface):
                 request.status = finished_status
 
                 # Journey event: FINISHED
+                core_span = self._core_spans.get(request.request_id)
                 finish_status_str = _map_finish_status(finished_status)
+                # Use current counter if scheduler_step not provided (external abort)
+                step = scheduler_step if scheduler_step is not None else self.scheduler_step_counter
                 self._emit_journey_event(
                     request,
                     RequestJourneyEventType.FINISHED,
-                    scheduler_step=scheduler_step,
+                    scheduler_step=step,
+                    span=core_span,
                     finish_status=finish_status_str,
                 )
 
@@ -2221,7 +2260,11 @@ class Scheduler(SchedulerInterface):
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
 
-    def _compute_progress_snapshot(self, request: Request) -> dict:
+    def _compute_progress_snapshot(
+        self,
+        request: Request,
+        event_type: RequestJourneyEventType | None = None,
+    ) -> dict:
         """Compute progress snapshot using counters that survive preemption.
 
         CRITICAL: num_cached_tokens is CACHE-HIT LENGTH (from OTHER requests),
@@ -2231,6 +2274,7 @@ class Scheduler(SchedulerInterface):
 
         Args:
             request: The request to compute progress for
+            event_type: Optional event type for phase inference (QUEUED → WAITING)
 
         Returns:
             Dictionary with progress fields:
@@ -2238,7 +2282,7 @@ class Scheduler(SchedulerInterface):
             - prefill_total_tokens: Total prompt tokens
             - decode_done_tokens: Output tokens generated
             - decode_max_tokens: Max generation tokens
-            - phase: "PREFILL" or "DECODE"
+            - phase: "WAITING", "PREFILL", or "DECODE"
         """
         num_prompt_tokens = len(request.prompt_token_ids)
 
@@ -2259,8 +2303,15 @@ class Scheduler(SchedulerInterface):
         decode_done = request.num_output_tokens
         decode_max = request.max_tokens
 
-        # Phase detection
-        phase = "PREFILL" if request.num_output_tokens == 0 else "DECODE"
+        # Phase detection with WAITING support
+        # WAITING is guaranteed for QUEUED events (not yet running)
+        # Other events infer PREFILL/DECODE from output tokens
+        if event_type == RequestJourneyEventType.QUEUED:
+            phase = "WAITING"  # Not running yet
+        elif request.num_output_tokens == 0:
+            phase = "PREFILL"  # Running, no output yet
+        else:
+            phase = "DECODE"  # Running, generating output
 
         return {
             "prefill_done_tokens": prefill_done,
@@ -2274,33 +2325,83 @@ class Scheduler(SchedulerInterface):
         self,
         request: Request,
         event_type: RequestJourneyEventType,
-        scheduler_step: int | None,
+        scheduler_step: int,
+        span: Any | None = None,
         schedule_kind: ScheduleKind | None = None,
         finish_status: str | None = None,
     ) -> None:
-        """Emit journey event and buffer per-client.
+        """Emit journey event to span (new) and buffer (legacy, parallel).
 
         This is the central emission point for all journey events. Events are
-        buffered per-client and flushed in update_from_output().
+        emitted to both spans (new) and buffers (legacy) in parallel until
+        legacy buffering is removed in PR #9.
+
+        DEFENSIVE: Must never break request processing if tracing fails.
 
         Args:
             request: The request this event is for
             event_type: Type of lifecycle event
-            scheduler_step: Scheduler step counter (None for QUEUED only)
+            scheduler_step: Scheduler step counter (always int, may be 0 for QUEUED)
+            span: OTEL span to emit to (None if tracer unavailable)
             schedule_kind: FIRST or RESUME (SCHEDULED events only)
             finish_status: Terminal status string (FINISHED events only)
         """
         if not self._enable_journey_tracing:
             return  # Near-zero overhead: single boolean check
 
-        # Compute progress snapshot (handles preemption correctly)
-        progress = self._compute_progress_snapshot(request)
+        # Compute progress snapshot and timestamps ONCE (reused for both span and buffering)
+        progress = self._compute_progress_snapshot(request, event_type=event_type)
+        ts_monotonic = time.monotonic()
+        ts_epoch_ns = time.time_ns()
 
-        # Create event
+        # NEW: Emit to span (parallel to legacy buffering)
+        # CRITICAL: Defensive span emission - wrap ALL OTEL calls in try/except
+        if span and SpanAttributes is not None:
+            try:
+                # Check if span is recording (can throw)
+                if span.is_recording():
+                    # Build event attributes (using pre-computed progress and timestamps)
+                    attributes = {
+                        SpanAttributes.JOURNEY_EVENT_TYPE: event_type.name,
+                        SpanAttributes.JOURNEY_TS_MONOTONIC: ts_monotonic,
+                        SpanAttributes.JOURNEY_SCHEDULER_STEP: scheduler_step,
+                        SpanAttributes.JOURNEY_PHASE: progress["phase"],
+                        SpanAttributes.JOURNEY_PREFILL_DONE_TOKENS: progress["prefill_done_tokens"],
+                        SpanAttributes.JOURNEY_PREFILL_TOTAL_TOKENS: progress["prefill_total_tokens"],
+                        SpanAttributes.JOURNEY_DECODE_DONE_TOKENS: progress["decode_done_tokens"],
+                        SpanAttributes.JOURNEY_DECODE_MAX_TOKENS: progress["decode_max_tokens"],
+                        SpanAttributes.JOURNEY_NUM_PREEMPTIONS: request.num_preemptions,
+                    }
+
+                    # Add optional fields
+                    if schedule_kind is not None:
+                        attributes[SpanAttributes.JOURNEY_SCHEDULE_KIND] = schedule_kind.name
+                    if finish_status is not None:
+                        attributes[SpanAttributes.JOURNEY_FINISH_STATUS] = finish_status
+
+                    # Emit event (can throw)
+                    span.add_event(
+                        name=f"journey.{event_type.name}",
+                        attributes=attributes,
+                        timestamp=ts_epoch_ns,
+                    )
+            except Exception as e:
+                # DEFENSIVE: Tracing must never break request processing
+                # Catches failures from is_recording(), add_event(), or attribute building
+                logger.debug(
+                    "Failed to emit journey event %s for request %s: %s",
+                    event_type.name,
+                    request.request_id,
+                    e,
+                )
+
+        # EXISTING: Legacy buffering (unchanged, parallel operation)
+        # This buffering will be removed in PR #9 (but do_tracing() stays)
+        # Reuse pre-computed progress and timestamp
         event = RequestJourneyEvent(
             request_id=request.request_id,
             event_type=event_type,
-            ts_monotonic=time.monotonic(),
+            ts_monotonic=ts_monotonic,  # Reused
             scheduler_step=scheduler_step,
             prefill_done_tokens=progress["prefill_done_tokens"],
             prefill_total_tokens=progress["prefill_total_tokens"],
