@@ -16,12 +16,12 @@ on:
         required: false
       rocm_arch:
         description: 'ROCm architecture (e.g., gfx1151, gfx1150;gfx1151)'
-        default: 'gfx1151'
+        default: 'gfx1150;gfx1151;gfx1152;gfx1153'
         required: false
 
 env:
   PYTORCH_INDEX_URL: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2-staging/gfx1151' }}
-  PYTORCH_ROCM_ARCH: ${{ github.event.inputs.rocm_arch || 'gfx1151' }}
+  PYTORCH_ROCM_ARCH: ${{ github.event.inputs.rocm_arch || 'gfx1150;gfx1151;gfx1152;gfx1153' }}
 
 jobs:
   build-wheel:
