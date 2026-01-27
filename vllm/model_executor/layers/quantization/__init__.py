@@ -46,7 +46,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "bitblas",
     "gptq_marlin_24",
     "gptq_bitblas",
-    "experts_int8",
     "ipex",
     "petit_nvfp4",
 ]
