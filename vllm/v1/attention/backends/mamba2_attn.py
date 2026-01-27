@@ -162,14 +162,12 @@ class Mamba2AttentionMetadataBuilder(
 
         for req_idx in range(num_prefills):
             this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
-
             this_new_tokens = (
                 query_start_loc_p_cpu[req_idx + 1].item()
                 - query_start_loc_p_cpu[req_idx].item()
             )
-         
-            is_first = True
 
+            is_first = True
             while this_new_tokens > 0:
 
                 # are we starting a new sequence?

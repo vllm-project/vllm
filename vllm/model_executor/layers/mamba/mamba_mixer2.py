@@ -743,11 +743,8 @@ class MambaMixer2(MambaBase, CustomOp):
 
             if is_mamba_cache_all:
                 # The chunk_stride is the number of chunks per mamba block
-                # e.g., if mamba_block_size = 512 and chunk_size = 256,
+                # e.g., if mamba_block_size = 400 and chunk_size = 256,
                 # then chunk_stride = 2
-
-                # NOTE(tdouble) this is no longer divisible
-                # do we need cdiv?
                 chunk_stride = cdiv(mamba_block_size, chunk_size)
 
                 # Save state for sequences with more than just final state
@@ -783,19 +780,14 @@ class MambaMixer2(MambaBase, CustomOp):
                     else:
                         first_chunk = 1 + last_chunk_indices_p[seq_idx - 1]
 
-                    #print("chunk_stride: ", chunk_stride)
-                    #print("n_blocks_to_fill: ", n_blocks_to_fill)
-
                     # First chunk that is aligned on the mamba block boundary
                     first_aligned_chunk = first_chunk + chunk_stride - 1
-                    #print("first_aligned_chunk: ", first_aligned_chunk)
 
                     # Calculate the number of computed tokens that were not
                     # already cached
                     num_unaligned_computed_tokens = (
                         num_computed_tokens_p[seq_idx] % mamba_block_size
                     )
-                    #print("num_unaligned_computed_tokens: ", num_unaligned_computed_tokens)
 
                     if num_unaligned_computed_tokens > 0:
                         # If the number of computed tokens is not block aligned,
@@ -803,15 +795,12 @@ class MambaMixer2(MambaBase, CustomOp):
                         first_aligned_chunk -= (
                             num_unaligned_computed_tokens // chunk_size
                         )
-                        # print("first_aligned_chunk: ", first_aligned_chunk)
 
                     # Get states to write
                     from_where = varlen_states[
                         first_aligned_chunk : first_aligned_chunk
                         + n_blocks_to_fill * chunk_stride : chunk_stride
                     ]
-
-                    
 
                     # Write the states
                     ssm_state[cache_blocks_to_fill] = from_where

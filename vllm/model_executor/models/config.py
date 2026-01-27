@@ -463,47 +463,15 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if mamba_page_size == 0:
             return
 
-        if cache_config.mamba_cache_mode == "all":
-            # With prefix caching, select attention block size to
-            # optimize for mamba kernel performance
+       
+        # Select minimum valid attention block size to minimize mamba state padding
 
-            # Mamba2 SSD kernel uses a chunk_size, e.g. 256
-            # Align the block to the kernel: use lowest multiple of chunk_size
-            # of attention tokens that would fit mamba_page_size:
-            # e.g. for mamba page size = 788kB
-            #          attn_1_token = 2kB -> fits ~394 tokens
-            #      then round up to a multiple of 256 -> 512 tokens
-            # End result:
-            #  attn_block_size = 512
-            #  mamba_block_size = 512 (aligned to a multiple of chunk_size)
-            # TODO(tdoublep): this constraint can be relaxed fairly
-            # easily by changing the way we layout chunks in the
-            # mamba2 kernels.
-
-            '''
-            base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
-            attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
-            chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
-            attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
-            cache_config.mamba_block_size = attn_block_size
-            '''
-            
-            attn_block_size = kernel_block_alignment_size * cdiv(
-                mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
-            )
-            cache_config.mamba_block_size = attn_block_size
-
-
-        else:
-            # Without prefix caching, select minimum valid attention block size
-            # to minimize mamba state padding
-
-            # Calculate minimum attention block size that satisfies both:
-            # 1. Backend alignment requirements (kernel_block_alignment_size)
-            # 2. Mamba page size compatibility (attn_page_size >= mamba_page_size)
-            attn_block_size = kernel_block_alignment_size * cdiv(
-                mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
-            )
+        # Calculate minimum attention block size that satisfies both:
+        # 1. Backend alignment requirements (kernel_block_alignment_size)
+        # 2. Mamba page size compatibility (attn_page_size >= mamba_page_size)
+        attn_block_size = kernel_block_alignment_size * cdiv(
+            mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
+        )
 
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
@@ -517,10 +485,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             )
 
         # By default, mamba block size will be set to max_model_len.
-        # When enabling prefix caching and using align mamba cache
-        # mode, we align mamba block size to the block size as the
-        # basic granularity for prefix caching.
-        if cache_config.mamba_cache_mode == "align":
+        # When enabling prefix caching we align mamba block size to 
+        # the block size as the basic granularity for prefix caching.
+        if cache_config.mamba_cache_mode in ["align", "all"]:
             cache_config.mamba_block_size = cache_config.block_size
 
         # compute new attention page size
