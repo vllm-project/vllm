@@ -12,6 +12,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsRealtime, supports_realtime
 from vllm.v1.engine.async_llm import StreamingInput
@@ -76,7 +77,11 @@ class OpenAIServingRealtime(OpenAIServing):
         """
 
         # it is the model's responsibility to handle the audio stream
-        async for prompt in self.model_cls.buffer_realtime_audio(
-            audio_stream, input_stream, self.model_config
-        ):
+        stream_input_iter: AsyncGenerator[PromptType, None] = (
+            self.model_cls.buffer_realtime_audio(
+                audio_stream, input_stream, self.model_config
+            )
+        )
+
+        async for prompt in stream_input_iter:
             yield StreamingInput(prompt=prompt)

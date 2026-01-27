@@ -284,6 +284,10 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
                     prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
                 )
 
+        # mypy shit
+        if False:
+            yield cast(PromptType, None)
+
     @property
     def audio_config(self):
         return self.tokenizer.instruct.audio_encoder.audio_config
