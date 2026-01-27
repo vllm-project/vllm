@@ -484,6 +484,9 @@ class FlexibleArgumentParser(ArgumentParser):
                     processed_args.append("--" + key)
                     for item in value:
                         processed_args.append(str(item))
+            elif isinstance(value, dict):
+                processed_args.append("--" + key)
+                processed_args.append(json.dumps(value))
             else:
                 processed_args.append("--" + key)
                 processed_args.append(str(value))
