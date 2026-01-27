@@ -585,31 +585,3 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
         memory_allocated_mb=mem_stats.get("allocated_mb"),
         memory_reserved_mb=mem_stats.get("reserved_mb"),
     )
-
-
-# ============================================================================
-# Backwards Compatibility
-# ============================================================================
-
-
-# Keep old function names for backwards compatibility
-def build_common_metadata(*args, **kwargs):
-    """Deprecated: Use _build_attention_metadata instead."""
-    return _build_attention_metadata(*args, **kwargs)
-
-
-def run_attention_benchmark_impl(config: BenchmarkConfig) -> BenchmarkResult:
-    """Deprecated: Use run_attention_benchmark instead."""
-    return run_attention_benchmark(config)
-
-
-def run_mla_benchmark_impl(config: BenchmarkConfig) -> BenchmarkResult:
-    """
-    Run MLA benchmark with real kernels.
-
-    This is a stub - use mla_runner.py for MLA benchmarks.
-    """
-    raise NotImplementedError(
-        "MLA benchmark runner is in mla_runner.py. "
-        "Use run_mla_benchmark() from that module."
-    )
