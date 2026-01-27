@@ -70,7 +70,21 @@ steps:
   - vllm/
   - tests/entrypoints/openai/responses
   commands:
-  - pytest -v -s entrypoints/openai/responses
+  # Run all Responses API tests except the heavy MCP tests in a single session.
+  # MCP tests are split into their own step below to avoid running two large
+  # gpt-oss servers concurrently on the same GPU, which can exhaust memory.
+  - pytest -v -s entrypoints/openai/responses --ignore=entrypoints/openai/responses/test_mcp_tools.py
+
+- label: Entrypoints Integration (Responses API – MCP)
+  timeout_in_minutes: 50
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai/responses/test_mcp_tools.py
+  commands:
+  # Run MCP-enabled/disabled responses tests in isolation so each pytest
+  # process only ever holds a single openai/gpt-oss-20b server instance.
+  - pytest -v -s entrypoints/openai/responses/test_mcp_tools.py
 
 - label: Entrypoints V1
   timeout_in_minutes: 50
