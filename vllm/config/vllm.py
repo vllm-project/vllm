@@ -103,12 +103,13 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if using AITER RMSNorm (TODO: add better checks here)
+    """Enable if using AITER RMSNorm and AITER Triton GEMMs
     and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
 
     return (
         envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_RMSNORM
+        and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
         and cfg.model_config.get_hidden_size() == 2880
     )
 
