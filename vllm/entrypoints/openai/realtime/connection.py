@@ -163,7 +163,7 @@ class RealtimeConnection:
         completion_tokens_len: int = 0
 
         try:
-            # Create sampling params 
+            # Create sampling params
             from vllm.sampling_params import RequestOutputKind, SamplingParams
 
             sampling_params = SamplingParams.from_optional(
