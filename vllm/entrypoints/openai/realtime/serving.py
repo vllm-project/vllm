@@ -12,9 +12,8 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.realtime.protocol import SessionUpdate
 from vllm.logger import init_logger
-from vllm.model_executor.models import SupportsTranscription, supports_transcription
+from vllm.model_executor.models.interfaces import SupportsRealtime, supports_realtime
 from vllm.v1.engine.async_llm import StreamingInput
 
 logger = init_logger(__name__)
@@ -34,7 +33,6 @@ class OpenAIServingRealtime(OpenAIServing):
         *,
         request_logger: RequestLogger | None,
         log_error_stack: bool = False,
-        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -43,44 +41,31 @@ class OpenAIServingRealtime(OpenAIServing):
             log_error_stack=log_error_stack,
         )
 
-        self.task_type: Literal["transcribe"] = "transcribe"
-        self.enable_force_include_usage = enable_force_include_usage
-
-        # Get speech-to-text configuration from the model
-        # TODO(Patrick) - can we use the same config as before for
-        # Speech-to-text
-        # self.asr_config = self.model_cls.get_speech_to_text_config(
-        #     self.model_config, self.task_type
-        # )
-
-        # TODO: Add warmup for audio preprocessing if needed
-        # self._warmup_audio_preprocessing()
+        self.task_type: Literal["realtime"] = "realtime"
 
         logger.info("OpenAIServingRealtime initialized for task: %s", self.task_type)
 
     @cached_property
-    def model_cls(self) -> type[SupportsTranscription]:
+    def model_cls(self) -> type[SupportsRealtime]:
         """Get the model class that supports transcription."""
         from vllm.model_executor.model_loader import get_model_cls
 
         model_cls = get_model_cls(self.model_config)
-        if not supports_transcription(model_cls):
+        if not supports_realtime(model_cls):
             raise ValueError(
                 f"Model {self.model_config.model} does not support transcription"
             )
-        return cast(type[SupportsTranscription], model_cls)
+        return cast(type[SupportsRealtime], model_cls)
 
     async def transcribe_realtime(
         self,
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
-        config: SessionUpdate | None,
     ) -> AsyncGenerator[StreamingInput, None]:
         """Transform audio stream into StreamingInput for engine.generate().
 
         Args:
             audio_stream: Async generator yielding float32 numpy audio arrays
-            config: Session configuration with model and parameters
             input_stream: Queue containing context token IDs from previous
                 generation outputs. Used for autoregressive multi-turn
                 processing where each generation's output becomes the context
@@ -89,27 +74,7 @@ class OpenAIServingRealtime(OpenAIServing):
         Yields:
             StreamingInput objects containing audio prompts for the engine
         """
-        # TODO: Validate model from config if provided
-        # if config and config.model:
-        #     error_check_ret = await self._check_model(request)
-        #     if error_check_ret is not None:
-        #         raise ValueError(f"Model validation failed: {error_check_ret}")
 
-        # Get sampling params from config
-        from vllm.sampling_params import RequestOutputKind, SamplingParams
-
-        sampling_params = SamplingParams.from_optional(
-            temperature=config.temperature if config else 0.0,
-            max_tokens=1,
-            output_kind=RequestOutputKind.DELTA,
-            skip_clone=True,
-        )
-
-        # Process each audio chunk from the stream via model specific
-        # buffer_audio function
+        # it is the model's responsibility to handle the audio stream
         async for prompt in self.model_cls.buffer_realtime_audio(audio_stream, input_stream, self.model_config):
-            # Yield as StreamingInput for the engine
-            yield StreamingInput(
-                prompt=prompt,
-                sampling_params=sampling_params,
-            )
+            yield StreamingInput(prompt=prompt)

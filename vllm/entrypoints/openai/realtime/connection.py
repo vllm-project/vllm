@@ -16,7 +16,6 @@ from vllm.entrypoints.openai.realtime.protocol import (
     ErrorEvent,
     InputAudioBufferAppend,
     SessionCreated,
-    SessionUpdate,
     TranscriptionDelta,
     TranscriptionDone,
 )
@@ -41,14 +40,15 @@ class RealtimeConnection:
         self.websocket = websocket
         self.connection_id = f"ws-{uuid4()}"
         self.serving = serving
-        self.session_config: SessionUpdate | None = None
         self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
         self.generation_task: asyncio.Task | None = None
+        self._is_connected = False
 
     async def handle_connection(self):
         """Main connection loop."""
         await self.websocket.accept()
         logger.info("WebSocket connection accepted: %s", self.connection_id)
+        self._is_connected = True
 
         # Send session created event
         await self.send(SessionCreated())
@@ -66,6 +66,7 @@ class RealtimeConnection:
                     await self.send_error(str(e), "processing_error")
         except WebSocketDisconnect:
             logger.info("WebSocket disconnected: %s", self.connection_id)
+            self._is_connected = False
         except Exception as e:
             logger.exception("Unexpected error in connection: %s", e)
         finally:
@@ -75,20 +76,15 @@ class RealtimeConnection:
         """Route events to handlers.
 
         Supported event types:
-        - session.update: Configure model, language, temperature
+        - session.update: Configure model
         - input_audio_buffer.append: Add audio chunk to queue
         - input_audio_buffer.commit: Start transcription generation
         """
         event_type = event.get("type")
-
         if event_type == "session.update":
-            self.session_config = SessionUpdate(**event)
-            logger.info("Session updated: %s", self.session_config.model_dump())
-
+            logger.info("Session updated: %s", event)
             # TODO: Validate model change
-            # if self.session_config.model:
-            #     await self.serving.validate_model(self.session_config.model)
-
+            # await self.serving.validate_model(event["model"])
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
             try:
@@ -114,11 +110,6 @@ class RealtimeConnection:
 
         elif event_type == "input_audio_buffer.commit":
             await self.start_generation()
-
-            # TODO: Add buffer clear event support
-            # elif event_type == "input_audio_buffer.clear":
-            #     await self.clear_audio_queue()
-
         else:
             await self.send_error(f"Unknown event type: {event_type}", "unknown_event")
 
@@ -145,7 +136,6 @@ class RealtimeConnection:
         streaming_input_gen = self.serving.transcribe_realtime(
             audio_stream,
             input_stream,
-            self.session_config,
         )
 
         # Start generation task
@@ -166,20 +156,14 @@ class RealtimeConnection:
         """
         request_id = f"rt-{self.connection_id}-{uuid4()}"
         full_text = ""
-        all_token_ids: list[int] = []
-
-        # TODO: Track metrics
-        # start_time = time.time()
-        # num_audio_chunks = 0
+        completion_tokens_len: int = 0
 
         try:
             # Create base sampling params (can be overridden per chunk in StreamingInput)
             from vllm.sampling_params import RequestOutputKind, SamplingParams
 
-            base_sampling_params = SamplingParams.from_optional(
-                temperature=self.session_config.temperature
-                if self.session_config
-                else 0.0,
+            sampling_params = SamplingParams.from_optional(
+                temperature=0.0,
                 max_tokens=1,
                 output_kind=RequestOutputKind.DELTA,
                 skip_clone=True,
@@ -190,37 +174,39 @@ class RealtimeConnection:
             # stream back transcription results incrementally
             result_gen = self.serving.engine_client.generate(
                 prompt=streaming_input_gen,
-                sampling_params=base_sampling_params,
+                sampling_params=sampling_params,
                 request_id=request_id,
             )
+            prompt_token_ids_len: int | None = None
 
             # Stream results back to client as they're generated
             async for output in result_gen:
                 if output.outputs and len(output.outputs) > 0:
 
+                    if prompt_token_ids_len is None:
+                        prompt_token_ids_len = len(output.prompt_token_ids)
+
                     delta = output.outputs[0].text
                     full_text += delta
 
-                    # Collect token IDs from output
-                    all_token_ids.extend(output.outputs[0].token_ids)
-                    print("Output", all_token_ids)
-                    await input_stream.put(all_token_ids)
+                    # append output to input
+                    await input_stream.put(output.outputs[0].token_ids)
                     await self.send(TranscriptionDelta(delta=delta))
 
-                    # TODO: Track token counts for usage stats
-                    # completion_tokens += len(output.outputs[0].token_ids)
+                    completion_tokens_len += len(output.outputs[0].token_ids)
 
-            # TODO: Calculate accurate usage stats
+                if not self._is_connected:
+                    # finish
+                    break
+
             usage = UsageInfo(
-                prompt_tokens=0,
-                completion_tokens=0,
-                total_tokens=0,
+                prompt_tokens=prompt_token_ids_len,
+                completion_tokens=completion_tokens_len,
+                total_tokens=prompt_token_ids_len + completion_tokens_len,
             )
 
             # Send final completion event
             await self.send(TranscriptionDone(text=full_text, usage=usage))
-
-            # TODO: Log metrics
 
             # Clear queue for next utterance
             while not self.audio_queue.empty():

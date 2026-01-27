@@ -15,15 +15,6 @@ from vllm.utils import random_uuid
 # Client -> Server Events
 
 
-class SessionUpdate(OpenAIBaseModel):
-    """Configure session parameters"""
-
-    type: Literal["session.update"] = "session.update"
-    model: str | None = None
-    temperature: float = 0.0
-    language: str | None = None
-
-
 class InputAudioBufferAppend(OpenAIBaseModel):
     """Append audio chunk to buffer"""
 
@@ -38,6 +29,11 @@ class InputAudioBufferCommit(OpenAIBaseModel):
 
 
 # Server -> Client Events
+class SessionUpdate(OpenAIBaseModel):
+    """Configure session parameters"""
+
+    type: Literal["session.update"] = "session.update"
+    model: str | None = None
 
 
 class SessionCreated(OpenAIBaseModel):

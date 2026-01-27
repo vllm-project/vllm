@@ -18,7 +18,7 @@ from mistral_common.tokens.tokenizers.audio import Audio
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
 from vllm.model_executor.models.voxtral import (
     VoxtralDummyInputsBuilder,
     VoxtralForConditionalGeneration,
@@ -215,7 +215,7 @@ class VoxtralRealtimeBuffer:
     info=VoxtralProcessingInfo,
     dummy_inputs=VoxtralDummyInputsBuilder,
 )
-class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
+class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
