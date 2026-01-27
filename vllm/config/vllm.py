@@ -1346,6 +1346,7 @@ class VllmConfig:
         compilation_config.compile_ranges_split_points = sorted(
             computed_compile_ranges_split_points
         )
+
     def _set_vit_cudagraph_sizes(self):
         """Sets the CUDA graph capture sizes for the Vision Transformer (ViT).
 

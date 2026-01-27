@@ -10,17 +10,22 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import MultiModalConfig, VllmConfig, CUDAGraphMode, get_current_vllm_config
+from vllm.config import (
+    CUDAGraphMode,
+    MultiModalConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
-from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 logger = init_logger(__name__)
 
@@ -489,8 +494,7 @@ def run_dp_sharded_mrope_vision_model(
     cudagraph_runtime_mode = CUDAGraphMode.NONE
     batch_descriptor = None
 
-    if (vllm_config and
-        vllm_config.compilation_config.vit_cudagraph_capture_sizes):
+    if vllm_config and vllm_config.compilation_config.vit_cudagraph_capture_sizes:
         current_input_len = pixel_values_local.shape[0]
         cudagraph_runtime_mode, batch_descriptor = dispatcher.dispatch(
             num_tokens=current_input_len,
@@ -500,7 +504,7 @@ def run_dp_sharded_mrope_vision_model(
             is_vit=True,
         )
         target_input_len = batch_descriptor.num_tokens
-    
+
         # Pad pixel_values_local for CUDA graph if needed
         if current_input_len < target_input_len:
             padding_size = target_input_len - current_input_len
@@ -516,7 +520,7 @@ def run_dp_sharded_mrope_vision_model(
         None,
         vllm_config=vllm_config,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
-        batch_descriptor=batch_descriptor
+        batch_descriptor=batch_descriptor,
     ):
         # Run the vision model on the local pixel_values_local
         if rope_type == "rope_2d":
@@ -535,7 +539,9 @@ def run_dp_sharded_mrope_vision_model(
                 )
         else:
             if pixel_values_local.shape[0] > 0:
-                image_embeds_local = vision_model(pixel_values_local, local_grid_thw_list)
+                image_embeds_local = vision_model(
+                    pixel_values_local, local_grid_thw_list
+                )
             else:
                 # Handle empty case
                 image_embeds_local = torch.empty(

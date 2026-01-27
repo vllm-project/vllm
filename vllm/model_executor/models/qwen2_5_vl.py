@@ -43,7 +43,12 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 )
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CUDAGraphMode, MultiModalConfig, VllmConfig, set_current_vllm_config, get_current_vllm_config
+from vllm.config import (
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -654,10 +659,14 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 dtype=self.dtype,
             )
             self._persistent_rotary_pos_emb_cos_buffer = torch.empty(
-                (max_compile_size, head_dim // 2), device=self.device, dtype=torch.bfloat16
+                (max_compile_size, head_dim // 2),
+                device=self.device,
+                dtype=torch.bfloat16,
             )
             self._persistent_rotary_pos_emb_sin_buffer = torch.empty(
-                (max_compile_size, head_dim // 2), device=self.device, dtype=torch.bfloat16
+                (max_compile_size, head_dim // 2),
+                device=self.device,
+                dtype=torch.bfloat16,
             )
 
     @property
@@ -804,7 +813,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_seqlens: list = []
 
         fwd_ctx = None
-        if is_forward_context_available():  
+        if is_forward_context_available():
             fwd_ctx = get_forward_context()
         if (
             self._persistent_hidden_states_buffer is not None
@@ -821,7 +830,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
             set_is_last_graph_in_vit_sequence,
         )
 
-        with set_is_first_graph_in_vit_sequence(True), set_is_last_graph_in_vit_sequence(False):
+        with (
+            set_is_first_graph_in_vit_sequence(True),
+            set_is_last_graph_in_vit_sequence(False),
+        ):
             hidden_states = self.patch_embed(hidden_states)
 
         window_index_id = 0
@@ -881,12 +893,12 @@ class Qwen2_5_VisionTransformer(nn.Module):
             and fwd_ctx
             and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
         ):
-            rotary_pos_emb_sin = self._persistent_rotary_pos_emb_sin_buffer[:seq_len].copy_(
-                rotary_pos_emb_sin
-            )
-            rotary_pos_emb_cos = self._persistent_rotary_pos_emb_cos_buffer[:seq_len].copy_(
-                rotary_pos_emb_cos
-            )
+            rotary_pos_emb_sin = self._persistent_rotary_pos_emb_sin_buffer[
+                :seq_len
+            ].copy_(rotary_pos_emb_sin)
+            rotary_pos_emb_cos = self._persistent_rotary_pos_emb_cos_buffer[
+                :seq_len
+            ].copy_(rotary_pos_emb_cos)
         window_index = window_index.to(device=hidden_states.device, non_blocking=True)
         reverse_indices = reverse_indices.to(
             device=hidden_states.device, non_blocking=True
@@ -938,7 +950,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         # adapter
-        with set_is_first_graph_in_vit_sequence(False), set_is_last_graph_in_vit_sequence(True):
+        with (
+            set_is_first_graph_in_vit_sequence(False),
+            set_is_last_graph_in_vit_sequence(True),
+        ):
             hidden_states = self.merger(hidden_states)
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
@@ -1263,7 +1278,8 @@ class Qwen2_5_VLForConditionalGeneration(
             )
 
     def _process_image_input(
-        self, image_input: Qwen2_5_VLImageInputs,
+        self,
+        image_input: Qwen2_5_VLImageInputs,
         cudagraph_dispatcher: Any | None = None,
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
@@ -1275,7 +1291,10 @@ class Qwen2_5_VLForConditionalGeneration(
         else:
             pixel_values = image_input["pixel_values"]
             with set_current_vllm_config(self.vllm_config):
-                if self.use_data_parallel and not self.vllm_config.is_in_compile_or_vit_cuda_graph_capture:
+                if (
+                    self.use_data_parallel
+                    and not self.vllm_config.is_in_compile_or_vit_cuda_graph_capture
+                ):
                     return run_dp_sharded_mrope_vision_model(
                         self.visual,
                         pixel_values,
@@ -1323,7 +1342,8 @@ class Qwen2_5_VLForConditionalGeneration(
         return tuple(image_embeds_split)
 
     def _process_video_input(
-        self, video_input: Qwen2_5_VLVideoInputs,
+        self,
+        video_input: Qwen2_5_VLVideoInputs,
         cudagraph_dispatcher: Any | None = None,
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
@@ -1335,7 +1355,10 @@ class Qwen2_5_VLForConditionalGeneration(
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
             with set_current_vllm_config(self.vllm_config):
-                if self.use_data_parallel and not self.vllm_config.is_in_compile_or_vit_cuda_graph_capture:
+                if (
+                    self.use_data_parallel
+                    and not self.vllm_config.is_in_compile_or_vit_cuda_graph_capture
+                ):
                     return run_dp_sharded_mrope_vision_model(
                         self.visual,
                         pixel_values_videos,
@@ -1505,14 +1528,18 @@ class Qwen2_5_VLForConditionalGeneration(
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                image_embeddings = self._process_image_input(multimodal_input, cudagraph_dispatcher=cudagraph_dispatcher)
+                image_embeddings = self._process_image_input(
+                    multimodal_input, cudagraph_dispatcher=cudagraph_dispatcher
+                )
                 if self.is_multimodal_pruning_enabled:
                     image_embeddings = self._postprocess_image_embeds_evs(
                         image_embeddings, multimodal_input
                     )
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
-                video_embeddings = self._process_video_input(multimodal_input, cudagraph_dispatcher=cudagraph_dispatcher)
+                video_embeddings = self._process_video_input(
+                    multimodal_input, cudagraph_dispatcher=cudagraph_dispatcher
+                )
                 if self.is_multimodal_pruning_enabled:
                     video_embeddings = self._postprocess_video_embeds_evs(
                         video_embeddings, multimodal_input

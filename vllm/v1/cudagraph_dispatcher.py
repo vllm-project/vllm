@@ -133,7 +133,6 @@ class CudagraphDispatcher:
                     self._bs_to_padded_vit_graph_size[bs] = start
                 else:
                     self._bs_to_padded_vit_graph_size[bs] = end
-        
 
     def _create_padded_batch_descriptor(
         self,
@@ -272,8 +271,14 @@ class CudagraphDispatcher:
         if (
             not self.keys_initialized
             or self.cudagraph_mode == CUDAGraphMode.NONE
-            or (not is_vit and num_tokens > self.compilation_config.max_cudagraph_capture_size)
-            or (is_vit and num_tokens > self.compilation_config.max_vit_cudagraph_capture_size)
+            or (
+                not is_vit
+                and num_tokens > self.compilation_config.max_cudagraph_capture_size
+            )
+            or (
+                is_vit
+                and num_tokens > self.compilation_config.max_vit_cudagraph_capture_size
+            )
         ):
             return CUDAGraphMode.NONE, BatchDescriptor(num_tokens, is_vit=is_vit)
 
@@ -315,7 +320,9 @@ class CudagraphDispatcher:
         # finally, just return no cudagraphs and a trivial batch descriptor
         return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
-    def get_capture_descs(self, is_vit: bool = False) -> list[tuple[CUDAGraphMode, list[BatchDescriptor]]]:
+    def get_capture_descs(
+        self, is_vit: bool = False
+    ) -> list[tuple[CUDAGraphMode, list[BatchDescriptor]]]:
         """
         Returns capture descriptors for cudagraph capturing.
 

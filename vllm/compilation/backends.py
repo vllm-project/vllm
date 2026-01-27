@@ -10,7 +10,7 @@ import operator
 import os
 import pprint
 import time
-from collections.abc import Callable, Generator, Sequence
+from collections.abc import Callable, Generator, Iterator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial
@@ -56,7 +56,7 @@ _is_last_graph_in_vit_sequence: bool = True
 
 
 @contextmanager
-def set_is_last_graph_in_vit_sequence(is_last: bool):
+def set_is_last_graph_in_vit_sequence(is_last: bool) -> Iterator[None]:
     """Context manager to indicate if the current graph being compiled
     is the last one in a sequence of graphs (e.g., a sequence of blocks).
     """
@@ -75,7 +75,7 @@ _is_first_graph_in_vit_sequence: bool = True
 
 
 @contextmanager
-def set_is_first_graph_in_vit_sequence(is_first: bool):
+def set_is_first_graph_in_vit_sequence(is_first: bool) -> Iterator[None]:
     """Context manager to indicate if the current graph being compiled
     is the first one in a sequence of graphs (e.g., a sequence of blocks).
     """
@@ -86,6 +86,7 @@ def set_is_first_graph_in_vit_sequence(is_first: bool):
         yield
     finally:
         _is_first_graph_in_vit_sequence = original_value
+
 
 def make_copy_and_call(
     sym_tensor_indices: list[int],
@@ -487,10 +488,8 @@ def wrap_with_cudagraph_if_needed(
         runtime_mode=CUDAGraphMode.PIECEWISE,
         cudagraph_options=CUDAGraphOptions(
             debug_log_enable=is_first_graph,
-            gc_disable=not is_first_graph
-                        or not _is_first_graph_in_vit_sequence,
-            weak_ref_output=is_last_graph
-                        and _is_last_graph_in_vit_sequence,
+            gc_disable=not is_first_graph or not _is_first_graph_in_vit_sequence,
+            weak_ref_output=is_last_graph and _is_last_graph_in_vit_sequence,
         ),
     )
 

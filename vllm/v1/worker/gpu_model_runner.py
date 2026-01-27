@@ -2431,7 +2431,10 @@ class GPUModelRunner(
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
                 is_vit_dp_mode = (
-                    getattr(self.model_config.multimodal_config, "mm_encoder_tp_mode", None) == "data"
+                    getattr(
+                        self.model_config.multimodal_config, "mm_encoder_tp_mode", None
+                    )
+                    == "data"
                     and self.parallel_config.tensor_parallel_size > 1
                 )
                 if not is_vit_dp_mode:
@@ -2441,17 +2444,24 @@ class GPUModelRunner(
                     # Default values for non-ViT cudagraph case
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
                     batch_descriptor = None
-                    if self.vit_cudagraph_batch_sizes and "pixel_values" in mm_kwargs_group:
-                        pixel_values = mm_kwargs_group["pixel_values"]
+                    if (
+                        self.vit_cudagraph_batch_sizes
+                        and "pixel_values" in mm_kwargs_group
+                    ):
+                        pixel_values = cast(
+                            torch.Tensor, mm_kwargs_group["pixel_values"]
+                        )
                         num_tokens = pixel_values.shape[0]
 
                         # get batch_descriptor from dispatcher
-                        cudagraph_runtime_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
-                            num_tokens=num_tokens,
-                            uniform_decode=False,
-                            has_lora=False,
-                            disable_full=False,
-                            is_vit=True,
+                        cudagraph_runtime_mode, batch_descriptor = (
+                            self.cudagraph_dispatcher.dispatch(
+                                num_tokens=num_tokens,
+                                uniform_decode=False,
+                                has_lora=False,
+                                disable_full=False,
+                                is_vit=True,
+                            )
                         )
                         padded_num_tokens = batch_descriptor.num_tokens
 
@@ -2468,12 +2478,16 @@ class GPUModelRunner(
 
                             # Update image_grid_thw to account for padding
                             if "image_grid_thw" in mm_kwargs_group:
-                                image_grid_thw = mm_kwargs_group["image_grid_thw"]
+                                image_grid_thw = cast(
+                                    torch.Tensor, mm_kwargs_group["image_grid_thw"]
+                                )
                                 original_num_imgs = image_grid_thw.shape[0]
 
                                 # Treat padding as a new virtual image.
-                                # Assuming a fixed patch size where height is merge_size.
-                                h_patches, w_patches = self._get_dummy_h_w_patches(padding_amount)
+                                # Assuming a fixed patch size where height = merge_size
+                                h_patches, w_patches = self._get_dummy_h_w_patches(
+                                    padding_amount
+                                )
                                 padding_grid_info = torch.tensor(
                                     [[1, h_patches, w_patches]],
                                     dtype=image_grid_thw.dtype,
@@ -2483,23 +2497,31 @@ class GPUModelRunner(
                                     [image_grid_thw, padding_grid_info], dim=0
                                 )
 
-                    with set_forward_context(
+                    with (
+                        set_forward_context(
                             None,
                             vllm_config=self.vllm_config,
                             cudagraph_runtime_mode=cudagraph_runtime_mode,
                             batch_descriptor=batch_descriptor,
-                        ), self.timed_encoder_operation(
-                        should_time, mm_lora_refs, current_item_idx, num_items
+                        ),
+                        self.timed_encoder_operation(
+                            should_time, mm_lora_refs, current_item_idx, num_items
+                        ),
                     ):
                         curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
                     # Remove the padded items before sanity check
                     if original_num_imgs != -1:
                         curr_group_outputs = curr_group_outputs[:original_num_imgs]
                 else:
-                    with set_current_vllm_config(self.vllm_config), self.timed_encoder_operation(
-                        should_time, mm_lora_refs, current_item_idx, num_items
+                    with (
+                        set_current_vllm_config(self.vllm_config),
+                        self.timed_encoder_operation(
+                            should_time, mm_lora_refs, current_item_idx, num_items
+                        ),
                     ):
-                        mm_kwargs_group["cudagraph_dispatcher"] = self.cudagraph_dispatcher
+                        mm_kwargs_group["cudagraph_dispatcher"] = (
+                            self.cudagraph_dispatcher
+                        )
                         curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -4665,7 +4687,7 @@ class GPUModelRunner(
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling ViT."""
 
-        # The first dimension of pixel_values corresponds 
+        # The first dimension of pixel_values corresponds
         # to the total number of patches.
         pixel_values = torch.zeros(
             (num_image_tokens, img_feature_dim), dtype=self.dtype, device=self.device
@@ -5219,7 +5241,9 @@ class GPUModelRunner(
             "video",
             1,
         )
-        img_feature_dim = tmp_dummy_mm_inputs["pixel_values_videos"].shape[1]
+        img_feature_dim = cast(
+            torch.Tensor, tmp_dummy_mm_inputs["pixel_values_videos"]
+        ).shape[1]
 
         if is_global_first_rank():
             compilation_cases = tqdm(
