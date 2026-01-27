@@ -20,9 +20,11 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ChatTemplateResolutionError,
     ConversationMessage,
+    build_video_prompts_from_mm_data,
     load_chat_template,
     parse_chat_messages,
     parse_chat_messages_async,
+    rebuild_mm_uuids_from_mm_data,
 )
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
@@ -547,6 +549,40 @@ class HfRenderer(RendererLike):
             **params.get_apply_chat_template_kwargs(),
         )
 
+        # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
+        # model which uses unified vision chunks for both images and videos.
+        if (
+            getattr(model_config.hf_config, "use_unified_vision_chunk", False)
+            and mm_uuids is not None
+            and mm_data is not None
+        ):
+            mm_uuids = rebuild_mm_uuids_from_mm_data(mm_uuids, mm_data)
+
+            # get video placehoder, replace it with runtime video-chunk prompts
+            video_placeholder = getattr(
+                model_config.hf_config, "video_placeholder", None
+            )
+            if video_placeholder and isinstance(prompt_raw, str):
+                video_prompts = build_video_prompts_from_mm_data(mm_data)
+
+                # replace in order
+                prompt_raw_parts = prompt_raw.split(video_placeholder)
+                if len(prompt_raw_parts) == len(video_prompts) + 1:
+                    prompt_raw = "".join(
+                        [
+                            prompt_raw_parts[i] + video_prompts[i]
+                            for i in range(len(video_prompts))
+                        ]
+                    )
+                    prompt_raw += prompt_raw_parts[-1]
+                else:
+                    logger.warning(
+                        "Number of video placeholders (%d) does not match "
+                        "number of videos (%d) in the request.",
+                        len(prompt_raw_parts) - 1,
+                        len(video_prompts),
+                    )
+
         prompt = self.render_completion(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
@@ -581,6 +617,37 @@ class HfRenderer(RendererLike):
             conversation,
             **params.get_apply_chat_template_kwargs(),
         )
+
+        # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
+        # model which uses unified vision chunks for both images and videos.
+        if (
+            getattr(model_config.hf_config, "use_unified_vision_chunk", False)
+            and mm_uuids is not None
+        ):
+            # get video placehoder, replace it with runtime video-chunk prompts
+            video_placeholder = getattr(
+                model_config.hf_config, "video_placeholder", None
+            )
+            if video_placeholder and isinstance(prompt_raw, str):
+                video_prompts = build_video_prompts_from_mm_data(mm_data)
+
+                # replace in order
+                prompt_raw_parts = prompt_raw.split(video_placeholder)
+                if len(prompt_raw_parts) == len(video_prompts) + 1:
+                    prompt_raw = "".join(
+                        [
+                            prompt_raw_parts[i] + video_prompts[i]
+                            for i in range(len(video_prompts))
+                        ]
+                    )
+                    prompt_raw += prompt_raw_parts[-1]
+                else:
+                    logger.warning(
+                        "Number of video placeholders (%d) does not match "
+                        "number of videos (%d) in the request.",
+                        len(prompt_raw_parts) - 1,
+                        len(video_prompts),
+                    )
 
         prompt = self.render_completion(prompt_raw)
         if mm_data is not None:
