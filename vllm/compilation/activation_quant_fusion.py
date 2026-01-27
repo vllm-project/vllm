@@ -175,8 +175,6 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
 
         register_replacement(pattern, replacement, self.get_inputs(), fwd_only, pm_pass)
 
-# In activation_quant_fusion.py - REPLACE SiluMulBlockQuantPattern class
-
 class SiluMulBlockQuantPattern:
     """
     Pattern for fusing inline SiLU+Mul with block quantization.
@@ -223,34 +221,21 @@ class SiluMulBlockQuantPattern:
     def register(self, pm_pass: PatternMatcherPass) -> None:
         """Register pattern that matches inline SiLU+Mul operations."""
         
-        # DEFINE THE PATTERN TO MATCH (native ops)
         def pattern(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            # Match: split → sigmoid → mul → mul → quantize
             hidden = input.shape[-1] // 2
             gate, up = input.split(hidden, dim=-1)
-            
-            # Inline SiLU: sigmoid(gate) * gate
             silu = torch.sigmoid(gate) * gate
-            
-            # Multiply with up
             silu_out = silu * up
-            
-            # Quantize
             result, scale = self.quant_matcher(silu_out)
             return result, scale
         
-        # DEFINE THE REPLACEMENT (fused operation)
-        def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-            print(f"NATIVE OPS FUSION TRIGGERED! input.shape={input.shape}, group_size={self.group_size}")
-            
+        def replacement(input: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:            
             if self.model_dtype is not None:
                 input = input.to(dtype=self.model_dtype)
             
-            # Calculate output shape
             output_shape = list(input.shape)
             output_shape[-1] = output_shape[-1] // 2
             
-            # Allocate tensors
             result = torch.empty(
                 output_shape, 
                 device=input.device, 
@@ -262,7 +247,6 @@ class SiluMulBlockQuantPattern:
                 transposed=self.has_col_major_scales
             )
             
-            # Call fused kernel
             at = auto_functionalized(
                 torch.ops._C.silu_and_mul_per_block_quant.default,
                 result=result,
@@ -275,11 +259,8 @@ class SiluMulBlockQuantPattern:
             
             return at[1], at[2]
         
-        # Create example inputs for pattern matching
-        # Pattern matcher needs to see what the pattern looks like
         input_example = torch.empty(5, 32, dtype=torch.float16, device="cuda")
         
-        # REGISTER THE PATTERN
         register_replacement(
             pattern,
             replacement,
@@ -313,11 +294,7 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
-        # =====================================================================
-        # NEW: Register block quantization patterns
-        # =====================================================================
         if current_platform.is_cuda():
-            # Register patterns for different group sizes and layouts
             count = 0
             for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
                 for has_col_major_scales in [True, False]:
