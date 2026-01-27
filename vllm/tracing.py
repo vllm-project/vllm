@@ -103,7 +103,10 @@ def inject_trace_context(span, carrier: dict[str, str] | None = None) -> dict[st
         carrier: Optional dict to inject into (modified in place). If None, creates new dict.
 
     Returns:
-        The carrier dict with injected context, or None if injection failed
+        The carrier dict with injected context. Returns carrier unchanged if:
+        - OTEL is unavailable (returns input carrier, which may be None)
+        - span is None (returns input carrier, which may be None)
+        - Injection fails due to exception (returns carrier, guaranteed dict after line 117)
     """
     if not is_otel_available():
         return carrier
