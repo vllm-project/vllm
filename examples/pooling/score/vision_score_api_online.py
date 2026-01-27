@@ -17,15 +17,27 @@ e.g.
 """
 
 import argparse
+import base64
 import json
 import pprint
 
 import requests
 
+
+def encode_base64_content_from_url(content_url: str) -> dict[str, str]:
+    """Encode a content retrieved from a remote url to base64 format."""
+
+    with requests.get(content_url, headers=headers) as response:
+        response.raise_for_status()
+        result = base64.b64encode(response.content).decode("utf-8")
+
+    return {"url": f"data:image/jpeg;base64,{result}"}
+
+
 headers = {"accept": "application/json", "Content-Type": "application/json"}
 
-text_1 = "slm markdown"
-text_2 = {
+queries = "slm markdown"
+documents = {
     "content": [
         {
             "type": "image_url",
@@ -38,6 +50,12 @@ text_2 = {
             "image_url": {
                 "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
             },
+        },
+        {
+            "type": "image_url",
+            "image_url": encode_base64_content_from_url(
+                "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
+            ),
         },
     ]
 }
@@ -58,9 +76,9 @@ def main(args):
     response = requests.get(models_url, headers=headers)
     model = response.json()["data"][0]["id"]
 
-    prompt = {"model": model, "text_1": text_1, "text_2": text_2}
+    prompt = {"model": model, "queries": queries, "documents": documents}
     response = requests.post(score_url, headers=headers, json=prompt)
-    print("\nPrompt when text_1 is string and text_2 is a image list:")
+    print("\nPrompt when queries is string and documents is a image list:")
     pprint.pprint(prompt)
     print("\nScore Response:")
     print(json.dumps(response.json(), indent=2))

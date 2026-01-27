@@ -41,7 +41,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         return self._parser.is_reasoning_end(input_ids)
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
         return self._parser.is_reasoning_end_streaming(input_ids, delta_ids)
 

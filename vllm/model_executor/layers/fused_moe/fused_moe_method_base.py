@@ -10,9 +10,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_router import (
-    FusedMoERouter,
-)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
@@ -108,11 +105,24 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def method_name(self) -> str:
         return self.__class__.__name__
 
-    @abstractmethod
+    @property
+    def is_monolithic(self) -> bool:
+        return False
+
+    # @abstractmethod
     def apply(
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
-        router: FusedMoERouter,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    # @abstractmethod
+    def apply_monolithic(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:

@@ -374,37 +374,39 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         tokenizer = cached_tokenizer_from_config(model_config)
         self.image_token_id: int = tokenizer.vocab[_IMAGE_TOKEN]
 
-        self.vision = self._init_vision_module(
-            self.vision_config, quant_config, maybe_prefix(prefix, "vision")
-        )
-
-        self.projector = MlpProjector(self.projector_config)
-        self.tile_tag = config.tile_tag
-        self.global_view_pos = config.global_view_pos
-
-        # special token for image token sequence format
-        embed_std = 1 / torch.sqrt(
-            torch.tensor(self.projector_config.n_embed, dtype=torch.float32)
-        )
-        if self.tile_tag == "2D":
-            # <|view_seperator|>, <|\n|>
-            self.image_newline = nn.Parameter(
-                torch.randn(self.projector_config.n_embed) * embed_std
-            )
-            # This is a typo in original implementation
-            self.view_seperator = nn.Parameter(
-                torch.randn(self.projector_config.n_embed) * embed_std
-            )
-        else:
-            raise ValueError(
-                f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision = self._init_vision_module(
+                self.vision_config, quant_config, maybe_prefix(prefix, "vision")
             )
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=self.text_config,
-            prefix=maybe_prefix(prefix, "language"),
-        )
+            self.projector = MlpProjector(self.projector_config)
+            self.tile_tag = config.tile_tag
+            self.global_view_pos = config.global_view_pos
+
+            # special token for image token sequence format
+            embed_std = 1 / torch.sqrt(
+                torch.tensor(self.projector_config.n_embed, dtype=torch.float32)
+            )
+            if self.tile_tag == "2D":
+                # <|view_seperator|>, <|\n|>
+                self.image_newline = nn.Parameter(
+                    torch.randn(self.projector_config.n_embed) * embed_std
+                )
+                # This is a typo in original implementation
+                self.view_seperator = nn.Parameter(
+                    torch.randn(self.projector_config.n_embed) * embed_std
+                )
+            else:
+                raise ValueError(
+                    f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
+                )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=self.text_config,
+                prefix=maybe_prefix(prefix, "language"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -603,9 +605,6 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             pixel_values=pixel_values, images_spatial_crop=images_spatial_crop
         )
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -615,7 +614,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
