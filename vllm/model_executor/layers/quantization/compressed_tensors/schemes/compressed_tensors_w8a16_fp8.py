@@ -34,8 +34,8 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # ampere and up
-        return 80
+        # turing and up
+        return 75
 
     # W8A8-Fp8 kernels support only per-tensor and per-channel cases.
     # So if we have a fused module (QKV, MLP) with per tensor scales,
