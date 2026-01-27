@@ -44,30 +44,17 @@ def is_relevant_file(filepath: str) -> bool:
 
 
 BACKENDS_DIR = REPO_ROOT / "vllm" / "v1" / "attention" / "backends"
-MLA_COMMON_FILE = (
-    REPO_ROOT / "vllm" / "model_executor" / "layers" / "attention" / "mla_attention.py"
-)
 REGISTRY_FILE = BACKENDS_DIR / "registry.py"
 CUDA_PLATFORM_FILE = REPO_ROOT / "vllm" / "platforms" / "cuda.py"
 
 
-def parse_registry() -> tuple[dict[str, str], dict[str, str]]:
+def parse_registry() -> dict[str, str]:
     """Parse the registry.py file to get backend names and their class paths."""
-    source = REGISTRY_FILE.read_text()
-    tree = ast.parse(source)
-
-    attention_backends: dict[str, str] = {}
-    mamba_backends: dict[str, str] = {}
-
+    tree = ast.parse(REGISTRY_FILE.read_text())
     for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef):
-            continue
-        if node.name == "AttentionBackendEnum":
-            attention_backends = _extract_enum_values(node)
-        elif node.name == "MambaAttentionBackendEnum":
-            mamba_backends = _extract_enum_values(node)
-
-    return attention_backends, mamba_backends
+        if isinstance(node, ast.ClassDef) and node.name == "AttentionBackendEnum":
+            return _extract_enum_values(node)
+    return {}
 
 
 def _extract_enum_values(node: ast.ClassDef) -> dict[str, str]:
@@ -122,50 +109,48 @@ def method_returns_true(method: ast.FunctionDef | None) -> bool:
     return False
 
 
-def parse_supported_dtypes(node: ast.ClassDef) -> str:
-    """Parse supported_dtypes class variable."""
+def _parse_list_class_var(node: ast.ClassDef, var_name: str) -> list[str] | None:
+    """Parse a list-type class variable, returning None if not found."""
     for item in node.body:
         if not isinstance(item, ast.AnnAssign):
             continue
         if not isinstance(item.target, ast.Name):
             continue
-        if item.target.id != "supported_dtypes":
+        if item.target.id != var_name:
             continue
         if not (item.value and isinstance(item.value, ast.List)):
             continue
-        dtypes = []
+        result = []
         for elt in item.value.elts:
             if isinstance(elt, ast.Attribute):
-                dtype_map = {"float16": "fp16", "bfloat16": "bf16", "float32": "fp32"}
-                dtypes.append(dtype_map.get(elt.attr, elt.attr))
-        return ", ".join(dtypes)
-    return "fp16, bf16"  # Default
+                result.append(elt.attr)
+            elif isinstance(elt, ast.Constant):
+                result.append(str(elt.value))
+        return result
+    return None
+
+
+def parse_supported_dtypes(node: ast.ClassDef) -> str:
+    """Parse supported_dtypes class variable."""
+    dtype_map = {"float16": "fp16", "bfloat16": "bf16", "float32": "fp32"}
+    dtypes = _parse_list_class_var(node, "supported_dtypes")
+    if dtypes is None:
+        return "fp16, bf16"
+    return ", ".join(dtype_map.get(d, d) for d in dtypes)
 
 
 def parse_kv_cache_dtypes(node: ast.ClassDef) -> str:
     """Parse supported_kv_cache_dtypes class variable."""
-    for item in node.body:
-        if not isinstance(item, ast.AnnAssign):
-            continue
-        if not isinstance(item.target, ast.Name):
-            continue
-        if item.target.id != "supported_kv_cache_dtypes":
-            continue
-        if not (item.value and isinstance(item.value, ast.List)):
-            continue
-        dtypes = [
-            str(elt.value) for elt in item.value.elts if isinstance(elt, ast.Constant)
-        ]
-        return ", ".join(dtypes)
-    return "auto"  # Default
+    dtypes = _parse_list_class_var(node, "supported_kv_cache_dtypes")
+    return ", ".join(dtypes) if dtypes else "auto"
 
 
-def parse_block_sizes(node: ast.ClassDef) -> str:
-    """Parse get_supported_kernel_block_sizes method."""
-    method = find_method(node, "get_supported_kernel_block_sizes")
+def _parse_return_list(
+    method: ast.FunctionDef | None, handle_multiple_of: bool = False
+) -> list[str]:
+    """Extract list items from a method's return statement."""
     if method is None:
-        return "×1"  # Default is MultipleOf(1)
-
+        return []
     for stmt in ast.walk(method):
         if not isinstance(stmt, ast.Return):
             continue
@@ -175,37 +160,32 @@ def parse_block_sizes(node: ast.ClassDef) -> str:
         for elt in stmt.value.elts:
             if isinstance(elt, ast.Constant):
                 sizes.append(str(elt.value))
-            elif isinstance(elt, ast.Call):
-                is_multiple_of = (
-                    isinstance(elt.func, ast.Name)
-                    and elt.func.id == "MultipleOf"
-                    and elt.args
-                    and isinstance(elt.args[0], ast.Constant)
-                )
-                if is_multiple_of:
-                    sizes.append(f"×{elt.args[0].value}")
+            elif (
+                handle_multiple_of
+                and isinstance(elt, ast.Call)
+                and isinstance(elt.func, ast.Name)
+                and elt.func.id == "MultipleOf"
+                and elt.args
+                and isinstance(elt.args[0], ast.Constant)
+            ):
+                sizes.append(f"×{elt.args[0].value}")
         if sizes:
-            return ", ".join(sizes)
-    return "×1"
+            return sizes
+    return []
+
+
+def parse_block_sizes(node: ast.ClassDef) -> str:
+    """Parse get_supported_kernel_block_sizes method."""
+    method = find_method(node, "get_supported_kernel_block_sizes")
+    sizes = _parse_return_list(method, handle_multiple_of=True)
+    return ", ".join(sizes) if sizes else "×1"
 
 
 def parse_head_sizes(node: ast.ClassDef) -> str:
     """Parse get_supported_head_sizes method."""
     method = find_method(node, "get_supported_head_sizes")
-    if method is None:
-        return "Any"
-
-    for stmt in ast.walk(method):
-        if not isinstance(stmt, ast.Return):
-            continue
-        if not isinstance(stmt.value, ast.List):
-            continue
-        sizes = [
-            str(elt.value) for elt in stmt.value.elts if isinstance(elt, ast.Constant)
-        ]
-        if sizes:
-            return ", ".join(sizes)
-    return "Any"
+    sizes = _parse_return_list(method)
+    return ", ".join(sizes) if sizes else "Any"
 
 
 def parse_compute_capability(node: ast.ClassDef) -> str:
@@ -729,7 +709,7 @@ def generate_legend() -> str:
 
 def generate_docs() -> str:
     """Generate the complete documentation."""
-    attention_backends_map, _ = parse_registry()
+    attention_backends_map = parse_registry()
 
     # Parse priority lists from cuda.py
     priorities = parse_cuda_priority_lists()
