@@ -168,15 +168,30 @@ def test_transfer(
     orig_dst_caches = [x.clone() for x in handler.dst_tensors]
 
     # call transfer function
+    start_time = time.time()
     assert handler.transfer_async(1, (src_spec, dst_spec))
-    assert set({x[0] for x in handler._transfers}) == {1}
+    assert set({x.job_id for x in handler._transfers}) == {1}
 
     # wait for transfer to complete
     end_time = time.time() + 10
     while time.time() < end_time:
         finished = handler.get_finished()
         if finished:
-            assert finished == [(1, True)]
+            assert finished[0].job_id == 1
+            assert finished[0].success
+            assert (
+                finished[0].transfer_type == ("GPU", "CPU")
+                if gpu_to_cpu
+                else ("CPU", "GPU")
+            )
+            assert (
+                finished[0].transfer_size
+                == handler.total_block_size_in_bytes
+                * handler.dst_block_size_factor
+                * len(dst_blocks)
+            )
+            assert finished[0].transfer_time > 0
+            assert finished[0].transfer_time < (time.time() - start_time)
             break
         time.sleep(0.1)
 
