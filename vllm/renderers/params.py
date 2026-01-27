@@ -140,8 +140,8 @@ class TokenizeParams:
             )
 
     def with_kwargs(self, tokenization_kwargs: dict[str, Any] | None):
-        max_length = self.max_total_tokens
-        max_input_tokens = self.max_input_tokens
+        max_total_tokens = self.max_total_tokens
+        max_output_tokens = self.max_output_tokens
         truncate_prompt_tokens = self.truncate_prompt_tokens
         do_lower_case = self.do_lower_case
         add_special_tokens = self.add_special_tokens
@@ -150,7 +150,9 @@ class TokenizeParams:
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
 
-        max_total_tokens = tokenization_kwargs.pop("max_length", max_length)
+        max_length = tokenization_kwargs.pop(
+            "max_length", max_total_tokens - max_output_tokens
+        )
         truncate_prompt_tokens = tokenization_kwargs.pop(
             "truncate_prompt_tokens", truncate_prompt_tokens
         )
@@ -165,7 +167,7 @@ class TokenizeParams:
         # https://huggingface.co/docs/transformers/en/pad_truncation
         if truncation := tokenization_kwargs.pop("truncation", None):
             if truncation in (True, "longest_first"):
-                truncate_prompt_tokens = max_input_tokens
+                truncate_prompt_tokens = max_length
             elif truncation in (False, "do_not_truncate"):
                 truncate_prompt_tokens = None
             else:
@@ -181,7 +183,7 @@ class TokenizeParams:
 
         return TokenizeParams(
             max_total_tokens=max_total_tokens,
-            max_output_tokens=max_total_tokens - max_input_tokens,
+            max_output_tokens=max_total_tokens - max_length,
             truncate_prompt_tokens=truncate_prompt_tokens,
             do_lower_case=do_lower_case,
             add_special_tokens=add_special_tokens,
