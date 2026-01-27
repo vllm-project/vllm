@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import math
 from collections.abc import Mapping
-from typing import Literal, cast
+from typing import AsyncGenerator, Literal, cast
 
 import numpy as np
 import torch
@@ -15,7 +16,7 @@ from mistral_common.protocol.transcription.request import (
 from mistral_common.tokens.tokenizers.audio import Audio
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.voxtral import (
@@ -126,16 +127,11 @@ def _expand_tensor(input_tensor: torch.Tensor, scaling: int) -> torch.Tensor:
     return (base.unsqueeze(1) + offsets).view(-1)
 
 
-class RealTimeAudioProcessor:
-
-    def __init__(self, tokenizer: MistralTokenizer) -> None:
+class VoxtralRealtimeBuffer:
+    def __init__(self, config: AudioConfig) -> None:
         self._look_ahead_in_ms = 2.5
         self._look_back_in_ms = 52.5
 
-        self._tokenizer = tokenizer
-        self._config: AudioConfig = (
-            self._tokenizer.instruct_tokenizer.audio_encoder.audio_config
-        )
         self._sampling_rate = self._config.sampling_rate
 
         self._audio: Audio | None = None
@@ -218,25 +214,37 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
 
         self.n_delay_tokens = int(_n_delay_tokens)
 
-    @classmethod
     # for realtime transcription
     async def buffer_realtime_audio(
         cls,
         audio_stream: AsyncGenerator[np.ndarray, None],
+        input_stream: asyncio.Queue[list[int]],
         model_config: ModelConfig,
     ) -> AsyncGenerator[PromptType, None]:
         tokenizer = cached_tokenizer_from_config(model_config)
-        _look_ahead_in_ms = 2.5
-        _look_back_in_ms = 52.5
-        n_left_pad_samples = (
-            config.raw_audio_length_per_tok * config.n_left_pad_tokens
-        )
-        buffer_size = streaming_delay + n_left_pad_samples + streaming_size
+        audio_encoder = tokenizer.instruct_tokenizer.audio_encoder
+        config = audio_encoder.audio_config
 
-        buffer = np.empty(,  dtype=np.float32)
+        buffer = VoxtralRealtimeBuffer(config)
         is_first_yield = True
 
         async for audio in audio_stream:
+            buffer.add_audio_chunk(audio)
+
+            while (new_audio := buffer.get_audio_chunk()) is not None:
+                if is_first_yield:
+                    # make sure that input_stream is empty
+                    assert input_stream.empty()
+                    token_ids = tokenizer.instruct_tokenizer.start() + audio_encoder._encode_streaming_tokens()
+                    is_first_yield = False
+                else:
+                    # pop last element from input_stream
+                    token_ids = input_stream.get_nowait()
+
+                multi_modal_data = {"audio": (new_audio, None)}
+                yield TokensPrompt(
+                    prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+                )
 
     @property
     def audio_config(self):

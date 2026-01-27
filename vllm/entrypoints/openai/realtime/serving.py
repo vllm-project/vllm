@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 from collections.abc import AsyncGenerator
 from functools import cached_property
 from typing import Literal, cast
@@ -72,6 +73,7 @@ class OpenAIServingRealtime(OpenAIServing):
     async def transcribe_realtime(
         self,
         audio_stream: AsyncGenerator[np.ndarray, None],
+        input_stream: asyncio.Queue[list[int]],
         config: SessionUpdate | None,
     ) -> AsyncGenerator[StreamingInput, None]:
         """Transform audio stream into StreamingInput for engine.generate().
@@ -79,6 +81,10 @@ class OpenAIServingRealtime(OpenAIServing):
         Args:
             audio_stream: Async generator yielding float32 numpy audio arrays
             config: Session configuration with model and parameters
+            input_stream: Queue containing context token IDs from previous
+                generation outputs. Used for autoregressive multi-turn
+                processing where each generation's output becomes the context
+                for the next iteration.
 
         Yields:
             StreamingInput objects containing audio prompts for the engine
@@ -101,7 +107,7 @@ class OpenAIServingRealtime(OpenAIServing):
 
         # Process each audio chunk from the stream via model specific
         # buffer_audio function
-        async for prompt in self.model_cls.buffer_realtime_audio(audio_stream):
+        async for prompt in self.model_cls.buffer_realtime_audio(audio_stream, input_stream, self.model_config):
             # Yield as StreamingInput for the engine
             yield StreamingInput(
                 prompt=prompt,

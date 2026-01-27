@@ -136,20 +136,24 @@ class RealtimeConnection:
             logger.warning("Generation already in progress, ignoring commit")
             return
 
+
         # Create audio stream generator
         audio_stream = self.audio_stream_generator()
+        input_stream: asyncio.Queue[list[int]] = asyncio.Queue()
 
         # Transform to StreamingInput generator
         streaming_input_gen = self.serving.transcribe_realtime(
-            audio_stream, self.session_config
+            audio_stream,
+            input_stream,
+            self.session_config,
         )
 
         # Start generation task
         self.generation_task = asyncio.create_task(
-            self._run_generation(streaming_input_gen)
+            self._run_generation(streaming_input_gen, input_stream)
         )
 
-    async def _run_generation(self, streaming_input_gen: AsyncGenerator):
+    async def _run_generation(self, streaming_input_gen: AsyncGenerator, input_stream: asyncio.Queue[list[int]]):
         """Run the generation and stream results back to the client.
 
         This method:
@@ -157,10 +161,12 @@ class RealtimeConnection:
         2. Passes the streaming input generator to engine.generate()
         3. Streams transcription.delta events as text is generated
         4. Sends final transcription.done event with usage stats
-        5. Cleans up the audio queue
+        5. Feeds generated token IDs back to input_stream for next iteration
+        6. Cleans up the audio queue
         """
         request_id = f"rt-{self.connection_id}-{uuid4()}"
         full_text = ""
+        all_token_ids: list[int] = []
 
         # TODO: Track metrics
         # start_time = time.time()
@@ -193,6 +199,11 @@ class RealtimeConnection:
                 if output.outputs and len(output.outputs) > 0:
                     delta = output.outputs[0].text
                     full_text += delta
+
+                    # Collect token IDs from output
+                    all_token_ids.extend(output.outputs[0].token_ids)
+                    await self.input_stream.put(all_token_ids)
+
                     await self.send(TranscriptionDelta(delta=delta))
 
                     # TODO: Track token counts for usage stats
@@ -237,6 +248,13 @@ class RealtimeConnection:
         """Cleanup resources."""
         # Signal audio stream to stop
         self.audio_queue.put_nowait(None)
+
+        # Clear input_stream queue
+        while not self.input_stream.empty():
+            try:
+                self.input_stream.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
         # Cancel generation task if running
         if self.generation_task and not self.generation_task.done():
