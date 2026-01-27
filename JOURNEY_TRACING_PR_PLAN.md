@@ -185,7 +185,7 @@ def _end_core_span_and_cleanup(self, request: Request) -> None:
 | #0 | `removelegacy` | Remove EngineCoreEvent | ~130 removed | 1 new + existing | ✅ **COMPLETED** |
 | #1 | `pr1ofjourney` | Init tracer in scheduler | ~25 lines | 4 | ✅ **COMPLETED** |
 | #2 | `journey-tracing-02-core-spans-lifecycle` | Create & cleanup core spans | ~100 lines | 6 | ✅ **COMPLETED** |
-| #3 | `journey-tracing-03-journey-state-cleanup` | Add journey state & cleanup | ~40 lines | 4 | Extends PR #2 cleanup |
+| #3 | `pr3ofjourney` | Add journey state & cleanup | ~26 lines | 4 | ✅ **COMPLETED** |
 | #4 | `journey-tracing-04-journey-events-emit` | Emit events to core spans | ~120 lines | 7 | No new resources, defensive |
 | #5 | `journey-tracing-05-api-span-tracking` | Add API span tracking dict | ~20 lines | 2 | No Pydantic field |
 | #6 | `journey-tracing-06-api-spans-full-lifecycle` | Create & close API spans | ~150 lines | 9 | **All closure paths in same PR** ✅ |
@@ -204,9 +204,9 @@ PR #0 (Remove EngineCoreEvent) ✅ COMPLETED
     ↓
 PR #1 (Scheduler Tracer Init) ✅ COMPLETED
     ↓
-PR #2 (Core Span + Cleanup) ← MUST include cleanup in same PR
+PR #2 (Core Span + Cleanup) ✅ COMPLETED
     ↓
-PR #3 (Journey State + Cleanup) ← extends PR #2 cleanup
+PR #3 (Journey State + Cleanup) ✅ COMPLETED
     ↓
 PR #4 (Core Event Emit) ← no new resources, safe
     ↓
@@ -577,9 +577,13 @@ class Scheduler:
 
 ---
 
-### PR #3: Engine - Journey State WITH Cleanup
+### PR #3: Engine - Journey State WITH Cleanup ✅ COMPLETED
 
-**Branch**: `journey-tracing-03-journey-state-cleanup`
+**Branch**: `pr3ofjourney`
+
+**Status**: ✅ **COMPLETED** (commit f4cf7903c, PR #33126)
+
+**Completed**: 2026-01-26
 
 **Goal**: Add journey progress tracking state, integrate cleanup into existing `_end_core_span_and_cleanup()`.
 
@@ -2118,3 +2122,77 @@ Each milestone is independently safe and valuable.
 - ✅ Foundation ready for PR #2 (core span creation)
 
 **Next Steps**: PR #2 will use `self.tracer` to create core spans with complete cleanup in same PR
+
+### ✅ PR #2: Core Span Lifecycle Management
+
+**Completed**: 2026-01-26
+**Branch**: `pr2ofjourney`
+**Status**: ✅ **MERGED** (commit d46cdf231)
+
+**Implementation Summary**:
+- Added `_core_spans` dictionary to track active spans per request
+- Created `_create_core_span()` helper with explicit OpenTelemetry parameters
+- Created `_end_core_span_and_cleanup()` idempotent helper
+- Modified `add_request()` to create and store core spans
+- Modified `update_from_output()` with try/finally (natural completion path)
+- Modified `finish_requests()` with try/finally (explicit abort path)
+
+**Changes**:
+- Production code: ~125 lines added
+  - `vllm/v1/core/sched/scheduler.py`: Core span lifecycle
+- Test code: ~245 lines added
+  - `tests/v1/core/test_scheduler.py`: 6 new tests
+
+**Test Results**: ✅ All 91 tests passing (6 new, 85 existing)
+
+**Safety Guarantees**:
+- ✅ All termination paths properly cleanup spans (no leaks)
+- ✅ Cleanup uses try/finally (runs even if teardown throws)
+- ✅ Defensive error handling (tracing never crashes requests)
+- ✅ Zero overhead when tracing disabled
+- ✅ Idempotent cleanup (safe to call multiple times)
+
+**Next Steps**: PR #3 will add journey state tracking with integrated cleanup
+
+### ✅ PR #3: Journey State Cleanup
+
+**Completed**: 2026-01-26
+**Branch**: `pr3ofjourney`
+**Status**: ✅ **COMPLETED** (commit f4cf7903c, PR #33126)
+
+**Implementation Summary**:
+- Extended `_end_core_span_and_cleanup()` with decoupled cleanup logic
+- Removed duplicate inline cleanup from `finish_requests()`
+- Added comprehensive docstring explaining two independent cleanup concerns
+- Fixed memory leak on natural completion path
+
+**Changes**:
+- Production code: 26 lines modified
+  - `vllm/v1/core/sched/scheduler.py`: Extended cleanup method
+- Test code: 162 lines added
+  - `tests/v1/core/test_scheduler.py`: 4 new tests
+- Documentation: Updated JOURNEY_TRACING_PR_PLAN.md
+
+**Test Results**: ✅ All 95 tests passing (4 new, 91 existing)
+
+**Code Review**: Approved by ChatGPT (2 rounds of feedback)
+- Round 1: Simplified tests, removed unused imports, rewrote leak test as unit test
+- Round 2: Fresh mock spans per iteration
+- All feedback applied
+
+**Key Achievements**:
+- ✅ Fixed critical memory leak on natural completion path
+- ✅ Decoupled cleanup: span cleanup (always) vs journey state (gated)
+- ✅ Centralized all cleanup in single method
+- ✅ Removed duplicate cleanup logic
+- ✅ Tests are focused, fast, and maintainable
+- ✅ No regressions in existing tests
+- ✅ Foundation ready for PR #4 (event emission)
+
+**Safety Guarantees**:
+- ✅ Span cleanup NEVER gated behind feature flags
+- ✅ Journey state cleanup only runs when enabled
+- ✅ Both termination paths verified (natural + explicit abort)
+- ✅ No accumulation over 20 iterations (unit test)
+
+**Next Steps**: PR #4 will add `_compute_progress_snapshot()` and emit journey events to core spans
