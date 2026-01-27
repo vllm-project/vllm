@@ -9,7 +9,7 @@ setuptools>=77.0.3,<81.0.0
 wheel
 jinja2>=3.1.6
 datasets # for benchmark scripts
-numba == 0.61.2 # Required for N-gram speculative decoding
+numba == 0.63.1 # Required for N-gram speculative decoding
 --extra-index-url=https://download.pytorch.org/whl/xpu
 torch==2.9.0+xpu
 torchaudio

@@ -3,7 +3,7 @@
 
 setuptools==77.0.3 # this version can reuse CMake build dir
 
-numba == 0.61.2; platform_machine != "s390x" # Required for N-gram speculative decoding
+numba == 0.63.1; platform_machine != "s390x" # Required for N-gram speculative decoding
 
 # Dependencies for CPUs
 torch==2.10.0+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
