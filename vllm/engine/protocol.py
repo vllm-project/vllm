@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, StreamingInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
@@ -15,7 +15,6 @@ from vllm.renderers import RendererLike
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.async_llm import StreamingInput
 from vllm.v1.engine.input_processor import InputProcessor
 
 
