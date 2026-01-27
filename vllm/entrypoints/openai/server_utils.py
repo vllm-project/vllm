@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import hashlib
 import json
+import secrets
+import uuid
 from argparse import Namespace
+from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
 
@@ -11,6 +15,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.concurrency import iterate_in_threadpool
+from starlette.datastructures import URL, Headers, MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -21,6 +27,85 @@ from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
 
 logger = init_logger("vllm.entrypoints.openai.api_server")
+
+
+class AuthenticationMiddleware:
+    """
+    Pure ASGI middleware that authenticates each request by checking
+    if the Authorization Bearer token exists and equals anyof "{api_key}".
+
+    Notes
+    -----
+    There are two cases in which authentication is skipped:
+        1. The HTTP method is OPTIONS.
+        2. The request path doesn't start with /v1 (e.g. /health).
+    """
+
+    def __init__(self, app: ASGIApp, tokens: list[str]) -> None:
+        self.app = app
+        self.api_tokens = [hashlib.sha256(t.encode("utf-8")).digest() for t in tokens]
+
+    def verify_token(self, headers: Headers) -> bool:
+        authorization_header_value = headers.get("Authorization")
+        if not authorization_header_value:
+            return False
+
+        scheme, _, param = authorization_header_value.partition(" ")
+        if scheme.lower() != "bearer":
+            return False
+
+        param_hash = hashlib.sha256(param.encode("utf-8")).digest()
+
+        token_match = False
+        for token_hash in self.api_tokens:
+            token_match |= secrets.compare_digest(param_hash, token_hash)
+
+        return token_match
+
+    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
+        if scope["type"] not in ("http", "websocket") or scope["method"] == "OPTIONS":
+            # scope["type"] can be "lifespan" or "startup" for example,
+            # in which case we don't need to do anything
+            return self.app(scope, receive, send)
+        root_path = scope.get("root_path", "")
+        url_path = URL(scope=scope).path.removeprefix(root_path)
+        headers = Headers(scope=scope)
+        # Type narrow to satisfy mypy.
+        if url_path.startswith("/v1") and not self.verify_token(headers):
+            response = JSONResponse(content={"error": "Unauthorized"}, status_code=401)
+            return response(scope, receive, send)
+        return self.app(scope, receive, send)
+
+
+class XRequestIdMiddleware:
+    """
+    Middleware the set's the X-Request-Id header for each response
+    to a random uuid4 (hex) value if the header isn't already
+    present in the request, otherwise use the provided request id.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
+        if scope["type"] not in ("http", "websocket"):
+            return self.app(scope, receive, send)
+
+        # Extract the request headers.
+        request_headers = Headers(scope=scope)
+
+        async def send_with_request_id(message: Message) -> None:
+            """
+            Custom send function to mutate the response headers
+            and append X-Request-Id to it.
+            """
+            if message["type"] == "http.response.start":
+                response_headers = MutableHeaders(raw=message["headers"])
+                request_id = request_headers.get("X-Request-Id", uuid.uuid4().hex)
+                response_headers.append("X-Request-Id", request_id)
+            await send(message)
+
+        return self.app(scope, receive, send_with_request_id)
 
 
 def load_log_config(log_config_file: str | None) -> dict | None:
