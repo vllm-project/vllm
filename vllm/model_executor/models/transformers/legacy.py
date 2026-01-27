@@ -39,6 +39,8 @@ class LegacyMixin:
                 ".gamma": ".weight",
                 ".beta": ".bias",
             } | self.hf_to_vllm_mapper.orig_to_new_suffix
+            # Apply mapping to quantization config if needed
+            self._maybe_apply_model_mapping()
 
         # Skip unsupported/unwanted output embeddings layers
         self.skip_prefixes.extend(

@@ -300,6 +300,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 "model.layers": "model.language_model.layers",
                 "model.norm": "model.language_model.norm",
             } | self.hf_to_vllm_mapper.orig_to_new_prefix
+            # Apply mapping to quantization config if needed
+            self._maybe_apply_model_mapping()
 
     def forward(
         self,

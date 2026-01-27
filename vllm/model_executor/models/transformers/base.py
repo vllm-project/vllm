@@ -192,7 +192,10 @@ class Base(
         missing_bmp_pattern = re.compile(rf"^(?!model\.)(({model_children}).+)")
         orig_to_new_regex[missing_bmp_pattern] = expected_bmp
 
-        # Remove\ layers not on this pipeline parallel rank
+        # Apply mapping to quantization config if needed
+        self._maybe_apply_model_mapping()
+
+        # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
