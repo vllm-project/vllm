@@ -76,7 +76,7 @@ class OpenAIServingRealtime(OpenAIServing):
             StreamingInput objects containing audio prompts for the engine
         """
 
-        # it is the model's responsibility to handle the audio stream
+        # it is the model's responsibility to prepare the next input
         stream_input_iter: AsyncGenerator[PromptType, None] = (
             self.model_cls.buffer_realtime_audio(
                 audio_stream, input_stream, self.model_config

@@ -285,8 +285,7 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
                 )
 
         # mypy shit
-        if False:
-            yield cast(PromptType, None)
+        yield
 
     @property
     def audio_config(self):
