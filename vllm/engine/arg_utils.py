@@ -1239,7 +1239,6 @@ class EngineArgs:
             help="Log aggregate rather than per-engine statistics "
             "when using data parallelism.",
         )
-
         return parser
 
     @classmethod
