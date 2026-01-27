@@ -1703,27 +1703,6 @@ class GPUModelRunner(
             max_seq_len = self.seq_lens.np[:num_reqs].max().item()
 
         if use_spec_decode:
-            if (
-                self.use_async_spec_decode
-                and self.valid_sampled_token_count_gpu is not None
-            ):
-                # For async spec decode, use valid_sampled_token_count_gpu
-                # directly to avoid CPU sync.
-                num_valid = self.valid_sampled_token_count_gpu.shape[0]
-                self.num_accepted_tokens.gpu[:num_valid] = (
-                    self.valid_sampled_token_count_gpu
-                )
-                if num_valid < num_reqs:
-                    # Fill remaining with 1 (new requests have no prior spec
-                    # decode)
-                    self.num_accepted_tokens.gpu[num_valid:num_reqs].fill_(1)
-            else:
-                # Non-async path or first step: use CPU values
-                self.num_accepted_tokens.np[:num_reqs] = (
-                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                )
-                self.num_accepted_tokens.np[num_reqs:].fill(1)
-                self.num_accepted_tokens.copy_to_gpu()
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
