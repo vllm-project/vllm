@@ -773,6 +773,15 @@ class LLM:
 
         return outputs
 
+    def _normalize_prompts(
+        self,
+        prompts: PromptType | Sequence[PromptType],
+    ) -> list[TextPrompt | TokensPrompt | EmbedsPrompt | ExplicitEncoderDecoderPrompt]:
+        if isinstance(prompts, str):
+            prompts = TextPrompt(prompt=prompts)
+
+        return prompts if isinstance(prompts, Sequence) else [prompts]  # type: ignore[return-value]
+
     def _tokenize_singleton_prompt(
         self,
         prompt: SingletonPrompt,
@@ -822,7 +831,7 @@ class LLM:
         ).with_kwargs(tokenization_kwargs)
 
         engine_prompts = list[_TokenizedPrompt | _TokenizedEncDecPrompt]()
-        for prompt in prompts if isinstance(prompts, Sequence) else [prompts]:
+        for prompt in self._normalize_prompts(prompts):
             if is_explicit_encoder_decoder_prompt(prompt):
                 engine_prompts.append(self._tokenize_enc_dec_prompt(prompt, tok_params))
             else:
@@ -1603,36 +1612,8 @@ class LLM:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> None:
-        if any(
-            p.truncate_prompt_tokens is not None
-            for p in ([params] if not isinstance(params, Sequence) else params)
-        ):
-            # Remove this after deprecating params.truncate_prompt_tokens
-            all_prompts = [
-                out_p
-                for in_prompt, in_param in zip(
-                    (
-                        [prompts]
-                        if isinstance(prompts, str) or not isinstance(prompts, Sequence)
-                        else prompts
-                    ),
-                    ([params] if not isinstance(params, Sequence) else params),
-                )
-                for out_p in self._preprocess_completion(
-                    [in_prompt],
-                    tokenization_kwargs=merge_kwargs(
-                        tokenization_kwargs,
-                        dict(truncate_prompt_tokens=in_param.truncate_prompt_tokens),
-                    ),
-                )
-            ]
-        else:
-            all_prompts = self._preprocess_completion(
-                prompts,
-                tokenization_kwargs=tokenization_kwargs,
-            )
-
-        num_requests = len(all_prompts)
+        in_prompts = self._normalize_prompts(prompts)
+        num_requests = len(in_prompts)
 
         if isinstance(params, Sequence):
             if len(params) != num_requests:
@@ -1641,9 +1622,9 @@ class LLM:
                     f"and lora_request ({len(params)}) must be the same."
                 )
 
-            all_params = params
+            engine_params = params
         else:
-            all_params = [params] * num_requests
+            engine_params = [params] * num_requests
 
         if isinstance(lora_request, Sequence):
             if len(lora_request) != num_requests:
@@ -1652,9 +1633,9 @@ class LLM:
                     f"and lora_request ({len(lora_request)}) must be the same."
                 )
 
-            all_lora_requests: Sequence[LoRARequest | None] = lora_request
+            engine_lora_requests: Sequence[LoRARequest | None] = lora_request
         else:
-            all_lora_requests = [lora_request] * num_requests
+            engine_lora_requests = [lora_request] * num_requests
 
         if priority is not None:
             if len(priority) != num_requests:
@@ -1665,13 +1646,32 @@ class LLM:
         else:
             priority = [0] * num_requests
 
-        for sp in all_params:
+        if any(param.truncate_prompt_tokens is not None for param in engine_params):
+            # Remove this after deprecating params.truncate_prompt_tokens
+            engine_prompts = [
+                engine_prompt
+                for in_prompt, param in zip(in_prompts, engine_params)
+                for engine_prompt in self._preprocess_completion(
+                    [in_prompt],
+                    tokenization_kwargs=merge_kwargs(
+                        tokenization_kwargs,
+                        dict(truncate_prompt_tokens=param.truncate_prompt_tokens),
+                    ),
+                )
+            ]
+        else:
+            engine_prompts = self._preprocess_completion(
+                prompts,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+        for sp in engine_params:
             if isinstance(sp, SamplingParams):
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
         # Add requests to the engine.
-        it = all_prompts
+        it = engine_prompts
         if use_tqdm:
             tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
             it = tqdm_func(it, desc="Adding requests")
@@ -1682,8 +1682,8 @@ class LLM:
             for i, prompt in enumerate(it):
                 request_id = self._add_request(
                     prompt,  # type: ignore[arg-type]
-                    all_params[i],
-                    lora_request=all_lora_requests[i],
+                    engine_params[i],
+                    lora_request=engine_lora_requests[i],
                     priority=priority[i],
                     tokenization_kwargs=tokenization_kwargs,
                 )
