@@ -871,6 +871,7 @@ class LLM:
         )
         tok_params = TokenizeParams(
             max_total_tokens=self.model_config.max_model_len,
+            add_special_tokens=False,
         ).with_kwargs(tokenization_kwargs)
 
         engine_prompts = list[_TokenizedPrompt]()
