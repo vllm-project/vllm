@@ -448,7 +448,7 @@ run_serving_tests() {
     fi
 
     # save the compilation mode on the serving results
-    compilation_mode= $(echo "$server_params" | jq -r '."compilation_config.mode"')
+    compilation_mode=$(echo "$server_params" | jq -r '."compilation_config.mode"')
 
     # iterate over different QPS
     for qps in $qps_list; do
