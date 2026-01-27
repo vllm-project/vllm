@@ -75,9 +75,8 @@ def get_file_from_class_path(class_path: str) -> Path | None:
     """Convert a class path to a file path."""
     if not class_path:
         return None
-    module_path = class_path.rsplit(".", 1)[0]
-    file_path = REPO_ROOT / module_path.replace(".", "/")
-    py_file = Path(str(file_path) + ".py")
+    module_path = class_path.rsplit(".", 1)[0].replace(".", "/")
+    py_file = REPO_ROOT / f"{module_path}.py"
     return py_file if py_file.exists() else None
 
 
@@ -317,18 +316,6 @@ def check_method_overrides(node: ast.ClassDef, method_name: str) -> bool:
     return method_returns_true(method)
 
 
-def get_parent_class_name(node: ast.ClassDef) -> str | None:
-    """Get the name of the first parent class."""
-    if not node.bases:
-        return None
-    first_base = node.bases[0]
-    if isinstance(first_base, ast.Name):
-        return first_base.id
-    if isinstance(first_base, ast.Attribute):
-        return first_base.attr
-    return None
-
-
 def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None:
     """Analyze a backend class and extract feature information."""
     file_path = get_file_from_class_path(class_path)
@@ -336,8 +323,7 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
         return None
 
     try:
-        source = file_path.read_text()
-        tree = ast.parse(source)
+        tree = ast.parse(file_path.read_text())
     except Exception as e:
         print(f"  Warning: Could not parse {file_path}: {e}", file=sys.stderr)
         return None
@@ -347,16 +333,19 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
     if class_node is None:
         return None
 
-    # Check if this is an MLA backend
-    parent = get_parent_class_name(class_node)
-    mla_parents = ("MLACommonBackend", "FlashMLABackend", "FlashMLASparseBackend")
+    # Check if this is an MLA backend by parent class or naming
+    parent = None
+    if class_node.bases:
+        base = class_node.bases[0]
+        parent = base.id if isinstance(base, ast.Name) else None
+    mla_parents = {"MLACommonBackend", "FlashMLABackend", "FlashMLASparseBackend"}
     is_mla_backend = (
         parent in mla_parents
         or ".mla." in class_path.lower()
         or "_mla" in backend_name.lower()
     )
 
-    info = {
+    return {
         "name": backend_name,
         "dtypes": parse_supported_dtypes(class_node),
         "kv_cache_dtypes": parse_kv_cache_dtypes(class_node),
@@ -369,12 +358,6 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
         "is_sparse": check_method_overrides(class_node, "is_sparse"),
         "supports_mm_prefix": check_method_overrides(class_node, "supports_mm_prefix"),
     }
-
-    # Ensure MLA backends are correctly marked
-    if is_mla_backend:
-        info["is_mla"] = True
-
-    return info
 
 
 def bool_to_emoji(value: bool) -> str:
@@ -461,84 +444,53 @@ def parse_cuda_priority_lists() -> dict[str, list[str]]:
             )
 
             if is_mla_branch:
-                # Process MLA branches
-                _extract_priority_from_if(stmt.body, priorities, "mla")
+                _extract_priorities(stmt.body, priorities, "mla")
                 if stmt.orelse:
-                    _extract_priority_from_else(stmt.orelse, priorities, "standard")
+                    _extract_priorities(stmt.orelse, priorities, "standard")
             else:
-                # Process standard branches directly
-                _extract_priority_from_if([stmt], priorities, "standard")
+                _extract_priorities([stmt], priorities, "standard")
 
     return priorities
 
 
-def _extract_priority_from_if(
-    body: list, priorities: dict[str, list[str]], prefix: str
-) -> None:
-    """Extract priority list from if statement body."""
+def _get_backends_from_return(stmts: list) -> list[str]:
+    """Extract backend names from return statements in a list of statements."""
+    for stmt in stmts:
+        if isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.List):
+            return [e.attr for e in stmt.value.elts if isinstance(e, ast.Attribute)]
+    return []
+
+
+def _is_sm100_check(test: ast.expr) -> bool:
+    """Check if test is `something.major == 10`."""
+    return (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Attribute)
+        and test.left.attr == "major"
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+        and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value == 10
+    )
+
+
+def _extract_priorities(body: list, priorities: dict[str, list[str]], prefix: str):
+    """Extract priority lists from if/else statement body."""
     for stmt in body:
         if isinstance(stmt, ast.If):
-            # Check for device_capability.major == 10 using AST inspection
-            is_sm100 = _is_major_equals_check(stmt.test, 10)
+            is_sm100 = _is_sm100_check(stmt.test)
+            if_key = f"{prefix}_sm100" if is_sm100 else f"{prefix}_default"
+            else_key = f"{prefix}_default" if is_sm100 else f"{prefix}_sm100"
 
-            # Get the return list from the if body
-            for sub in stmt.body:
-                if isinstance(sub, ast.Return) and isinstance(sub.value, ast.List):
-                    backends = _extract_backend_names(sub.value)
-                    if is_sm100:
-                        priorities[f"{prefix}_sm100"] = backends
-                    else:
-                        priorities[f"{prefix}_default"] = backends
-
-            # Get the return list from the else body
-            for sub in stmt.orelse:
-                if isinstance(sub, ast.Return) and isinstance(sub.value, ast.List):
-                    backends = _extract_backend_names(sub.value)
-                    if is_sm100:
-                        priorities[f"{prefix}_default"] = backends
-                    else:
-                        priorities[f"{prefix}_sm100"] = backends
+            if backends := _get_backends_from_return(stmt.body):
+                priorities[if_key] = backends
+            if backends := _get_backends_from_return(stmt.orelse):
+                priorities[else_key] = backends
 
         elif isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.List):
-            backends = _extract_backend_names(stmt.value)
+            backends = [e.attr for e in stmt.value.elts if isinstance(e, ast.Attribute)]
             priorities[f"{prefix}_default"] = backends
-
-
-def _is_major_equals_check(test: ast.expr, value: int) -> bool:
-    """Check if the AST expression is `something.major == value`."""
-    if not isinstance(test, ast.Compare):
-        return False
-    if not isinstance(test.left, ast.Attribute):
-        return False
-    if test.left.attr != "major":
-        return False
-    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
-        return False
-    if len(test.comparators) != 1:
-        return False
-    comparator = test.comparators[0]
-    return isinstance(comparator, ast.Constant) and comparator.value == value
-
-
-def _extract_priority_from_else(
-    orelse: list, priorities: dict[str, list[str]], prefix: str
-) -> None:
-    """Extract priority list from else clause."""
-    for stmt in orelse:
-        if isinstance(stmt, ast.If):
-            _extract_priority_from_if([stmt], priorities, prefix)
-        elif isinstance(stmt, ast.Return) and isinstance(stmt.value, ast.List):
-            backends = _extract_backend_names(stmt.value)
-            priorities[f"{prefix}_default"] = backends
-
-
-def _extract_backend_names(list_node: ast.List) -> list[str]:
-    """Extract backend enum names from an AST List node."""
-    backends = []
-    for elt in list_node.elts:
-        if isinstance(elt, ast.Attribute):
-            backends.append(elt.attr)
-    return backends
 
 
 def generate_usage_section() -> str:
@@ -621,6 +573,18 @@ When no backend is specified (the default):
 """
 
 
+def _priority_table(title: str, backends: list[str]) -> list[str]:
+    """Generate a priority table for a list of backends."""
+    return [
+        f"**{title}:**",
+        "",
+        "| Priority | Backend |",
+        "|----------|---------|",
+        *[f"| {i} | {b} |" for i, b in enumerate(backends, 1)],
+        "",
+    ]
+
+
 def generate_priority_section(priorities: dict[str, list[str]]) -> str:
     """Generate the priority ranking section."""
     lines = [
@@ -631,51 +595,24 @@ def generate_priority_section(priorities: dict[str, list[str]]) -> str:
         "",
         "Priority is **1 = highest** (tried first).",
         "",
+        "### Standard Attention (non-MLA)",
+        "",
     ]
 
-    # Standard backends
-    lines.append("### Standard Attention (non-MLA)")
-    lines.append("")
+    sm100 = "Blackwell (SM 10.x)"
+    ampere = "Ampere/Hopper (SM 8.x-9.x)"
 
     if "standard_sm100" in priorities:
-        lines.append("**Blackwell (SM 10.x):**")
-        lines.append("")
-        lines.append("| Priority | Backend |")
-        lines.append("|----------|---------|")
-        for i, backend in enumerate(priorities["standard_sm100"], 1):
-            lines.append(f"| {i} | {backend} |")
-        lines.append("")
-
+        lines.extend(_priority_table(sm100, priorities["standard_sm100"]))
     if "standard_default" in priorities:
-        lines.append("**Ampere/Hopper (SM 8.x-9.x):**")
-        lines.append("")
-        lines.append("| Priority | Backend |")
-        lines.append("|----------|---------|")
-        for i, backend in enumerate(priorities["standard_default"], 1):
-            lines.append(f"| {i} | {backend} |")
-        lines.append("")
+        lines.extend(_priority_table(ampere, priorities["standard_default"]))
 
-    # MLA backends
-    lines.append("### MLA Attention (DeepSeek-style)")
-    lines.append("")
+    lines.extend(["### MLA Attention (DeepSeek-style)", ""])
 
     if "mla_sm100" in priorities:
-        lines.append("**Blackwell (SM 10.x):**")
-        lines.append("")
-        lines.append("| Priority | Backend |")
-        lines.append("|----------|---------|")
-        for i, backend in enumerate(priorities["mla_sm100"], 1):
-            lines.append(f"| {i} | {backend} |")
-        lines.append("")
-
+        lines.extend(_priority_table(sm100, priorities["mla_sm100"]))
     if "mla_default" in priorities:
-        lines.append("**Ampere/Hopper (SM 8.x-9.x):**")
-        lines.append("")
-        lines.append("| Priority | Backend |")
-        lines.append("|----------|---------|")
-        for i, backend in enumerate(priorities["mla_default"], 1):
-            lines.append(f"| {i} | {backend} |")
-        lines.append("")
+        lines.extend(_priority_table(ampere, priorities["mla_default"]))
 
     lines.append(
         "> **Note:** ROCm and CPU platforms have their own selection logic. "
