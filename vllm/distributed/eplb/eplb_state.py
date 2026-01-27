@@ -47,7 +47,9 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 from .async_worker import start_async_worker
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
+    EplbCommunicator,
     RecvMetadata,
+    create_eplb_communicator,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -185,6 +187,10 @@ class EplbModelState:
     cuda_device_index: int | None
     """
     CUDA device index for the async EPLB worker thread.
+    """
+    communicator: EplbCommunicator
+    """
+    The communicator for expert weight transfers.
     """
     new_physical_to_logical_map: torch.Tensor | None = None
     """
@@ -478,15 +484,23 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
+
+        # Create the communicator for this model
+        communicator = create_eplb_communicator(
+            ep_group=ep_group,
+            backend=self.parallel_config.eplb_config.communicator,
+            expert_weights=model.expert_weights[0],
+        )
+
         if global_expert_load is not None:
             rearrange_expert_weights_inplace(
                 old_global_expert_indices,
                 new_physical_to_logical_map,
                 model.expert_weights,
                 ep_group,
+                communicator,
                 False,
                 rank_mapping,
-                communicator_backend=self.parallel_config.eplb_config.communicator,
             )
             self.expert_rearrangement_step = 0
 
@@ -516,6 +530,7 @@ class EplbState:
                 recv_dst_rows=np.array([]),
             ),
             cuda_device_index=self.cuda_device_index,
+            communicator=communicator,
             new_physical_to_logical_map=new_physical_to_logical_map,
             new_logical_to_physical_map=new_logical_to_physical_map,
             new_logical_replica_count=new_logical_replica_count,
@@ -818,9 +833,9 @@ class EplbState:
                     new_physical_to_logical_map,
                     eplb_model_state.model.expert_weights,
                     ep_group,
+                    eplb_model_state.communicator,
                     is_profile,
                     rank_mapping,
-                    communicator_backend=self.parallel_config.eplb_config.communicator,
                 )
 
                 if not is_profile:

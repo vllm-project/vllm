@@ -76,6 +76,8 @@ async def transfer_run_periodically(
                 model_state.rebalanced
                 and model_state.layer_to_transfer < current_num_layers
             ):
+                # Set the async worker's CUDA stream on the communicator
+                model_state.communicator.set_stream(cuda_stream)
                 if (
                     not model_state.ep_buffer_ready
                     and model_state.rebalanced
@@ -96,11 +98,11 @@ async def transfer_run_periodically(
                             expert_weights=model_state.model.expert_weights,
                             expert_weights_buffer=model_state.expert_buffer,
                             ep_group=ep_group,
+                            communicator=model_state.communicator,
                             is_profile=is_profile,
                             layer=model_state.layer_to_transfer,
                             cuda_stream=cuda_stream,
                             rank_mapping=rank_mapping,
-                            communicator_backend=state.parallel_config.eplb_config.communicator,
                         )
                         event = torch.cuda.Event(blocking=False)
                         cuda_stream.record_event(event)

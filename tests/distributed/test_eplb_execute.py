@@ -9,6 +9,7 @@ import torch
 import torch.distributed
 
 from vllm.distributed.eplb.rebalance_execute import (
+    create_eplb_communicator,
     move_from_buffer,
     rearrange_expert_weights_inplace,
     transfer_layer,
@@ -293,6 +294,13 @@ def _test_async_transfer_layer_without_mtp_worker(
     expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
     cuda_stream = torch.cuda.Stream(device=device)
 
+    communicator = create_eplb_communicator(
+        ep_group=ep_group,
+        backend=eplb_communicator,
+        expert_weights=expert_weights[0],
+    )
+    communicator.set_stream(cuda_stream)
+
     for layer_idx in range(num_layers):
         is_unchanged, is_received_locally, recv_metadata = asyncio.run(
             transfer_layer(
@@ -301,9 +309,9 @@ def _test_async_transfer_layer_without_mtp_worker(
                 expert_weights=expert_weights,
                 expert_weights_buffer=expert_buffer,
                 ep_group=ep_group,
+                communicator=communicator,
                 layer=layer_idx,
                 cuda_stream=cuda_stream,
-                communicator_backend=eplb_communicator,
             )
         )
         cuda_stream.synchronize()
@@ -384,14 +392,20 @@ def _test_rearrange_expert_weights_with_redundancy(
         num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
     )
 
+    communicator = create_eplb_communicator(
+        ep_group=ep_group,
+        backend=eplb_communicator,
+        expert_weights=expert_weights[0],
+    )
+
     # Execute weight rearrangement
     rearrange_expert_weights_inplace(
         old_indices,
         new_indices,
         expert_weights,
         ep_group,
+        communicator,
         is_profile=False,
-        communicator_backend=eplb_communicator,
     )
 
     # Verify the rearrangement result
@@ -495,14 +509,20 @@ def _test_rearrange_expert_weights_no_change(
             layer_copy.append(weight.clone())
         original_weights.append(layer_copy)
 
+    communicator = create_eplb_communicator(
+        ep_group=ep_group,
+        backend=eplb_communicator,
+        expert_weights=expert_weights[0],
+    )
+
     # Execute rearrangement (should be no change)
     rearrange_expert_weights_inplace(
         indices,
         indices,  # Same indices
         expert_weights,
         ep_group,
+        communicator,
         is_profile=False,
-        communicator_backend=eplb_communicator,
     )
 
     # Verify that the weights have not changed
@@ -607,14 +627,20 @@ def _test_rearrange_expert_weights_profile_mode(
             layer_copy.append(weight.clone())
         original_weights.append(layer_copy)
 
+    communicator = create_eplb_communicator(
+        ep_group=ep_group,
+        backend=eplb_communicator,
+        expert_weights=expert_weights[0],
+    )
+
     # Execute profile mode rearrangement
     rearrange_expert_weights_inplace(
         old_indices,
         new_indices,
         expert_weights,
         ep_group,
+        communicator,
         is_profile=True,  # Profile mode
-        communicator_backend=eplb_communicator,
     )
 
     # In profile mode, the weights should remain unchanged
