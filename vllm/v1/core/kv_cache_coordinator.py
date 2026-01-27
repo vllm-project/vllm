@@ -513,7 +513,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     for group_id, blocks in zip(group_ids, hit_blocks):
                         hit_blocks_by_group[group_id] = blocks
 
-            if curr_hit_length < hit_length:
+            if self.use_eagle:
+                hit_length = curr_hit_length
+                break
+            elif curr_hit_length < hit_length:
                 hit_length = curr_hit_length
             else:
                 break
