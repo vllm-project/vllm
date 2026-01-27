@@ -601,6 +601,7 @@ class MPClient(EngineCoreClient):
         if self.resources.engine_dead:
             return
         try:
+            logger.info("Sending SHUTDOWN to %d engine(s)", len(self.core_engines))
             for engine_id in self.core_engines:
                 self.input_socket.send_multipart(
                     [engine_id, EngineCoreRequestType.SHUTDOWN.value],

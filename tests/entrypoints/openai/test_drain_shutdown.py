@@ -348,3 +348,51 @@ async def test_child_processes_exit_on_parent_crash():
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_default_shutdown_mode():
+    """Verify default (immediate) shutdown mode exits promptly on SIGTERM."""
+    port = get_open_port()
+    # don't specify shutdown_mode to test the default behavior
+    proc = _start_server(port)
+
+    try:
+        client = openai.AsyncOpenAI(
+            base_url=f"http://localhost:{port}/v1",
+            api_key="dummy",
+            max_retries=0,
+            timeout=30,
+        )
+
+        if not await _wait_for_server_ready(client, _SERVER_STARTUP_TIMEOUT):
+            proc.terminate()
+            proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
+            pytest.fail(f"Server failed to start in {_SERVER_STARTUP_TIMEOUT}s")
+
+        child_pids = _get_child_pids(proc.pid)
+
+        start_time = time.time()
+        proc.send_signal(signal.SIGTERM)
+
+        # default mode should exit promptly
+        for _ in range(100):
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+            pytest.fail("Process did not exit after SIGTERM in default mode")
+
+        exit_time = time.time() - start_time
+        assert exit_time < 10, f"Default shutdown took too long: {exit_time:.1f}s"
+        assert proc.returncode in (0, -15, None), f"Unexpected: {proc.returncode}"
+
+        await _assert_children_cleaned_up(child_pids)
+
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
