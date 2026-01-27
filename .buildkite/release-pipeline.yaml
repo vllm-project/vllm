@@ -638,6 +638,8 @@ steps:
     depends_on:
       - step: upload-rocm-wheels
         allow_failure: true
+      - step: input-release-version
+        allow_failure: true
     agents:
       queue: cpu_queue_postmerge
     commands:

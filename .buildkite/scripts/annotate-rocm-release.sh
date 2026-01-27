@@ -12,8 +12,15 @@ ROCM_VERSION=$(grep -E '^ARG BASE_IMAGE=' docker/Dockerfile.rocm_base | sed -E '
 PYTHON_VERSION=$(buildkite-agent meta-data get rocm-python-version 2>/dev/null || echo "3.12")
 PYTORCH_ROCM_ARCH=$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo "gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151")
 
+# TODO: Enable the nightly build for ROCm
+# Get release version, default to 1.0.0.dev for nightly/per-commit builds
+RELEASE_VERSION=$(buildkite-agent meta-data get release-version 2>/dev/null || echo "")
+if [ -z "${RELEASE_VERSION}" ]; then
+  RELEASE_VERSION="1.0.0.dev"
+fi
+
 # S3 URLs
-S3_BUCKET="${S3_BUCKET:-vllm-wheels-dev}"
+S3_BUCKET="${S3_BUCKET:-vllm-wheels}"
 S3_REGION="${AWS_DEFAULT_REGION:-us-west-2}"
 S3_URL="http://${S3_BUCKET}.s3-website-${S3_REGION}.amazonaws.com"
 
@@ -86,6 +93,7 @@ aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/flash-
 To download and upload the image:
 
 \`\`\`
+docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm
 docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}
 docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT} vllm/vllm-openai-rocm:latest
 docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT} vllm/vllm-openai-rocm:v${RELEASE_VERSION}
