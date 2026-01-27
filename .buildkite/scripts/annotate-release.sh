@@ -46,12 +46,6 @@ docker tag vllm/vllm-openai:aarch64 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64
 docker push vllm/vllm-openai:latest-aarch64
 docker push vllm/vllm-openai:v${RELEASE_VERSION}-aarch64
 
-docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm vllm/vllm-openai:rocm
-docker tag vllm/vllm-openai:rocm vllm/vllm-openai:latest-rocm
-docker tag vllm/vllm-openai:rocm vllm/vllm-openai:v${RELEASE_VERSION}-rocm
-docker push vllm/vllm-openai:latest-rocm
-docker push vllm/vllm-openai:v${RELEASE_VERSION}-rocm
-
 docker manifest rm vllm/vllm-openai:latest
 docker manifest create vllm/vllm-openai:latest vllm/vllm-openai:latest-x86_64 vllm/vllm-openai:latest-aarch64
 docker manifest create vllm/vllm-openai:v${RELEASE_VERSION} vllm/vllm-openai:v${RELEASE_VERSION}-x86_64 vllm/vllm-openai:v${RELEASE_VERSION}-aarch64
