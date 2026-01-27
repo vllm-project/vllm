@@ -75,8 +75,8 @@ class MultiModalProcessorTimingStats:
     prompt_update_time: float = 0.0
     """Time spent applying prompt updates and finding placeholders (seconds)."""
 
-    total_time: float = 0.0
-    """Total processing time (seconds)."""
+    preprocessor_total_time: float = 0.0
+    """Total preprocessing time (seconds)."""
 
     def to_dict(self) -> dict[str, float]:
         """Convert stats to a dictionary for JSON serialization."""
@@ -85,7 +85,7 @@ class MultiModalProcessorTimingStats:
             "hashing_time": self.hashing_time,
             "cache_lookup_time": self.cache_lookup_time,
             "prompt_update_time": self.prompt_update_time,
-            "total_time": self.total_time,
+            "preprocessor_total_time": self.preprocessor_total_time,
         }
 
 
@@ -93,13 +93,30 @@ def get_timing_stats_from_engine_client(
     engine_client: Any,
 ) -> dict[str, dict[str, float]]:
     """
-    Get all timing stats from the context associated with the engine client.
+    Get all multimodal timing stats from the engine client.
+
+    Collects both preprocessing stats (HF processor, hashing, cache lookup,
+    prompt update) and encoder forward pass timing, merged by request_id.
 
     Args:
-        engine_client: The engine client that has input_processor.
+        engine_client: The engine client (has input_processor and workers).
 
     Returns:
-        A dictionary mapping request_id to stats dict.
+        Dictionary mapping request_id to merged stats dict containing
+        both preprocessing and encoder timing metrics.
+
+    Example:
+        {
+            'request-123': {
+                'hf_processor_time': 0.45,
+                'hashing_time': 0.02,
+                'cache_lookup_time': 0.01,
+                'prompt_update_time': 0.03,
+                'preprocessor_total_time': 0.51,
+                'encoder_forward_time': 0.23,
+                'num_encoder_calls': 1
+            }
+        }
     """
     try:
         if not engine_client.vllm_config.observability_config.enable_mm_processor_stats:
@@ -107,6 +124,7 @@ def get_timing_stats_from_engine_client(
     except (AttributeError, RuntimeError):
         return {}
 
+    preprocessing_stats = {}
     try:
         input_processor = engine_client.input_processor
         input_preprocessor = input_processor.input_preprocessor
@@ -115,15 +133,68 @@ def get_timing_stats_from_engine_client(
             mm_processor = input_preprocessor._get_mm_processor()
             if mm_processor is not None and hasattr(mm_processor, "info"):
                 ctx = mm_processor.info.ctx
-                return ctx.get_all_timing_stats()
+                preprocessing_stats = ctx.get_all_timing_stats()
     except (AttributeError, RuntimeError):
         pass
 
-    return {}
+    encoder_stats = {}
+    try:
+        if hasattr(engine_client, "collective_rpc"):
+            encoder_stats_results = engine_client.collective_rpc(
+                "get_encoder_timing_stats"
+            )
+            if encoder_stats_results and len(encoder_stats_results) > 0:
+                for worker_stats in encoder_stats_results:
+                    if not worker_stats:
+                        continue
+                    for request_id, stats_dict in worker_stats.items():
+                        if request_id not in encoder_stats:
+                            encoder_stats[request_id] = dict(stats_dict)
+                        else:
+                            # Aggregate timing metrics across workers
+                            current_time = encoder_stats[request_id].get(
+                                "encoder_forward_time", 0.0
+                            )
+                            new_time = stats_dict.get("encoder_forward_time", 0.0)
+                            encoder_stats[request_id]["encoder_forward_time"] = max(
+                                current_time, new_time
+                            )
+
+                            current_calls = encoder_stats[request_id].get(
+                                "num_encoder_calls", 0
+                            )
+                            new_calls = stats_dict.get("num_encoder_calls", 0)
+                            encoder_stats[request_id]["num_encoder_calls"] = max(
+                                current_calls, new_calls
+                            )
+    except (AttributeError, RuntimeError):
+        pass
+
+    merged_stats = {}
+
+    for request_id, prep_dict in preprocessing_stats.items():
+        merged_stats[request_id] = dict(prep_dict)
+
+    for request_id, enc_dict in encoder_stats.items():
+        if request_id in merged_stats:
+            merged_stats[request_id].update(enc_dict)
+            continue
+
+        # In V1 engine, the request_id in encoder_stats has a suffix
+        # appended to the original request_id (which is used in
+        # preprocessing_stats).
+        # We try to strip the suffix to find the matching request.
+        possible_original_id = request_id.rpartition("-")[0]
+        if possible_original_id and possible_original_id in merged_stats:
+            merged_stats[possible_original_id].update(enc_dict)
+        else:
+            merged_stats[request_id] = dict(enc_dict)
+
+    return merged_stats
 
 
 @contextmanager
-def timed_operation(ctx: "InputProcessingContext", stage_name: str):
+def timed_preprocessor_operation(ctx: "InputProcessingContext", stage_name: str):
     """
     Context manager to time an operation using the context's timing stats.
 
@@ -157,7 +228,7 @@ def timed_operation(ctx: "InputProcessingContext", stage_name: str):
             stats.cache_lookup_time += elapsed
         elif stage_name == "prompt_update":
             stats.prompt_update_time += elapsed
-        stats.total_time += elapsed
+        stats.preprocessor_total_time += elapsed
 
 
 _T = TypeVar("_T")

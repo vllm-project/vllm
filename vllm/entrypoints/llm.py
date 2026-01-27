@@ -41,10 +41,6 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
-    apply_hf_chat_template,
-    apply_mistral_chat_template,
-    parse_chat_messages,
-    resolve_chat_template_content_format,
 )
 from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
@@ -807,7 +803,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[TokensPrompt]:
+    ) -> list[TextPrompt | TokensPrompt]:
         """
         Generate prompt for a chat conversation. The pre-processed
         prompt can then be used as input for the other LLM methods.
@@ -828,63 +824,27 @@ class LLM:
             # messages is list[...]
             list_of_messages = [cast(list[ChatCompletionMessageParam], messages)]
 
-        tokenizer = self.get_tokenizer()
-        model_config = self.model_config
-        resolved_content_format = resolve_chat_template_content_format(
-            chat_template,
-            tools,
-            chat_template_content_format,
-            tokenizer,
-            model_config=model_config,
-        )
+        renderer = self.llm_engine.renderer
 
-        _chat_template_kwargs: dict[str, Any] = dict(
-            chat_template=chat_template,
-            add_generation_prompt=add_generation_prompt,
-            continue_final_message=continue_final_message,
-            tools=tools,
-        )
-        _chat_template_kwargs.update(chat_template_kwargs or {})
+        chat_template_kwargs = {
+            "chat_template": chat_template,
+            "add_generation_prompt": add_generation_prompt,
+            "continue_final_message": continue_final_message,
+            "tools": tools,
+            **(chat_template_kwargs or {}),
+        }
 
-        prompts: list[TokensPrompt] = []
+        prompts = list[TextPrompt | TokensPrompt]()
 
         for msgs in list_of_messages:
-            # NOTE: _parse_chat_message_content_parts() currently doesn't
+            # NOTE: renderer.render_messages() currently doesn't
             # handle mm_processor_kwargs, since there is no implementation in
             # the chat message parsing for it.
-            conversation, mm_data, mm_uuids = parse_chat_messages(
+            _, prompt = renderer.render_messages(
                 msgs,
-                model_config,
-                content_format=resolved_content_format,
+                chat_template_content_format=chat_template_content_format,
+                **chat_template_kwargs,
             )
-
-            if isinstance(tokenizer, MistralTokenizer):
-                prompt_token_ids = apply_mistral_chat_template(
-                    tokenizer,
-                    messages=msgs,
-                    **_chat_template_kwargs,
-                )
-            else:
-                prompt_str = apply_hf_chat_template(
-                    tokenizer=tokenizer,
-                    conversation=conversation,
-                    model_config=model_config,
-                    **_chat_template_kwargs,
-                )
-                # Special tokens are already included in chat templates so
-                # should not be added by the tokenizer in this case.
-                prompt_token_ids = tokenizer.encode(
-                    prompt_str, add_special_tokens=False
-                )
-
-            prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
-
-            if mm_data is not None:
-                prompt["multi_modal_data"] = mm_data
-
-            if mm_uuids is not None:
-                prompt["multi_modal_uuids"] = mm_uuids
-
             if mm_processor_kwargs is not None:
                 prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
@@ -1635,10 +1595,6 @@ class LLM:
 
         try:
             for i, prompt in enumerate(it):
-                if isinstance(prompt, dict):
-                    self._validate_mm_data_and_uuids(
-                        prompt.get("multi_modal_data"), prompt.get("multi_modal_uuids")
-                    )
                 request_id = self._add_request(
                     prompt,
                     params[i] if isinstance(params, Sequence) else params,
@@ -1653,54 +1609,6 @@ class LLM:
             if added_request_ids:
                 self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
-
-    def _validate_mm_data_and_uuids(
-        self,
-        multi_modal_data: Any | None,  # MultiModalDataDict
-        multi_modal_uuids: Any | None,  # MultiModalUUIDDict
-    ):
-        """
-        Validate that if any multi-modal data is skipped (i.e. None),
-        then its corresponding UUID must be set.
-        """
-        if multi_modal_data is None:
-            return
-
-        for modality, data in multi_modal_data.items():
-            if isinstance(data, list):
-                for i, d in enumerate(data):
-                    if d is None:
-                        if (
-                            multi_modal_uuids is None
-                            or modality not in multi_modal_uuids
-                            or multi_modal_uuids[  # noqa: E501
-                                modality
-                            ]
-                            is None
-                        ):
-                            raise ValueError(
-                                f"Multi-modal data for {modality} is None "
-                                f"but UUID is not provided"
-                            )
-                        else:
-                            if (
-                                len(multi_modal_uuids[modality]) <= i
-                                or multi_modal_uuids[modality][i] is None
-                            ):
-                                raise ValueError(
-                                    f"Multi-modal data for {modality} is None "
-                                    f"but UUID is not provided"
-                                )
-            else:
-                if data is None and (
-                    multi_modal_uuids is None
-                    or modality not in multi_modal_uuids
-                    or multi_modal_uuids[modality] is None
-                ):
-                    raise ValueError(
-                        f"Multi-modal data for {modality} is None"
-                        f" but UUID is not provided"
-                    )
 
     def _process_inputs(
         self,

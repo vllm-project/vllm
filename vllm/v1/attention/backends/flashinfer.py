@@ -281,6 +281,7 @@ class FlashInferBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "bfloat16",
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
@@ -603,7 +604,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "earlier GPUs."
             )
         # Preparing persistent buffers
-        self.pin_memory = is_pin_memory_available()
+        # Since we do not have explicit synchronization in ModelRunnerV2, we do not pin
+        # reused CPU buffers to avoid a race condition between step N async copies to
+        # GPU and step N+1 buffer updates.
+        self.pin_memory = (
+            not envs.VLLM_USE_V2_MODEL_RUNNER and is_pin_memory_available()
+        )
         self.paged_kv_indptr = self._make_buffer(max_num_reqs + 1)
         self.paged_kv_indptr_cpu_buffer = torch.zeros_like(
             self.paged_kv_indptr.cpu, pin_memory=self.pin_memory
