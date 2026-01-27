@@ -78,7 +78,7 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
 
         layer.register_parameter("weight_scale", weight_scale)
 
-    def process_weights_after_loading(self, layer) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Process parameters for marlin repacking
 
         # Rename weight_packed to weight that marlin expects
@@ -86,7 +86,7 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
         del layer.weight_packed
         # ct stores the inverse of what is expected by the marlin kernel
         layer.weight_global_scale = Parameter(
-            1 / layer.weight_global_scale.max().to(torch.float32), requires_grad=False
+            1.0 / layer.weight_global_scale.max().to(torch.float32), requires_grad=False
         )
 
         prepare_fp4_layer_for_marlin(layer)

@@ -5,7 +5,6 @@ from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
-from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -486,7 +485,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", scale)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight
         max_w_scale = layer.weight_scale.max()
         if not (layer.weight_scale == layer.weight_scale[0]).all():
@@ -568,7 +567,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
 
@@ -669,7 +668,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Keep weight in [out, in] layout for W8A8BlockFp8LinearOp.
         layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
@@ -1172,7 +1171,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         layer.register_parameter("weight_scale", weight_scale)
 
-    def process_weights_after_loading(self, layer: Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Rename ModelOpt checkpoint names to standardized names
         input_global_scale = layer.input_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
@@ -1186,7 +1185,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.input_global_scale * layer.weight_global_scale, requires_grad=False
         )
         layer.input_global_scale_inv = Parameter(
-            (1 / layer.input_global_scale).to(torch.float32), requires_grad=False
+            (1.0 / layer.input_global_scale).to(torch.float32), requires_grad=False
         )
 
         # Convert layer to NVFP4 linear kernel format
