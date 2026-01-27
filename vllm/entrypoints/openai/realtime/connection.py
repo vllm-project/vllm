@@ -187,14 +187,14 @@ class RealtimeConnection:
             # Stream results back to client as they're generated
             async for output in result_gen:
                 if output.outputs and len(output.outputs) > 0:
-                    if not prompt_token_ids_len:
+                    if not prompt_token_ids_len and output.prompt_token_ids:
                         prompt_token_ids_len = len(output.prompt_token_ids)
 
                     delta = output.outputs[0].text
                     full_text += delta
 
                     # append output to input
-                    await input_stream.put(output.outputs[0].token_ids)
+                    await input_stream.put(list(output.outputs[0].token_ids))
                     await self.send(TranscriptionDelta(delta=delta))
 
                     completion_tokens_len += len(output.outputs[0].token_ids)
