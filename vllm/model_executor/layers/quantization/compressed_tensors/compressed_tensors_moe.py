@@ -602,8 +602,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel is not None
-        return self.kernel.forward_monolithic(
+        assert self.moe_mk is not None
+        return self.moe_mk.forward_monolithic(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -977,8 +977,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         assert self.is_monolithic
         assert layer.activation == "silu"
 
-        assert self.kernel is not None
-        return self.kernel.forward_monolithic(
+        assert self.moe_mk is not None
+        return self.moe_mk.forward_monolithic(
             x,
             layer.w13_weight,
             layer.w2_weight,

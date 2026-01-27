@@ -8,7 +8,6 @@ from packaging import version
 from torch.nn import Module
 
 from vllm._ipex_ops import ipex_ops as ops
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -375,11 +374,6 @@ class XPUFp8MoEMethod(Fp8OnlineMoEMethod):
             use_prepack=True,
             experts_start_id=ep_rank_start,
         )
-
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
-        return None
 
     @property
     def is_monolithic(self) -> bool:

@@ -940,8 +940,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if layer.enable_eplb:
             raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
 
-        assert self.kernel is not None
-        return self.kernel.forward_monolithic(
+        assert self.moe_mk is not None
+        return self.moe_mk.forward_monolithic(
             x,
             layer.w13_weight,
             layer.w2_weight,

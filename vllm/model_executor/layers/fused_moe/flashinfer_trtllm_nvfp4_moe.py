@@ -205,9 +205,11 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> torch.Tensor:
         assert activation == "silu"
         assert a1q_scale is not None
+        assert self.quant_config.w1_scale is not None
+        assert self.quant_config.w2_scale is not None
 
         # Prepare routing bias into kernel format.
-        routing_bias = self.e_score_correction_bias
+        routing_bias = e_score_correction_bias
         if routing_bias is not None:
             routing_bias = routing_bias.to(torch.bfloat16)
         router_logits = (
