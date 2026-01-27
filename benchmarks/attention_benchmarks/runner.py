@@ -175,7 +175,16 @@ def _build_block_table(
     Returns:
         BlockTable instance
     """
-    bt = BlockTable(len(requests), max_num_blocks, total_q, False, device)
+    bt = BlockTable(
+        block_size=block_size,
+        max_num_reqs=len(requests),
+        max_num_blocks_per_req=max_num_blocks,
+        max_num_batched_tokens=total_q,
+        pin_memory=False,
+        device=device,
+        kernel_block_size=block_size,
+        cp_kv_cache_interleave_size=1,
+    )
     for i in range(len(requests)):
         num_blocks = (kv_lens[i] + block_size - 1) // block_size
         bt.add_row(list(range(num_blocks)), i)
@@ -235,7 +244,6 @@ def _create_backend_impl(
         num_kv_heads=config.num_kv_heads,
         head_size=config.head_dim,
         dtype=dtype,
-        use_mla=False,
     )
 
     # Create mock layer
@@ -287,7 +295,6 @@ def _create_metadata_builder(
             num_kv_heads=config.num_kv_heads,
             head_size=config.head_dim,
             dtype=dtype,
-            use_mla=False,
         ),
         block_table=block_table,
     )
