@@ -983,19 +983,10 @@ class SupportsQuant:
     def __new__(cls, *args, **kwargs) -> Self:
         instance = super().__new__(cls)
 
-        # find config passed in arguments
-        quant_config = cls._find_quant_config(*args, **kwargs)
-        if quant_config is not None:
-            # attach config to model for general use
-            instance.quant_config = quant_config
+        # find config passed in arguments and attach it to model for general use
+        instance.quant_config = cls._find_quant_config(*args, **kwargs)
 
-            # apply model mappings to config for proper config-model matching
-            if (hf_to_vllm_mapper := instance.hf_to_vllm_mapper) is not None:
-                instance.quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
-            if instance.packed_modules_mapping is not None:
-                instance.quant_config.packed_modules_mapping.update(
-                    instance.packed_modules_mapping
-                )
+        cls._maybe_apply_model_mapping(instance)
 
         return instance
 
@@ -1013,6 +1004,15 @@ class SupportsQuant:
                 return arg
 
         return None
+
+    def _maybe_apply_model_mapping(self):
+        """Apply model mappings to config for proper config-model matching"""
+        if self.quant_config is None:
+            return
+        if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
+            self.quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+        if self.packed_modules_mapping is not None:
+            self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
 
 
 @runtime_checkable
