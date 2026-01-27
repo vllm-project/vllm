@@ -226,17 +226,6 @@ class TokenizeParams:
 
         return prompt
 
-    def _apply_truncation(self, tokens: _S) -> _S:
-        """Apply truncation to a token sequence."""
-        truncate_prompt_tokens = self.truncate_prompt_tokens
-
-        if truncate_prompt_tokens is None or truncate_prompt_tokens >= len(tokens):
-            return tokens
-        if truncate_prompt_tokens == 0:
-            return tokens[:0]  # type: ignore[return-value]
-
-        return tokens[-truncate_prompt_tokens:]  # type: ignore[return-value]
-
     def _apply_length_check(self, tokens: _S) -> _S:
         """Apply length checks to a token sequence."""
         max_input_tokens = self.max_input_tokens
@@ -257,7 +246,7 @@ class TokenizeParams:
 
     def _validate_tokens(self, tokens: _S) -> _S:
         """Apply all validators to a token sequence."""
-        for validator in (self._apply_truncation, self._apply_length_check):
+        for validator in (self._apply_length_check,):
             tokens = validator(tokens)
 
         return tokens
