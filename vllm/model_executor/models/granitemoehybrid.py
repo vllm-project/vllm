@@ -46,6 +46,7 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
+    mark_mamba_gate_proj_loaded,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -576,6 +577,7 @@ class GraniteMoeHybridModel(nn.Module):
                 if not loaded:
                     _load(n, p)
 
+        mark_mamba_gate_proj_loaded(params_dict, loaded_params)
         return loaded_params
 
 

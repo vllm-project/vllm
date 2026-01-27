@@ -333,8 +333,6 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
 
 
 def create_kv_caches_with_random_flash(
@@ -551,6 +549,8 @@ def current_stream() -> torch.cuda.Stream:
 # aux_stream() is currently used for:
 #   - MoE shared_expert overlap with router
 _aux_stream: torch.cuda.Stream | None = None
+_mamba_prefill_decode_stream: torch.cuda.Stream | None = None
+_mamba_gate_stream: torch.cuda.Stream | None = None
 
 
 def aux_stream() -> torch.cuda.Stream | None:
@@ -565,6 +565,53 @@ def aux_stream() -> torch.cuda.Stream | None:
         _aux_stream = torch.cuda.Stream()
 
     return _aux_stream
+
+
+def mamba_prefill_decode_stream() -> torch.cuda.Stream | None:
+    """Dedicated aux stream for Mamba prefill/decode overlap."""
+    global _mamba_prefill_decode_stream
+
+    from vllm.platforms import current_platform
+
+    if _mamba_prefill_decode_stream is None and current_platform.is_cuda_alike():
+        _mamba_prefill_decode_stream = torch.cuda.Stream()
+
+    return _mamba_prefill_decode_stream
+
+
+def mamba_gate_stream() -> torch.cuda.Stream | None:
+    """Dedicated aux stream for Mamba-2 gate projection overlap."""
+    global _mamba_gate_stream
+
+    from vllm.platforms import current_platform
+
+    if _mamba_gate_stream is None and current_platform.is_cuda_alike():
+        _mamba_gate_stream = torch.cuda.Stream()
+
+    return _mamba_gate_stream
+
+
+def maybe_execute_in_parallel(
+    fn0: Callable[[], Any],
+    fn1: Callable[[], Any],
+    event0: torch.cuda.Event,
+    event1: torch.cuda.Event,
+    aux_stream: torch.cuda.Stream | None = None,
+) -> tuple[Any, Any]:
+    """Run two callables, optionally overlapping on an aux CUDA stream."""
+    if aux_stream is None:
+        return fn0(), fn1()
+
+    event0.record()
+    result0 = fn0()
+
+    with torch.cuda.stream(aux_stream):
+        aux_stream.wait_event(event0)
+        result1 = fn1()
+        event1.record()
+
+    event1.wait()
+    return result0, result1
 
 
 @lru_cache(maxsize=8)
@@ -615,9 +662,8 @@ def weak_ref_tensor(tensor: Any) -> Any:
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
-    This ignores 0-size tensors as those don't allocate any memory.
     """
-    if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
+    if isinstance(tensor, torch.Tensor):
         return torch.ops._C.weak_ref_tensor(tensor)
     else:
         return tensor
