@@ -227,7 +227,7 @@ RUN if [ "$GIT_REPO_CHECK" != "0" ]; then \
 # This ensures setuptools_scm sees clean repo state for version detection
 RUN --mount=type=bind,source=.git,target=vllm/.git \
     cd vllm \
-    && pip install setuptools_scm \
+    && pip install setuptools_scm regex \
     && VLLM_VERSION=$(python3 -c "import setuptools_scm; print(setuptools_scm.get_version())") \
     && echo "Detected vLLM version: ${VLLM_VERSION}" \
     && echo "${VLLM_VERSION}" > /tmp/vllm_version.txt
