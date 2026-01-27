@@ -24,10 +24,23 @@ from vllm.multimodal.utils import (
 )
 from vllm.utils.serial_utils import tensor2base64
 
+KIMI_K2_5_MODEL_ID = "moonshotai/Kimi-K2.5"
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
 MISTRAL_MODEL_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+
+
+@pytest.fixture(scope="function")
+def kimi_k2_5_model_config():
+    return ModelConfig(
+        KIMI_K2_5_MODEL_ID,
+        runner="generate",
+        trust_remote_code=True,
+        limit_mm_per_prompt={
+            "image": 2,
+        },
+    )
 
 
 @pytest.fixture(scope="function")
@@ -155,6 +168,23 @@ def _assert_mm_data_is_image_input(
     assert set(mm_data.keys()) == {"image"}
 
     image_data = mm_data.get("image")
+    assert image_data is not None
+
+    assert isinstance(image_data, list) and len(image_data) == image_count
+    if skipped_image_indices is not None:
+        for i in skipped_image_indices:
+            assert image_data[i] is None
+
+
+def _assert_mm_data_is_vision_chunk_input(
+    mm_data: MultiModalDataDict | None,
+    image_count: int,
+    skipped_image_indices: list | None = None,
+) -> None:
+    assert mm_data is not None
+    assert set(mm_data.keys()) == {"vision_chunk"}
+
+    image_data = mm_data.get("vision_chunk")
     assert image_data is not None
 
     assert isinstance(image_data, list) and len(image_data) == image_count
@@ -2151,3 +2181,40 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     ]
     _assert_mm_data_inputs(mm_data, {"audio": 1})
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[audio_uuid])
+
+
+@pytest.mark.asyncio
+async def test_parse_chat_messages_image_vision_chunk(
+    kimi_k2_5_model_config,
+    image_url,
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this image."},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|media_begin|>image<|media_content|><|media_pad|><|media_end|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this image.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None], modality="vision_chunk")
