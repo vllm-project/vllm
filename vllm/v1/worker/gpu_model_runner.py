@@ -1105,8 +1105,11 @@ class GPUModelRunner(
     ) -> None:
         """Update the cached states after model execution.
 
-        For hybrid models using MTP/EAGLE, keep track of how many draft
-        tokens were accepted so the next iteration can shift states.
+        This is used for MTP/EAGLE for hybrid models, as in linear attention,
+        only the last token's state is kept. In MTP/EAGLE, for draft tokens
+        the state are kept util we decide how many tokens are accepted for
+        each sequence, and a shifting is done during the next iteration
+        based on the number of accepted tokens.
         """
         if not self.speculative_config or not self.model_config.is_hybrid:
             return
