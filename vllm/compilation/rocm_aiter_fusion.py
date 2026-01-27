@@ -413,32 +413,17 @@ class AddAiterRMSNormPadPattern:
         self,
         epsilon: float,
         hidden_size: int,
-        num_local_experts: int,
         x_pad_to_multiple: int,
     ):
         self.epsilon = epsilon
         self.hidden_size = hidden_size
-        self.num_local_experts = num_local_experts
         self.x_pad_to_multiple = x_pad_to_multiple
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon, match_rocm_aiter=True)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        input = (
-            self.rmsnorm_matcher.empty(5, self.hidden_size)
-            if self.rmsnorm_matcher.enabled
-            else self.rmsnorm_matcher.empty_f32(5, self.hidden_size)
-        )
-        weight = self.rmsnorm_matcher.empty(self.hidden_size)
-        residual = self.rmsnorm_matcher.empty(5, self.hidden_size)
-        router_weight = torch.empty(
-            [self.num_local_experts, self.hidden_size],
-            dtype=weight.dtype,
-            device=weight.device,
-        )
-        router_bias = torch.empty(
-            [self.num_local_experts], dtype=weight.dtype, device=weight.device
-        )
-
+        input, weight, residual = self.rmsnorm_matcher.inputs()
+        router_weight = torch.empty([8, 16], dtype=weight.dtype, device=weight.device)
+        router_bias = torch.empty([8], dtype=weight.dtype, device=weight.device)
         return [input, weight, residual, router_weight, router_bias]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -499,14 +484,13 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
             pass_name="rocm_aiter_triton_add_rmsnorm_pad_fusion_pass"
         )
 
-        # gpt-oss has hidden size 2880 and num_local_experts 128
+        # gpt-oss has hidden size 2880
         # padded to a multiple of 128 on gfx942 and 256 on gfx950 respectively
         hidden_size = 2880
-        num_local_experts = 128
         for epsilon in [1e-5, 1e-6]:
             for x_pad_to_multiple in [128, 256]:
                 AddAiterRMSNormPadPattern(
-                    epsilon, hidden_size, num_local_experts, x_pad_to_multiple
+                    epsilon, hidden_size, x_pad_to_multiple
                 ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
