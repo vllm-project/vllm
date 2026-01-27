@@ -52,26 +52,25 @@ class OnlineWeightLoaderMixin:
     4. Calls a callback when all weights are loaded
 
     Classes using this mixin should:
-    - Call `_mixin_create_weights` from their `create_weights` method
-    - Implement `_create_scale_parameters` to create quantization-specific scales
+    - Implement `_create_scale_tensors` to create quantization-specific scales
     - Implement `process_weights_after_loading` for quantization and kernel setup
     """
 
-    def _mixin_create_weights(
+    def create_weights(
         self,
         layer: Module,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
-        extra_weight_attrs: dict,
+        **extra_weight_attrs,
     ) -> None:
         """
         Shared weight creation logic for online MoE quantization.
 
         Creates weights on meta device with a patched weight loader that
         tracks loading progress. Subclasses must implement
-        `_create_scale_parameters` for quantization-specific scales.
+        `_create_scale_tensors` to create quantization-specific scales.
         """
         # Store layer dimensions
         layer.intermediate_size_per_partition = intermediate_size_per_partition
