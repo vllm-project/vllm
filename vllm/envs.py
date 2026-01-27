@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
+    VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
     # Deprecated env variables for profiling, kept for backward compatibility
     # See also vllm/config/profiler.py and `--profiler-config` argument
     VLLM_TORCH_CUDA_PROFILE: str | None = None
@@ -288,16 +289,11 @@ def use_aot_compile() -> bool:
     from vllm.model_executor.layers.batch_invariant import (
         vllm_is_batch_invariant,
     )
-    from vllm.platforms import current_platform
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = (
         "1"
-        if is_torch_equal_or_newer("2.10.0.dev")
-        and not disable_compile_cache()
-        # Disabling AOT_COMPILE for CPU
-        # See: https://github.com/vllm-project/vllm/issues/32033
-        and not current_platform.is_cpu()
+        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
         else "0"
     )
 
@@ -872,6 +868,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
     "VLLM_LORA_RESOLVER_CACHE_DIR": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_CACHE_DIR", None
+    ),
+    # A remote HF repo(s) containing one or more LoRA adapters, which
+    # may be downloaded and leveraged as needed. Only works if plugins
+    # are enabled and VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
+    # Values should be comma separated.
+    "VLLM_LORA_RESOLVER_HF_REPO_LIST": lambda: os.getenv(
+        "VLLM_LORA_RESOLVER_HF_REPO_LIST", None
     ),
     # Enables torch CUDA profiling if set to 1.
     # Deprecated, see profiler_config.
