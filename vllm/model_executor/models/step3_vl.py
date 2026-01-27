@@ -142,8 +142,11 @@ class Step3VisionProcessor:
 
 
 class ImagePatcher:
+    def __init__(self, enable_patch: bool = True) -> None:
+        self.enable_patch = enable_patch
+
     def determine_window_size(self, long: int, short: int) -> int:
-        if long <= 728:
+        if long < 728:
             return short if long / short > 1.5 else 0
         return min(short, 504) if long / short > 4 else 504
 
@@ -241,7 +244,7 @@ class ImagePatcher:
         window_size = self.determine_window_size(
             max(img_height, img_width), min(img_height, img_width)
         )
-        if window_size == 0:
+        if window_size == 0 or not self.enable_patch:
             return 0, 0
         else:
             img_width, img_height = self.get_image_size_for_crop(
@@ -277,7 +280,7 @@ class ImagePatcher:
             max(new_img_height, new_img_width), min(new_img_height, new_img_width)
         )
 
-        if window_size == 0:
+        if window_size == 0 or not self.enable_patch:
             return img, [], None
         else:
             new_img_width, new_img_height = self.get_image_size_for_crop(
@@ -327,7 +330,6 @@ class Step3VLProcessor:
 
         self.config = config
         self.tokenizer = tokenizer
-
         self.image_size = 728
         self.patch_size = 504
         self.image_preprocessor = Step3VisionProcessor(
@@ -340,7 +342,10 @@ class Step3VLProcessor:
         self.image_feature_placeholder = self.image_token * self.num_image_feature_size
         self.patch_feature_placeholder = self.image_token * self.num_patch_feature_size
 
-        self.patcher = ImagePatcher()
+        # Respect vision config switch to enable/disable patch extraction.
+        # For video understanding, it's preferable to disable patch.
+        enable_patch = getattr(self.config.vision_config, "enable_patch", True)
+        self.patcher = ImagePatcher(enable_patch=enable_patch)
 
     @property
     def image_token_id(self) -> int:
@@ -1096,7 +1101,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
