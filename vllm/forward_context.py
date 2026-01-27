@@ -267,7 +267,7 @@ def create_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
-    slot_mapping: dict[str, torch.Tensor] | None = None,
+    slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
 ):
