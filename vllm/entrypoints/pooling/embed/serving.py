@@ -29,9 +29,6 @@ from vllm.pooling_params import PoolingParams
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.serial_utils import (
-    EmbedDType,
-    EncodingFormat,
-    Endianness,
     encode_pooling_bytes,
     encode_pooling_output,
 )
@@ -122,9 +119,9 @@ class OpenAIServingEmbedding(OpenAIServing):
     ) -> EmbeddingResponse | EmbeddingBytesResponse | ErrorResponse:
         final_res_batch_checked = ctx.final_res_batch
 
-        encoding_format: EncodingFormat = ctx.request.encoding_format
-        embed_dtype: EmbedDType = ctx.request.embed_dtype
-        endianness: Endianness = ctx.request.endianness
+        encoding_format = ctx.request.encoding_format
+        embed_dtype = ctx.request.embed_dtype
+        endianness = ctx.request.endianness
 
         def encode_float_base64():
             items: list[EmbeddingResponseData] = []
@@ -205,8 +202,8 @@ class OpenAIServingEmbedding(OpenAIServing):
         self,
         ctx: EmbeddingServeContext,
         token_ids: list[int],
-        pooling_params,
-        trace_headers,
+        pooling_params: PoolingParams,
+        trace_headers: Mapping[str, str] | None,
         prompt_idx: int,
     ) -> list[AsyncGenerator[PoolingRequestOutput, None]]:
         """Process a single prompt using chunked processing."""
