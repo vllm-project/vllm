@@ -405,9 +405,12 @@ class Attention(nn.Module, AttentionLayerBase):
                 )
             else:
                 kv_cache_dummy_dep = None
-                if not self.attn_backend.forward_includes_kv_cache_update and (
-                    # torch can only dispatch custom op if a tensor is passed
-                    key is not None or value is not None
+                # Only call KV cache update if both key and value are present.
+                # They may be None for cross-attention where K/V are cached once.
+                if (
+                    not self.attn_backend.forward_includes_kv_cache_update
+                    and key is not None
+                    and value is not None
                 ):
                     kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
                         key, value, self.layer_name
@@ -835,10 +838,9 @@ def unified_kv_cache_update(
     )
     layer_slot_mapping = slot_mapping.get(layer_name)
 
-    # Skip KV cache update if key/value is None or slot_mapping is not available.
-    # key and value may be None in the case of cross attention where they are
-    # calculated once based on the output from the encoder and then cached.
-    if layer_slot_mapping is not None and key is not None and value is not None:
+    # Skip KV cache update if slot_mapping is not available for this layer.
+    # Note: key and value are guaranteed to be non-None by the caller.
+    if layer_slot_mapping is not None:
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
         )
