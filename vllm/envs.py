@@ -207,6 +207,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
+    VLLM_NIXL_DISAGGREGATION_BACKEND: str | None = None
     VLLM_MORIIO_CONNECTOR_READ_MODE: bool = False
     VLLM_MORIIO_QP_PER_TRANSFER: int = 1
     VLLM_MORIIO_POST_BATCH_SIZE: int = -1
@@ -1292,6 +1293,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # IP address used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_HOST": lambda: os.getenv(
         "VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"
+    ),
+    # Backend used for NIXL disaggregation (e.g., UCX, LIBFABRIC).
+    "VLLM_NIXL_DISAGGREGATION_BACKEND": lambda: os.getenv(
+        "VLLM_NIXL_DISAGGREGATION_BACKEND", None
     ),
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT": lambda: int(

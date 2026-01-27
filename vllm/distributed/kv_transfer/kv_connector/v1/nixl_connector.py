@@ -142,6 +142,20 @@ _NIXL_SUPPORTED_DEVICE = {
 _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 
+def _resolve_nixl_backends(kv_transfer_config: Any) -> list[str]:
+    """Resolve NIXL backends from env var or kv_transfer_config.
+
+    Priority:
+      1) VLLM_NIXL_DISAGGREGATION_BACKEND (if set)
+      2) kv_connector_extra_config["backends"] (default: ["UCX"])
+    """
+
+    env_backend = os.getenv("VLLM_NIXL_DISAGGREGATION_BACKEND")
+    if env_backend:
+        return [env_backend.strip().upper()]
+    return kv_transfer_config.get_from_extra_config("backends", ["UCX"])
+
+
 @dataclass
 class NixlAgentMetadata:
     engine_id: str
@@ -864,9 +878,7 @@ class NixlConnectorWorker:
             raise ValueError("kv_transfer_config must be set for NixlConnector")
         self.kv_transfer_config = vllm_config.kv_transfer_config
 
-        self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
-            "backends", ["UCX"]
-        )
+        self.nixl_backends = _resolve_nixl_backends(self.kv_transfer_config)
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
