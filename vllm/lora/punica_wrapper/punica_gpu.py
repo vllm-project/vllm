@@ -310,52 +310,57 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         adapter_enabled: torch.Tensor,
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        naive_block_assignment: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
         """
-        max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
-        if pad_sorted_ids:
-            max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-        sorted_ids = torch.empty(
-            (max_loras * max_num_tokens_padded,),
-            dtype=torch.int32,
-            device=topk_ids.device,
-        )
-        max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-        # Expert ids must be set default to -1 to prevent a blank block
-        expert_ids = torch.empty(
-            (max_loras * max_num_m_blocks,),
-            dtype=torch.int32,
-            device=topk_ids.device,
-        )
-        num_tokens_post_pad = torch.empty(
-            (max_loras), dtype=torch.int32, device=topk_ids.device
-        )
-
         (token_lora_mapping, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(
             num_tokens
         )
+        if naive_block_assignment:
+            expert_ids = topk_ids.reshape(-1)
+            sorted_ids = None
+            num_tokens_post_pad = None
+        else:
+            max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+            if pad_sorted_ids:
+                max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+            sorted_ids = torch.empty(
+                (max_loras * max_num_tokens_padded,),
+                dtype=torch.int32,
+                device=topk_ids.device,
+            )
+            max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+            # Expert ids must be set default to -1 to prevent a blank block
+            expert_ids = torch.empty(
+                (max_loras * max_num_m_blocks,),
+                dtype=torch.int32,
+                device=topk_ids.device,
+            )
+            num_tokens_post_pad = torch.empty(
+                (max_loras), dtype=torch.int32, device=topk_ids.device
+            )
 
-        ops.moe_lora_align_block_size(
-            topk_ids,
-            token_lora_mapping,
-            num_experts,
-            block_size,
-            max_loras,
-            max_num_tokens_padded,
-            max_num_m_blocks,
-            sorted_ids,
-            expert_ids,
-            num_tokens_post_pad,
-            adapter_enabled,
-            lora_ids,
-        )
-        if expert_map is not None:
-            expert_ids = expert_map[expert_ids]
+            ops.moe_lora_align_block_size(
+                topk_ids,
+                token_lora_mapping,
+                num_experts,
+                block_size,
+                max_loras,
+                max_num_tokens_padded,
+                max_num_m_blocks,
+                sorted_ids,
+                expert_ids,
+                num_tokens_post_pad,
+                adapter_enabled,
+                lora_ids,
+            )
+            if expert_map is not None:
+                expert_ids = expert_map[expert_ids]
 
-        return sorted_ids, expert_ids, num_tokens_post_pad
+        return None, sorted_ids, expert_ids, num_tokens_post_pad
 
     def add_lora_fused_moe(
         self,
@@ -375,7 +380,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         mul_routed_weight=False,
         fully_sharded: bool = False,
         offset: int = 0,
-        naive_block_assignment: bool = False,
         token_lora_mapping: torch.Tensor | None = None,
     ):
         """
@@ -419,20 +423,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             expand_config.get("NUM_WARPS", 4),
             expand_config.get("NUM_STAGES", 3),
             expand_config.get("SPLIT_K", 1),
-            naive_block_assignment,
             mul_routed_weight,
             fully_sharded,
             offset,
         )
-
-    def get_token_lora_mapping(
-        self,
-        num_tokens: int,
-    ) -> torch.Tensor:
-        """
-        Returns the token to LoRA mapping tensor for the given number of tokens.
-        """
-        (token_lora_mapping, _, _, _, _, _) = self.token_mapping_meta.meta_args(
-            num_tokens
-        )
-        return token_lora_mapping

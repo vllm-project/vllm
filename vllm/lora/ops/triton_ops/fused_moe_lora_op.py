@@ -283,7 +283,6 @@ def _fused_moe_lora_shrink(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    naive_block_assignment: bool = False,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
 ) -> None:
@@ -345,7 +344,7 @@ def _fused_moe_lora_shrink(
         num_slice_a=1,
         num_slice_c=num_slices,
         input_token_stride=1 if mul_routed_weight else top_k_num,
-        naive_block_assignment=naive_block_assignment,
+        naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=False,
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=True,
@@ -387,7 +386,6 @@ def _fused_moe_lora_expand(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    naive_block_assignment: bool = False,
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
@@ -456,7 +454,7 @@ def _fused_moe_lora_expand(
         num_slice_a=num_slices,
         num_slice_c=num_slices,
         input_token_stride=1,
-        naive_block_assignment=naive_block_assignment,
+        naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=False,
@@ -499,14 +497,13 @@ def _fused_moe_lora(
     expand_num_warps: int,
     expand_num_stages: int,
     expand_split_k: int,
-    naive_block_assignment: bool = False,
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
 ) -> None:
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
     assert topk_weights.dim() == qcurr_hidden_states.dim() == 2
-    if naive_block_assignment:
+    if sorted_token_ids is None:
         assert expert_ids.dim() == 1
     else:
         assert sorted_token_ids is not None
@@ -581,7 +578,6 @@ def _fused_moe_lora(
         shrink_num_warps,
         shrink_num_stages,
         shrink_split_k,
-        naive_block_assignment,
         mul_routed_weight,
         use_gdc=use_gdc,
     )
@@ -630,7 +626,6 @@ def _fused_moe_lora(
         expand_num_warps,
         expand_num_stages,
         expand_split_k,
-        naive_block_assignment,
         mul_routed_weight,
         offset,
         use_gdc=use_gdc,
@@ -665,7 +660,6 @@ def _fused_moe_lora_fake(
     expand_num_warps: int,
     expand_num_stages: int,
     expand_split_k: int,
-    naive_block_assignment: bool = False,
     mul_routed_weight: bool = False,
 ) -> None:
     return
@@ -698,7 +692,6 @@ def _fused_moe_lora_shrink_fake(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    naive_block_assignment: bool = False,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
 ) -> None:
@@ -734,7 +727,6 @@ def _fused_moe_lora_expand_fake(
     num_warps: int,
     num_stages: int,
     split_k: int,
-    naive_block_assignment: bool = False,
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
 ) -> None:

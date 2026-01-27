@@ -404,7 +404,6 @@ def use_fused_moe_lora_kernel_naive(
         config["NUM_WARPS"],
         config["NUM_STAGES"],
         config["SPLIT_K"],
-        naive_block_assignment=True,
         mul_routed_weight=mul_routed_weight,
         fully_sharded=fully_sharded,
         offset=offset,
