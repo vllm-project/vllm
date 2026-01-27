@@ -475,7 +475,7 @@ class FlexibleArgumentParser(ArgumentParser):
                 f"Config file must be of a yaml/yml type. {extension} supplied"
             )
 
-        # Supports both flat configs and nested dicts (converted to JSON strings)
+        # Supports both flat configs and nested dicts
         processed_args: list[str] = []
 
         config: dict[str, Any] = {}
@@ -501,12 +501,6 @@ class FlexibleArgumentParser(ArgumentParser):
             elif isinstance(value, dict):
                 # Convert nested dicts to JSON strings so they can be parsed
                 # by the existing JSON argument parsing machinery.
-                # This allows YAML configs like:
-                #   compilation-config:
-                #     pass_config:
-                #       fuse_allreduce_rms: true
-                # Instead of requiring:
-                #   compilation-config: '{"pass_config":{"fuse_allreduce_rms":true}}'
                 processed_args.append("--" + key)
                 processed_args.append(json.dumps(value))
             else:
