@@ -222,21 +222,16 @@ def get_max_tokens(
     default_sampling_params: dict,
 ) -> int:
     # NOTE: Avoid isinstance() for better efficiency
-    max_tokens: int | None = next(
-        (
-            val
-            for attr in [
-                # ChatCompletionRequest
-                "max_completion_tokens",
-                # ResponsesRequest
-                "max_output_tokens",
-                # CompletionRequest (also a fallback for ChatCompletionRequest)
-                "max_tokens",
-            ]
-            if (val := getattr(request, attr, None)) is not None
-        ),
-        None,
-    )
+    max_tokens: int | None = None
+    if max_tokens is None:
+        # ChatCompletionRequest
+        max_tokens = getattr(request, "max_completion_tokens", None)
+    if max_tokens is None:
+        # ResponsesRequest
+        max_tokens = getattr(request, "max_output_tokens", None)
+    if max_tokens is None:
+        # CompletionRequest (also a fallback for ChatCompletionRequest)
+        max_tokens = getattr(request, "max_tokens", None)
 
     input_length = length_from_prompt_token_ids_or_embeds(
         prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
