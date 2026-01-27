@@ -71,18 +71,6 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         chat_template_content_format="auto",
     )
 
-    async def _fake_process_inputs(
-        request_id,
-        engine_prompt,
-        sampling_params,
-        *,
-        lora_request,
-        trace_headers,
-        priority,
-        data_parallel_rank,
-    ):
-        return dict(engine_prompt), {}
-
     async def _fake_preprocess_chat(*args, **kwargs):
         # return conversation, engine_prompts
         return (
