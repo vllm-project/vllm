@@ -1518,20 +1518,11 @@ class GPUModelRunner(
         self.discard_request_mask.np[:num_reqs] = optimistic_seq_lens_np < num_tokens_np
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
-        # Sync num_computed_tokens and num_accepted_tokens to GPU.
-        self.num_computed_tokens.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-        )
-        self.num_computed_tokens.copy_to_gpu(num_reqs)
-        self.num_accepted_tokens.np[:num_reqs] = (
-            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-        )
-        self.num_accepted_tokens.np[num_reqs:].fill(1)
-        self.num_accepted_tokens.copy_to_gpu()
-        # For async spec decode: compute cumulatively on GPU for continuing
-        # requests (old_value + valid_sampled_count), bypassing CPU's optimistic
-        # values entirely. This avoids needing prev_num_draft_len.
+        # For async spec decode: read old GPU values BEFORE copying CPU values,
+        # since the CPU values are "optimistic" (assume all draft tokens accepted).
+        # We need the actual old GPU values to compute the correct new values.
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        async_update_data = None
         if (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
@@ -1554,14 +1545,33 @@ class GPUModelRunner(
                     current_indices, dtype=torch.int64, device=self.device
                 )
 
-                # Compute new values from old GPU state + valid counts
+                # Read old GPU values before they're overwritten by CPU->GPU copy
                 old_num_computed = self.num_computed_tokens.gpu[prev_indices_gpu]
                 valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
                 new_num_computed = old_num_computed + valid_counts.int()
 
-                # Overwrite continuing requests with GPU-computed values
-                self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
-                self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
+                # Save for after CPU->GPU copy
+                async_update_data = (
+                    current_indices_gpu,
+                    new_num_computed,
+                    valid_counts,
+                )
+
+        self.num_computed_tokens.np[:num_reqs] = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        )
+        self.num_computed_tokens.copy_to_gpu(num_reqs)
+        self.num_accepted_tokens.np[:num_reqs] = (
+            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+        )
+        self.num_accepted_tokens.np[num_reqs:].fill(1)
+        self.num_accepted_tokens.copy_to_gpu()
+
+        # Apply async spec decode updates after CPU->GPU copy
+        if async_update_data is not None:
+            current_indices_gpu, new_num_computed, valid_counts = async_update_data
+            self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
+            self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
 
         # Copy mrope_position_delta for M-RoPE models.
         if self.uses_mrope:
