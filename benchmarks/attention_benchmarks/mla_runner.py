@@ -490,7 +490,7 @@ def _create_backend_impl(
     )
 
     # Initialize DCP attributes
-    if not hasattr(impl, "dcp_world_size") or impl.dcp_world_size is None:
+    if not hasattr(impl, "dcp_world_size") or impl.dcp_world_size in (None, -1):
         impl.dcp_world_size = 1
         impl.dcp_rank = 0
 
