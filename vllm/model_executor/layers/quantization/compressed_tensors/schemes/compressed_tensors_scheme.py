@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 
 import torch
+from compressed_tensors.quantization import QuantizationArgs
 
 __all__ = ["CompressedTensorsScheme"]
 
@@ -16,7 +17,7 @@ class CompressedTensorsScheme(ABC):
 
     @classmethod
     @abstractmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(cls, weight_quant: QuantizationArgs) -> int:
         """
         Get minimum device capability.
         """

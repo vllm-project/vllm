@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 import torch
+from compressed_tensors.quantization import QuantizationArgs
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
@@ -70,7 +71,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         self.group_size = 16
 
     @classmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(cls, weight_quant: QuantizationArgs) -> int:
         if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
             return 80
         return 100

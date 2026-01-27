@@ -4,7 +4,7 @@
 from collections.abc import Callable
 
 import torch
-from compressed_tensors.quantization import ActivationOrdering
+from compressed_tensors.quantization import ActivationOrdering, QuantizationArgs
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
@@ -65,7 +65,7 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
         self.quant_type = W4A8_SUPPORTED_TYPES_MAP[num_bits]
 
     @classmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(cls, weight_quant: QuantizationArgs) -> int:
         # hopper
         return 90
 

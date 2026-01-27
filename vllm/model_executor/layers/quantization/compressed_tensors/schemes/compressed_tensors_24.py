@@ -71,7 +71,7 @@ class CompressedTensors24(CompressedTensorsScheme):
             self.quant_fp8 = QuantFP8(static, g_shape)
 
     @classmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(cls, weight_quant: QuantizationArgs) -> int:
         # Only cutlass 3.x kernels are implemented so far
         return 90
 

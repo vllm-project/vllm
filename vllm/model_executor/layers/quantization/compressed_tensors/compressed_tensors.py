@@ -650,7 +650,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
-                    CompressedTensorsW8A8Fp8.get_min_capability(), error=False
+                    CompressedTensorsW8A8Fp8.get_min_capability(weight_quant),
+                    error=False,
                 )
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
@@ -781,7 +782,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Raise error if device does not support the scheme
         # (e.g. fp8 needs ada lovelace)
-        self._check_scheme_supported(scheme.get_min_capability())
+        self._check_scheme_supported(
+            scheme.get_min_capability(weight_quant=weight_quant)
+        )
         logger.debug("Using scheme: %s for %s", scheme.__class__.__name__, layer_name)
         return scheme
 

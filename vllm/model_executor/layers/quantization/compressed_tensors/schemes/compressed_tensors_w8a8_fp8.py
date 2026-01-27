@@ -92,7 +92,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             )
 
     @classmethod
-    def get_min_capability(cls) -> int:
+    def get_min_capability(cls, weight_quant: QuantizationArgs) -> int:
         # lovelace and up
         return 89
 
