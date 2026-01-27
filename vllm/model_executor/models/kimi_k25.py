@@ -380,7 +380,8 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             )
 
         # The batch dimension of pixel_values has been flattened into shape[0]
-        pixel_values = pixel_values.to(self.vision_tower.dtype)
+        target_dtype = next(self.vision_tower.parameters()).dtype
+        pixel_values = pixel_values.to(target_dtype)
         assert isinstance(grid_thws, torch.Tensor), (
             f"expect grid_thws to be a tensor, get {type(grid_thws)}"
         )
