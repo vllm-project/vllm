@@ -58,6 +58,7 @@ class ChatParams:
         )
 
     def get_apply_chat_template_kwargs(self) -> dict[str, Any]:
+        """The arguments to pass to `tokenizer.apply_chat_template`."""
         return merge_kwargs(
             self.chat_template_kwargs,
             dict(chat_template=self.chat_template),
@@ -191,6 +192,7 @@ class TokenizeParams:
         )
 
     def get_encode_kwargs(self) -> dict[str, Any]:
+        """The arguments to pass to `tokenizer.encode`."""
         truncate_prompt_tokens = self.truncate_prompt_tokens
 
         if truncate_prompt_tokens is not None and truncate_prompt_tokens < 0:
@@ -198,7 +200,7 @@ class TokenizeParams:
 
         return dict(
             truncation=truncate_prompt_tokens is not None,
-            max_length=truncate_prompt_tokens,
+            max_length=truncate_prompt_tokens or self.max_input_tokens,
             add_special_tokens=self.add_special_tokens,
         )
 
