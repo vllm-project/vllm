@@ -145,11 +145,22 @@ async def finalize_weight_update(raw_request: Request):
 
 
 @router.get("/get_world_size")
-async def get_world_size(raw_request: Request):
-    """Get the world size from the parallel config (TP * PP * DP)."""
-    world_size = engine_client(
-        raw_request
-    ).vllm_config.parallel_config.world_size_across_dp
+async def get_world_size(
+    raw_request: Request,
+    include_dp: bool = Query(True),
+):
+    """Get the world size from the parallel config.
+
+    Args:
+        include_dp: If True (default), returns the world size including
+            data parallelism (TP * PP * DP). If False, returns the world
+            size without data parallelism (TP * PP).
+    """
+    parallel_config = engine_client(raw_request).vllm_config.parallel_config
+    if include_dp:
+        world_size = parallel_config.world_size_across_dp
+    else:
+        world_size = parallel_config.world_size
     return JSONResponse(content={"world_size": world_size})
 
 

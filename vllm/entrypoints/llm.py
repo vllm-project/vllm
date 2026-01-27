@@ -361,14 +361,22 @@ class LLM:
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
 
-    def get_world_size(self) -> int:
+    def get_world_size(self, include_dp: bool = True) -> int:
         """Get the world size from the parallel config.
 
+        Args:
+            include_dp: If True (default), returns the world size including
+                data parallelism (TP * PP * DP). If False, returns the world
+                size without data parallelism (TP * PP).
+
         Returns:
-            The world size including data parallelism
-            (tensor_parallel_size * pipeline_parallel_size * data_parallel_size).
+            The world size (tensor_parallel_size * pipeline_parallel_size),
+            optionally multiplied by data_parallel_size if include_dp is True.
         """
-        return self.llm_engine.vllm_config.parallel_config.world_size_across_dp
+        parallel_config = self.llm_engine.vllm_config.parallel_config
+        if include_dp:
+            return parallel_config.world_size_across_dp
+        return parallel_config.world_size
 
     def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()

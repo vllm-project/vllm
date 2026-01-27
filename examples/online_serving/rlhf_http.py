@@ -15,7 +15,7 @@ Prerequisites:
 
     $ vllm serve facebook/opt-125m \
         --enforce-eager \
-        --weight-transfer-backend nccl \
+        --weight-transfer-config '{"backend": "nccl"}' \
         --load-format dummy
 
     Then run this script:

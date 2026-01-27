@@ -90,8 +90,13 @@ class Worker(WorkerBase):
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine (initialized on-demand)
-        self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
-            self.vllm_config.weight_transfer_config, self.vllm_config.parallel_config
+        self.weight_transfer_engine = (
+            WeightTransferEngineFactory.create_engine(
+                self.vllm_config.weight_transfer_config,
+                self.vllm_config.parallel_config,
+            )
+            if self.vllm_config.weight_transfer_config is not None
+            else None
         )
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
@@ -934,6 +939,11 @@ class Worker(WorkerBase):
         Args:
             init_info: Dictionary containing backend-specific initialization info
         """
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. "
+                "Please set weight_transfer_config to enable weight transfer."
+            )
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer(typed_init_info)
@@ -946,7 +956,10 @@ class Worker(WorkerBase):
             update_info: Dictionary containing backend-specific update info
         """
         if self.weight_transfer_engine is None:
-            raise RuntimeError("Weight transfer not initialized.")
+            raise RuntimeError(
+                "Weight transfer not configured. "
+                "Please set weight_transfer_config to enable weight transfer."
+            )
 
         # Parse dict into backend-specific typed dataclass
         typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
