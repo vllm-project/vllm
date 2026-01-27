@@ -91,7 +91,8 @@ class StructuredOutputsParams:
 
     def all_non_structural_tag_constraints_none(self) -> bool:
         """
-        Returns True if all structured-output constraint fields are None.
+        Returns True if all non structural tag
+        structured-output constraint fields are None.
         """
         return all(
             getattr(self, field) is None
