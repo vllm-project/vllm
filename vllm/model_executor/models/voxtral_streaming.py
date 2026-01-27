@@ -242,50 +242,50 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
         input_stream: asyncio.Queue[list[int]],
         model_config: ModelConfig,
     ) -> AsyncGenerator[PromptType, None]:
-        tokenizer = cached_tokenizer_from_config(model_config)
-        audio_encoder = tokenizer.instruct.audio_encoder
-        config = audio_encoder.audio_config
+        async def _generate() -> AsyncGenerator[PromptType, None]:
+            tokenizer = cached_tokenizer_from_config(model_config)
+            audio_encoder = tokenizer.instruct.audio_encoder
+            config = audio_encoder.audio_config
 
-        buffer = VoxtralRealtimeBuffer(config)
-        is_first_yield = True
+            buffer = VoxtralRealtimeBuffer(config)
+            is_first_yield = True
 
-        async for audio in audio_stream:
-            buffer.add_audio_chunk(audio)
+            async for audio in audio_stream:
+                buffer.add_audio_chunk(audio)
 
-            while (new_audio := buffer.get_audio_chunk()) is not None:
-                if is_first_yield:
-                    # make sure that input_stream is empty
-                    assert input_stream.empty()
+                while (new_audio := buffer.get_audio_chunk()) is not None:
+                    if is_first_yield:
+                        # make sure that input_stream is empty
+                        assert input_stream.empty()
 
-                    audio = Audio(new_audio, config.sampling_rate, format="wav")
+                        audio = Audio(new_audio, config.sampling_rate, format="wav")
 
-                    request = TranscriptionRequest(
-                        streaming=StreamingMode.ONLINE,
-                        audio=RawAudio.from_audio(audio),
-                        language=None,
+                        request = TranscriptionRequest(
+                            streaming=StreamingMode.ONLINE,
+                            audio=RawAudio.from_audio(audio),
+                            language=None,
+                        )
+                        # audio will be correctly padded
+                        # and correct token ids will be created
+                        audio_enc = tokenizer.mistral.encode_transcription(request)
+
+                        token_ids = audio_enc.tokens
+                        new_audio = audio_enc.audios[0].audio_array
+
+                        is_first_yield = False
+                    else:
+                        # pop last element from input_stream
+                        all_outputs = await asyncio.wait_for(
+                            input_stream.get(), timeout=VLLM_ENGINE_ITERATION_TIMEOUT_S
+                        )
+                        token_ids = all_outputs[-1:]
+
+                    multi_modal_data = {"audio": (new_audio, None)}
+                    yield TokensPrompt(
+                        prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
                     )
-                    # audio will be correctly padded
-                    # and correct token ids will be created
-                    audio_enc = tokenizer.mistral.encode_transcription(request)
 
-                    token_ids = audio_enc.tokens
-                    new_audio = audio_enc.audios[0].audio_array
-
-                    is_first_yield = False
-                else:
-                    # pop last element from input_stream
-                    all_outputs = await asyncio.wait_for(
-                        input_stream.get(), timeout=VLLM_ENGINE_ITERATION_TIMEOUT_S
-                    )
-                    token_ids = all_outputs[-1:]
-
-                multi_modal_data = {"audio": (new_audio, None)}
-                yield TokensPrompt(
-                    prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
-                )
-
-        # mypy shit
-        yield
+        return _generate()
 
     @property
     def audio_config(self):
