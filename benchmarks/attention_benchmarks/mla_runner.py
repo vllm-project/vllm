@@ -413,11 +413,19 @@ def _create_input_tensors(
     )
     k_scale = torch.ones(1, device=device, dtype=torch.float32)
 
+    output = torch.zeros(
+        total_q,
+        mla_dims["num_q_heads"] * mla_dims["v_head_dim"],
+        device=device,
+        dtype=dtype,
+    )
+
     prefill_inputs = {
         "q": prefill_q,
         "k_c_normed": k_c_normed,
         "k_pe": k_pe,
         "k_scale": k_scale,
+        "output": output,
     }
 
     return decode_inputs, prefill_inputs
@@ -640,6 +648,7 @@ def _run_single_benchmark(
             kv_cache,
             metadata,
             prefill_inputs["k_scale"],
+            prefill_inputs["output"],
         )
     else:
         raise RuntimeError("Metadata has neither decode nor prefill metadata")
