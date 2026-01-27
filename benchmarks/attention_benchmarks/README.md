@@ -128,6 +128,8 @@ Use `--sweep-param` and `--sweep-values` to run parameter sweeps from the CLI:
 
 #### CUTLASS MLA num-splits Optimization
 
+**Question:** What is the optimal `num_kv_splits` for CUTLASS MLA?
+
 ```bash
 python benchmark.py \
     --backend cutlass_mla \
@@ -137,9 +139,9 @@ python benchmark.py \
     --output-json optimal_splits.json
 ```
 
-**Answers:** What is the optimal `num_kv_splits` for CUTLASS MLA?
-
 #### Reorder Batch Threshold Optimization
+
+**Question:** What's the optimal `reorder_batch_threshold` for speculative decoding?
 
 ```bash
 python benchmark.py \
@@ -149,8 +151,6 @@ python benchmark.py \
     --sweep-values 1 4 16 64 256 512 \
     --output-csv threshold_sweep.csv
 ```
-
-**Answers:** What's the optimal `reorder_batch_threshold` for speculative decoding?
 
 ### All Command-Line Options
 
@@ -251,27 +251,6 @@ formatter.save_csv(results, "output.csv")
 formatter.save_json(results, "output.json")
 ```
 
-## File Structure
-
-```text
-attention_benchmarks/
-├── README.md                      # This file
-│
-├── batch_spec.py                  # Batch specification grammar parser
-├── common.py                      # Shared utilities and data classes
-├── runner.py                      # Standard attention benchmark runner
-├── mla_runner.py                  # MLA benchmark runner (all 4 backends)
-│
-├── benchmark.py                   # Universal benchmark CLI
-│
-└── configs/                       # Pre-configured benchmarks
-    ├── mla_decode.yaml            # MLA decode-only benchmark
-    ├── mla_mixed_batch.yaml       # MLA mixed prefill/decode benchmark
-    ├── speculative_decode.yaml    # Speculative decoding benchmark
-    ├── standard_attention.yaml    # Standard attention benchmark
-    └── reorder_threshold.yaml     # Reorder threshold optimization study
-```
-
 ## Tips
 
 **1. Warmup matters** - Use `--warmup-iters 10` for stable results
@@ -285,31 +264,3 @@ attention_benchmarks/
 **5. Extended grammar** - Leverage spec decode, chunked prefill patterns
 
 **6. Parameter sweeps** - Use `--sweep-param` and `--sweep-values` to find optimal values
-
-## Troubleshooting
-
-**Import errors?**
-
-```bash
-source /path/to/vllm/.venv/bin/activate
-```
-
-**Backend not supported?**
-
-- Check hardware requirements above
-- Some backends need Hopper/Blackwell
-
-**OOM?**
-
-- Reduce batch size: `"32q1s1k"` → `"16q1s1k"`
-- Reduce sequence length: `"64q1s16k"` → `"64q1s4k"`
-
-## What's Included
-
-- Extended batch spec grammar
-- Universal benchmark script for all backends
-- Standard attention support (Flash/Triton/FlashInfer)
-- MLA runner with all 4 backends (CUTLASS, FlashInfer, FlashAttn, FlashMLA)
-- Parameter sweep support via `--sweep-param` and `--sweep-values`
-- Rich console output + CSV/JSON export
-- Pre-built YAML configuration files
