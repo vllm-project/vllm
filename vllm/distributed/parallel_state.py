@@ -53,7 +53,6 @@ from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
-    supports_custom_op,
 )
 
 
@@ -246,33 +245,32 @@ def patched_fused_scaled_matmul_reduce_scatter(
     )
 
 
-if supports_custom_op():
-    direct_register_custom_op(
-        op_name="all_reduce",
-        op_func=all_reduce,
-        fake_impl=all_reduce_fake,
-    )
+direct_register_custom_op(
+    op_name="all_reduce",
+    op_func=all_reduce,
+    fake_impl=all_reduce_fake,
+)
 
-    direct_register_custom_op(
-        op_name="reduce_scatter",
-        op_func=reduce_scatter,
-        fake_impl=reduce_scatter_fake,
-    )
+direct_register_custom_op(
+    op_name="reduce_scatter",
+    op_func=reduce_scatter,
+    fake_impl=reduce_scatter_fake,
+)
 
-    direct_register_custom_op(
-        op_name="all_gather",
-        op_func=all_gather,
-        fake_impl=all_gather_fake,
-    )
+direct_register_custom_op(
+    op_name="all_gather",
+    op_func=all_gather,
+    fake_impl=all_gather_fake,
+)
 
-    # TODO: Remove this once the pytorch fix
-    # (https://github.com/pytorch/pytorch/pull/165086) gets released,
-    # in either 2.9.1 or 2.10
-    direct_register_custom_op(
-        op_name="patched_fused_scaled_matmul_reduce_scatter",
-        op_func=patched_fused_scaled_matmul_reduce_scatter,
-        fake_impl=patched_fused_scaled_matmul_reduce_scatter_fake,
-    )
+# TODO: Remove this once the pytorch fix
+# (https://github.com/pytorch/pytorch/pull/165086) gets released,
+# in either 2.9.1 or 2.10
+direct_register_custom_op(
+    op_name="patched_fused_scaled_matmul_reduce_scatter",
+    op_func=patched_fused_scaled_matmul_reduce_scatter,
+    fake_impl=patched_fused_scaled_matmul_reduce_scatter_fake,
+)
 
 
 class GroupCoordinator:
@@ -1002,7 +1000,7 @@ class GroupCoordinator:
         if self.device_communicator is not None:
             self.device_communicator.prepare_communication_buffer_for_model(model)
 
-    def dispatch(
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1013,7 +1011,7 @@ class GroupCoordinator:
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         if self.device_communicator is not None:
-            return self.device_communicator.dispatch(  # type: ignore[call-arg]
+            return self.device_communicator.dispatch_router_logits(
                 hidden_states,
                 router_logits,
                 is_sequence_parallel,
@@ -1021,6 +1019,28 @@ class GroupCoordinator:
             )
         else:
             return hidden_states, router_logits
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
+        if self.device_communicator is not None:
+            return self.device_communicator.dispatch(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                is_sequence_parallel,
+                extra_tensors,
+            )
+        else:
+            return hidden_states, topk_weights, topk_ids
 
     def combine(
         self, hidden_states, is_sequence_parallel: bool = False
@@ -1529,22 +1549,22 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         _TP = old_tp_group
 
 
-def get_tensor_model_parallel_world_size():
+def get_tensor_model_parallel_world_size() -> int:
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
 
 
-def get_tensor_model_parallel_rank():
+def get_tensor_model_parallel_rank() -> int:
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
 
 
-def get_decode_context_model_parallel_world_size():
+def get_decode_context_model_parallel_world_size() -> int:
     """Return world size for the decode context model parallel group."""
     return get_dcp_group().world_size
 
 
-def get_decode_context_model_parallel_rank():
+def get_decode_context_model_parallel_rank() -> int:
     """Return my rank for the decode context model parallel group."""
     return get_dcp_group().rank_in_group
 

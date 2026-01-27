@@ -414,6 +414,18 @@ pull_request_rules:
       remove:
         - needs-rebase
 
+- name: label-bug
+  description: Automatically apply bug label
+  conditions:
+    - label != stale
+    - or:
+      - title~=(?i)\bbug\b
+      - title~=(?i)\bbugfix\b
+  actions:
+    label:
+      add:
+        - bug
+
 - name: label-kv-connector
   description: Automatically apply kv-connector label
   conditions:

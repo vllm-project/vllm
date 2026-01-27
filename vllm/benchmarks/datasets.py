@@ -2593,17 +2593,10 @@ class InstructCoderDataset(HuggingFaceDataset):
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
         sampled_requests = []
-        for i, item in enumerate(self.data):
-            if len(sampled_requests) >= num_requests:
-                break
-            prompt = (
-                f"{item['input']}\n\n{item['instruction']} Just output "
-                "the code, do not include any explanation."
-            )
-
+        for i, prompt in enumerate(self.sample_prompts(n=num_requests)):
             # apply template
             if not skip_chat_template:
                 prompt = tokenizer.apply_chat_template(
@@ -2625,6 +2618,14 @@ class InstructCoderDataset(HuggingFaceDataset):
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
         return sampled_requests
+
+    def sample_prompts(self, n: int) -> Iterator[str]:
+        for item in self.data.take(n):
+            prompt = (
+                f"{item['input']}\n\n{item['instruction']} Just output "
+                "the code, do not include any explanation."
+            )
+            yield prompt
 
 
 # -----------------------------------------------------------------------------

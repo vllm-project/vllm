@@ -182,10 +182,6 @@ class EplbModelState:
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
     """
-    is_async_enabled: bool
-    """
-    The flag indicates whether the EPLB is running in async mode.
-    """
     cuda_device_index: int | None
     """
     CUDA device index for the async EPLB worker thread.
@@ -518,7 +514,6 @@ class EplbState:
                 recv_expert_ids=np.array([]),
                 recv_dst_rows=np.array([]),
             ),
-            is_async_enabled=self.is_async,
             cuda_device_index=self.cuda_device_index,
             new_physical_to_logical_map=new_physical_to_logical_map,
             new_logical_to_physical_map=new_logical_to_physical_map,
@@ -630,19 +625,12 @@ class EplbState:
 
         if self.is_async:
             for eplb_model_state in self.model_states.values():
-                if not eplb_model_state.is_async_enabled:
-                    continue
-
                 all_ranks_buffer_ready = False
                 if eplb_model_state.pending_global_ready_check:
                     all_ranks_buffer_ready = self._all_ranks_buffer_ready(
                         eplb_model_state
                     )
-                if (
-                    eplb_model_state.is_async_enabled
-                    and eplb_model_state.ep_buffer_ready
-                    and all_ranks_buffer_ready
-                ):
+                if eplb_model_state.ep_buffer_ready and all_ranks_buffer_ready:
                     self.move_to_workspace(
                         model_state=eplb_model_state,
                         ep_group=ep_group,
@@ -664,8 +652,8 @@ class EplbState:
                         )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
-            if any(
-                eplb_model_state.is_async_enabled and eplb_model_state.rebalanced
+            if self.is_async and any(
+                eplb_model_state.rebalanced
                 for eplb_model_state in self.model_states.values()
             ):
                 # Still performing asynchronous rearrangement
@@ -822,7 +810,7 @@ class EplbState:
                 eplb_model_state.physical_to_logical_map,
             )
 
-            if not eplb_model_state.is_async_enabled or is_profile:
+            if not self.is_async or is_profile:
                 # Update expert weights
                 rearrange_expert_weights_inplace(
                     eplb_model_state.physical_to_logical_map,
@@ -982,8 +970,23 @@ class EplbState:
         ep_group: ProcessGroup,
         is_profile: bool = False,
     ):
-        if not model_state.buffer_lock.acquire(blocking=False):
-            return
+        # We call move_to_workspace only when ep_buffer_ready is 1.
+        # It means we only need to wait for the lock for a short time.
+        max_retries = 6  # 1 minute max
+        retries = 0
+        while not model_state.buffer_lock.acquire(blocking=True, timeout=10.0):
+            retries += 1
+            if retries >= max_retries:
+                raise RuntimeError(
+                    f"Rank {ep_group.rank()}: buffer_lock timeout after "
+                    "{max_retries * 10}s"
+                )
+            logger.warning(
+                "Rank %d: EPLB buffer_lock acquire failed, retrying (%d/%d)",
+                ep_group.rank(),
+                retries,
+                max_retries,
+            )
         try:
             assert model_state.new_physical_to_logical_map is not None
             device_index = model_state.cuda_device_index or self.cuda_device_index
@@ -1153,6 +1156,15 @@ class EplbState:
         for eplb_model_state in self.model_states.values():
             load_pass_list.append(eplb_model_state.expert_load_pass.clone())
         return self._allreduce_list(load_pass_list)
+
+
+@dataclass
+class EplbLayerState:
+    """Runtime EPLB data stored in the MoE layer."""
+
+    expert_load_view: torch.Tensor | None = None
+    logical_to_physical_map: torch.Tensor | None = None
+    logical_replica_count: torch.Tensor | None = None
 
 
 def _node_count_with_rank_mapping(

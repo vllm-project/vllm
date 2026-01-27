@@ -198,6 +198,8 @@ class ModelConfig:
     graph and always execute the model in eager mode. If False, we will use
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
+    enable_return_routed_experts: bool = False
+    """Whether to return routed experts."""
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -304,6 +306,7 @@ class ModelConfig:
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
+    mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
@@ -418,6 +421,7 @@ class ModelConfig:
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
+        mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
         interleave_mm_strings: bool | None,
@@ -494,6 +498,15 @@ class ModelConfig:
             self.model, hf_token=self.hf_token, revision=self.revision
         )
         self.model_arch_config = self.get_model_arch_config()
+
+        if self.convert == "mm_encoder_only":
+            logger.warning_once(
+                "`--convert mm_encoder_only` is deprecated and "
+                "will be removed in v0.15. "
+                "Please use --mm-encoder-only` instead."
+            )
+            mm_encoder_only = True
+            self.convert = "none"
 
         architectures = self.architectures
         registry = self.registry
@@ -581,6 +594,7 @@ class ModelConfig:
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+                mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
                 interleave_mm_strings=interleave_mm_strings,
@@ -882,6 +896,7 @@ class ModelConfig:
                 "gptq_bitblas",
                 "awq_marlin",
                 "ipex",
+                "inc",
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
@@ -1124,6 +1139,7 @@ class ModelConfig:
         """Whether to use bidirectional attention for mm positions."""
         MM_PREFIX_LM_MODELS = (
             "gemma3",
+            "molmo2",
             "paligemma",
         )
         if not hasattr(self.hf_config, "model_type"):
@@ -1323,10 +1339,9 @@ class ModelConfig:
         Returns:
             A dictionary containing the non-default sampling parameters.
         """
-        if self.generation_config == "vllm":
-            config = {}
-        else:
-            config = self.try_get_generation_config()
+        src = self.generation_config
+
+        config = {} if src == "vllm" else self.try_get_generation_config()
 
         # Overriding with given generation config
         config.update(self.override_generation_config)
@@ -1352,13 +1367,16 @@ class ModelConfig:
         else:
             diff_sampling_param = {}
 
-        if diff_sampling_param:
+        if diff_sampling_param and src != "vllm":
             logger.warning_once(
-                "Default sampling parameters have been overridden by the "
-                "model's Hugging Face generation config recommended from the "
-                "model creator. If this is not intended, please relaunch "
-                "vLLM instance with `--generation-config vllm`."
+                "Default vLLM sampling parameters have been overridden by %s: `%s`. "
+                "If this is not intended, please relaunch vLLM instance "
+                "with `--generation-config vllm`.",
+                "the model's `generation_config.json`" if src == "auto" else src,
+                str(diff_sampling_param),
+                scope="local",
             )
+
         return diff_sampling_param
 
     @property
@@ -1492,7 +1510,7 @@ class ModelConfig:
 
         if self.runner_type != "pooling" and head_dtype != self.dtype:
             logger.warning_once(
-                "`head_dtype` currently only supports pooling models."
+                "`head_dtype` currently only supports pooling models, "
                 "fallback to model dtype [%s].",
                 self.dtype,
             )

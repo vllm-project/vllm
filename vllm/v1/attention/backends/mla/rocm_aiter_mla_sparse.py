@@ -11,25 +11,69 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonBaseImpl,
+    get_mla_dims,
+)
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionCGSupport,
     AttentionLayer,
     AttentionMetadata,
-)
-from vllm.v1.attention.backends.mla.common import MLACommonBaseImpl, get_mla_dims
-from vllm.v1.attention.backends.mla.flashmla_sparse import (
-    triton_convert_req_index_to_global_index,
-)
-from vllm.v1.attention.backends.utils import (
-    AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+)
+from vllm.v1.attention.backends.mla.flashmla_sparse import (
+    triton_convert_req_index_to_global_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
+
+
+@triton.jit
+def fetch_id_to_ragged_kernel(
+    in_tensor_ptr,  # [num_seq, topk]
+    cumsum_ptr,  # [num_seq + 1]
+    out_tensor_ptr,  # [max_num_seq * topk]
+    in_tensor_ptr_stride,
+    TOPK: tl.constexpr,
+    TOKEN_NUM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    seq_id = tl.program_id(0)
+    block_id = tl.program_id(1)
+    offset = tl.arange(0, BLOCK_SIZE)
+    token_start = tl.load(cumsum_ptr + seq_id)
+    token_end = tl.load(cumsum_ptr + seq_id + 1)
+    token_num = token_end - token_start
+    row_offset = block_id * BLOCK_SIZE
+    if row_offset >= token_num:
+        return
+    in_tensor_offset = seq_id * in_tensor_ptr_stride + row_offset + offset
+    in_tensor_mask = (row_offset + offset) < TOPK
+    in_tensor_val = tl.load(in_tensor_ptr + in_tensor_offset, mask=in_tensor_mask)
+    out_tensor_offset = token_start + row_offset + offset
+    out_tensor_mask = (out_tensor_offset < token_end) & in_tensor_mask
+    tl.store(out_tensor_ptr + out_tensor_offset, in_tensor_val, mask=out_tensor_mask)
+
+
+def fetch_id_to_ragged_triton(
+    in_tensor: torch.Tensor, cumsum: torch.Tensor, out_tensor: torch.Tensor, topk
+):
+    num_tokens = in_tensor.size(0)
+    block_size = 64
+    num_block_per_row = triton.cdiv(topk, block_size)
+    grid = (
+        num_tokens,
+        num_block_per_row,
+    )
+    fetch_id_to_ragged_kernel[grid](
+        in_tensor, cumsum, out_tensor, in_tensor.stride(0), topk, num_tokens, block_size
+    )
 
 
 class ROCMAiterMLASparseBackend(AttentionBackend):
@@ -82,6 +126,13 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 
     block_table: torch.Tensor
     req_id_per_token: torch.Tensor
+
+    qo_indptr: torch.Tensor
+    paged_kv_last_page_len: torch.Tensor
+    paged_kv_indices: torch.Tensor
+    paged_kv_indptr: torch.Tensor
+    paged_kv_indptr_rest: torch.Tensor
+
     block_size: int = 1
     topk_tokens: int = 2048
 
@@ -90,7 +141,7 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 class ROCMAiterMLASparseMetadataBuilder(
     AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
 ):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
     def __init__(
         self,
@@ -103,6 +154,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.device = device
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
@@ -123,6 +175,23 @@ class ROCMAiterMLASparseMetadataBuilder(
             dtype=torch.int32,
             device=device,
         )
+        self.qo_indptr = torch.arange(
+            0, max_num_batched_tokens + 1, dtype=torch.int32, device=device
+        )
+        self.paged_kv_last_page_len = torch.ones(
+            max_num_batched_tokens, dtype=torch.int32, device=device
+        )
+
+        # These two needs to be calculated in runtime,
+        # but we still needs to prepare the buffer
+        self.paged_kv_indices = torch.zeros(
+            [max_num_batched_tokens * self.topk_tokens],
+            dtype=torch.int32,
+            device=device,
+        )
+        self.paged_kv_indptr = torch.zeros(
+            [max_num_batched_tokens + 1], dtype=torch.int32, device=device
+        )
 
     def build(
         self,
@@ -141,7 +210,15 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
             torch.from_numpy(req_id_per_token), non_blocking=True
         )
+        self.paged_kv_indices.fill_(0)
+        self.paged_kv_indptr.fill_(0)
+
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
+        qo_indptr = self.qo_indptr[: num_tokens + 1]
+        paged_kv_last_page_len = self.paged_kv_last_page_len[:num_tokens]
+        paged_kv_indices = self.paged_kv_indices[: num_tokens * self.topk_tokens]
+        paged_kv_indptr = self.paged_kv_indptr[: num_tokens + 1]
+        paged_kv_indptr_rest = self.paged_kv_indptr[num_tokens + 1 :]
 
         metadata = ROCMAiterMLASparseMetadata(
             num_reqs=common_attn_metadata.num_reqs,
@@ -154,6 +231,11 @@ class ROCMAiterMLASparseMetadataBuilder(
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            qo_indptr=qo_indptr,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indptr_rest=paged_kv_indptr_rest,
         )
         return metadata
 
@@ -225,20 +307,39 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
 
     def _forward_bf16_kv(
         self,
-        q: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        topk_indices: torch.Tensor,
+        q: torch.Tensor,  # [sq, heads, d_qk]
+        kv_c_and_k_pe_cache: torch.Tensor,  # [blocks, heads, d_qk]
+        topk_indices: torch.Tensor,  # [sq, topk]
         attn_metadata: ROCMAiterMLASparseMetadata,
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
-        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
-            -1, 1, kv_c_and_k_pe_cache.shape[-1]
+        output = torch.empty(
+            [num_tokens, self.num_heads, self.kv_lora_rank],
+            dtype=q.dtype,
+            device=q.device,
+        )
+        seq_len = (topk_indices != -1).sum(dim=-1)
+        torch.cumsum(seq_len, dim=0, out=attn_metadata.paged_kv_indptr[1:])
+        attn_metadata.paged_kv_indptr_rest.fill_(attn_metadata.paged_kv_indptr[-1])
+        fetch_id_to_ragged_triton(
+            topk_indices,
+            attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_indices,
+            attn_metadata.topk_tokens,
         )
 
-        topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = reference_mla_sparse_prefill(
-            q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale, 512
-        )[0]
+        rocm_aiter_ops.mla_decode_fwd(
+            q,
+            kv_c_and_k_pe_cache,
+            output,
+            self.scale,
+            attn_metadata.qo_indptr,
+            1,
+            attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_indices,
+            attn_metadata.paged_kv_last_page_len,
+        )
+
         return output[:, : self.num_heads, :]
 
     def forward(

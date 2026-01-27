@@ -8,8 +8,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.v1.attention.backend import AttentionLayer, MultipleOf
-from vllm.v1.attention.backends.mla.common import (
+from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
     MLACommonImpl,
@@ -17,7 +16,7 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionCGSupport, AttentionLayer, MultipleOf
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
@@ -231,7 +230,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
     ):
-        output = self.flash_attn_varlen_func(
+        output = self.flash_attn_varlen_func(  # type: ignore[call-arg]
             q=q,
             k=k,
             v=v,
