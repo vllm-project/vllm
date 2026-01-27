@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import jinja2
 import jinja2.ext
@@ -20,11 +20,9 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ChatTemplateResolutionError,
     ConversationMessage,
-    build_video_prompts_from_mm_data,
     load_chat_template,
     parse_chat_messages,
     parse_chat_messages_async,
-    rebuild_mm_uuids_from_mm_data,
 )
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
@@ -35,6 +33,13 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.func_utils import supports_kw
 
 from .protocol import RendererLike
+
+if TYPE_CHECKING:
+    from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
+else:
+    MultiModalDataDict = dict[str, Any]
+    MultiModalUUIDDict = dict[str, Any]
+
 
 logger = init_logger(__name__)
 
@@ -479,6 +484,107 @@ def safe_apply_chat_template(
         raise ValueError(str(e)) from e
 
 
+def rebuild_mm_uuids_from_mm_data(
+    mm_uuids: "MultiModalUUIDDict",
+    mm_data: "MultiModalDataDict",
+) -> "MultiModalUUIDDict":
+    """Rebuild mm_uuids after vision_chunk processing.
+
+    When videos are split into chunks, the original UUIDs need to be updated
+    to reflect the new UUIDs generated for each chunk.
+
+    Args:
+        mm_uuids: Original UUIDs dictionary
+        mm_data: Processed multimodal data with vision_chunk items
+
+    Returns:
+        Updated UUIDs dictionary with chunk UUIDs
+    """
+    vision_chunks = mm_data.get("vision_chunk")
+    if vision_chunks is None:
+        return mm_uuids
+
+    new_uuids = dict(mm_uuids)
+    vision_chunk_uuids = []
+
+    for item in vision_chunks:
+        # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
+        assert isinstance(item, dict)
+        uuid_val = item.get("uuid")
+        if uuid_val is not None:
+            vision_chunk_uuids.append(uuid_val)
+
+    if vision_chunk_uuids:
+        new_uuids["vision_chunk"] = vision_chunk_uuids
+
+    return new_uuids
+
+
+def build_video_prompts_from_mm_data(
+    mm_data: "MultiModalDataDict",
+) -> list[str]:
+    """Build video prompts from vision_chunk data.
+
+    Collects prompts from video chunks and groups them by video_idx.
+
+    Args:
+        mm_data: Processed multimodal data with vision_chunk items
+
+    Returns:
+        List of video prompts, one per video.
+    """
+    vision_chunks = mm_data.get("vision_chunk")
+    if vision_chunks is None:
+        return []
+
+    # Group chunks by video_idx
+    video_prompts_dict: dict[int, list[str]] = defaultdict(list)
+
+    for item in vision_chunks:
+        # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
+        assert isinstance(item, dict)
+        if item.get("type") == "video_chunk":
+            video_idx = item.get("video_idx", 0)
+            prompt = item.get("prompt", "")
+            video_prompts_dict[video_idx].append(prompt)
+
+    # Build prompts in video order
+    video_prompts = []
+    for video_idx in sorted(video_prompts_dict.keys()):
+        video_prompts.append("".join(video_prompts_dict[video_idx]))
+
+    return video_prompts
+
+
+def replace_vision_chunk_video_placeholder(
+    prompt_raw: str | list[int],
+    mm_data: "MultiModalDataDict",
+    video_placeholder: str | None,
+) -> str | list[int]:
+    # get video placehoder, replace it with runtime video-chunk prompts
+    if video_placeholder and isinstance(prompt_raw, str):
+        video_prompts = build_video_prompts_from_mm_data(mm_data)
+
+        # replace in order
+        prompt_raw_parts = prompt_raw.split(video_placeholder)
+        if len(prompt_raw_parts) == len(video_prompts) + 1:
+            prompt_raw = "".join(
+                [
+                    prompt_raw_parts[i] + video_prompts[i]
+                    for i in range(len(video_prompts))
+                ]
+            )
+            prompt_raw += prompt_raw_parts[-1]
+        else:
+            logger.warning(
+                "Number of video placeholders (%d) does not match "
+                "number of videos (%d) in the request.",
+                len(prompt_raw_parts) - 1,
+                len(video_prompts),
+            )
+    return prompt_raw
+
+
 class HfRenderer(RendererLike):
     @classmethod
     def from_config(
@@ -496,6 +602,9 @@ class HfRenderer(RendererLike):
         super().__init__()
 
         self.config = config
+        self.use_unified_vision_chunk = getattr(
+            config.hf_config, "use_unified_vision_chunk", False
+        )
 
         if config.skip_tokenizer_init:
             tokenizer = None
@@ -552,7 +661,7 @@ class HfRenderer(RendererLike):
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
         # model which uses unified vision chunks for both images and videos.
         if (
-            getattr(model_config.hf_config, "use_unified_vision_chunk", False)
+            self.use_unified_vision_chunk
             and mm_uuids is not None
             and mm_data is not None
         ):
@@ -562,26 +671,11 @@ class HfRenderer(RendererLike):
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
             )
-            if video_placeholder and isinstance(prompt_raw, str):
-                video_prompts = build_video_prompts_from_mm_data(mm_data)
-
-                # replace in order
-                prompt_raw_parts = prompt_raw.split(video_placeholder)
-                if len(prompt_raw_parts) == len(video_prompts) + 1:
-                    prompt_raw = "".join(
-                        [
-                            prompt_raw_parts[i] + video_prompts[i]
-                            for i in range(len(video_prompts))
-                        ]
-                    )
-                    prompt_raw += prompt_raw_parts[-1]
-                else:
-                    logger.warning(
-                        "Number of video placeholders (%d) does not match "
-                        "number of videos (%d) in the request.",
-                        len(prompt_raw_parts) - 1,
-                        len(video_prompts),
-                    )
+            prompt_raw = replace_vision_chunk_video_placeholder(
+                prompt_raw,
+                mm_data,
+                video_placeholder,
+            )
 
         prompt = (
             TextPrompt(prompt=prompt_raw)
@@ -626,7 +720,7 @@ class HfRenderer(RendererLike):
         # NOTE: use_unified_vision_chunk is currently specific to Kimi-K2.5
         # model which uses unified vision chunks for both images and videos.
         if (
-            getattr(model_config.hf_config, "use_unified_vision_chunk", False)
+            self.use_unified_vision_chunk
             and mm_uuids is not None
             and mm_data is not None
         ):
@@ -636,26 +730,11 @@ class HfRenderer(RendererLike):
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
             )
-            if video_placeholder and isinstance(prompt_raw, str):
-                video_prompts = build_video_prompts_from_mm_data(mm_data)
-
-                # replace in order
-                prompt_raw_parts = prompt_raw.split(video_placeholder)
-                if len(prompt_raw_parts) == len(video_prompts) + 1:
-                    prompt_raw = "".join(
-                        [
-                            prompt_raw_parts[i] + video_prompts[i]
-                            for i in range(len(video_prompts))
-                        ]
-                    )
-                    prompt_raw += prompt_raw_parts[-1]
-                else:
-                    logger.warning(
-                        "Number of video placeholders (%d) does not match "
-                        "number of videos (%d) in the request.",
-                        len(prompt_raw_parts) - 1,
-                        len(video_prompts),
-                    )
+            prompt_raw = replace_vision_chunk_video_placeholder(
+                prompt_raw,
+                mm_data,
+                video_placeholder,
+            )
 
         prompt = (
             TextPrompt(prompt=prompt_raw)
