@@ -976,7 +976,7 @@ def supports_cross_encoding(
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    hf_to_vllm_mapper: WeightsMapper | None = None
+    hf_to_vllm_mapper: ClassVar[WeightsMapper | None] = None
     packed_modules_mapping: ClassVar[dict[str, list[str]] | None] = None
     quant_config: QuantizationConfig | None = None
 
