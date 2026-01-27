@@ -1140,7 +1140,7 @@ class FusedMoE(CustomOp):
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
-            loaded_weight = loaded_weight.t()
+            loaded_weight = loaded_weight.t().contiguous()
 
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but got {shard_id}.")
