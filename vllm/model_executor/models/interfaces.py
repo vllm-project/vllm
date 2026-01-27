@@ -2,14 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from collections.abc import (
-    AsyncGenerator,
-    AsyncIterator,
-    Callable,
-    Iterable,
-    Mapping,
-    MutableSequence,
-)
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, MutableSequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
@@ -1035,7 +1028,7 @@ class SupportsRealtime(Protocol):
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: ModelConfig,
-    ) -> AsyncIterator[PromptType]: ...
+    ) -> AsyncGenerator[PromptType, None]: ...
 
 
 @overload

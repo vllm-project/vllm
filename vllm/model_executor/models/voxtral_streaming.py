@@ -3,7 +3,7 @@
 
 import asyncio
 import math
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, Mapping
 from typing import Literal, cast
 
 import numpy as np
@@ -241,7 +241,7 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: ModelConfig,
-    ) -> AsyncIterator[PromptType]:
+    ) -> AsyncGenerator[PromptType, None]:
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_encoder = tokenizer.instruct.audio_encoder
         config = audio_encoder.audio_config
