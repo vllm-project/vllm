@@ -1659,7 +1659,17 @@ class Scheduler(SchedulerInterface):
             return None
 
     def _end_core_span_and_cleanup(self, request: Request) -> None:
-        """End the core span for a request and remove from tracking dict.
+        """End core span and cleanup all journey tracing state.
+
+        CRITICAL: This is the centralized cleanup method that must be called
+        for ALL request termination paths to prevent memory leaks.
+
+        This method handles TWO INDEPENDENT concerns:
+        1. Core span cleanup (runs if span exists, regardless of flags)
+        2. Journey state cleanup (runs if journey tracing enabled)
+
+        IMPORTANT: Core span cleanup NEVER gated behind feature flags to
+        prevent leaks.
 
         Safe to call multiple times for the same request (idempotent).
 
@@ -1667,8 +1677,10 @@ class Scheduler(SchedulerInterface):
             request: The request whose span should be ended
         """
         request_id = request.request_id
-        core_span = self._core_spans.pop(request_id, None)
 
+        # Cleanup #1: Core spans (independent of journey tracing flag)
+        # CRITICAL: ALWAYS runs if span exists, never gate behind feature flags
+        core_span = self._core_spans.pop(request_id, None)
         if core_span is not None:
             try:
                 import time
@@ -1679,6 +1691,11 @@ class Scheduler(SchedulerInterface):
                     request_id,
                     e
                 )
+
+        # Cleanup #2: Journey state (only if enabled)
+        if self._enable_journey_tracing:
+            self._first_token_emitted.discard(request_id)
+            self._journey_prefill_hiwater.pop(request_id, None)
 
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
@@ -1753,11 +1770,6 @@ class Scheduler(SchedulerInterface):
                     scheduler_step=scheduler_step,
                     finish_status=finish_status_str,
                 )
-
-                # Cleanup journey tracing state
-                if self._enable_journey_tracing:
-                    self._first_token_emitted.discard(request.request_id)
-                    self._journey_prefill_hiwater.pop(request.request_id, None)
 
                 self._free_request(request)
             finally:

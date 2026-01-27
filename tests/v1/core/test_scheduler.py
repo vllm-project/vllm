@@ -3780,3 +3780,165 @@ def test_cleanup_is_idempotent(mock_init_tracer):
 
     # Verify no errors (idempotent)
     assert len(scheduler._core_spans) == 0
+
+
+@patch('vllm.tracing.init_tracer')
+def test_journey_state_created(mock_init_tracer):
+    """Test that journey state structures are initialized."""
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    # Verify state structures are empty (fail fast if they don't exist)
+    assert scheduler._first_token_emitted == set()
+    assert scheduler._journey_prefill_hiwater == {}
+
+
+@patch('vllm.tracing.init_tracer')
+def test_journey_state_cleaned_on_finish(mock_init_tracer):
+    """Test journey state cleanup in finish_requests() path."""
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    # Mock _create_core_span to return mock span
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        requests = create_requests(num_requests=1)
+        request = requests[0]
+        scheduler.add_request(request)
+
+    # Manually populate journey state (simulating normal operation)
+    scheduler._first_token_emitted.add(request.request_id)
+    scheduler._journey_prefill_hiwater[request.request_id] = 10
+
+    # Verify state populated
+    assert request.request_id in scheduler._first_token_emitted
+    assert request.request_id in scheduler._journey_prefill_hiwater
+
+    # Abort request via finish_requests()
+    scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+
+    # Verify state cleaned by centralized cleanup method
+    assert request.request_id not in scheduler._first_token_emitted
+    assert request.request_id not in scheduler._journey_prefill_hiwater
+
+
+@patch('vllm.tracing.init_tracer')
+def test_journey_state_cleaned_on_completion(mock_init_tracer):
+    """Test journey state cleanup on natural completion path.
+
+    This is the CRITICAL test that catches the memory leak bug.
+    Without proper cleanup, journey state will leak on natural completion.
+    """
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    # Mock _create_core_span to return mock span
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        requests = create_requests(num_requests=1)
+        request = requests[0]
+        scheduler.add_request(request)
+
+    # Schedule the request so it moves to running
+    scheduler_output = scheduler.schedule()
+
+    # Manually populate journey state (simulating FIRST_TOKEN emission)
+    scheduler._first_token_emitted.add(request.request_id)
+    scheduler._journey_prefill_hiwater[request.request_id] = request.num_prompt_tokens
+
+    # Verify state populated
+    assert request.request_id in scheduler._first_token_emitted
+    assert request.request_id in scheduler._journey_prefill_hiwater
+
+    # Complete request naturally with EOS token
+    model_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[EOS_TOKEN_ID]],  # Triggers stop
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=None,
+        num_nans_in_logits=None,
+    )
+
+    scheduler.update_from_output(
+        model_runner_output=model_output,
+        scheduler_output=scheduler_output,
+    )
+
+    # CRITICAL VERIFICATION: State must be cleaned on natural completion
+    # This test will fail if cleanup is missing on natural completion path
+    assert request.request_id not in scheduler._first_token_emitted
+    assert request.request_id not in scheduler._journey_prefill_hiwater
+
+
+@patch('vllm.tracing.init_tracer')
+def test_no_state_leak(mock_init_tracer):
+    """Test no memory leak after processing many requests.
+
+    This is a focused unit test that directly calls the cleanup method
+    to verify no accumulation over many iterations without depending on
+    the full scheduler/EOS stop logic.
+    """
+    mock_tracer = Mock()
+    mock_init_tracer.return_value = mock_tracer
+
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint="http://localhost:4317"
+    )
+
+    # Process 20 requests to verify no accumulation
+    # Use direct cleanup calls to test the exact invariant without
+    # depending on EOS/stop detection logic
+    for i in range(20):
+        requests = create_requests(num_requests=1)
+        request = requests[0]
+
+        # Create fresh mock span for each request (more realistic)
+        mock_span = Mock()
+        mock_span.is_recording.return_value = True
+
+        # Simulate span creation (add to tracking dict)
+        scheduler._core_spans[request.request_id] = mock_span
+
+        # Simulate state population (what happens during normal operation)
+        scheduler._first_token_emitted.add(request.request_id)
+        scheduler._journey_prefill_hiwater[request.request_id] = 10
+
+        # Verify state populated
+        assert request.request_id in scheduler._first_token_emitted
+        assert request.request_id in scheduler._journey_prefill_hiwater
+        assert request.request_id in scheduler._core_spans
+
+        # Call cleanup directly (tests the exact method we care about)
+        scheduler._end_core_span_and_cleanup(request)
+
+        # Verify immediate cleanup
+        assert request.request_id not in scheduler._first_token_emitted
+        assert request.request_id not in scheduler._journey_prefill_hiwater
+        assert request.request_id not in scheduler._core_spans
+
+    # Final verification: NO leaks after 20 iterations
+    assert len(scheduler._first_token_emitted) == 0
+    assert len(scheduler._journey_prefill_hiwater) == 0
+    assert len(scheduler._core_spans) == 0
