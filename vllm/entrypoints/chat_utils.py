@@ -595,20 +595,17 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         num_items = len(self._items_by_modality[input_modality]) + 1
 
-        self.mm_processor.validate_num_items(
-            input_modality.replace("_embeds", ""), num_items
-        )
-
-        input_modality_key = (
-            input_modality if "_embeds" not in input_modality else modality
-        )
-        self._items_by_modality[input_modality_key].append(item)  # type: ignore
+        self.mm_processor.validate_num_items(input_modality, num_items)
 
         # Track original modality for vision_chunk items
         if self.use_unified_vision_chunk_modality and original_modality in [
             "video",
             "image",
         ]:
+            input_modality_key = (
+                input_modality if "_embeds" not in input_modality else modality
+            )
+            self._items_by_modality[input_modality_key].append(item)  # type: ignore
             self._modality_order["vision_chunk"].append(original_modality)
 
         return self.model_cls.get_placeholder_str(modality, num_items)
