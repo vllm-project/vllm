@@ -133,7 +133,6 @@ class LoRAModelRunnerMixin:
         num_scheduled_tokens: np.ndarray,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
         num_sampled_tokens: np.ndarray | None = None,
-        activate_lora: bool = True,
         num_active_loras: int = 0,
     ):
         """
@@ -143,14 +142,14 @@ class LoRAModelRunnerMixin:
             lora_config: LoRA configuration, or None if LoRA is disabled.
             num_scheduled_tokens: Array of scheduled token counts per request.
             num_sampled_tokens: Array of sampled token counts per request.
-            activate_lora: Whether to activate LoRAs (False means no LoRA).
             num_active_loras: Number of distinct active LoRAs to use.
-                - 0: Use all max_loras (default behavior for has_lora=True).
+                - 0: No LoRA active (set up zero mappings).
                 - >0: Use exactly this many distinct LoRAs.
         """
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
 
+        # Skip LoRA setup entirely only if no LoRA config
         if lora_config is None:
             yield
         else:
@@ -166,21 +165,19 @@ class LoRAModelRunnerMixin:
             # to include -1 entries to simulate batches with both LoRA and
             # no-LoRA tokens. This ensures prepare_tensors computes the correct
             # num_active_loras that matches the cudagraph capture key.
-            include_no_lora = False
-            if not activate_lora:
-                # No LoRA active
+            if num_active_loras == 0:
+                # No LoRA active - use 0 mappings like the original code
                 effective_num_loras = 0
+                include_no_lora = False
             elif num_active_loras > max_loras:
                 # num_active_loras > max_loras means we want max_loras adapters
                 # PLUS no-LoRA tokens (-1). This is the max_loras + 1 case.
                 effective_num_loras = max_loras
                 include_no_lora = True
-            elif num_active_loras > 0:
+            else:
                 # Specific number of active LoRAs requested
                 effective_num_loras = min(num_active_loras, max_loras)
-            else:
-                # Default: use all max_loras
-                effective_num_loras = max_loras
+                include_no_lora = False
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
@@ -202,6 +199,7 @@ class LoRAModelRunnerMixin:
                         np.arange(num_reqs, dtype=np.int32) % effective_num_loras
                     ) + 1
             else:
+                # No LoRA active - use 0 for all tokens (original behavior)
                 prompt_lora_mapping = np.zeros(num_reqs, dtype=np.int32)
 
             # Make sample lora mapping
@@ -235,7 +233,6 @@ class LoRAModelRunnerMixin:
         lora_config: LoRAConfig | None,
         num_scheduled_tokens: np.ndarray,
         num_sampled_tokens: np.ndarray,
-        activate_lora: bool = True,
         remove_lora: bool = True,
         num_active_loras: int = 0,
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
@@ -247,9 +244,9 @@ class LoRAModelRunnerMixin:
             lora_config: LoRA configuration.
             num_scheduled_tokens: Array of scheduled token counts per request.
             num_sampled_tokens: Array of sampled token counts per request.
-            activate_lora: Whether to activate LoRAs.
             remove_lora: Whether to remove LoRAs after the context exits.
             num_active_loras: Number of distinct active LoRAs to use.
+                LoRA is activated when num_active_loras > 0.
         """
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),
@@ -258,7 +255,6 @@ class LoRAModelRunnerMixin:
                 num_scheduled_tokens,
                 mapping_type,
                 num_sampled_tokens,
-                activate_lora,
                 num_active_loras,
             ),
         ):

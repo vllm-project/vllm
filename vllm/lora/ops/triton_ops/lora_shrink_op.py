@@ -215,8 +215,6 @@ def _lora_shrink(
     grid = (
         SPLIT_K * triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),
         NUM_SLICES,
-        # Using active loras to construct grid if specialize_lora_count is true
-        # else using MAX_LORAS if specialize_lora_count is false
         num_active_loras,
     )
     # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
@@ -271,7 +269,6 @@ def _lora_shrink_fake(
     no_lora_flag_cpu: torch.Tensor,
     num_active_loras: int,
     scaling: float,
-    specialize_active_lora: bool = False,
 ) -> None:
     return
 

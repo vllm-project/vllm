@@ -235,8 +235,6 @@ def _lora_expand(
     grid = (
         triton.cdiv(M, BLOCK_M) * triton.cdiv(MAX_N, BLOCK_N),
         NUM_SLICES,
-        # Using active loras to construct grid if specialize_lora_count is true
-        # else using MAX_LORAS if specialize_lora_count is false
         num_active_loras,
     )
     # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
@@ -294,7 +292,6 @@ def _lora_expand_fake(
     num_active_loras: int,
     offset_start: int = 0,
     add_inputs: bool = False,
-    specialize_active_lora: bool = False,
 ) -> None:
     return
 

@@ -4610,7 +4610,6 @@ class GPUModelRunner(
         is_profile: bool = False,
         create_mixed_batch: bool = False,
         remove_lora: bool = True,
-        activate_lora: bool = False,
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -4635,9 +4634,8 @@ class GPUModelRunner(
             create_mixed_batch: If True, create a mixed batch with both decode
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
-            activate_lora: If False, dummy_run is performed without LoRAs.
             num_active_loras: Number of distinct active LoRAs to capture for.
-                Only used when cudagraph_specialize_lora_count is True.
+                LoRA is activated when num_active_loras > 0.
         """
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
@@ -4719,10 +4717,10 @@ class GPUModelRunner(
                 # `force_has_lora` is used for cudagraph capture; because LoRA is
                 # activated later in the context manager, but we need to know the
                 # LoRA state when determining the batch descriptor for capture
-                force_has_lora=activate_lora,
+                force_has_lora=num_active_loras > 0,
                 # `force_num_active_loras` is used for cudagraph capture; because we
                 # need to capture graphs for specific num_active_loras counts
-                force_num_active_loras=num_active_loras if activate_lora else 0,
+                force_num_active_loras=num_active_loras,
             )
         )
 
@@ -4792,7 +4790,6 @@ class GPUModelRunner(
             self.lora_config,
             num_scheduled_tokens,
             num_sampled_tokens,
-            activate_lora,
             remove_lora,
             num_active_loras,
         ):
@@ -4895,7 +4892,10 @@ class GPUModelRunner(
                 # lora cases when cudagraph_specialize_lora is enabled. This is a
                 # short term mitigation for issue mentioned in
                 # https://github.com/vllm-project/vllm/issues/28334
-                if self.compilation_config.cudagraph_specialize_lora and activate_lora:
+                if (
+                    self.compilation_config.cudagraph_specialize_lora
+                    and num_active_loras > 0
+                ):
                     use_cudagraphs = False
 
                 self.drafter.dummy_run(
@@ -5270,7 +5270,6 @@ class GPUModelRunner(
         # We skip EPLB here since we don't want to record dummy metrics
         for batch_desc in batch_descriptors:
             num_tokens = batch_desc.num_tokens
-            activate_lora = batch_desc.has_lora
             num_active_loras = batch_desc.num_active_loras
 
             # We currently only capture ubatched graphs when its a FULL
@@ -5298,7 +5297,6 @@ class GPUModelRunner(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
                     allow_microbatching=allow_microbatching,
-                    activate_lora=activate_lora,
                     num_active_loras=num_active_loras,
                 )
 
@@ -5307,7 +5305,6 @@ class GPUModelRunner(
                 num_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 allow_microbatching=allow_microbatching,
-                activate_lora=activate_lora,
                 num_active_loras=num_active_loras,
                 is_graph_capturing=True,
             )

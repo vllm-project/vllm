@@ -91,7 +91,7 @@ class LoRAKernelMeta:
         self.lora_token_start_loc.fill_(0)
         self.no_lora_flag_cpu.fill_(False)
         self.num_active_loras = 0
-        self.captured_lora_counts = []
+        # self.captured_lora_counts = []
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """
@@ -175,6 +175,7 @@ class LoRAKernelMeta:
             token_nums (int): Number of input tokens in the current forward
                 pass of the kernel.
         """
+        max_loras = self.active_lora_ids.size(0) - 1
         return (
             self.token_lora_mapping[:token_nums],
             self.token_indices_sorted_by_lora_ids[:token_nums],
@@ -182,7 +183,5 @@ class LoRAKernelMeta:
             self.lora_token_start_loc,
             self.active_lora_ids,
             self.no_lora_flag_cpu,
-            self.num_active_loras
-            if specialize_active_lora
-            else self.active_lora_ids.size(0),
+            self.num_active_loras if specialize_active_lora else max_loras + 1,
         )
