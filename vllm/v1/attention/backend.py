@@ -709,7 +709,7 @@ class AttentionImpl(ABC, Generic[T]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: T,
-    ) -> torch.Tensor:
+    ) -> None:
         """Perform KV cache update separately from attention forward pass.
 
         This is the default implementation that uses the standard
@@ -724,17 +724,17 @@ class AttentionImpl(ABC, Generic[T]):
             kv_cache: The KV cache tensor.
             attn_metadata: Attention metadata containing slot_mapping, or
                            slot_mapping tensor directly.
-
-        Returns:
-            The KV cache tensor (possibly with dtype changed for FP8).
         """
         # Skip if sharing KV cache with an earlier attention layer
         if self.kv_sharing_target_layer_name is not None:
-            return kv_cache
+            return
 
         key_cache, value_cache = kv_cache.unbind(0)
 
-        # Extract slot_mapping from metadata if it's an object, otherwise use directly
+        # Handle slot_mapping parameter flexibility:
+        # In practice, all current callers pass slot_mapping tensor directly.
+        # The hasattr check provides forward compatibility if future callers
+        # need to pass full metadata objects.
         slot_mapping = (
             attn_metadata.slot_mapping
             if hasattr(attn_metadata, "slot_mapping")
@@ -757,8 +757,6 @@ class AttentionImpl(ABC, Generic[T]):
             layer._k_scale,
             layer._v_scale,
         )
-
-        return kv_cache
 
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """
