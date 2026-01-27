@@ -58,6 +58,7 @@ FILES = [
 SEPARATE_GROUPS = [
     "tests",
     # v0 related
+    "vllm/compilation",
     "vllm/lora",
     "vllm/model_executor",
     # v1 related
