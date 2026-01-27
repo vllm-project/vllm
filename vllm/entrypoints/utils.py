@@ -192,18 +192,22 @@ def get_max_tokens(
     prompt: TokensPrompt | EmbedsPrompt,
     default_sampling_params: dict,
 ) -> int:
-    if isinstance(request, CompletionRequest):
-        max_tokens = request.max_tokens
-    elif isinstance(request, ChatCompletionRequest):
-        max_tokens = request.max_completion_tokens or request.max_tokens
-    else:
-        max_tokens = request.max_output_tokens
+    # NOTE: Avoid isinstance() for better efficiency
+    max_tokens: int | None = None
+    if max_tokens is None:
+        # ChatCompletionRequest
+        max_tokens = getattr(request, "max_completion_tokens", None)
+    if max_tokens is None:
+        # ResponsesRequest
+        max_tokens = getattr(request, "max_output_tokens", None)
+    if max_tokens is None:
+        # CompletionRequest (also a fallback for ChatCompletionRequest)
+        max_tokens = getattr(request, "max_tokens", None)
 
     input_length = length_from_prompt_token_ids_or_embeds(
         prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
         prompt.get("prompt_embeds"),  # type: ignore[arg-type]
     )
-
     default_max_tokens = max_model_len - input_length
     max_output_tokens = current_platform.get_max_output_tokens(input_length)
 

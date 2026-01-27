@@ -1174,7 +1174,7 @@ class OpenAIServing:
             # yield context
 
             # Create inputs for the next turn.
-            # Render the next prompt token ids.
+            # Render the next prompt token ids and update sampling_params.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
                 token_ids = context.render_for_completion()
                 engine_prompt = TokensPrompt(prompt_token_ids=token_ids)
