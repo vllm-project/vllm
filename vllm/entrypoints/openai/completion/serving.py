@@ -36,6 +36,7 @@ from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, TokensPrompt, is_embeds_prompt
+from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -72,16 +73,9 @@ class OpenAIServingCompletion(OpenAIServing):
         self.logits_processors = self.model_config.logits_processors
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
-        self.default_sampling_params = self.model_config.get_diff_sampling_param()
         self.enable_force_include_usage = enable_force_include_usage
-        if self.default_sampling_params:
-            source = self.model_config.generation_config
-            source = "model" if source == "auto" else source
-            logger.info(
-                "Using default completion sampling params from %s: %s",
-                source,
-                self.default_sampling_params,
-            )
+
+        self.default_sampling_params = self.model_config.get_diff_sampling_param()
 
     async def render_completion_request(
         self,
@@ -169,25 +163,12 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, prompt_token_ids, prompt_embeds = (
-                    self._get_prompt_components(engine_prompt)
-                )
-
-                input_length = None
-                if prompt_token_ids is not None:
-                    input_length = len(prompt_token_ids)
-                elif prompt_embeds is not None:
-                    input_length = len(prompt_embeds)
-                else:
-                    raise NotImplementedError
-
-                if self.default_sampling_params is None:
-                    self.default_sampling_params = {}
+                prompt_text, _, _ = get_prompt_components(engine_prompt)
 
                 max_tokens = get_max_tokens(
                     max_model_len=self.max_model_len,
                     request=request,
-                    input_length=input_length,
+                    prompt=engine_prompt,
                     default_sampling_params=self.default_sampling_params,
                 )
 
