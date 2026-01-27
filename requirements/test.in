@@ -9,6 +9,7 @@ pytest-timeout
 pytest-cov
 
 # testing utils
+albumentations # required for Nemotron Parse in test_common.py
 backoff # required for phi4mm test
 blobfile # required for kimi-vl test
 einops # required for MPT, qwen-vl
@@ -19,11 +20,11 @@ vocos # required for minicpmo_26 test
 peft>=0.15.0 # required for phi-4-mm test
 pqdm
 ray[cgraph,default]>=2.48.0 # Ray Compiled Graph, required by pipeline parallelism tests
-sentence-transformers # required for embedding tests
+sentence-transformers>=5.2.0 # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
 tblib # for pickling test exceptions
-timm >=1.0.17 # required for internvl and gemma3n-mm test
+timm==1.0.17 # required for internvl and gemma3n-mm test
 torch==2.9.1
 torchaudio==2.9.1
 torchvision==0.24.1
@@ -31,12 +32,12 @@ transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[image,audio] >= 1.8.8 # required for voxtral test
 num2words # required for smolvlm test
-open_clip_torch==2.32.0 # Required for nemotron_vl test
-opencv-python-headless >= 4.11.0 # required for video test
+open_clip_torch==2.32.0 # Required for nemotron_vl test, Nemotron Parse in test_common.py
+opencv-python-headless >= 4.13.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]>=0.4.9.2 # required for model evaluation test
 mteb[bm25s]>=2, <3 # required for mteb test
-transformers==4.57.3
+transformers==4.57.5
 tokenizers==0.22.0
 schemathesis>=3.39.15 # Required for openai schema test.
 # quantization
@@ -44,8 +45,8 @@ bitsandbytes==0.46.1
 buildkite-test-collector==0.1.9
 
 
-genai_perf==0.0.8
-tritonclient==2.51.0
+genai_perf>=0.0.8
+tritonclient>=2.51.0
 
 arctic-inference == 0.1.1 # Required for suffix decoding test
 numba == 0.61.2 # Required for N-gram speculative decoding

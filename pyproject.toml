@@ -9,6 +9,7 @@ requires = [
     "torch == 2.9.1",
     "wheel",
     "jinja2",
+    "grpcio-tools>=1.76.0",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -43,6 +44,7 @@ vllm = "vllm.entrypoints.cli.main:main"
 
 [project.entry-points."vllm.general_plugins"]
 lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
+lora_hf_hub_resolver = "vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_hub_resolver"
 
 [tool.setuptools_scm]
 # no extra settings needed, presence enables setuptools-scm
@@ -55,6 +57,10 @@ include = ["vllm*"]
 "vllm/third_party/**" = ["ALL"]
 "vllm/version.py" = ["F401"]
 "vllm/_version.py" = ["ALL"]
+# Exclude generated protobuf files
+"vllm/grpc/*_pb2.py" = ["ALL"]
+"vllm/grpc/*_pb2_grpc.py" = ["ALL"]
+"vllm/grpc/*_pb2.pyi" = ["ALL"]
 
 [tool.ruff.lint]
 select = [
@@ -95,6 +101,13 @@ ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
 
+[[tool.mypy.overrides]]
+module = "vllm.compilation.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+warn_return_any = true
+follow_imports = "silent"
+
 [tool.pytest.ini_options]
 markers = [
     "slow_test",
@@ -120,7 +133,8 @@ python = "./.venv"
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*",
     "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
-    "vllm/third_party/*"]
+    "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", 
+    "docs/governance/process.md"]
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
@@ -162,6 +176,7 @@ depthwise_seperable_CNN = "depthwise_seperable_CNN"
 [tool.typos.default.extend-words]
 iy = "iy"
 tendencias = "tendencias"
+indx = "indx"
 # intel cpu features
 tme = "tme"
 dout = "dout"

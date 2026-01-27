@@ -18,8 +18,12 @@ import ray
 import torch
 
 from vllm import LLM
-from vllm.config import KVTransferConfig
-from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.config import KVTransferConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    KVOutputAggregator,
+    TpKVTopology,
+    get_current_attn_backend,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1 import nixl_connector
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
@@ -48,8 +52,11 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheTensor
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import RequestStatus
+from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
+from vllm.v1.worker.utils import AttentionGroup
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
@@ -185,18 +192,21 @@ class FakeNixlWrapper:
 def _make_fake_nixl_pkg():
     """Context manager that creates a temporary package making
        `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper.
+       Also creates rixl package for ROCm compatibility.
 
     Automatically cleans up the temporary directory when done.
     """
     with tempfile.TemporaryDirectory() as td:
-        pkg_root = os.path.join(td, "nixl", "_api")
-        os.makedirs(pkg_root, exist_ok=True)
+        # Create both nixl and rixl packages for cross-platform compatibility
+        for pkg_name in ["nixl", "rixl"]:
+            pkg_root = os.path.join(td, pkg_name, "_api")
+            os.makedirs(pkg_root, exist_ok=True)
 
-        # Get the source code of FakeNixlWrapper class and dedent it
-        fake_nixl_source = inspect.getsource(FakeNixlWrapper)
-        fake_nixl_source = textwrap.dedent(fake_nixl_source)
+            # Get the source code of FakeNixlWrapper class and dedent it
+            fake_nixl_source = inspect.getsource(FakeNixlWrapper)
+            fake_nixl_source = textwrap.dedent(fake_nixl_source)
 
-        stub = f"""\
+            stub = f"""\
 # Copy of FakeNixlWrapper implementation for Ray workers
 import uuid
 from collections import defaultdict
@@ -206,16 +216,17 @@ from collections import defaultdict
 # Export as nixl_agent
 nixl_agent = FakeNixlWrapper
 """
-        with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
-            f.write(stub)
+            with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
+                f.write(stub)
 
-        # Mock nixlXferTelemetry class
-        pkg_root2 = os.path.join(td, "nixl", "_bindings")
-        os.makedirs(pkg_root2, exist_ok=True)
-        with open(os.path.join(pkg_root2, "__init__.py"), "w") as f:
-            f.write("class nixlXferTelemetry: pass")
-        # touch parent package
-        open(os.path.join(td, "nixl", "__init__.py"), "w").close()
+            # Mock nixlXferTelemetry class
+            pkg_root2 = os.path.join(td, pkg_name, "_bindings")
+            os.makedirs(pkg_root2, exist_ok=True)
+            with open(os.path.join(pkg_root2, "__init__.py"), "w") as f:
+                f.write("class nixlXferTelemetry: pass")
+            # touch parent package
+            open(os.path.join(td, pkg_name, "__init__.py"), "w").close()
+
         yield td
 
 
@@ -299,6 +310,7 @@ def test_prompt_less_than_block_size():
 )
 def test_kv_transfer_handshake(dist_init):
     """Unit test for basic NixlConnector interface functionality."""
+    from vllm.config import set_current_vllm_config
 
     # Test setup, we creates a scheduler that contains a NixlConnector
     # of role SCHEDULER, and expect it to be serving NixlAgentMetadata from
@@ -308,81 +320,83 @@ def test_kv_transfer_handshake(dist_init):
     vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
     scheduler = create_scheduler(vllm_config)
 
-    # Create two NixlConnector of role WORKER, one is the worker of
-    # the scheduler (prefill), the other is a worker of decode instance.
+    with set_current_vllm_config(vllm_config):
+        # Create two NixlConnector of role WORKER, one is the worker of
+        # the scheduler (prefill), the other is a worker of decode instance.
 
-    # Prefill connector will register KV cache to populate proper handshake
-    # metadata.
-    prefill_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
-    kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
-    )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    kv_caches = {
-        "layer0": shared_tensor,
-        "layer1": unique_tensor,
-        "layer2": shared_tensor,
-    }
-    prefill_connector.register_kv_caches(kv_caches)
-
-    # Simulate EngineCore initialization that would gather connector
-    # metadata from all workers
-    metadata = prefill_connector.get_handshake_metadata()
-
-    # metadata is a NixlHandshakePayload, decode it to get NixlAgentMetadata
-    decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-    expected_agent_metadata = decoder.decode(metadata.agent_metadata_bytes)
-
-    # The scheduler connector expects metadata to be in
-    # dict[int, KVConnectorHandshakeMetadata], where the first key is
-    # the dp_rank, the second key is the tp_rank.
-    scheduler_connector = scheduler.get_kv_connector()
-    scheduler_connector.set_xfer_handshake_metadata({0: metadata})
-
-    # Simulate a request that finishes prefill, which returns
-    # corresponding NixlConnectorMetadata for decode instance.
-    BLOCK_SIZE = vllm_config.cache_config.block_size
-    NUM_EXTERNAL_FULL_BLOCKS = 2
-    NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
-
-    request = create_request(
-        request_id=1,
-        block_size=BLOCK_SIZE,
-        num_tokens=NUM_TOKENS,
-        do_remote_decode=True,
-    )
-    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-    delay, kv_connector_metadata = scheduler.get_kv_connector().request_finished(
-        request, [0, 1, 2]
-    )
-    assert delay
-
-    # Decode connector will be able to create handshake with the prefill connector.
-    decode_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
-
-    # Here we are testing the retrieval of NIXLAgentMetadata.
-    # Knowing the implementation detail, we override the add_remote_agent
-    # to validate the metadata received is the same as the one in prefill_connector.
-    with patch.object(
-        decode_connector.connector_worker, "add_remote_agent"
-    ) as mock_add_remote_agent:
-        mock_add_remote_agent.return_type = "remote_agent"
-
-        decode_connector.connector_worker._nixl_handshake(
-            kv_connector_metadata["remote_host"],
-            kv_connector_metadata["remote_port"],
-            kv_connector_metadata["tp_size"],
-            kv_connector_metadata["remote_engine_id"],
+        # Prefill connector will register KV cache to populate proper handshake
+        # metadata.
+        prefill_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
         )
+        shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        kv_caches = {
+            "layer0": shared_tensor,
+            "layer1": unique_tensor,
+            "layer2": shared_tensor,
+        }
+        prefill_connector.register_kv_caches(kv_caches)
 
-        received_metadata = mock_add_remote_agent.call_args.args
-        assert received_metadata[0] == expected_agent_metadata
-        assert received_metadata[1] == 0  # remote_tp_rank
-        assert received_metadata[2] == 1  # remote_tp_size
+        # Simulate EngineCore initialization that would gather connector
+        # metadata from all workers
+        metadata = prefill_connector.get_handshake_metadata()
 
-    # Need to shutdown the background thread to release NIXL side channel port
-    scheduler_connector.shutdown()
+        # metadata is a NixlHandshakePayload, decode it to get NixlAgentMetadata
+        decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+        expected_agent_metadata = decoder.decode(metadata.agent_metadata_bytes)
+
+        # The scheduler connector expects metadata to be in
+        # dict[int, KVConnectorHandshakeMetadata], where the first key is
+        # the dp_rank, the second key is the tp_rank.
+        scheduler_connector = scheduler.get_kv_connector()
+        scheduler_connector.set_xfer_handshake_metadata({0: metadata})
+
+        # Simulate a request that finishes prefill, which returns
+        # corresponding NixlConnectorMetadata for decode instance.
+        BLOCK_SIZE = vllm_config.cache_config.block_size
+        NUM_EXTERNAL_FULL_BLOCKS = 2
+        NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
+
+        request = create_request(
+            request_id=1,
+            block_size=BLOCK_SIZE,
+            num_tokens=NUM_TOKENS,
+            do_remote_decode=True,
+        )
+        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+        delay, kv_connector_metadata = scheduler.get_kv_connector().request_finished(
+            request, [0, 1, 2]
+        )
+        assert delay
+
+        # Decode connector will be able to create handshake with the prefill connector.
+        decode_connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        decode_connector.register_kv_caches(kv_caches)
+
+        # Here we are testing the retrieval of NIXLAgentMetadata.
+        # Knowing the implementation detail, we override the add_remote_agent
+        # to validate the metadata received is the same as the one in prefill_connector.
+        with patch.object(
+            decode_connector.connector_worker, "add_remote_agent"
+        ) as mock_add_remote_agent:
+            mock_add_remote_agent.return_type = "remote_agent"
+
+            decode_connector.connector_worker._nixl_handshake(
+                kv_connector_metadata["remote_host"],
+                kv_connector_metadata["remote_port"],
+                kv_connector_metadata["tp_size"],
+                kv_connector_metadata["remote_engine_id"],
+            )
+
+            received_metadata = mock_add_remote_agent.call_args.args
+            assert received_metadata[0] == expected_agent_metadata
+            assert received_metadata[1] == 0  # remote_tp_rank
+            assert received_metadata[2] == 1  # remote_tp_size
+
+        # Need to shutdown the background thread to release NIXL side channel port
+        scheduler_connector.shutdown()
 
 
 class FakeNixlConnectorWorker(NixlConnectorWorker):
@@ -396,6 +410,23 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.kv_cache_layout = kv_cache_layout
         # Mock register_kv_caches attribute needed for tests that do not call it.
         self.src_xfer_handles_by_block_size = {self.block_size: 1}
+        test_shape = self.attn_backend.get_kv_cache_shape(
+            num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+        )
+        self.kv_topo = TpKVTopology(
+            tp_rank=self.tp_rank,
+            engine_id=self.engine_id,
+            remote_tp_size=self._tp_size,  # shared state
+            remote_block_size=self._block_size,  # shared state
+            is_mla=self.use_mla,
+            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            attn_backend=self.attn_backend,
+            tensor_shape=test_shape,
+        )
+
+        self.compat_hash = compute_nixl_compatibility_hash(
+            self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
+        )
 
     def _nixl_handshake(
         self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
@@ -458,6 +489,7 @@ class TestNixlHandshake:
     )
     def test_multi_xfer_one_engine(
         self,
+        default_vllm_config,
         # dist_init is a fixture that initializes the distributed environment.
         dist_init,
     ):
@@ -511,11 +543,12 @@ class TestNixlHandshake:
                 )
             connector.bind_connector_metadata(metadata)
 
-            # Mimic maybe_setup_kv_connector in gpu_model_runner.
+            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
                 virtual_engine=0,
+                slot_mapping={},
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -524,7 +557,7 @@ class TestNixlHandshake:
                 f"start_load_kv took {_after_load - _before_load} seconds"
             )
 
-            # Mimic get_finished_kv_transfers in gpu_model_runner.
+            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
             _, done_recving = connector.get_finished(finished_req_ids=set())
             if len(done_recving) > 0:
                 assert request_id in done_recving
@@ -547,6 +580,7 @@ class TestNixlHandshake:
     )
     def test_async_load_kv(
         self,
+        default_vllm_config,
         # Fixture that initializes the distributed environment.
         dist_init,
         # Simulate consumer-producer TP sizes.
@@ -585,6 +619,7 @@ class TestNixlHandshake:
                 no_compile_layers={},
                 attn_metadata={},
                 virtual_engine=0,
+                slot_mapping={},
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -605,7 +640,7 @@ class TestNixlHandshake:
     )
     @pytest.mark.parametrize("local_tp_size", [1, 2])
     def test_prefill_tp_size_greater_than_decode_tp_size(
-        self, local_tp_size: int, dist_init
+        self, local_tp_size: int, default_vllm_config, dist_init
     ):
         """
         Verify remote TP > local TP handshake succeeds with different
@@ -670,7 +705,7 @@ class TestNixlHandshake:
     )
     @pytest.mark.parametrize("local_tp_size", [1, 2])
     def test_prefill_tp_size_greater_than_decode_tp_size_mla(
-        self, local_tp_size: int, dist_init
+        self, local_tp_size: int, default_vllm_config, dist_init
     ):
         """
         Verify remote TP > local TP handshake succeeds with different
@@ -770,6 +805,7 @@ class TestNixlHandshake:
     )
     def test_concurrent_load_kv(
         self,
+        default_vllm_config,
         # dist_init is a fixture that initializes the distributed environment.
         dist_init,
     ):
@@ -810,6 +846,7 @@ class TestNixlHandshake:
                 no_compile_layers={},
                 attn_metadata={},
                 virtual_engine=0,
+                slot_mapping={},
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -830,7 +867,9 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
         FakeNixlWrapper,
     )
-    def test_handshake_fails_on_kv_cache_layout_mismatch(self, dist_init):
+    def test_handshake_fails_on_kv_cache_layout_mismatch(
+        self, default_vllm_config, dist_init
+    ):
         """
         Verify that adding a remote agent fails if kv_cache_layout differs.
         This test is only relevant for heterogeneous TP.
@@ -879,7 +918,7 @@ class TestNixlHandshake:
         FakeNixlWrapper,
     )
     def test_handshake_succeed_on_kv_cache_layout_mismatch_with_experimental(
-        self, dist_init
+        self, default_vllm_config, dist_init
     ):
         """
         Verify that adding a remote agent fails if kv_cache_layout differs.
@@ -934,7 +973,7 @@ class TestNixlHandshake:
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_kv_connector_stats(dist_init):
+def test_kv_connector_stats(default_vllm_config, dist_init):
     """Test that KV transfer stats are properly recorded and retrieved."""
     vllm_config = create_vllm_config()
 
@@ -970,6 +1009,7 @@ def test_kv_connector_stats(dist_init):
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1355,9 +1395,10 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
             ),
         ),
         "TRITON_ATTN",
+        "FLASHINFER",
     ],
 )
-def test_register_kv_caches(dist_init, attn_backend):
+def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
     """
     Test that register_kv_caches() properly calls nixl_wrapper methods with
     correct data.
@@ -1371,6 +1412,11 @@ def test_register_kv_caches(dist_init, attn_backend):
 
     vllm_config = create_vllm_config(attention_backend=attn_backend)
 
+    # Enable cross layers blocks
+    vllm_config.kv_transfer_config.kv_connector_extra_config[
+        "enable_cross_layers_blocks"
+    ] = True
+
     # Import the appropriate backend based on the parameter
     if attn_backend == "FLASH_ATTN":
         from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -1380,55 +1426,17 @@ def test_register_kv_caches(dist_init, attn_backend):
         from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 
         backend_cls = RocmAttentionBackend
-    else:  # TRITON_ATTN
+    else:  # TRITON
         from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
         backend_cls = TritonAttentionBackend
-
-    # Create test kv cache tensors using proper backend shape
-    kv_cache_shape = backend_cls.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
-    )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    kv_caches = {
-        "layer0": shared_tensor,
-        "layer1": unique_tensor,
-        "layer2": shared_tensor,
-    }
-
-    # Store tensor info for validation
-
-    test_shape = backend_cls.get_kv_cache_shape(
-        num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
-    )
-    is_blocks_first = len(test_shape) == 5 and test_shape[0] == 1
-
-    if is_blocks_first:
-        expected_tensor_size = shared_tensor.element_size() * shared_tensor.numel()
-        expected_base_addrs = [
-            shared_tensor.data_ptr(),
-            unique_tensor.data_ptr(),
-        ]
-        expected_num_entries = 2
-    else:
-        expected_tensor_size = (
-            shared_tensor[0].element_size() * shared_tensor[0].numel()
-        )
-        expected_base_addrs = [
-            shared_tensor[0].data_ptr(),
-            shared_tensor[1].data_ptr(),
-            unique_tensor[0].data_ptr(),
-            unique_tensor[1].data_ptr(),
-        ]
-        expected_num_entries = 4
 
     nixl_module = "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector"
     with (
         patch(f"{nixl_module}.NixlWrapper") as mock_nixl_wrapper,
         patch(f"{nixl_module}.threading.Event"),
         patch(f"{nixl_module}.threading.Thread") as mock_thread,
-        patch(f"{nixl_module}.get_attn_backend") as mock_get_attn_backend,
+        patch(f"{nixl_module}.get_current_attn_backend") as mock_get_attn_backend,
     ):
         # Ensure get_attn_backend returns the correct value due to
         # _cached_get_attn_backend returning the backend from previous
@@ -1450,6 +1458,107 @@ def test_register_kv_caches(dist_init, attn_backend):
 
         # Reassure the shutdown() check that the thread is terminated
         mock_thread.return_value.is_alive.return_value = False
+
+        expected_tensor_size: int
+        expected_base_addrs: list[int]
+        expected_num_entries: int
+        kv_caches: dict[str, torch.Tensor]
+        if connector.prefer_cross_layer_blocks:
+            num_layers = 32
+            block_size = 16
+            num_blocks = 8
+            kv_cache_spec = AttentionSpec(
+                block_size=block_size,
+                num_kv_heads=4,
+                head_size=64,
+                dtype=torch.bfloat16,
+            )
+            kv_cache_config = KVCacheConfig(
+                num_blocks=num_blocks,
+                kv_cache_tensors=[
+                    KVCacheTensor(
+                        size=kv_cache_spec.page_size_bytes * num_blocks,
+                        shared_by=["dummy-layer"],
+                    )
+                    for i in range(num_layers)
+                ],
+                # allocate_uniform_kv_caches does not use this
+                kv_cache_groups=[],
+            )
+
+            with set_current_vllm_config(vllm_config):
+                _, cross_layers_kv_cache, _ = (
+                    KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+                        kv_cache_config=kv_cache_config,
+                        attn_groups=[
+                            [
+                                AttentionGroup(
+                                    backend=backend_cls,
+                                    layer_names=[],
+                                    kv_cache_spec=kv_cache_spec,
+                                    kv_cache_group_id=0,
+                                )
+                            ]
+                        ],
+                        cache_dtype=torch.bfloat16,
+                        device=torch.cuda.current_device(),
+                        kernel_block_sizes=[block_size],
+                    )
+                )
+            # Store tensor info for validation
+            expected_tensor_size = (
+                cross_layers_kv_cache.element_size() * cross_layers_kv_cache.numel()
+            )
+            expected_base_addrs = [
+                cross_layers_kv_cache.data_ptr(),
+            ]
+            expected_num_entries = 1
+
+            expected_blocks_count = 8
+
+            kv_caches = {"all-layers": cross_layers_kv_cache}
+
+        else:
+            # Create test kv cache tensors using proper backend shape
+            kv_cache_shape = backend_cls.get_kv_cache_shape(
+                num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+            )
+            shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+            unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+            kv_caches = {
+                "layer0": shared_tensor,
+                "layer1": unique_tensor,
+                "layer2": shared_tensor,
+            }
+
+            # Store tensor info for validation
+
+            test_shape = backend_cls.get_kv_cache_shape(
+                num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+            )
+            is_blocks_first = len(test_shape) == 5 and test_shape[0] == 1
+
+            if is_blocks_first:
+                expected_tensor_size = (
+                    shared_tensor.element_size() * shared_tensor.numel()
+                )
+                expected_base_addrs = [
+                    shared_tensor.data_ptr(),
+                    unique_tensor.data_ptr(),
+                ]
+                expected_num_entries = 2
+            else:
+                expected_tensor_size = (
+                    shared_tensor[0].element_size() * shared_tensor[0].numel()
+                )
+                expected_base_addrs = [
+                    shared_tensor[0].data_ptr(),
+                    shared_tensor[1].data_ptr(),
+                    unique_tensor[0].data_ptr(),
+                    unique_tensor[1].data_ptr(),
+                ]
+                expected_num_entries = 4
+            expected_blocks_count = 8
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)
@@ -1474,16 +1583,19 @@ def test_register_kv_caches(dist_init, attn_backend):
         blocks_data, _ = mock_wrapper_instance.get_xfer_descs.call_args[0]
 
         # Validate blocks_data structure and size
-        expected_blocks_count = 8
         assert len(blocks_data) == expected_blocks_count, (
             f"Expected {expected_blocks_count} blocks, got {len(blocks_data)}"
         )
 
-        num_blocks = 2
-        if is_blocks_first:
-            expected_block_len = expected_tensor_size // num_blocks // 2
-        else:
+        if connector.prefer_cross_layer_blocks:
+            num_blocks = 8
             expected_block_len = expected_tensor_size // num_blocks
+        else:
+            num_blocks = 2
+            if is_blocks_first:
+                expected_block_len = expected_tensor_size // num_blocks // 2
+            else:
+                expected_block_len = expected_tensor_size // num_blocks
 
         for i, block_entry in enumerate(blocks_data):
             block_start_addr, block_len, tp_rank = block_entry
@@ -1518,7 +1630,9 @@ class FakePlatform(Platform):
         ("oot", "VRAM"),
     ],
 )
-def test_kv_buffer_to_nixl_memory_types(dist_init, kv_buffer_device, nixl_memory_type):
+def test_kv_buffer_to_nixl_memory_types(
+    default_vllm_config, dist_init, kv_buffer_device, nixl_memory_type
+):
     """
     Test that register_kv_caches() passes the correct memory types from the
     config to the nixl_wrapper.
@@ -1563,7 +1677,7 @@ def test_kv_buffer_to_nixl_memory_types(dist_init, kv_buffer_device, nixl_memory
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_shutdown_cleans_up_resources(dist_init):
+def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
     """Test that shutdown() properly cleans up all resources."""
     vllm_config = create_vllm_config()
 
@@ -1622,7 +1736,7 @@ def test_shutdown_cleans_up_resources(dist_init):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_aborted_request_removed_from_worker_in_batch(dist_init):
+def test_aborted_request_removed_from_worker_in_batch(default_vllm_config, dist_init):
     """
     Create and schedule a request so that P adds it to in-batch tracking via
     the real scheduler, then simulate an abort (request not in next scheduler
@@ -1657,6 +1771,7 @@ def test_aborted_request_removed_from_worker_in_batch(dist_init):
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1692,6 +1807,8 @@ class FailingNixlWrapper(FakeNixlWrapper):
         self.fail_handshake = False
         self.fail_transfer_setup = False
         self.fail_send_notif = False
+        self.fail_transfer_state = False  # Returns "ERR" state
+        self.fail_transfer_exception = False  # Raises exception in check_xfer_state
 
     def add_remote_agent(self, agent_metadata: bytes) -> str:
         if self.fail_handshake:
@@ -1726,12 +1843,157 @@ class FailingNixlWrapper(FakeNixlWrapper):
             raise RuntimeError("Simulated send_notif failure")
         return super().send_notif(agent_name, notif_msg)
 
+    def check_xfer_state(self, handle: int) -> str:
+        if self.fail_transfer_exception:
+            raise RuntimeError("Simulated check_xfer_state exception")
+        if self.fail_transfer_state:
+            return "ERR"  # Bad transfer state
+        return super().check_xfer_state(handle)
+
 
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FailingNixlWrapper,
 )
-def test_handshake_failure_returns_finished(dist_init):
+@pytest.mark.parametrize(
+    "failure_type,wrapper_config,needs_get_finished",
+    [
+        ("transfer_setup_failed", {"fail_transfer_setup": True}, False),
+        ("handshake_failed", {"fail_handshake": True}, False),
+        ("notification_failed", {"fail_send_notif": True}, False),
+        ("transfer_failed", {"fail_transfer_state": True}, True),
+        ("transfer_exception", {"fail_transfer_exception": True}, True),
+    ],
+)
+def test_transfer_failure_logging(
+    default_vllm_config,
+    dist_init,
+    failure_type,
+    wrapper_config,
+    needs_get_finished,
+):
+    """Test that transfer failures are logged with structured context.
+
+    Run with `pytest -sv` to see the log output.
+
+    Covers failure types:
+    - transfer_setup_failed: make_prepped_xfer fails
+    - handshake_failed: add_remote_agent fails during request handshake
+    - notification_failed: send_notif fails
+    - transfer_failed: check_xfer_state returns bad state (e.g., "ERR")
+    - transfer_exception: check_xfer_state raises exception
+    """
+    import logging
+
+    vllm_config = create_vllm_config()
+
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0.0
+    )
+
+    # Configure FailingNixlWrapper to fail in the specified way
+    for key, value in wrapper_config.items():
+        setattr(connector.connector_worker.nixl_wrapper, key, value)
+
+    request_id = f"test_{failure_type}_req"
+
+    # For notification_failed, we need empty local blocks
+    # (full cache hit path to trigger send_notif)
+    local_blocks = [] if failure_type == "notification_failed" else [10, 11, 12]
+    remote_blocks = [20, 21, 22]
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id=request_id,
+        local_block_ids=local_blocks,
+        kv_transfer_params={
+            "remote_block_ids": remote_blocks,
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+        },
+    )
+    connector.bind_connector_metadata(metadata)
+
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        virtual_engine=0,
+        slot_mapping={},
+    )
+
+    # Capture logs from the nixl_connector logger specifically
+    # vLLM loggers have propagate=False, so we need to capture directly
+    nixl_logger = logging.getLogger(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector"
+    )
+    captured_logs: list[logging.LogRecord] = []
+
+    class LogCapture(logging.Handler):
+        def emit(self, record):
+            captured_logs.append(record)
+
+    handler = LogCapture()
+    handler.setLevel(logging.ERROR)
+    nixl_logger.addHandler(handler)
+
+    try:
+        connector.start_load_kv(dummy_ctx)
+        # Process the ready_requests queue (for async handshake)
+        connector.bind_connector_metadata(NixlConnectorMetadata())
+        # Wait for async handshake to complete
+        time.sleep(0.2)
+        connector.start_load_kv(dummy_ctx)
+
+        # For transfer_failed/transfer_exception, the error happens in
+        # get_finished() when checking transfer state
+        if needs_get_finished:
+            connector.get_finished(finished_req_ids=set())
+    finally:
+        nixl_logger.removeHandler(handler)
+
+    # Print logs for manual comparison between commits
+    error_logs = [r for r in captured_logs if r.levelno >= logging.ERROR]
+    print("\n" + "=" * 60)
+    print(f"CAPTURED ERROR LOGS for {failure_type}:")
+    print("=" * 60)
+    for i, record in enumerate(error_logs):
+        print(f"\n--- Log {i + 1} ---")
+        print(f"Message: {record.message}")
+    print("=" * 60 + "\n")
+
+    assert len(error_logs) >= 1, f"Expected at least one error log for {failure_type}"
+
+    # Verify structured logging output (new format)
+    # Check that at least one log matches the expected format
+    all_messages = [r.message for r in error_logs]
+    combined_logs = "\n".join(all_messages)
+
+    assert any("NIXL transfer failure" in msg for msg in all_messages), (
+        f"Expected structured log format with 'NIXL transfer failure' prefix "
+        f"for {failure_type}. Got: {all_messages}"
+    )
+    assert any("failure_type" in msg for msg in all_messages), (
+        f"Expected 'failure_type' in logs. Got: {all_messages}"
+    )
+    assert any("Context:" in msg for msg in all_messages), (
+        f"Expected 'Context:' in logs. Got: {all_messages}"
+    )
+    # Check that the expected failure_type appears in at least one log
+    # Note: handshake_failed also triggers handshake_setup_failed
+    assert failure_type in combined_logs or (
+        failure_type == "handshake_failed" and "handshake_setup_failed" in combined_logs
+    ), f"Expected '{failure_type}' in logs. Got: {all_messages}"
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FailingNixlWrapper,
+)
+def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
     """Test that handshake failures mark blocks invalid and return via get_finished."""
     vllm_config = create_vllm_config()
 
@@ -1761,6 +2023,7 @@ def test_handshake_failure_returns_finished(dist_init):
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1780,7 +2043,7 @@ def test_handshake_failure_returns_finished(dist_init):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FailingNixlWrapper,
 )
-def test_transfer_setup_failure_returns_finished(dist_init):
+def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init):
     """Test that transfer setup failures mark blocks invalid
     and return via get_finished."""
     vllm_config = create_vllm_config()
@@ -1811,6 +2074,7 @@ def test_transfer_setup_failure_returns_finished(dist_init):
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1855,6 +2119,7 @@ def test_transfer_setup_failure_returns_finished(dist_init):
     FakeNixlWrapper,
 )
 def test_compatibility_hash_validation(
+    default_vllm_config,
     dist_init,
     mismatch_type,
     config_overrides,
@@ -1881,6 +2146,17 @@ def test_compatibility_hash_validation(
     )
     decode_connector = NixlConnector(local_vllm_config, KVConnectorRole.WORKER)
     decode_worker = decode_connector.connector_worker
+    kv_cache_shape = decode_worker.attn_backend.get_kv_cache_shape(
+        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    )
+    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    kv_caches = {
+        "layer0": shared_tensor,
+        "layer1": unique_tensor,
+        "layer2": shared_tensor,
+    }
+    decode_connector.register_kv_caches(kv_caches)
 
     remote_config_params: dict[str, Any] = {
         "model": "facebook/opt-125m",
@@ -1903,7 +2179,9 @@ def test_compatibility_hash_validation(
                 )
             )
         remote_hash = compute_nixl_compatibility_hash(
-            remote_vllm_config, decode_worker.backend_name
+            remote_vllm_config,
+            decode_worker.backend_name,
+            decode_worker.kv_topo.cross_layers_blocks,
         )
 
     prefill_block_size = config_overrides.get("block_size", 16)
@@ -1967,7 +2245,7 @@ def test_compatibility_hash_validation(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_handshake_decode_errors(dist_init, error_scenario):
+def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario):
     """
     Test that msgspec decode errors are properly handled during handshake.
 
@@ -1981,6 +2259,27 @@ def test_handshake_decode_errors(dist_init, error_scenario):
     )
     decode_connector = NixlConnector(local_vllm_config, KVConnectorRole.WORKER)
     decode_worker = decode_connector.connector_worker
+
+    backend = get_current_attn_backend(local_vllm_config)
+    test_shape = backend.get_kv_cache_shape(
+        num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+    )
+    decode_worker.kv_topo = TpKVTopology(
+        tp_rank=decode_worker.tp_rank,
+        engine_id=decode_worker.engine_id,
+        remote_tp_size=decode_worker._tp_size,  # shared state
+        remote_block_size=decode_worker._block_size,  # shared state
+        is_mla=decode_worker.use_mla,
+        total_num_kv_heads=decode_worker.model_config.get_total_num_kv_heads(),
+        attn_backend=backend,
+        tensor_shape=test_shape,
+    )
+
+    decode_worker.compat_hash = compute_nixl_compatibility_hash(
+        decode_worker.vllm_config,
+        decode_worker.backend_name,
+        decode_worker.kv_topo.cross_layers_blocks,
+    )
 
     if error_scenario == "handshake_decode_error":
         msg_bytes = b"this is not valid msgpack data"

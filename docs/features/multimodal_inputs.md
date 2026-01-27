@@ -20,67 +20,6 @@ To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
 - `prompt`: The prompt should follow the format that is documented on HuggingFace.
 - `multi_modal_data`: This is a dictionary that follows the schema defined in [vllm.multimodal.inputs.MultiModalDataDict][].
 
-### Stable UUIDs for Caching (multi_modal_uuids)
-
-When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
-
-??? code
-
-    ```python
-    from vllm import LLM
-    from PIL import Image
-
-    # Qwen2.5-VL example with two images
-    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
-
-    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
-    img_a = Image.open("/path/to/a.jpg")
-    img_b = Image.open("/path/to/b.jpg")
-
-    outputs = llm.generate({
-        "prompt": prompt,
-        "multi_modal_data": {"image": [img_a, img_b]},
-        # Provide stable IDs for caching.
-        # Requirements (matched by this example):
-        #  - Include every modality present in multi_modal_data.
-        #  - For lists, provide the same number of entries.
-        #  - Use None to fall back to content hashing for that item.
-        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
-    })
-
-    for o in outputs:
-        print(o.outputs[0].text)
-    ```
-
-Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
-
-??? code
-
-    ```python
-    from vllm import LLM
-    from PIL import Image
-
-    # Qwen2.5-VL example with two images
-    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
-
-    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
-    img_b = Image.open("/path/to/b.jpg")
-
-    outputs = llm.generate({
-        "prompt": prompt,
-        "multi_modal_data": {"image": [None, img_b]},
-        # Since img_a is expected to be cached, we can skip sending the actual
-        # image entirely.
-        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
-    })
-
-    for o in outputs:
-        print(o.outputs[0].text)
-    ```
-
-!!! warning
-    If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
-
 ### Image Inputs
 
 You can pass a single image to the `'image'` field of the multi-modal dictionary, as shown in the following examples:
@@ -166,49 +105,51 @@ Full example: [examples/offline_inference/vision_language_multi_image.py](../../
 
 If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can pass images directly in the message content using various formats: image URLs, PIL Image objects, or pre-computed embeddings:
 
-```python
-from vllm import LLM
-from vllm.assets.image import ImageAsset
+??? code
 
-llm = LLM(model="llava-hf/llava-1.5-7b-hf")
-image_url = "https://picsum.photos/id/32/512/512"
-image_pil = ImageAsset('cherry_blossom').pil_image
-image_embeds = torch.load(...)
+    ```python
+    from vllm import LLM
+    from vllm.assets.image import ImageAsset
 
-conversation = [
-    {"role": "system", "content": "You are a helpful assistant"},
-    {"role": "user", "content": "Hello"},
-    {"role": "assistant", "content": "Hello! How can I assist you today?"},
-    {
-        "role": "user",
-        "content": [
-            {
-                "type": "image_url",
-                "image_url": {"url": image_url},
-            },
-            {
-                "type": "image_pil",
-                "image_pil": image_pil,
-            },
-            {
-                "type": "image_embeds",
-                "image_embeds": image_embeds,
-            },
-            {
-                "type": "text",
-                "text": "What's in these images?",
-            },
-        ],
-    },
-]
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    image_url = "https://picsum.photos/id/32/512/512"
+    image_pil = ImageAsset('cherry_blossom').pil_image
+    image_embeds = torch.load(...)
 
-# Perform inference and log output.
-outputs = llm.chat(conversation)
+    conversation = [
+        {"role": "system", "content": "You are a helpful assistant"},
+        {"role": "user", "content": "Hello"},
+        {"role": "assistant", "content": "Hello! How can I assist you today?"},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                },
+                {
+                    "type": "image_pil",
+                    "image_pil": image_pil,
+                },
+                {
+                    "type": "image_embeds",
+                    "image_embeds": image_embeds,
+                },
+                {
+                    "type": "text",
+                    "text": "What's in these images?",
+                },
+            ],
+        },
+    ]
 
-for o in outputs:
-    generated_text = o.outputs[0].text
-    print(generated_text)
-```
+    # Perform inference and log output.
+    outputs = llm.chat(conversation)
+
+    for o in outputs:
+        generated_text = o.outputs[0].text
+        print(generated_text)
+    ```
 
 Multi-image input can be extended to perform video captioning. We show this with [Qwen2-VL](https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct) as it supports videos:
 
@@ -354,10 +295,49 @@ You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the mult
 
 Full example: [examples/offline_inference/audio_language.py](../../examples/offline_inference/audio_language.py)
 
+#### Automatic Audio Channel Normalization
+
+vLLM automatically normalizes audio channels for models that require specific audio formats. When loading audio with libraries like `torchaudio`, stereo files return shape `[channels, time]`, but many audio models (particularly Whisper-based models) expect mono audio with shape `[time]`.
+
+**Supported models with automatic mono conversion:**
+
+- **Whisper** and all Whisper-based models
+- **Qwen2-Audio**
+- **Qwen2.5-Omni** / **Qwen3-Omni** (inherits from Qwen2.5-Omni)
+- **Ultravox**
+
+For these models, vLLM automatically:
+
+1. Detects if the model requires mono audio via the feature extractor
+2. Converts multi-channel audio to mono using channel averaging
+3. Handles both `(channels, time)` format (torchaudio) and `(time, channels)` format (soundfile)
+
+**Example with stereo audio:**
+
+```python
+import torchaudio
+from vllm import LLM
+
+# Load stereo audio file - returns (channels, time) shape
+audio, sr = torchaudio.load("stereo_audio.wav")
+print(f"Original shape: {audio.shape}")  # e.g., torch.Size([2, 16000])
+
+# vLLM automatically converts to mono for Whisper-based models
+llm = LLM(model="openai/whisper-large-v3")
+
+outputs = llm.generate({
+    "prompt": "",
+    "multi_modal_data": {"audio": (audio.numpy(), sr)},
+})
+```
+
+No manual conversion is needed - vLLM handles the channel normalization automatically based on the model's requirements.
+
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
-pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
+pass a tensor of shape `(..., hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
+The exact shape depends on the model being used.
 
 You must enable this feature via `enable_mm_embeds=True`.
 
@@ -378,8 +358,7 @@ You must enable this feature via `enable_mm_embeds=True`.
     # Refer to the HuggingFace repo for the correct format to use
     prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
-    # Embeddings for single image
-    # torch.Tensor of shape (1, image_feature_size, hidden_size of LM)
+    # For most models, `image_embeds` has shape: (num_images, image_feature_size, hidden_size)
     image_embeds = torch.load(...)
 
     outputs = llm.generate({
@@ -390,21 +369,8 @@ You must enable this feature via `enable_mm_embeds=True`.
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
-    ```
 
-For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embeddings:
-
-??? code
-
-    ```python
-    # Construct the prompt based on your model
-    prompt = ...
-
-    # Embeddings for multiple images
-    # torch.Tensor of shape (num_images, image_feature_size, hidden_size of LM)
-    image_embeds = torch.load(...)
-
-    # Qwen2-VL
+    # Additional examples for models that require extra fields
     llm = LLM(
         "Qwen/Qwen2-VL-2B-Instruct",
         limit_mm_per_prompt={"image": 4},
@@ -412,13 +378,15 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     )
     mm_data = {
         "image": {
-            "image_embeds": image_embeds,
+            # Shape: (total_feature_size, hidden_size)
+            # total_feature_size = sum(image_feature_size for image in images)
+            "image_embeds": torch.load(...),
+            # Shape: (num_images, 3)
             # image_grid_thw is needed to calculate positional encoding.
-            "image_grid_thw": torch.load(...),  # torch.Tensor of shape (1, 3),
+            "image_grid_thw": torch.load(...),
         }
     }
 
-    # MiniCPM-V
     llm = LLM(
         "openbmb/MiniCPM-V-2_6",
         trust_remote_code=True,
@@ -427,20 +395,14 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     )
     mm_data = {
         "image": {
-            "image_embeds": image_embeds,
+            # Shape: (num_images, num_slices, hidden_size)
+            # num_slices can differ for each image
+            "image_embeds": [torch.load(...) for image in images],  
+            # Shape: (num_images, 2)
             # image_sizes is needed to calculate details of the sliced image.
-            "image_sizes": [image.size for image in images],  # list of image sizes
+            "image_sizes": [image.size for image in images],
         }
     }
-
-    outputs = llm.generate({
-        "prompt": prompt,
-        "multi_modal_data": mm_data,
-    })
-
-    for o in outputs:
-        generated_text = o.outputs[0].text
-        print(generated_text)
     ```
 
 For Qwen3-VL, the `image_embeds` should contain both the base image embedding and deepstack features.
@@ -461,8 +423,8 @@ You can pass pre-computed audio embeddings similar to image embeddings:
     # Refer to the HuggingFace repo for the correct format to use
     prompt = "USER: <audio>\nWhat is in this audio?\nASSISTANT:"
 
-    # Load pre-computed audio embeddings
-    # torch.Tensor of shape (1, audio_feature_size, hidden_size of LM)
+    # Load pre-computed audio embeddings, usually with shape:
+    # (num_audios, audio_feature_size, hidden_size of LM)
     audio_embeds = torch.load(...)
 
     outputs = llm.generate({
@@ -474,6 +436,67 @@ You can pass pre-computed audio embeddings similar to image embeddings:
         generated_text = o.outputs[0].text
         print(generated_text)
     ```
+
+### Cached Inputs
+
+When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    from PIL import Image
+
+    # Qwen2.5-VL example with two images
+    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
+
+    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
+    img_a = Image.open("/path/to/a.jpg")
+    img_b = Image.open("/path/to/b.jpg")
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"image": [img_a, img_b]},
+        # Provide stable IDs for caching.
+        # Requirements (matched by this example):
+        #  - Include every modality present in multi_modal_data.
+        #  - For lists, provide the same number of entries.
+        #  - Use None to fall back to content hashing for that item.
+        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+    })
+
+    for o in outputs:
+        print(o.outputs[0].text)
+    ```
+
+Using UUIDs, you can also skip sending media data entirely if you expect cache hits for respective items. Note that the request will fail if the skipped media doesn't have a corresponding UUID, or if the UUID fails to hit the cache.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    from PIL import Image
+
+    # Qwen2.5-VL example with two images
+    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
+
+    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
+    img_b = Image.open("/path/to/b.jpg")
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"image": [None, img_b]},
+        # Since img_a is expected to be cached, we can skip sending the actual
+        # image entirely.
+        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+    })
+
+    for o in outputs:
+        print(o.outputs[0].text)
+    ```
+
+!!! warning
+    If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
 
 ## Online Serving
 
@@ -506,6 +529,7 @@ Then, you can use the OpenAI client as follows:
 ??? code
 
     ```python
+    import os
     from openai import OpenAI
 
     openai_api_key = "EMPTY"
@@ -517,8 +541,11 @@ Then, you can use the OpenAI client as follows:
     )
 
     # Single-image input inference
+
+    # Public image URL for testing remote image processing
     image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
+    # Create chat completion with remote image
     chat_response = client.chat.completions.create(
         model="microsoft/Phi-3.5-vision-instruct",
         messages=[
@@ -541,6 +568,35 @@ Then, you can use the OpenAI client as follows:
         ],
     )
     print("Chat completion output:", chat_response.choices[0].message.content)
+
+    # Local image file path (update this to point to your actual image file)
+    image_file = "/path/to/image.jpg"
+
+    # Create chat completion with local image file
+    # Launch the API server/engine with the --allowed-local-media-path argument.
+    if os.path.exists(image_file):
+        chat_completion_from_local_image_url = client.chat.completions.create(
+            model="microsoft/Phi-3.5-vision-instruct",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "What’s in this image?",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"file://{image_file}"},
+                        },
+                    ],
+                }
+            ],
+        )
+        result = chat_completion_from_local_image_url.choices[0].message.content
+        print("Chat completion output from local image file:\n", result)
+    else:
+        print(f"Local image file not found at {image_file}, skipping local file test.")
 
     # Multi-image input inference
     image_url_duck = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg"
@@ -653,6 +709,31 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
     ```bash
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
+
+#### Video Frame Recovery
+
+For improved robustness when processing potentially corrupted or truncated video files, vLLM supports optional frame recovery using a dynamic window forward-scan approach. When enabled, if a target frame fails to load during sequential reading, the next successfully grabbed frame (before the next target frame) will be used in its place.
+
+To enable video frame recovery, pass the `frame_recovery` parameter via `--media-io-kwargs`:
+
+```bash
+# Example: Enable frame recovery
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"frame_recovery": true}}'
+```
+
+**Parameters:**
+
+- `frame_recovery`: Boolean flag to enable forward-scan recovery. When `true`, failed frames are recovered using the next available frame within the dynamic window (up to the next target frame). Default is `false`.
+
+**How it works:**
+
+1. The system reads frames sequentially
+2. If a target frame fails to grab, it's marked as "failed"
+3. The next successfully grabbed frame (before reaching the next target) is used to recover the failed frame
+4. This approach handles both mid-video corruption and end-of-video truncation
+
+Works with common video formats like MP4 when using OpenCV backends.
 
 #### Custom RGBA Background Color
 
@@ -781,7 +862,11 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
-pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
+pass a tensor of shape `(..., hidden_size of LM)` for each item to the corresponding field of the multi-modal dictionary.
+
+!!! important
+    Unlike offline inference, the embeddings for each item must be passed separately
+    in order for placeholder tokens to be applied correctly by the chat template.
 
 You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
 
@@ -799,11 +884,6 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     ```python
     from vllm.utils.serial_utils import tensor2base64
 
-    image_embedding = torch.load(...)
-    grid_thw = torch.load(...) # Required by Qwen/Qwen2-VL-2B-Instruct
-
-    base64_image_embedding = tensor2base64(image_embedding)
-
     client = OpenAI(
         # defaults to os.environ.get("OPENAI_API_KEY")
         api_key=openai_api_key,
@@ -814,29 +894,33 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
     model = "llava-hf/llava-1.5-7b-hf"
     embeds = {
         "type": "image_embeds",
-        "image_embeds": f"{base64_image_embedding}",
+        "image_embeds": tensor2base64(torch.load(...)),  # Shape: (image_feature_size, hidden_size)
         "uuid": image_url,  # Optional
     }
 
-    # Pass additional parameters (available to Qwen2-VL and MiniCPM-V)
+
+    # Additional examples for models that require extra fields
     model = "Qwen/Qwen2-VL-2B-Instruct"
     embeds = {
         "type": "image_embeds",
         "image_embeds": {
-            "image_embeds": f"{base64_image_embedding}",  # Required
-            "image_grid_thw": f"{base64_image_grid_thw}",  # Required by Qwen/Qwen2-VL-2B-Instruct
+            "image_embeds": tensor2base64(torch.load(...)),  # Shape: (image_feature_size, hidden_size)
+            "image_grid_thw": tensor2base64(torch.load(...)),  # Shape: (3,)
         },
         "uuid": image_url,  # Optional
     }
+
     model = "openbmb/MiniCPM-V-2_6"
     embeds = {
         "type": "image_embeds",
         "image_embeds": {
-            "image_embeds": f"{base64_image_embedding}",  # Required
-            "image_sizes": f"{base64_image_sizes}",  # Required by openbmb/MiniCPM-V-2_6
+            "image_embeds": tensor2base64(torch.load(...)),  # Shape: (num_slices, hidden_size)
+            "image_sizes": tensor2base64(torch.load(...)),  # Shape: (2,)
         },
         "uuid": image_url,  # Optional
     }
+
+    # Single image input
     chat_completion = client.chat.completions.create(
         messages=[
             {
@@ -856,9 +940,57 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
         ],
         model=model,
     )
+
+    # Multi image input
+    chat_completion = client.chat.completions.create(
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a helpful assistant.",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "What's in this image?",
+                    },
+                    embeds,
+                    embeds,
+                ],
+            },
+        ],
+        model=model,
+    )
+
+    # Multi image input (interleaved)
+    chat_completion = client.chat.completions.create(
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a helpful assistant.",
+            },
+            {
+                "role": "user",
+                "content": [
+                    embeds,
+                    {
+                        "type": "text",
+                        "text": "What's in this image?",
+                    },
+                    embeds,
+                ],
+            },
+        ],
+        model=model,
+    )
     ```
 
-For Online Serving, you can also skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
+### Cached Inputs
+
+Just like with offline inference, you can skip sending media if you expect cache hits with provided UUIDs. You can do so by sending media like this:
+
+??? code
 
     ```python
         # Image/video/audio URL:
@@ -890,13 +1022,3 @@ For Online Serving, you can also skip sending media if you expect cache hits wit
         },
 
     ```
-
-!!! note
-    Multiple messages can now contain `{"type": "image_embeds"}`, enabling you to pass multiple image embeddings in a single request (similar to regular images). The number of embeddings is limited by `--limit-mm-per-prompt`.
-
-    **Important**: The embedding shape format differs based on the number of embeddings:
-
-    - **Single embedding**: 3D tensor of shape `(1, feature_size, hidden_size)`
-    - **Multiple embeddings**: List of 2D tensors, each of shape `(feature_size, hidden_size)`
-
-    If used with a model that requires additional parameters, you must also provide a tensor for each of them, e.g. `image_grid_thw`, `image_sizes`, etc.

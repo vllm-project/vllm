@@ -1,9 +1,6 @@
 # --8<-- [start:installation]
 
-vLLM supports AMD GPUs with ROCm 6.3 or above, and torch 2.8.0 and above.
-
-!!! tip
-    [Docker](#set-up-using-docker) is the recommended way to use vLLM on ROCm.
+vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 7.0.
 
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
@@ -16,12 +13,36 @@ vLLM supports AMD GPUs with ROCm 6.3 or above, and torch 2.8.0 and above.
 # --8<-- [end:requirements]
 # --8<-- [start:set-up-using-python]
 
-There is no extra information on creating a new Python environment for this device.
+The vLLM wheel bundles PyTorch and all required dependencies, and you should use the included PyTorch for compatibility. Because vLLM compiles many ROCm kernels to ensure a validated, high‑performance stack, the resulting binaries may not be compatible with other ROCm or PyTorch builds.
+If you need a different ROCm version or want to use an existing PyTorch installation, you’ll need to build vLLM from source.  See [below](#build-wheel-from-source) for more details.
 
 # --8<-- [end:set-up-using-python]
 # --8<-- [start:pre-built-wheels]
 
-Currently, there are no pre-built ROCm wheels.
+To install the latest version of vLLM for Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
+
+```bash
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+```
+
+!!! tip
+    You can find out about which ROCm version the latest vLLM supports by checking the index in extra-index-url [https://wheels.vllm.ai/rocm/](https://wheels.vllm.ai/rocm/) .
+
+To install a specific version and ROCm variant of vLLM wheel.
+
+```bash
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.14.1/rocm700
+```
+
+!!! warning "Caveats for using `pip`" 
+
+    We recommend leveraging `uv` to install vLLM wheel. Using `pip` to install from custom indices is cumbersome, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install wheel from custom index if exact versions of all packages are specified exactly. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
+
+    If you insist on using `pip`, you have to specify the exact vLLM version and full URL of the wheel path `https://wheels.vllm.ai/rocm/<version>/<rocm-variant>` (which can be obtained from the web page).
+
+    ```bash
+    pip install vllm==0.14.1+rocm700 --extra-index-url https://wheels.vllm.ai/rocm/0.14.1/rocm700
+    ```
 
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
@@ -84,7 +105,7 @@ Currently, there are no pre-built ROCm wheels.
         - The validated `$FA_BRANCH` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
 
 
-3. If you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
+3. Optionally, if you choose to build AITER yourself to use a certain branch or commit, you can build AITER using the following steps:
 
     ```bash
     python3 -m pip uninstall -y aiter
@@ -98,9 +119,24 @@ Currently, there are no pre-built ROCm wheels.
     !!! note
         - You will need to config the `$AITER_BRANCH_OR_COMMIT` for your purpose.
         - The validated `$AITER_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
-        
 
-4. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
+
+4. Optionally, if you want to use MORI for EP or PD disaggregation, you can install [MORI](https://github.com/ROCm/mori) using the following steps:
+
+    ```bash
+    git clone https://github.com/ROCm/mori.git
+    cd mori
+    git checkout $MORI_BRANCH_OR_COMMIT
+    git submodule sync; git submodule update --init --recursive
+    MORI_GPU_ARCHS="gfx942;gfx950" python3 setup.py install
+    ```
+
+    !!! note
+        - You will need to config the `$MORI_BRANCH_OR_COMMIT` for your purpose.
+        - The validated `$MORI_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
+
+
+5. Build vLLM. For example, vLLM on ROCM 7.0 can be built with the following steps:
 
     ???+ console "Commands"
 
@@ -126,7 +162,7 @@ Currently, there are no pre-built ROCm wheels.
         python3 setup.py develop
         ```
 
-    This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm installation.
+    This may take 5-10 minutes. Currently, `pip install .` does not work for ROCm when installing vLLM from source.
 
     !!! tip
         - The ROCm version of PyTorch, ideally, should match the ROCm driver version.
@@ -138,9 +174,51 @@ Currently, there are no pre-built ROCm wheels.
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
+#### Use vLLM's Official Docker Image
+
+vLLM offers an official Docker image for deployment.
+The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai-rocm](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags).
+
+???+ console "Commands"
+    ```bash
+    docker run --rm \
+        --group-add=video \
+        --cap-add=SYS_PTRACE \
+        --security-opt seccomp=unconfined \
+        --device /dev/kfd \
+        --device /dev/dri \
+        -v ~/.cache/huggingface:/root/.cache/huggingface \
+        --env "HF_TOKEN=$HF_TOKEN" \
+        -p 8000:8000 \
+        --ipc=host \
+        vllm/vllm-openai-rocm:latest \
+        --model Qwen/Qwen3-0.6B
+    ```
+
+To use the docker image as base for development, you can launch it in interactive session through overriding the entrypoint.
+
+???+ console "Commands"
+    ```bash
+    docker run --rm -it \
+        --group-add=video \
+        --cap-add=SYS_PTRACE \
+        --security-opt seccomp=unconfined \
+        --device /dev/kfd \
+        --device /dev/dri \
+        -v ~/.cache/huggingface:/root/.cache/huggingface \
+        --env "HF_TOKEN=$HF_TOKEN" \
+        -p 8000:8000 \
+        --ipc=host \
+        --entrypoint bash \
+        vllm/vllm-openai-rocm:latest
+    ```
+
+
+#### Use AMD's Docker Images
+
 The [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
 docker image designed for validating inference performance on the AMD Instinct™ MI300X accelerator.
-AMD also offers nightly prebuilt docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev), which has vLLM and all its dependencies installed.
+AMD also offers nightly prebuilt docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev), which has vLLM and all its dependencies installed. The entrypoint of this docker image is `/bin/bash` (different from the vLLM's Official Docker Image).
 
 ???+ console "Commands"
     ```bash
@@ -173,7 +251,7 @@ Building the Docker image from source is the recommended way to use vLLM with RO
     **This step is optional as this rocm_base image is usually prebuilt and store at [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev) under tag `rocm/vllm-dev:base` to speed up user experience.**
     If you choose to build this rocm_base image yourself, the steps are as follows.
 
-    It is important that the user kicks off the docker build using buildkit. Either the user put DOCKER_BUILDKIT=1 as environment variable when calling docker build command, or the user needs to set up buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
+    It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to set up buildkit in the docker daemon configuration `/etc/docker/daemon.json` as follows and restart the daemon:
 
     ```json
     {
@@ -196,7 +274,7 @@ Building the Docker image from source is the recommended way to use vLLM with RO
 First, build a docker image from [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) and launch a docker container from the image.
 It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to set up buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
 
-```bash
+```json
 {
     "features": {
         "buildkit": true
@@ -212,7 +290,7 @@ It provides flexibility to customize the build of docker image using the followi
 
 Their values can be passed in when running `docker build` with `--build-arg` options.
 
-To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default:
+To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default (which build a docker image with `vllm serve` as entrypoint):
 
 ???+ console "Commands"
     ```bash
@@ -220,6 +298,7 @@ To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default:
     ```
 
 To run the above docker image `vllm-rocm`, use the below command:
+
 
 ???+ console "Commands"
     ```bash
@@ -232,7 +311,8 @@ To run the above docker image `vllm-rocm`, use the below command:
     --device /dev/kfd \
     --device /dev/dri \
     -v <path/to/model>:/app/model \
-    vllm-rocm
+    vllm-rocm \
+    --model Qwen/Qwen3-0.6B
     ```
 
 Where the `<path/to/model>` is the location where the model is stored, for example, the weights for llama2 or llama3 models.

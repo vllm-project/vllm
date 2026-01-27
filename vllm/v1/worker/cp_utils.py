@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.parallel_state import get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.v1.utils import CpuGpuBuffer
 
 if TYPE_CHECKING:
@@ -319,3 +319,17 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     f"but the impl {layer_impl.__class__.__name__} "
                     "does not support PCP."
                 )
+
+
+def get_total_cp_world_size():
+    try:
+        pcp_world_size = get_pcp_group().world_size
+    except AssertionError:
+        # PCP might not be initialized in testing
+        pcp_world_size = 1
+    try:
+        dcp_world_size = get_dcp_group().world_size
+    except AssertionError:
+        # DCP might not be initialized in testing
+        dcp_world_size = 1
+    return dcp_world_size * pcp_world_size
