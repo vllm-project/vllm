@@ -84,7 +84,6 @@ class TokenizeParams:
     """
     Number of tokens to keep:
     - `None` means no truncation.
-    - `0` yields an empty list (and skips embeds).
     - `-1` maps to `max_input_tokens`.
     """
 
