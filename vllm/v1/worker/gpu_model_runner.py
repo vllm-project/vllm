@@ -3779,9 +3779,8 @@ class GPUModelRunner(
         assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
             "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
         )
-        src_global_rank = pp.ranks[pp.world_size - 1]
         torch.distributed.broadcast(
-            sampled_token_ids, src=src_global_rank, group=pp.device_group
+            sampled_token_ids, src=pp.rank, group=pp.device_group
         )
 
     def _pp_receive_prev_sampled_token_ids_to_input_batch(self) -> None:
