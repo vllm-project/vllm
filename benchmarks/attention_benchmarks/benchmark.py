@@ -48,9 +48,9 @@ from common import (
 
 def run_standard_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     """Run standard attention benchmark (Flash/Triton/FlashInfer)."""
-    from runner import run_attention_benchmark_impl
+    from runner import run_attention_benchmark
 
-    return run_attention_benchmark_impl(config)
+    return run_attention_benchmark(config)
 
 
 def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:

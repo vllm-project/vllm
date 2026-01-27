@@ -8,14 +8,25 @@ This module provides helpers for running standard attention backends
 (FlashAttention, Triton, FlashInfer) with real vLLM integration.
 """
 
+import types
+
 import numpy as np
 import torch
 from batch_spec import parse_batch_spec, reorder_for_flashinfer
 from common import BenchmarkConfig, BenchmarkResult, MockLayer, get_attention_scale
 
+from vllm.config import (
+    CacheConfig,
+    CompilationConfig,
+    DeviceConfig,
+    LoadConfig,
+    ModelConfig,
+    ParallelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.worker.block_table import BlockTable
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 # ============================================================================
 # Backend Configuration
@@ -47,18 +58,6 @@ _BACKEND_CONFIG = {
 
 
 def _get_backend_config(backend: str) -> dict:
-    """
-    Get backend configuration.
-
-    Args:
-        backend: Backend name (flash, triton, flashinfer)
-
-    Returns:
-        Backend configuration dict
-
-    Raises:
-        ValueError: If backend is unknown
-    """
     if backend not in _BACKEND_CONFIG:
         raise ValueError(
             f"Unknown backend: {backend}. "
@@ -72,124 +71,120 @@ def _get_backend_config(backend: str) -> dict:
 # ============================================================================
 
 
-def _build_attention_metadata(
-    requests: list,
-    block_size: int,
-    device: torch.device,
-) -> tuple:
-    """
-    Build CommonAttentionMetadata from batch requests.
-
-    Args:
-        requests: List of BatchRequest objects
-        block_size: KV cache block size
-        device: Target device
-
-    Returns:
-        Tuple of (metadata, slot_mapping, max_num_blocks)
-    """
-    q_lens = [r.q_len for r in requests]
-    kv_lens = [r.kv_len for r in requests]
-    total_q = sum(q_lens)
-    max_kv = max(kv_lens)
-
-    # Build query start locations
-    q_start_cpu = np.array(
-        [0] + [sum(q_lens[: i + 1]) for i in range(len(q_lens))],
-        dtype=np.int32,
-    )
-    q_start_gpu = torch.from_numpy(q_start_cpu).to(device)
-
-    # Build sequence lengths
-    seq_lens_cpu = np.array(kv_lens, dtype=np.int32)
-    seq_lens_gpu = torch.from_numpy(seq_lens_cpu).to(device)
-
-    # Build num_computed_tokens (context length before new query)
-    computed_tokens_cpu = np.array(
-        [kv - q for kv, q in zip(kv_lens, q_lens)],
-        dtype=np.int32,
-    )
-
-    # Build block table
-    num_blocks_per_req = [(kv + block_size - 1) // block_size for kv in kv_lens]
-    max_num_blocks = max(num_blocks_per_req)
-
-    block_table_cpu = np.zeros((len(requests), max_num_blocks), dtype=np.int32)
-    for i, num_blocks in enumerate(num_blocks_per_req):
-        block_table_cpu[i, :num_blocks] = np.arange(num_blocks, dtype=np.int32)
-    block_table_gpu = torch.from_numpy(block_table_cpu).to(device)
-
-    # Build slot mapping (maps each token to its KV cache slot)
-    slot_mapping_list = []
-    for i, (q_len, kv_len, num_blocks) in enumerate(
-        zip(q_lens, kv_lens, num_blocks_per_req)
-    ):
-        context_len = kv_len - q_len
-        for j in range(q_len):
-            token_kv_idx = context_len + j
-            block_idx = token_kv_idx // block_size
-            offset_in_block = token_kv_idx % block_size
-            global_block_id = block_table_cpu[i, block_idx]
-            slot_id = global_block_id * block_size + offset_in_block
-            slot_mapping_list.append(slot_id)
-
-    slot_mapping = torch.tensor(slot_mapping_list, dtype=torch.int64, device=device)
-
-    # Create CommonAttentionMetadata
-    metadata = CommonAttentionMetadata(
-        query_start_loc=q_start_gpu,
-        query_start_loc_cpu=torch.from_numpy(q_start_cpu),
-        seq_lens=seq_lens_gpu,
-        seq_lens_cpu=torch.from_numpy(seq_lens_cpu),
-        num_computed_tokens_cpu=torch.from_numpy(computed_tokens_cpu),
-        num_reqs=len(requests),
-        num_actual_tokens=total_q,
-        max_query_len=max(q_lens),
-        max_seq_len=max_kv,
-        block_table_tensor=block_table_gpu,
-        slot_mapping=slot_mapping,
-    )
-
-    return metadata, slot_mapping, max_num_blocks
-
-
-def _build_block_table(
-    requests: list,
+def _build_common_attn_metadata(
+    q_lens: list[int],
     kv_lens: list[int],
     block_size: int,
-    total_q: int,
-    max_num_blocks: int,
     device: torch.device,
-) -> BlockTable:
-    """
-    Build BlockTable for metadata builder.
+) -> CommonAttentionMetadata:
+    """Build CommonAttentionMetadata from query/kv lengths."""
+    batch_size = len(q_lens)
+    total_tokens = sum(q_lens)
 
-    Args:
-        requests: List of BatchRequest objects
-        kv_lens: List of KV sequence lengths
-        block_size: KV cache block size
-        total_q: Total number of query tokens
-        max_num_blocks: Maximum number of blocks per request
-        device: Target device
-
-    Returns:
-        BlockTable instance
-    """
-    bt = BlockTable(
-        block_size=block_size,
-        max_num_reqs=len(requests),
-        max_num_blocks_per_req=max_num_blocks,
-        max_num_batched_tokens=total_q,
-        pin_memory=False,
-        device=device,
-        kernel_block_size=block_size,
-        cp_kv_cache_interleave_size=1,
+    query_start_loc = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
+    query_start_loc[1:] = torch.tensor(q_lens, dtype=torch.int32, device=device).cumsum(
+        0
     )
-    for i in range(len(requests)):
-        num_blocks = (kv_lens[i] + block_size - 1) // block_size
-        bt.add_row(list(range(num_blocks)), i)
-    bt.commit(len(requests))
-    return bt
+    query_start_loc_cpu = query_start_loc.cpu()
+
+    seq_lens = torch.tensor(kv_lens, dtype=torch.int32, device=device)
+    seq_lens_cpu = seq_lens.cpu()
+    max_seq_len = int(seq_lens_cpu.max())
+
+    context_lens = [kv - q for kv, q in zip(kv_lens, q_lens)]
+    num_computed_tokens_cpu = torch.tensor(context_lens, dtype=torch.int32)
+
+    max_blocks = (max(kv_lens) + block_size - 1) // block_size
+    num_blocks = batch_size * max_blocks
+    block_table_tensor = torch.arange(
+        num_blocks, dtype=torch.int32, device=device
+    ).view(batch_size, max_blocks)
+    slot_mapping = torch.arange(total_tokens, dtype=torch.int64, device=device)
+
+    max_query_len = max(q_lens)
+
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens_cpu,
+        num_computed_tokens_cpu=num_computed_tokens_cpu,
+        num_reqs=batch_size,
+        num_actual_tokens=total_tokens,
+        max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
+        block_table_tensor=block_table_tensor,
+        slot_mapping=slot_mapping,
+        causal=True,
+    )
+
+
+def _create_vllm_config(
+    config: BenchmarkConfig,
+    dtype: torch.dtype,
+    max_num_blocks: int,
+) -> VllmConfig:
+    """Create a VllmConfig for benchmarking with mock model methods."""
+    model_config = ModelConfig(
+        model="meta-llama/Meta-Llama-3-8B",
+        tokenizer="meta-llama/Meta-Llama-3-8B",
+        trust_remote_code=False,
+        dtype=dtype,
+        seed=0,
+        max_model_len=1024,
+    )
+
+    cache_config = CacheConfig(
+        block_size=config.block_size,
+        cache_dtype="auto",
+        swap_space=0,
+    )
+    cache_config.num_gpu_blocks = max_num_blocks
+    cache_config.num_cpu_blocks = 0
+
+    parallel_config = ParallelConfig(tensor_parallel_size=1)
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=256,
+        max_num_batched_tokens=8192,
+        enable_chunked_prefill=True,
+    )
+    device_config = DeviceConfig()
+    load_config = LoadConfig()
+    compilation_config = CompilationConfig()
+
+    # Add mock methods for benchmark config values
+    model_config.get_num_layers = types.MethodType(
+        lambda self: config.num_layers, model_config
+    )
+    model_config.get_sliding_window_for_layer = types.MethodType(
+        lambda self, i: None, model_config
+    )
+    model_config.get_logits_soft_cap_for_layer = types.MethodType(
+        lambda self, i: 0.0, model_config
+    )
+    model_config.get_sm_scale_for_layer = types.MethodType(
+        lambda self, i: 1.0 / config.head_dim**0.5, model_config
+    )
+    model_config.get_num_attention_heads = types.MethodType(
+        lambda self, parallel_config=None: config.num_q_heads, model_config
+    )
+    model_config.get_num_kv_heads = types.MethodType(
+        lambda self, parallel_config=None: config.num_kv_heads, model_config
+    )
+    model_config.get_head_size = types.MethodType(
+        lambda self: config.head_dim, model_config
+    )
+    model_config.get_sliding_window = types.MethodType(lambda self: None, model_config)
+
+    return VllmConfig(
+        model_config=model_config,
+        cache_config=cache_config,
+        parallel_config=parallel_config,
+        scheduler_config=scheduler_config,
+        device_config=device_config,
+        load_config=load_config,
+        compilation_config=compilation_config,
+    )
 
 
 # ============================================================================
@@ -202,30 +197,15 @@ def _create_backend_impl(
     config: BenchmarkConfig,
     device: torch.device,
 ):
-    """
-    Create backend implementation instance.
-
-    Args:
-        backend_cfg: Backend configuration dict
-        config: BenchmarkConfig instance
-        device: Target device
-
-    Returns:
-        Tuple of (backend_class, impl, layer, dtype)
-    """
-    # Import backend class
+    """Create backend implementation instance."""
     import importlib
 
     backend_module = importlib.import_module(backend_cfg["module"])
     backend_class = getattr(backend_module, backend_cfg["backend_class"])
 
-    # Calculate scale
     scale = get_attention_scale(config.head_dim)
-
-    # Get dtype
     dtype = backend_cfg["dtype"]
 
-    # Create attention impl
     impl = backend_class.get_impl_cls()(
         num_heads=config.num_q_heads,
         head_size=config.head_dim,
@@ -236,17 +216,13 @@ def _create_backend_impl(
         kv_cache_dtype="auto",
     )
 
-    # Create KV cache spec for MockLayer
-    from vllm.v1.kv_cache_interface import AttentionSpec
-
-    kv_cache_spec = AttentionSpec(
+    kv_cache_spec = FullAttentionSpec(
         block_size=config.block_size,
         num_kv_heads=config.num_kv_heads,
         head_size=config.head_dim,
         dtype=dtype,
     )
 
-    # Create mock layer
     layer = MockLayer(device, kv_cache_spec=kv_cache_spec)
 
     return backend_class, impl, layer, dtype
@@ -254,52 +230,17 @@ def _create_backend_impl(
 
 def _create_metadata_builder(
     backend_class,
-    common_metadata: CommonAttentionMetadata,
-    block_table: BlockTable,
-    config: BenchmarkConfig,
-    dtype: torch.dtype,
+    kv_cache_spec: FullAttentionSpec,
+    vllm_config: VllmConfig,
     device: torch.device,
 ):
-    """
-    Create metadata builder instance.
-
-    Args:
-        backend_class: Backend class
-        common_metadata: CommonAttentionMetadata instance
-        block_table: BlockTable instance
-        config: BenchmarkConfig instance
-        dtype: Tensor dtype
-        device: Target device
-
-    Returns:
-        Built attention metadata
-    """
-    # Create mock runner for builder
-    from common import MockRunner
-
-    runner = MockRunner(
-        seq_lens=common_metadata.seq_lens_cpu.numpy(),
-        query_start_locs=common_metadata.query_start_loc_cpu.numpy(),
+    """Create metadata builder instance."""
+    return backend_class.get_builder_cls()(
+        kv_cache_spec=kv_cache_spec,
+        layer_names=["layer_0"],
+        vllm_config=vllm_config,
         device=device,
-        num_q_heads=config.num_q_heads,
-        num_kv_heads=config.num_kv_heads,
-        head_dim=config.head_dim,
-        dtype=dtype,
     )
-
-    # Create metadata builder
-    builder = backend_class.get_builder_cls()(
-        runner=runner,
-        kv_cache_spec=AttentionSpec(
-            block_size=config.block_size,
-            num_kv_heads=config.num_kv_heads,
-            head_size=config.head_dim,
-            dtype=dtype,
-        ),
-        block_table=block_table,
-    )
-
-    return builder
 
 
 # ============================================================================
@@ -313,18 +254,7 @@ def _create_input_tensors(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple:
-    """
-    Create Q, K, V input tensors for all layers.
-
-    Args:
-        config: BenchmarkConfig instance
-        total_q: Total number of query tokens
-        device: Target device
-        dtype: Tensor dtype
-
-    Returns:
-        Tuple of (q_list, k_list, v_list)
-    """
+    """Create Q, K, V input tensors for all layers."""
     q_list = [
         torch.randn(
             total_q, config.num_q_heads, config.head_dim, device=device, dtype=dtype
@@ -353,19 +283,7 @@ def _create_kv_cache(
     device: torch.device,
     dtype: torch.dtype,
 ) -> list:
-    """
-    Create KV cache tensors for all layers.
-
-    Args:
-        config: BenchmarkConfig instance
-        max_num_blocks: Maximum number of blocks
-        cache_layout: Cache layout type ("standard" or "flashinfer")
-        device: Target device
-        dtype: Tensor dtype
-
-    Returns:
-        List of KV cache tensors (one per layer)
-    """
+    """Create KV cache tensors for all layers."""
     if cache_layout == "flashinfer":
         # FlashInfer layout: [num_blocks, 2, block_size, num_kv_heads, head_dim]
         cache_list = [
@@ -414,25 +332,7 @@ def _run_single_benchmark(
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple:
-    """
-    Run single benchmark iteration with warmup and timing loop.
-
-    Args:
-        config: BenchmarkConfig instance
-        impl: Backend implementation instance
-        layer: MockLayer instance
-        q_list: List of Q tensors
-        k_list: List of K tensors
-        v_list: List of V tensors
-        cache_list: List of KV cache tensors
-        attn_metadata: Attention metadata
-        device: Target device
-        dtype: Tensor dtype
-
-    Returns:
-        Tuple of (times, mem_stats)
-    """
-    # Create output buffer
+    """Run single benchmark iteration with warmup and timing loop."""
     total_q = q_list[0].shape[0]
     out = torch.empty(
         total_q, config.num_q_heads, config.head_dim, device=device, dtype=dtype
@@ -475,7 +375,6 @@ def _run_single_benchmark(
         elapsed_ms = start.elapsed_time(end)
         times.append(elapsed_ms / 1000.0 / config.num_layers)  # seconds per layer
 
-    # Memory stats
     mem_stats = {}
     if config.profile_memory:
         mem_stats = {
@@ -506,58 +405,52 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     device = torch.device(config.device)
     torch.cuda.set_device(device)
 
-    # Get backend configuration
     backend_cfg = _get_backend_config(config.backend)
 
-    # Parse batch spec
     requests = parse_batch_spec(config.batch_spec)
 
-    # Reorder for FlashInfer if needed
     if config.backend == "flashinfer":
         requests = reorder_for_flashinfer(requests)
 
-    # Extract dimensions
     q_lens = [r.q_len for r in requests]
     kv_lens = [r.kv_len for r in requests]
     total_q = sum(q_lens)
+    max_kv = max(kv_lens)
 
-    # Build common metadata
-    common_metadata, slot_mapping, max_num_blocks = _build_attention_metadata(
-        requests, config.block_size, device
-    )
+    max_num_blocks = (max_kv + config.block_size - 1) // config.block_size
 
-    # Create backend impl, layer, and dtype
     backend_class, impl, layer, dtype = _create_backend_impl(
         backend_cfg, config, device
     )
 
-    # Build block table
-    block_table = _build_block_table(
-        requests, kv_lens, config.block_size, total_q, max_num_blocks, device
+    common_metadata = _build_common_attn_metadata(
+        q_lens, kv_lens, config.block_size, device
     )
 
-    # Create metadata builder and build metadata
+    kv_cache_spec = FullAttentionSpec(
+        block_size=config.block_size,
+        num_kv_heads=config.num_kv_heads,
+        head_size=config.head_dim,
+        dtype=dtype,
+    )
+
+    vllm_config = _create_vllm_config(config, dtype, max_num_blocks)
+
     builder = _create_metadata_builder(
-        backend_class, common_metadata, block_table, config, dtype, device
+        backend_class, kv_cache_spec, vllm_config, device
     )
 
     attn_metadata = builder.build(
-        num_reqs=len(requests),
-        num_actual_tokens=total_q,
-        max_query_len=max(q_lens),
         common_prefix_len=0,
         common_attn_metadata=common_metadata,
     )
 
-    # Create input tensors
     q_list, k_list, v_list = _create_input_tensors(config, total_q, device, dtype)
 
-    # Create KV cache
     cache_list = _create_kv_cache(
         config, max_num_blocks, backend_cfg["cache_layout"], device, dtype
     )
 
-    # Run benchmark
     times, mem_stats = _run_single_benchmark(
         config,
         impl,
@@ -571,7 +464,6 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
         dtype,
     )
 
-    # Calculate throughput
     mean_time = np.mean(times)
     throughput = total_q / mean_time if mean_time > 0 else 0
 
