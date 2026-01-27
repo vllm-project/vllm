@@ -26,7 +26,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
 
-logger = init_logger("vllm.entrypoints.openai.api_server")
+logger = init_logger("vllm.entrypoints.openai.server_utils")
 
 
 class AuthenticationMiddleware:
