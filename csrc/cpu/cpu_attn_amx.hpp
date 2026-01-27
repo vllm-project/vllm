@@ -377,7 +377,7 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
       const int32_t q_heads_per_kv, const int64_t q_num_stride,
       const int64_t q_head_stride, const float scale) {
     constexpr int64_t bytes_per_head = head_dim * sizeof(scalar_t);
-    static_assert(bytes_per_head % AMX_TILE_ROW_BYTES == 0);
+    // static_assert(bytes_per_head % AMX_TILE_ROW_BYTES == 0);
     constexpr int64_t head_size_block_num = bytes_per_head / AMX_TILE_ROW_BYTES;
     constexpr int64_t head_elem_num_pre_block =
         AMX_TILE_ROW_BYTES / sizeof(scalar_t);

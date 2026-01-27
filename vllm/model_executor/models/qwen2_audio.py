@@ -54,13 +54,13 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -140,6 +140,10 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_target_channels(self) -> int:
+        """Return target audio channels for Qwen2 Audio models (mono)."""
+        return 1
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
@@ -201,7 +205,10 @@ class Qwen2AudioMultiModalDataParser(MultiModalDataParser):
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessingInfo]):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
-        return Qwen2AudioMultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+        return Qwen2AudioMultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.info.get_target_channels(),
+        )
 
     def _call_hf_processor(
         self,
@@ -327,20 +334,21 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-
-        self.audio_tower = Qwen2AudioEncoder(config.audio_config)
-        self.multi_modal_projector = Qwen2AudioMultiModalProjector(
-            config.audio_config.d_model, config.text_config.hidden_size
-        )
-
         self.quant_config = quant_config
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen2ForCausalLM"],
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = Qwen2AudioEncoder(config.audio_config)
+            self.multi_modal_projector = Qwen2AudioMultiModalProjector(
+                config.audio_config.d_model, config.text_config.hidden_size
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen2ForCausalLM"],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -434,9 +442,6 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
             masked_audio_features, audio_output_lengths.flatten().tolist()
         )
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
@@ -446,7 +451,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

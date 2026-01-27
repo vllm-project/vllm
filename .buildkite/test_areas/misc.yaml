@@ -31,7 +31,7 @@ steps:
   source_file_dependencies:
     - vllm/
     - tests/v1
-  no_gpu: true
+  device: cpu
   commands:
     # split the test to avoid interference
     - pytest -v -s -m 'cpu_test' v1/core
@@ -82,7 +82,7 @@ steps:
 
 - label: Metrics, Tracing (2 GPUs)
   timeout_in_minutes: 20
-  num_gpus: 2
+  num_devices: 2
   source_file_dependencies:
   - vllm/
   - tests/v1/tracing
@@ -121,17 +121,19 @@ steps:
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/multimodal
+  - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
   - tests/tool_parsers
   - tests/transformers_utils
   - tests/config
-  no_gpu: true
+  device: cpu
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s renderers
   - pytest -v -s tokenizers_
   - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
@@ -140,7 +142,7 @@ steps:
 - label: GPT-OSS Eval (B200)
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
-  gpu: b200
+  device: b200
   optional: true
   source_file_dependencies:
   - tests/evals/gpt_oss
@@ -153,7 +155,7 @@ steps:
 
 - label: Batch Invariance (H100)
   timeout_in_minutes: 25
-  gpu: h100
+  device: h100
   source_file_dependencies:
     - vllm/v1/attention
     - vllm/model_executor/layers

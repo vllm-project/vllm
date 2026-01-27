@@ -14,10 +14,10 @@ import pytest
 from transformers import AutoProcessor
 
 from vllm import LLM, EngineArgs, SamplingParams
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.multimodal.utils import encode_image_url
 from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ....utils import create_new_process_for_each_test
 from ...utils import dummy_hf_overrides
@@ -90,6 +90,19 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         },
         "use_processor": True,
         "question": "What is the content of each image?",
+    },
+    "glm_ocr": {
+        "model_name": "zai-org/GLM-OCR",
+        "interface": "llm_generate",
+        "max_model_len": 131072,
+        "max_num_seqs": 2,
+        "sampling_params": {
+            "temperature": 0.0,
+            "max_tokens": 256,
+            "stop_token_ids": None,
+        },
+        "use_processor": True,
+        "question": "Text Recognition:",
     },
     "keye_vl": {
         "model_name": "Kwai-Keye/Keye-VL-8B-Preview",

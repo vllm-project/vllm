@@ -112,9 +112,8 @@ class RayDistributedExecutor(Executor):
         """Ray distributed executor supports pipeline parallelism,
         meaning that it allows PP size batches to be executed concurrently.
         """
-        if self.scheduler_config.async_scheduling:
-            return 2
-        return self.parallel_config.pipeline_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def shutdown(self) -> None:
         if logger:
@@ -209,9 +208,7 @@ class RayDistributedExecutor(Executor):
                     num_gpus=num_gpus,
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(  # type: ignore[attr-defined]
-                    vllm_config=self.vllm_config, rpc_rank=rank
-                )
+                )(RayWorkerWrapper).remote(rpc_rank=rank)
             else:
                 worker = ray.remote(
                     num_cpus=0,
@@ -219,9 +216,8 @@ class RayDistributedExecutor(Executor):
                     resources={current_platform.ray_device_key: num_gpus},
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(  # type: ignore[attr-defined]
-                    vllm_config=self.vllm_config, rpc_rank=rank
-                )
+                )(RayWorkerWrapper).remote(rpc_rank=rank)
+
             worker_metadata.append(RayWorkerMetaData(worker=worker, created_rank=rank))
 
         worker_ips = ray.get(

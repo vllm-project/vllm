@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
 import multiprocessing
+from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -26,8 +28,6 @@ if TYPE_CHECKING:
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
-    ReasoningParser = object
-    Request = object
 
 logger = init_logger(__name__)
 
@@ -96,7 +96,7 @@ class StructuredOutputManager:
             self.vllm_config.structured_outputs_config.enable_in_reasoning
         )
 
-    def grammar_init(self, request: Request) -> None:
+    def grammar_init(self, request: "Request") -> None:
         if request.structured_output_request is None:
             return
 
@@ -154,10 +154,7 @@ class StructuredOutputManager:
             grammar = self._create_grammar(request)  # type: ignore[assignment]
         request.structured_output_request.grammar = grammar  # type: ignore[assignment]
 
-    def _create_grammar(
-        self,
-        request: Request,
-    ) -> StructuredOutputGrammar:
+    def _create_grammar(self, request: "Request") -> StructuredOutputGrammar:
         key = request.structured_output_request.structured_output_key  # type: ignore[union-attr]
 
         # Note that the request was validated in the engine core client,
@@ -171,8 +168,7 @@ class StructuredOutputManager:
         return self.backend.compile_grammar(request_type, grammar_spec)
 
     def _fill_bitmasks(
-        self,
-        batch: list[tuple[StructuredOutputGrammar, int, bool]],
+        self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
     ) -> None:
         assert self._grammar_bitmask is not None
         for grammar, index, apply_bitmask in batch:
@@ -185,14 +181,13 @@ class StructuredOutputManager:
                 self._grammar_bitmask[index].fill_(self._full_mask)
 
     def _async_submit_fill_bitmask(
-        self,
-        batch: list[tuple[StructuredOutputGrammar, int, bool]],
+        self, batch: list[tuple[StructuredOutputGrammar, int, bool]]
     ) -> Future:
         return self.executor_for_fillmask.submit(self._fill_bitmasks, batch)
 
     def grammar_bitmask(
         self,
-        requests: dict[str, Request],
+        requests: dict[str, "Request"],
         structured_output_request_ids: list[str],
         scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> "npt.NDArray[np.int32] | None":
@@ -237,11 +232,10 @@ class StructuredOutputManager:
                 if TYPE_CHECKING:
                     assert structured_output_request is not None
                     assert structured_output_request.grammar is not None
+                grammar = structured_output_request.grammar
 
                 apply_bitmask = self.should_fill_bitmask(request)
-                batch.append(
-                    (structured_output_request.grammar, cumulative_index, apply_bitmask)
-                )
+                batch.append((grammar, cumulative_index, apply_bitmask))
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
                     batch = []
@@ -262,34 +256,23 @@ class StructuredOutputManager:
                 if TYPE_CHECKING:
                     assert structured_output_request is not None
                     assert structured_output_request.grammar is not None
+                grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
 
                 state_advancements = 0
-                req_tokens = scheduled_spec_decode_tokens.get(req_id, [])
-                for i, token in enumerate(req_tokens + [None]):
-                    self._fill_bitmasks(
-                        [
-                            (
-                                structured_output_request.grammar,
-                                cumulative_index,
-                                apply_bitmask,
-                            )
-                        ]
-                    )
-
-                    if (
-                        apply_bitmask
-                        and token is not None
-                        and not structured_output_request.grammar.is_terminated()
-                    ):
-                        accepted = structured_output_request.grammar.accept_tokens(
-                            req_id, [token]
-                        )
+                req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
+                for token in itertools.chain(req_tokens, (-1,)):
+                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                    if token == -1:
+                        # Stop advancing the grammar once we hit a padding token.
+                        apply_bitmask = False
+                    if apply_bitmask and not grammar.is_terminated():
+                        accepted = grammar.accept_tokens(req_id, [token])
                         assert accepted, (token, req_id, scheduled_spec_decode_tokens)
                         state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:
-                    structured_output_request.grammar.rollback(state_advancements)
+                    grammar.rollback(state_advancements)
 
         bitmask_tensor = self._grammar_bitmask
         if cumulative_index < bitmask_tensor.shape[0]:
@@ -300,7 +283,7 @@ class StructuredOutputManager:
         # and deserialization when sending this to the GPU workers.
         return bitmask_tensor.numpy()
 
-    def should_fill_bitmask(self, request: Request) -> bool:
+    def should_fill_bitmask(self, request: "Request") -> bool:
         # NOTE (Hanchen) if enable_in_reasoning is True, it means that
         # the model needs to be constrained in reasoning. So we should always
         # enable the bitmask filling.
@@ -311,12 +294,12 @@ class StructuredOutputManager:
             assert request.structured_output_request is not None
             if request.structured_output_request.reasoning_ended is None:
                 request.structured_output_request.reasoning_ended = (
-                    self.reasoner.is_reasoning_end(request.prompt_token_ids)
+                    self.reasoner.is_reasoning_end(request.prompt_token_ids or [])
                 )
             return request.structured_output_request.reasoning_ended
         return True
 
-    def should_advance(self, request: Request) -> bool:
+    def should_advance(self, request: "Request") -> bool:
         if not request.use_structured_output:
             return False
 
@@ -340,8 +323,9 @@ class StructuredOutputManager:
 
         # Check if reasoning ends in *this* step
         delta_from = request.num_computed_tokens - request.num_output_placeholders
+        all_token_ids = request.all_token_ids
         if self.reasoner.is_reasoning_end_streaming(
-            request.all_token_ids, request.all_token_ids[delta_from:]
+            all_token_ids, all_token_ids[delta_from:]
         ):
             # Reasoning just ended, so we shouldn't advance til
             # next pass

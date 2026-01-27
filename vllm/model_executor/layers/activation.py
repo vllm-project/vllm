@@ -22,6 +22,7 @@ from vllm.utils.collection_utils import LazyDict
 logger = init_logger(__name__)
 
 
+# --8<-- [start:fatrelu_and_mul]
 @CustomOp.register("fatrelu_and_mul")
 class FatreluAndMul(CustomOp):
     """An activation function for FATReLU.
@@ -34,6 +35,8 @@ class FatreluAndMul(CustomOp):
         x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
+
+    # --8<-- [end:fatrelu_and_mul]
 
     def __init__(self, threshold: float = 0.0):
         super().__init__()
@@ -58,6 +61,7 @@ class FatreluAndMul(CustomOp):
         return out
 
 
+# --8<-- [start:silu_and_mul]
 @CustomOp.register("silu_and_mul")
 class SiluAndMul(CustomOp):
     """An activation function for SwiGLU.
@@ -69,8 +73,10 @@ class SiluAndMul(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
-    def __init__(self):
-        super().__init__()
+    # --8<-- [end:silu_and_mul]
+
+    def __init__(self, *, compile_native: bool = True):
+        super().__init__(compile_native=compile_native)
         if current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_xpu():
@@ -101,6 +107,7 @@ class SiluAndMul(CustomOp):
         return out
 
 
+# --8<-- [start:mul_and_silu]
 @CustomOp.register("mul_and_silu")
 class MulAndSilu(CustomOp):
     """An activation function for SwiGLU.
@@ -111,6 +118,8 @@ class MulAndSilu(CustomOp):
         x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
+
+    # --8<-- [end:mul_and_silu]
 
     def __init__(self):
         super().__init__()
@@ -139,6 +148,7 @@ class MulAndSilu(CustomOp):
     # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
 
 
+# --8<-- [start:gelu_and_mul_sparse]
 @CustomOp.register("gelu_and_mul_sparse")
 class GeluAndMulSparse(CustomOp):
     """An activation function for GeluAndMulSparse.
@@ -152,6 +162,8 @@ class GeluAndMulSparse(CustomOp):
         x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
+
+    # --8<-- [end:gelu_and_mul_sparse]
 
     def __init__(self, activation_sparsity: float, approximate: str = "none"):
         super().__init__()
@@ -195,6 +207,7 @@ class GeluAndMulSparse(CustomOp):
         return self.forward_native(x)
 
 
+# --8<-- [start:gelu_and_mul]
 @CustomOp.register("gelu_and_mul")
 class GeluAndMul(CustomOp):
     """An activation function for GeGLU.
@@ -205,6 +218,8 @@ class GeluAndMul(CustomOp):
         x: (batch_size, seq_len, 2 * d) or (num_tokens, 2 * d)
         return: (batch_size, seq_len, d) or (num_tokens, d)
     """
+
+    # --8<-- [end:gelu_and_mul]
 
     def __init__(self, approximate: str = "none"):
         super().__init__()
@@ -257,9 +272,12 @@ class GeluAndMul(CustomOp):
         return f"approximate={repr(self.approximate)}"
 
 
+# --8<-- [start:swigluoai_and_mul]
 @CustomOp.register("swigluoai_and_mul")
 class SwigluOAIAndMul(CustomOp):
     # https://github.com/huggingface/transformers/blob/v4.55.0/src/transformers/models/gpt_oss/modeling_gpt_oss.py#L106-L110
+    # --8<-- [end:swigluoai_and_mul]
+
     def __init__(self, alpha: float = 1.702, limit: float = 7.0):
         super().__init__()
         self.alpha = alpha
@@ -286,8 +304,11 @@ class SwigluOAIAndMul(CustomOp):
         return f"alpha={repr(self.alpha)}, limit={repr(self.limit)}"
 
 
+# --8<-- [start:gelu_new]
 @CustomOp.register("gelu_new")
 class NewGELU(CustomOp):
+    # --8<-- [end:gelu_new]
+
     def __init__(self):
         super().__init__()
         if current_platform.is_cuda_alike() or current_platform.is_cpu():
@@ -311,8 +332,11 @@ class NewGELU(CustomOp):
         return self.op(x)
 
 
+# --8<-- [start:gelu_fast]
 @CustomOp.register("gelu_fast")
 class FastGELU(CustomOp):
+    # --8<-- [end:gelu_fast]
+
     def __init__(self):
         super().__init__()
         if current_platform.is_cuda_alike() or current_platform.is_cpu():
@@ -335,9 +359,12 @@ class FastGELU(CustomOp):
         return self.op(x)
 
 
+# --8<-- [start:quick_gelu]
 @CustomOp.register("quick_gelu")
 class QuickGELU(CustomOp):
     # https://github.com/huggingface/transformers/blob/main/src/transformers/activations.py#L90
+    # --8<-- [end:quick_gelu]
+
     def __init__(self):
         super().__init__()
         if current_platform.is_cuda_alike() or current_platform.is_cpu():
@@ -365,11 +392,14 @@ class QuickGELU(CustomOp):
     # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
 
 
+# --8<-- [start:relu2]
 @CustomOp.register("relu2")
 class ReLUSquaredActivation(CustomOp):
     """
     Applies the relu^2 activation introduced in https://arxiv.org/abs/2109.08668v2
     """
+
+    # --8<-- [end:relu2]
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -380,6 +410,7 @@ class ReLUSquaredActivation(CustomOp):
         return self.forward_native(x)
 
 
+# --8<-- [start:xielu]
 @CustomOp.register("xielu")
 class XIELU(CustomOp):
     """
@@ -387,6 +418,8 @@ class XIELU(CustomOp):
     If the user has installed the nickjbrowning/XIELU, we import xIELU CUDA
     Otherwise, we emit a single warning and use xIELU Python
     """
+
+    # --8<-- [end:xielu]
 
     def __init__(
         self,
