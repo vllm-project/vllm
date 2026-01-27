@@ -191,9 +191,13 @@ class TokenizeParams:
 
     def get_encode_kwargs(self) -> dict[str, Any]:
         """The arguments to pass to `tokenizer.encode`."""
+        max_length = self.truncate_prompt_tokens
+        if max_length is None or max_length < 0:
+            max_length = self.max_input_tokens
+
         return dict(
             truncation=self.truncate_prompt_tokens is not None,
-            max_length=self.max_input_tokens,
+            max_length=max_length,
             add_special_tokens=self.add_special_tokens,
         )
 
