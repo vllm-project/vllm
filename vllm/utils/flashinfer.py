@@ -641,7 +641,6 @@ _FLASHINFER_UTILS_EXPORTS = (
     "register_scales_for_trtllm_fp8_per_tensor_moe",
     "apply_fi_trtllm_fp8_per_tensor_moe",
     "make_fp8_moe_alpha_scales_for_fi",
-    "build_flashinfer_fp8_cutlass_moe_prepare_finalize",
     "get_flashinfer_moe_backend",
     "is_flashinfer_supporting_global_sf",
     "align_fp8_moe_weights_for_fi",
@@ -653,7 +652,6 @@ if TYPE_CHECKING:
         FlashinferMoeBackend,
         align_fp8_moe_weights_for_fi,
         apply_fi_trtllm_fp8_per_tensor_moe,
-        build_flashinfer_fp8_cutlass_moe_prepare_finalize,
         get_flashinfer_moe_backend,
         is_flashinfer_supporting_global_sf,
         make_fp8_moe_alpha_scales_for_fi,
@@ -707,7 +705,6 @@ __all__ = [
     "register_scales_for_trtllm_fp8_per_tensor_moe",  # noqa: F822
     "apply_fi_trtllm_fp8_per_tensor_moe",  # noqa: F822
     "make_fp8_moe_alpha_scales_for_fi",  # noqa: F822
-    "build_flashinfer_fp8_cutlass_moe_prepare_finalize",  # noqa: F822
     "get_flashinfer_moe_backend",  # noqa: F822
     "is_flashinfer_supporting_global_sf",  # noqa: F822
     "align_fp8_moe_weights_for_fi",  # noqa: F822
