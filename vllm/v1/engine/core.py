@@ -208,6 +208,10 @@ class EngineCore:
         self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         self.aborts_queue = queue.Queue[list[str]]()
+
+        # Pre-step hooks for extensibility (e.g., benchmarking slowdown)
+        self.pre_step_hooks: list[Callable[[], None]] = []
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -543,6 +547,34 @@ class EngineCore:
     def profile(self, is_start: bool = True):
         self.model_executor.profile(is_start)
 
+    def register_pre_step_hook(self, hook: Callable[[], None]) -> None:
+        """Register a hook to be called before each engine step.
+
+        Hooks are called in registration order at the start of each
+        _process_engine_step() call. Useful for benchmarking, debugging,
+        or custom instrumentation without modifying core engine logic.
+
+        Args:
+            hook: A callable that takes no arguments. The hook can access
+                  engine state via closure or by being a bound method.
+        """
+        if hook not in self.pre_step_hooks:
+            self.pre_step_hooks.append(hook)
+
+    def deregister_pre_step_hook(self, hook: Callable[[], None]) -> None:
+        """Remove a previously registered pre-step hook.
+
+        Args:
+            hook: The hook to remove. No-op if the hook is not registered.
+        """
+        if hook in self.pre_step_hooks:
+            self.pre_step_hooks.remove(hook)
+
+    def pre_step(self) -> None:
+        """Run all registered pre-step hooks."""
+        for hook in self.pre_step_hooks:
+            hook()
+
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
         # re-sync the internal caches (P0 sender, P1 receiver)
@@ -695,6 +727,10 @@ class EngineCoreProc(EngineCore):
                 executor_fail_callback,
                 internal_dp_balancing,
             )
+
+            # Slowdown for benchmarking P/D disaggregation.
+            # Hook is registered/deregistered dynamically via set_forward_sleep_time().
+            self.forward_sleep_time: float | None = None
 
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -984,6 +1020,9 @@ class EngineCoreProc(EngineCore):
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
 
+        # Run registered pre-step hooks.
+        self.pre_step()
+
         # Step the engine core.
         outputs, model_executed = self.step_fn()
         # Put EngineCoreOutputs into the output queue.
@@ -1000,6 +1039,52 @@ class EngineCoreProc(EngineCore):
             time.sleep(0.001)
 
         return model_executed
+
+    def _slowdown_pre_step_hook(self) -> None:
+        """Pre-step hook for benchmarking P/D disaggregation slowdown.
+
+        When forward_sleep_time is set, sleeps before each forward pass
+        while periodically processing incoming requests so KV transfers
+        can still be triggered during the slowdown period.
+        """
+        if self.forward_sleep_time is None:
+            return
+
+        sleep_interval = 0.1  # Wake up every 100ms to process new requests
+        remaining = self.forward_sleep_time
+        logger.info(
+            "Slowdown: sleeping %ss while processing incoming requests",
+            self.forward_sleep_time,
+        )
+        while remaining > 0:
+            sleep_time = min(sleep_interval, remaining)
+            time.sleep(sleep_time)
+            remaining -= sleep_time
+            # Process any new requests that arrived during sleep
+            while not self.input_queue.empty():
+                req = self.input_queue.get_nowait()
+                self._handle_client_request(*req)
+
+    def set_forward_sleep_time(self, t: float | None) -> None:
+        """Set forward sleep time for benchmarking P/D disaggregation.
+
+        Args:
+            t: Sleep time in seconds before each forward pass.
+               Set to None or <= 0 to disable.
+        """
+        if t is not None and t <= 0:
+            t = None
+
+        # Register or deregister the slowdown hook based on the value.
+        if t is not None and self.forward_sleep_time is None:
+            # Enabling slowdown: register the hook
+            self.register_pre_step_hook(self._slowdown_pre_step_hook)
+        elif t is None and self.forward_sleep_time is not None:
+            # Disabling slowdown: deregister the hook
+            self.deregister_pre_step_hook(self._slowdown_pre_step_hook)
+
+        self.forward_sleep_time = t
+        logger.info("Forward sleep time set to: %s", t)
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any

@@ -172,6 +172,15 @@ class EngineClient(ABC):
         """Return whether the engine is currently paused."""
         ...
 
+    async def slow_down(self, forward_sleep_time: float | None) -> None:
+        """Slow down forward passes for benchmarking P/D disaggregation.
+
+        Args:
+            forward_sleep_time: Sleep time in seconds before each forward pass.
+                                Set to None or <= 0 to disable.
+        """
+        raise NotImplementedError
+
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ) -> None:

@@ -218,6 +218,12 @@ class FrontendArgs:
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    enable_dev_endpoints: bool = False
+    """
+    Enable development/benchmarking endpoints that should not be exposed
+    in production (e.g., /slow_down). These endpoints are not authenticated
+    and could be used for DoS attacks if publicly accessible.
+    """
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:

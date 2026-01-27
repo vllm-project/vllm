@@ -320,3 +320,15 @@ class GenerateRequest(BaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+
+
+class SlowDownRequest(OpenAIBaseModel):
+    """Request to slow down forward passes for benchmarking P/D disaggregation."""
+
+    forward_sleep_time: float | None = Field(
+        default=None,
+        description=(
+            "Sleep time in seconds before each forward pass. "
+            "Set to null or <= 0 to disable. Only for benchmarking."
+        ),
+    )

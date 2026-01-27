@@ -917,6 +917,12 @@ class AsyncLLM(EngineClient):
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 
+    async def slow_down(self, forward_sleep_time: float | None) -> None:
+        """Slow down forward passes for benchmarking P/D disaggregation."""
+        await self.engine_core.call_utility_async(
+            "set_forward_sleep_time", forward_sleep_time
+        )
+
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
         return await self.engine_core.add_lora_async(lora_request)
