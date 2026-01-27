@@ -158,3 +158,7 @@ def attach_router(app: FastAPI, supported_tasks: tuple["SupportedTask", ...]):
         return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
     app.include_router(router)
+
+
+def sagemaker_standards_bootstrap(app: FastAPI) -> FastAPI:
+    return sagemaker_standards.bootstrap(app)
