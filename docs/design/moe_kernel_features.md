@@ -111,4 +111,4 @@ The following table shows "families" of modular kernels that are intended to wor
 |---------|-----------------------------------------|----------------------------------------------|
 | deepep_high_throughput | `DeepEPHTPrepareAndFinalize` |  `DeepGemmExperts`,</br>`TritonExperts`,</br>`TritonOrDeepGemmExperts`,</br>`CutlassExpertsFp8`, </br>`MarlinExperts` |
 | deepep_low_latency,</br>pplx | `DeepEPLLPrepareAndFinalize`,</br>`PplxPrepareAndFinalize` |  `BatchedDeepGemmExperts`,</br>`BatchedTritonExperts`,</br>`CutlassBatchedExpertsFp8`,</br>`BatchedMarlinExperts` |
-| flashinfer | `FlashInferCutlassMoEPrepareAndFinalize` | `FlashInferExperts` |
+| flashinfer | `FlashInferA2APrepareAndFinalize` | `FlashInferExperts` |

@@ -253,14 +253,14 @@ if has_pplx():
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
     from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (  # noqa: E501
-        FlashInferCutlassMoEPrepareAndFinalize,
+        FlashInferA2APrepareAndFinalize,
     )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
 
     register_prepare_and_finalize(
-        FlashInferCutlassMoEPrepareAndFinalize,
+        FlashInferA2APrepareAndFinalize,
         standard_format,
         nvfp4_types + fp8_types,
         blocked_quantization_support=True,
@@ -279,7 +279,7 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
         supports_expert_map=True,
     )
 else:
-    FlashInferCutlassMoEPrepareAndFinalize = None
+    FlashInferA2APrepareAndFinalize = None
     FlashInferExperts = None
 
 
