@@ -580,6 +580,8 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
+    fail_on_environ_validation: bool = True
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -1198,6 +1200,14 @@ class EngineArgs:
             action="store_true",
             help="Log aggregate rather than per-engine statistics "
             "when using data parallelism.",
+        )
+
+        parser.add_argument(
+            "--fail-on-environ-validation",
+            help="If set, the engine will raise an error if "
+            "environment validation fails.",
+            default=True,
+            action=argparse.BooleanOptionalAction,
         )
         return parser
 
