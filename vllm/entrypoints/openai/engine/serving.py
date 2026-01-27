@@ -330,6 +330,185 @@ class OpenAIServing:
         """
         self._api_spans.pop(request_id, None)
 
+    def _pop_api_span_info(
+        self,
+        request_id: str,
+    ) -> tuple[Any, float, float | None] | None:
+        """Pop and return API span info, removing from tracking dict.
+
+        This is the idempotence primitive for span finalization: only one caller
+        succeeds in popping the span, all others get None.
+
+        Args:
+            request_id: The request ID
+
+        Returns:
+            Tuple of (span, arrival_time, first_response_time) if present, None otherwise
+        """
+        return self._api_spans.pop(request_id, None)
+
+    async def _create_api_span(
+        self,
+        request_id: str,
+        trace_headers: dict[str, str] | None = None,
+    ) -> Any | None:
+        """Create parent span for API-level journey tracing.
+
+        Extracts incoming trace context from headers (if present) and creates
+        parent span that will be linked to child span in engine-core.
+
+        Args:
+            request_id: The request ID (e.g., chatcmpl-xxx)
+            trace_headers: Optional trace headers from request
+
+        Returns:
+            Span object if tracer available, None otherwise
+        """
+        try:
+            from vllm.tracing import SpanAttributes, extract_trace_context
+            from opentelemetry import trace
+            from opentelemetry.trace import SpanKind
+        except ImportError:
+            return None
+
+        # Get tracer from global provider (set by engine during init)
+        try:
+            tracer_provider = trace.get_tracer_provider()
+            tracer = tracer_provider.get_tracer("vllm.api")
+        except Exception:
+            return None
+
+        # Extract incoming trace context (if client provided traceparent header)
+        parent_context = None
+        if trace_headers:
+            try:
+                parent_context = extract_trace_context(trace_headers)
+            except Exception:
+                pass  # Continue without parent context
+
+        # Create parent span (becomes child if parent_context exists, root otherwise)
+        try:
+            api_span = tracer.start_span(
+                name="llm_request",
+                kind=SpanKind.SERVER,
+                context=parent_context,
+                start_time=time.time_ns(),
+            )
+        except Exception:
+            return None
+
+        # Set basic attributes
+        try:
+            api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request_id)
+        except Exception:
+            pass  # Continue even if attribute setting fails
+
+        # Emit ARRIVED event immediately (best-effort)
+        try:
+            if api_span.is_recording():
+                api_span.add_event(
+                    name="api.ARRIVED",
+                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
+                    timestamp=time.time_ns(),
+                )
+        except Exception:
+            pass  # Event emission is optional, don't fail span creation
+
+        return api_span
+
+    def _finalize_api_span(
+        self,
+        request_id: str,
+        terminal_event: str | None = None,
+        reason: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Finalize API span: emit terminal event, end span, cleanup dict.
+
+        CRITICAL: Idempotent via pop-at-start - safe to call multiple times.
+
+        This is the single centralized cleanup method for API spans.
+        All termination paths must call this method.
+
+        Uses pop-at-start pattern: dict.pop() at the beginning ensures only one caller
+        succeeds, making idempotence explicit.
+
+        Cleanup runs in three independent steps:
+        1. Status setting (only if ABORTED and error_message, NOT gated on is_recording)
+        2. Event emission (only if terminal_event provided and span.is_recording())
+        3. span.end() (always runs if span exists, NOT gated on is_recording)
+
+        Args:
+            request_id: The request ID
+            terminal_event: "DEPARTED", "ABORTED", or None
+                - None = cleanup-only fallback (no event emission)
+                - "DEPARTED" = success terminal event
+                - "ABORTED" = error terminal event with reason/error_message
+            reason: Optional reason code (e.g., "client_disconnect", "generation_error")
+            error_message: Optional error message (for ABORTED events)
+        """
+        # Pop span info at start (idempotence primitive - only one caller succeeds)
+        api_span_info = self._pop_api_span_info(request_id)
+        if api_span_info is None:
+            return  # Already finalized or never created
+
+        api_span, arrival_time, first_response_time = api_span_info
+
+        try:
+            from vllm.tracing import SpanAttributes
+            from opentelemetry.trace import Status, StatusCode
+
+            # Step 1: Set error status for ABORTED (best-effort, NOT gated)
+            if terminal_event == "ABORTED" and error_message:
+                try:
+                    api_span.set_status(Status(StatusCode.ERROR, error_message))
+                except Exception as e:
+                    logger.debug(
+                        "Failed to set status for API span %s: %s",
+                        request_id,
+                        e,
+                    )
+
+            # Step 2: Emit terminal event (best-effort, gated on recording)
+            if terminal_event is not None and api_span.is_recording():
+                try:
+                    attributes: dict[str, Any] = {
+                        SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
+                    }
+
+                    if terminal_event == "ABORTED":
+                        # Add reason and error to event attributes
+                        if reason:
+                            attributes["reason"] = reason
+                        if error_message:
+                            attributes["error"] = error_message
+
+                    api_span.add_event(
+                        name=f"api.{terminal_event}",
+                        attributes=attributes,
+                        timestamp=time.time_ns(),
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "Failed to emit %s event for API span %s: %s",
+                        terminal_event,
+                        request_id,
+                        e,
+                    )
+
+        finally:
+            # Step 3: CRITICAL - Always end span (guaranteed by finally)
+            # This must run even if status/event operations fail above
+            try:
+                api_span.end(end_time=time.time_ns())
+            except Exception as e:
+                # Even span.end() failures shouldn't break request processing
+                logger.debug(
+                    "Failed to end API span for request %s: %s",
+                    request_id,
+                    e,
+                )
+
     def _get_tool_parser(
         self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
     ) -> Callable[[TokenizerLike], ToolParser] | None:

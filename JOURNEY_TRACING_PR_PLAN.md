@@ -188,7 +188,7 @@ def _end_core_span_and_cleanup(self, request: Request) -> None:
 | #3 | `pr3ofjourney` | Add journey state & cleanup | ~26 lines | 4 | ✅ **COMPLETED** |
 | #4 | `pr4ofjourney` | Emit events to core spans | ~113 lines | 9 | ✅ **COMPLETED** |
 | #5 | `pr5ofjourney` | Add API span tracking dict | ~67 lines | 8 | ✅ **COMPLETED** |
-| #6 | `journey-tracing-06-api-spans-full-lifecycle` | Create & close API spans | ~150 lines | 9 | **All closure paths in same PR** ✅ |
+| #6 | `pr6ofjourney` | Create & close API spans | ~150 lines | 17 | ✅ **COMPLETED** |
 | #7 | `journey-tracing-07-context-propagation` | Link parent-child spans | ~25 lines | 4 | No new resources |
 | #8 | `journey-tracing-08-api-additional-events` | Emit API lifecycle events | ~80 lines | 5 | No new resources |
 | #9 | `journey-tracing-09-remove-buffering` | Remove journey event buffering | ~150 removed | 4 | Clean break |
@@ -1132,27 +1132,43 @@ class OpenAIServing:
 
 **Goal**: Create API parent spans AND ensure they're closed on all exit paths in the same PR.
 
-**Why Safe**: Spans created AND DEPARTED/ABORTED events included in same PR. All termination paths covered.
+**Why Safe**: Spans created AND finalized (DEPARTED/ABORTED) in same PR. All termination paths covered with idempotent cleanup.
 
 **CRITICAL**: This PR must include DEPARTED and ABORTED events. No "we'll add them later".
+
+**Key Design Decisions**:
+- **Ownership**: All lifecycle methods implemented on `OpenAIServing` base class (owner of `_api_spans` from PR #5), not child classes
+- **Single Finalizer**: One `_finalize_api_span()` method instead of separate departed/aborted helpers (prevents drift, simplifies audits)
+- **Pop-At-Start Idempotence**: Finalizer uses `_pop_api_span_info()` at start; only one caller succeeds, others get None (explicit idempotence, avoids reentrancy window)
+- **Cleanup-Only Fallback**: Finalizer supports `terminal_event=None` for cleanup without event emission; outer finally uses this as idempotent fallback for truly uncaught exceptions
+- **Re-raise Pattern**: Exceptions that re-raise (CancelledError, GeneratorExit) finalize with ABORTED then re-raise (preserves both observability and propagation semantics)
+- **Cleanup Independence**: Status setting and `span.end()` NOT gated on `is_recording()` (only event emission is gated)
+- **Minimal Events**: Only terminal events (DEPARTED/ABORTED) + optional ARRIVED; defer handoff/first-response to PR #8
 
 #### Changes
 
 ```python
-# vllm/entrypoints/openai/chat_completion/serving.py
+# vllm/entrypoints/openai/engine/serving.py
 
-class OpenAIServingChat:
+class OpenAIServing:
+    def __init__(self, ...):
+        # Existing from PR #5:
+        # self._api_spans: dict[str, tuple[Any, float, float | None]] = {}
+        # self._cached_is_tracing_enabled: bool | None = None
+
     async def _create_api_span(
-        self, request_id: str, raw_request: Request | None
+        self,
+        request_id: str,
+        trace_headers: dict[str, str] | None = None,
     ) -> Any | None:
         """Create parent span for API-level journey tracing.
 
-        Extracts incoming trace context from request headers (if present) and
-        creates parent span that will be linked to child span in engine-core.
+        Extracts incoming trace context from headers (if present) and creates
+        parent span that will be linked to child span in engine-core.
 
         Args:
             request_id: The request ID (e.g., chatcmpl-xxx)
-            raw_request: The FastAPI request object with headers
+            trace_headers: Optional trace headers from request
 
         Returns:
             Span object if tracer available, None otherwise
@@ -1173,138 +1189,175 @@ class OpenAIServingChat:
 
         # Extract incoming trace context (if client provided traceparent header)
         parent_context = None
-        if raw_request:
-            trace_headers = await self._get_trace_headers(raw_request.headers)
-            if trace_headers:
+        if trace_headers:
+            try:
                 parent_context = extract_trace_context(trace_headers)
+            except Exception:
+                pass  # Continue without parent context
 
         # Create parent span (becomes child if parent_context exists, root otherwise)
-        api_span = tracer.start_span(
-            name="llm_request",
-            kind=SpanKind.SERVER,
-            context=parent_context,
-            start_time=time.time_ns(),
-        )
+        try:
+            api_span = tracer.start_span(
+                name="llm_request",
+                kind=SpanKind.SERVER,
+                context=parent_context,
+                start_time=time.time_ns(),
+            )
+        except Exception:
+            return None
 
         # Set basic attributes
-        api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request_id)
+        try:
+            api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request_id)
+        except Exception:
+            pass  # Continue even if attribute setting fails
+
+        # NEW: Emit ARRIVED event immediately (minimal event for PR #6)
+        try:
+            if api_span.is_recording():
+                api_span.add_event(
+                    name="api.ARRIVED",
+                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
+                    timestamp=time.time_ns(),
+                )
+        except Exception:
+            pass  # Event emission is optional, don't fail span creation
 
         return api_span
 
-    def _safe_emit_departed_event(
+    def _pop_api_span_info(
         self,
         request_id: str,
-    ) -> None:
-        """Emit api.DEPARTED event, end span, and cleanup tracking.
+    ) -> tuple[Any, float, float | None] | None:
+        """Pop and return API span info, removing from tracking dict.
 
-        CRITICAL: Idempotent - safe to call even if span already ended.
+        This is the idempotence primitive for span finalization: only one caller
+        succeeds in popping the span, all others get None.
+
+        Note: PR #5's _cleanup_api_span() remains available as a separate cleanup
+        primitive if needed elsewhere, but finalization uses pop-at-start for
+        explicit idempotence.
 
         Args:
-            request_id: The request ID to close span for
+            request_id: The request ID
+
+        Returns:
+            Tuple of (span, arrival_time, first_response_time) if present, None otherwise
         """
-        # Get span from tracking dict (from PR #5)
-        api_span, arrival_time, first_response_time = self._get_api_span_info(request_id)
+        return self._api_spans.pop(request_id, None)
 
-        if not api_span or not api_span.is_recording():
-            # Still cleanup even if span not recording
-            self._cleanup_api_span(request_id)
-            return
-
-        try:
-            from vllm.tracing import SpanAttributes
-
-            # Emit DEPARTED event (minimal version for this PR)
-            # PR #8 will add full latency metrics
-            api_span.add_event(
-                name="api.DEPARTED",
-                attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
-                timestamp=time.time_ns(),
-            )
-
-            # End span
-            api_span.end(end_time=time.time_ns())
-        except Exception:
-            pass  # Defensive: tracing must never break response
-        finally:
-            # CRITICAL: Always cleanup tracking dict (from PR #5)
-            self._cleanup_api_span(request_id)
-
-    def _safe_emit_aborted_event(
+    def _finalize_api_span(
         self,
         request_id: str,
-        error_message: str,
+        terminal_event: str | None = None,  # "DEPARTED", "ABORTED", or None (cleanup-only)
         reason: str | None = None,
+        error_message: str | None = None,
     ) -> None:
-        """Emit api.ABORTED event, set error status, end span, and cleanup tracking.
+        """Finalize API span: emit terminal event, end span, cleanup dict.
 
-        CRITICAL: Idempotent - safe to call even if span already ended.
+        CRITICAL: Idempotent via pop-at-start - safe to call multiple times.
+
+        This is the single centralized cleanup method for API spans.
+        All termination paths must call this method.
+
+        Uses pop-at-start pattern: dict.pop() at the beginning ensures only one caller
+        succeeds, making idempotence explicit. This avoids any theoretical reentrancy
+        window where multiple callers could peek before any pops.
+
+        Cleanup runs in three independent steps:
+        1. Status setting (only if ABORTED and error_message, NOT gated on is_recording)
+        2. Event emission (only if terminal_event provided and span.is_recording())
+        3. span.end() (always runs if span exists, NOT gated on is_recording)
 
         Args:
-            request_id: The request ID to close span for
-            error_message: Error message to record
-            reason: Optional reason code (e.g., "client_disconnect")
+            request_id: The request ID
+            terminal_event: "DEPARTED", "ABORTED", or None
+                - None = cleanup-only fallback (no event emission)
+                - "DEPARTED" = success terminal event
+                - "ABORTED" = error terminal event with reason/error_message
+            reason: Optional reason code (e.g., "client_disconnect", "generation_error")
+            error_message: Optional error message (for ABORTED events)
         """
-        # Get span from tracking dict (from PR #5)
-        api_span, _, _ = self._get_api_span_info(request_id)
+        # Pop span info at start (idempotence primitive - only one caller succeeds)
+        api_span_info = self._pop_api_span_info(request_id)
+        if api_span_info is None:
+            return  # Already finalized or never created
 
-        if not api_span or not api_span.is_recording():
-            # Still cleanup even if span not recording
-            self._cleanup_api_span(request_id)
-            return
+        api_span, arrival_time, first_response_time = api_span_info
 
         try:
             from vllm.tracing import SpanAttributes
             from opentelemetry.trace import Status, StatusCode
 
-            # Set error status
-            api_span.set_status(Status(StatusCode.ERROR, error_message))
+            # Step 1: Set error status for ABORTED (NOT gated - part of span end semantics)
+            if terminal_event == "ABORTED" and error_message:
+                api_span.set_status(Status(StatusCode.ERROR, error_message))
 
-            # Emit ABORTED event
-            attributes: dict[str, Any] = {
-                SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
-                "error": error_message,
-            }
-            if reason:
-                attributes["reason"] = reason
+            # Step 2: Emit terminal event (ONLY if terminal_event provided and recording)
+            if terminal_event is not None and api_span.is_recording():
+                attributes: dict[str, Any] = {
+                    SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic(),
+                }
 
-            api_span.add_event(
-                name="api.ABORTED",
-                attributes=attributes,
-                timestamp=time.time_ns(),
+                if terminal_event == "ABORTED":
+                    # Add reason and error to event attributes
+                    if reason:
+                        attributes["reason"] = reason
+                    if error_message:
+                        attributes["error"] = error_message
+
+                api_span.add_event(
+                    name=f"api.{terminal_event}",
+                    attributes=attributes,
+                    timestamp=time.time_ns(),
+                )
+
+            # Step 3: Always end span (NOT gated on is_recording)
+            api_span.end(end_time=time.time_ns())
+
+        except Exception as e:
+            # Defensive: tracing failures must never break request processing
+            logger.debug(
+                "Failed to finalize API span for request %s: %s",
+                request_id,
+                e,
             )
 
-            # End span
-            api_span.end(end_time=time.time_ns())
-        except Exception:
-            pass  # Defensive
-        finally:
-            # CRITICAL: Always cleanup tracking dict (from PR #5)
-            self._cleanup_api_span(request_id)
+# vllm/entrypoints/openai/chat_completion/serving.py
 
+class OpenAIServingChat(OpenAIServing):
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
         raw_request: Request | None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
-        # ... existing request_id creation ...
+        # Generate request_id
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
         )
 
-        # NEW: Create API span and store in tracking dict (from PR #5)
+        # Extract trace headers
+        trace_headers = (
+            None
+            if raw_request is None
+            else await self._get_trace_headers(raw_request.headers)
+        )
+
+        # NEW: Create API span (from base class)
+        api_span = None
         is_tracing_enabled = await self._get_is_tracing_enabled()
         if is_tracing_enabled:
-            api_span = await self._create_api_span(request_id, raw_request)
+            api_span = await self._create_api_span(request_id, trace_headers)
             if api_span:
                 arrival_time = time.monotonic()
                 self._store_api_span(request_id, api_span, arrival_time)
 
-        # Initialize metadata (no span fields needed)
+        # Initialize metadata (no span fields - everything in _api_spans dict)
         request_metadata = RequestResponseMetadata(
             request_id=request_id,
         )
 
-        # ... existing code ...
+        # ... existing request processing ...
 
     async def chat_completion_stream_generator(
         self,
@@ -1316,36 +1369,75 @@ class OpenAIServingChat:
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
         """Streaming generator with span closure on all paths."""
+
+        # Outer try/finally ensures cleanup on ALL exception paths
         try:
-            # ... existing streaming logic ...
+            # Inner try/except for specific error handling
+            try:
+                # ... existing streaming logic ...
 
-            # ... existing code ...
-        except GenerationError as e:
-            # NEW: Close span on generation error (uses request_id from metadata)
-            self._safe_emit_aborted_event(
+                async for res in result_generator:
+                    # ... existing chunk processing ...
+                    yield chunk
+
+            except GenerationError as e:
+                # Generation error during streaming - finalize and return
+                self._finalize_api_span(
+                    request_metadata.request_id,
+                    terminal_event="ABORTED",
+                    reason="generation_error",
+                    error_message=str(e),
+                )
+                yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            except asyncio.CancelledError:
+                # Client disconnected - finalize with ABORTED, then re-raise
+                self._finalize_api_span(
+                    request_metadata.request_id,
+                    terminal_event="ABORTED",
+                    reason="client_disconnect",
+                    error_message="Client disconnected",
+                )
+                raise  # Re-raise to properly propagate cancellation
+
+            except GeneratorExit:
+                # Generator closed early - finalize with ABORTED, then re-raise
+                self._finalize_api_span(
+                    request_metadata.request_id,
+                    terminal_event="ABORTED",
+                    reason="generator_exit",
+                    error_message="Generator closed early",
+                )
+                raise  # Re-raise to properly propagate exit
+
+            except Exception as e:
+                # Unexpected exception - finalize and return
+                self._finalize_api_span(
+                    request_metadata.request_id,
+                    terminal_event="ABORTED",
+                    reason="exception",
+                    error_message=str(e),
+                )
+                logger.exception("Error in chat completion stream generator.")
+                data = self.create_streaming_error_response(e)
+                yield f"data: {data}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            # Success path: all chunks yielded
+            yield "data: [DONE]\n\n"
+            self._finalize_api_span(
                 request_metadata.request_id,
-                f"Generation error: {e}",
-                "generation_error"
+                terminal_event="DEPARTED",
             )
-            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
-            yield "data: [DONE]\n\n"
-            return  # Span closed and cleaned, safe to return
-        except Exception as e:
-            # NEW: Close span on unexpected exception
-            self._safe_emit_aborted_event(
-                request_metadata.request_id, str(e), "exception"
-            )
-            logger.exception("Error in chat completion stream generator.")
-            data = self.create_streaming_error_response(e)
-            yield f"data: {data}\n\n"
-            yield "data: [DONE]\n\n"
-            return  # Span closed and cleaned, safe to return
 
-        # Send final done message
-        yield "data: [DONE]\n\n"
-
-        # NEW: Close span on success (retrieves span from dict, ends it, cleans up)
-        self._safe_emit_departed_event(request_metadata.request_id)
+        finally:
+            # CRITICAL: Unconditional cleanup-only in outer finally
+            # Called with terminal_event=None: no event emission, just end+cleanup if not already done
+            # This is fallback for CancelledError, GeneratorExit, or any uncaught exceptions
+            self._finalize_api_span(request_metadata.request_id)
 
     async def chat_completion_full_generator(
         self,
@@ -1359,114 +1451,188 @@ class OpenAIServingChat:
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
-        span_closed = False
 
-        # CRITICAL: Outer try/finally ensures span cleanup on ANY exception path
+        # CRITICAL: Outer try/finally ensures cleanup on ANY exception path
         try:
-            # Generator iteration
+            # Generator iteration with specific error handling
             try:
                 async for res in result_generator:
                     final_res = res
+
             except asyncio.CancelledError:
-                self._safe_emit_aborted_event(
+                # Client disconnected - finalize and return (not re-raised)
+                self._finalize_api_span(
                     request_metadata.request_id,
-                    "Client disconnected",
-                    "client_disconnect"
+                    terminal_event="ABORTED",
+                    reason="client_disconnect",
+                    error_message="Client disconnected",
                 )
-                span_closed = True
                 return self.create_error_response("Client disconnected")
-            except ValueError as e:
-                self._safe_emit_aborted_event(
-                    request_metadata.request_id, str(e), "validation_error"
+
+            except GeneratorExit:
+                # Generator closed early - finalize with ABORTED, then re-raise
+                self._finalize_api_span(
+                    request_metadata.request_id,
+                    terminal_event="ABORTED",
+                    reason="generator_exit",
+                    error_message="Generator closed early",
                 )
-                span_closed = True
+                raise  # Re-raise to properly propagate exit
+
+            except ValueError as e:
+                # Validation error - finalize and return
+                self._finalize_api_span(
+                    request_metadata.request_id,
+                    terminal_event="ABORTED",
+                    reason="validation_error",
+                    error_message=str(e),
+                )
                 return self.create_error_response(e)
 
-            # Response building
+            except Exception as e:
+                # Unexpected exception - finalize and return
+                self._finalize_api_span(
+                    request_metadata.request_id,
+                    terminal_event="ABORTED",
+                    reason="exception",
+                    error_message=str(e),
+                )
+                return self.create_error_response(str(e))
+
+            # Response building (success path)
             assert final_res is not None
 
             # ... existing response building code ...
 
-            # NEW: Close span on success (retrieves span from dict, ends it, cleans up)
-            self._safe_emit_departed_event(request_metadata.request_id)
-            span_closed = True
+            # Success: finalize with DEPARTED
+            self._finalize_api_span(
+                request_metadata.request_id,
+                terminal_event="DEPARTED",
+            )
 
             return response
+
         finally:
-            # CRITICAL: Outer finally catches ALL other exceptions
-            # Check if span exists in dict (not if metadata has span field)
-            if not span_closed:
-                span, _, _ = self._get_api_span_info(request_metadata.request_id)
-                if span:
-                    self._safe_emit_aborted_event(
-                        request_metadata.request_id,
-                        "Unexpected error during request processing",
-                    )
+            # CRITICAL: Unconditional cleanup-only in outer finally
+            # Called with terminal_event=None: no event emission, just end+cleanup if not already done
+            # This is fallback for GeneratorExit or any truly uncaught exceptions
+            self._finalize_api_span(request_metadata.request_id)
 ```
 
 #### Safety Checklist
 
-- ✅ **Spans created → Spans closed AND tracking dict cleaned on all paths**
-  - ✅ Streaming success → DEPARTED + span.end() + cleanup dict
-  - ✅ Streaming GenerationError → ABORTED + span.end() + cleanup dict
-  - ✅ Streaming exception → ABORTED + span.end() + cleanup dict
-  - ✅ Non-streaming success → DEPARTED + span.end() + cleanup dict
-  - ✅ Non-streaming CancelledError → ABORTED + span.end() + cleanup dict
-  - ✅ Non-streaming ValueError → ABORTED + span.end() + cleanup dict
-  - ✅ Non-streaming unexpected exception → ABORTED + span.end() + cleanup dict in finally
-- ✅ **Tracking dict cleanup** in finally blocks (from PR #5)
+- ✅ **Ownership**: All lifecycle methods on `OpenAIServing` (single owner of `_api_spans`)
+- ✅ **Spans created → Spans finalized on all paths** (12 termination paths total)
+  - ✅ Streaming: success, GenerationError, CancelledError, GeneratorExit, Exception, outer finally fallback
+  - ✅ Non-streaming: success, CancelledError, GeneratorExit, ValueError, Exception, outer finally fallback
+- ✅ **Idempotence**: `_finalize_api_span()` uses pop-at-start pattern via `_pop_api_span_info()` - only one caller succeeds, safe to call multiple times
+- ✅ **Cleanup-Only Fallback**: `terminal_event=None` in outer finally for truly uncaught exceptions (idempotent no-op if already finalized)
+- ✅ **Re-raise Pattern**: Exceptions that re-raise (CancelledError, GeneratorExit) finalize with ABORTED, then re-raise (preserves both observability and propagation)
+- ✅ **Cleanup Independence**:
+  - ✅ Status setting (for ABORTED) NOT gated on `is_recording()` (part of span end semantics)
+  - ✅ Event emission gated on `terminal_event != None` AND `is_recording()`
+  - ✅ `span.end()` NOT gated on `is_recording()` (always called if span exists)
+  - ✅ Dict cleanup via pop-at-start NOT gated on `is_recording()` or feature flags
+- ✅ **Single Finalizer**: One method handles DEPARTED, ABORTED, and cleanup-only (prevents drift)
+- ✅ **PR #5 Abstraction Respected**: Adds `_pop_api_span_info()` helper alongside PR #5 helpers; avoids direct dict access in finalize path
 - ✅ **No Pydantic serialization risk** (spans in separate dict, not model fields)
-- ✅ Idempotent span.end() (checks is_recording())
 - ✅ Tests prove all paths close span AND cleanup dict
 - ✅ Legacy tracing untouched
-- ✅ Defensive error handling
+- ✅ Defensive error handling (all OTEL calls in try/except)
 
-#### Termination Paths Covered
+#### Termination Paths Covered (12 Total)
 
-**Streaming Generator:**
-1. Success → DEPARTED + span.end()
-2. GenerationError → ABORTED + span.end()
-3. Exception → ABORTED + span.end()
+**Streaming Generator (6 paths):**
+1. Success → `_finalize_api_span(..., "DEPARTED")` (explicit)
+2. GenerationError → `_finalize_api_span(..., "ABORTED", reason="generation_error")` (explicit, then return)
+3. CancelledError → `_finalize_api_span(..., "ABORTED", reason="client_disconnect")` (explicit, then re-raise)
+4. GeneratorExit → `_finalize_api_span(..., "ABORTED", reason="generator_exit")` (explicit, then re-raise)
+5. Generic Exception → `_finalize_api_span(..., "ABORTED", reason="exception")` (explicit, then return)
+6. Truly uncaught exception → outer finally `_finalize_api_span(...)` (cleanup-only fallback)
 
-**Non-Streaming Generator:**
-1. Success → DEPARTED + span.end()
-2. CancelledError → ABORTED + span.end()
-3. ValueError → ABORTED + span.end()
-4. Unexpected exception → ABORTED + span.end() (outer finally)
+**Non-Streaming Generator (6 paths):**
+1. Success → `_finalize_api_span(..., "DEPARTED")` (explicit)
+2. CancelledError → `_finalize_api_span(..., "ABORTED", reason="client_disconnect")` (explicit, then return)
+3. GeneratorExit → `_finalize_api_span(..., "ABORTED", reason="generator_exit")` (explicit, then re-raise)
+4. ValueError → `_finalize_api_span(..., "ABORTED", reason="validation_error")` (explicit, then return)
+5. Generic Exception → `_finalize_api_span(..., "ABORTED", reason="exception")` (explicit, then return)
+6. Truly uncaught exception → outer finally `_finalize_api_span(...)` (cleanup-only fallback)
 
-#### Tests
+**Key**:
+- All explicit exception handlers finalize with appropriate terminal event (DEPARTED or ABORTED)
+- Exceptions that **return** finalize then return response
+- Exceptions that **re-raise** finalize then re-raise (outer finally becomes no-op due to idempotence)
+- Outer finally uses `terminal_event=None` (cleanup-only fallback for truly uncaught exceptions, idempotent)
 
-1. **`test_api_span_created()`**
-   - Verify span created when tracing enabled
-   - Verify span has correct name and attributes
+#### Tests (16 Total)
 
-2. **`test_api_span_none_when_disabled()`**
+**Span Creation (2 tests):**
+1. **`test_api_span_created_when_tracing_enabled()`**
+   - Verify span created and stored in `_api_spans` dict
+   - Verify ARRIVED event present
+
+2. **`test_api_span_none_when_tracing_disabled()`**
    - Verify None when tracing disabled
 
-3. **`test_span_closed_on_streaming_success()`**
-   - Verify DEPARTED + end on success
+**Streaming Termination (5 tests):**
+3. **`test_streaming_success_path()`**
+   - Verify DEPARTED on success
 
-4. **`test_span_closed_on_streaming_generation_error()`**
-   - Verify ABORTED + end on GenerationError
+4. **`test_streaming_generation_error()`**
+   - Verify ABORTED with reason="generation_error"
 
-5. **`test_span_closed_on_streaming_exception()`**
-   - Verify ABORTED + end on exception
+5. **`test_streaming_cancelled_error()`**
+   - Verify ABORTED with reason="client_disconnect"
+   - Verify exception re-raised after finalization
 
-6. **`test_span_closed_on_full_success()`**
-   - Verify DEPARTED + end on success
+6. **`test_streaming_generator_exit()`**
+   - Verify ABORTED with reason="generator_exit"
+   - Verify exception re-raised after finalization
 
-7. **`test_span_closed_on_full_cancelled()`**
-   - Verify ABORTED + end on CancelledError
+7. **`test_streaming_generic_exception()`**
+   - Verify ABORTED with reason="exception"
 
-8. **`test_span_closed_on_full_exception()`**
-   - Verify ABORTED + end in outer finally
+**Non-Streaming Termination (5 tests):**
+8. **`test_full_success_path()`**
+   - Verify DEPARTED on success
 
-9. **`test_initialization_order()`**
-   - Verify engine init before API span creation
-   - Verify global tracer provider set
+9. **`test_full_cancelled_error()`**
+   - Verify ABORTED with reason="client_disconnect"
 
-**Size**: ~150 lines, 9 tests
-**Review Time**: ~30 minutes
+10. **`test_full_generator_exit()`**
+    - Verify ABORTED with reason="generator_exit"
+    - Verify exception re-raised after finalization
+
+11. **`test_full_validation_error()`**
+    - Verify ABORTED with reason="validation_error"
+
+12. **`test_full_generic_exception()`**
+    - Verify ABORTED with reason="exception"
+
+**Idempotence & Leak Tests (2 tests):**
+13. **`test_finalizer_idempotence()`**
+    - Verify safe to call finalizer multiple times
+    - Verify dict entry removed after first call
+
+14. **`test_no_span_leaks()`**
+    - Verify no leaks over 100 requests (mix of success/error)
+    - Verify `_api_spans` dict size == 0 at end
+
+**Cleanup Independence (2 tests):**
+15. **`test_cleanup_not_gated_on_is_recording()`**
+    - Mock span with `is_recording()` returning False
+    - Verify `span.end()` called (not gated)
+    - Verify dict popped (not gated on is_recording)
+    - Verify `add_event()` not called (gated on is_recording)
+
+16. **`test_cleanup_only_fallback()`**
+    - Call `_finalize_api_span(request_id)` with no terminal_event (cleanup-only)
+    - Verify no event emission
+    - Verify `span.end()` called
+    - Verify `_cleanup_api_span()` called
+
+**Size**: ~180 lines production code, ~420 lines test code, 16 tests
+**Review Time**: ~35 minutes
 
 **CRITICAL**: This PR is larger because it includes full lifecycle. Cannot split into "create" and "close" PRs.
 
@@ -2086,4 +2252,52 @@ Condensed summary of completed PRs. See individual PR sections above for detaile
 
 ---
 
-**Summary**: 5 PRs completed, ~350 production lines added, ~1022 test lines added, 31 tests passing
+### ✅ PR #6: API Parent Span Lifecycle
+- **Completed**: 2026-01-27
+- **Branch**: `pr6ofjourney` (formerly `journey-tracing-06-api-spans-full-lifecycle`)
+- **Changes**: ~150 production, ~420 test lines | 17 tests (all passing)
+- **Key Implementation Details**:
+  - Added `_create_api_span()` method on `OpenAIServing` base class
+  - Created `_finalize_api_span()` single finalizer supporting DEPARTED/ABORTED/cleanup-only modes
+  - Added `_pop_api_span_info()` for explicit pop-at-start idempotence primitive
+  - Wrapped both streaming and non-streaming generators with comprehensive error handling
+  - Covered 12 termination paths (6 streaming, 6 non-streaming)
+  - **Streaming paths**: success (DEPARTED), GenerationError (ABORTED), CancelledError (ABORTED+re-raise), GeneratorExit (ABORTED+re-raise), generic Exception (ABORTED), outer finally fallback (cleanup-only)
+  - **Non-streaming paths**: success (DEPARTED), CancelledError (ABORTED), GeneratorExit (ABORTED+re-raise), ValueError (ABORTED), generic Exception (ABORTED), outer finally fallback (cleanup-only)
+- **Critical Fixes Applied** (Post-Review):
+  - **Fix #1**: Guaranteed span.end() using nested try/except/finally (BLOCKER resolved)
+    - Moved span.end() to outer finally block in `_finalize_api_span()`
+    - Wrapped set_status() and add_event() in inner try/except (best-effort)
+    - Prevents OTEL span leak if earlier operations throw
+  - **Fix #2**: Eliminated all brittle test patterns (BLOCKER resolved)
+    - Added `find_events()` helper using kwargs-only pattern: `call.kwargs.get("name") == "api.DEPARTED"`
+    - Replaced all 10 instances of `"X" in str(call)` pattern with helper usage
+    - Tests now robust to mock library changes and Python version updates
+  - **Fix #3**: Simplified partial fix to kwargs-only (QUALITY improvement)
+    - Changed test_full_generation_error_during_response_building from mixed args/kwargs to pure kwargs
+    - Reduced from 25 lines to 8 lines using helper function
+    - Added assertion for error message existence
+- **Design Patterns**:
+  - **Ownership**: All lifecycle methods on `OpenAIServing` base class (single owner)
+  - **Single Finalizer**: One method handles DEPARTED, ABORTED, cleanup-only (prevents drift)
+  - **Pop-At-Start Idempotence**: `_pop_api_span_info()` at method start ensures only one caller succeeds
+  - **Cleanup-Only Fallback**: `terminal_event=None` in outer finally for truly uncaught exceptions (idempotent no-op if already finalized)
+  - **Re-raise Pattern**: CancelledError, GeneratorExit finalize with ABORTED then re-raise (preserves observability + propagation)
+  - **Cleanup Independence**: status setting and span.end() NOT gated on is_recording() or flags (only event emission gated)
+- **Test Coverage**: 17 tests covering:
+  - Span creation (2 tests)
+  - Streaming termination (6 tests: success, generation_error, cancelled, generator_exit, exception, partial_fix)
+  - Non-streaming termination (5 tests: success, cancelled, generator_exit, validation, exception)
+  - Idempotence & leak tests (2 tests)
+  - Cleanup independence (2 tests: not_gated_on_is_recording, cleanup_only_fallback)
+- **Safety Guarantees**:
+  - ✅ span.end() ALWAYS called (even if set_status/add_event throw)
+  - ✅ All 12 termination paths finalize properly (no leaks)
+  - ✅ Idempotent via pop-at-start (safe to call multiple times)
+  - ✅ Tests use robust kwargs-only pattern (no brittle string matching)
+  - ✅ Dict cleanup NOT gated on flags (cleanup independence)
+  - ✅ All tests passing (17/17, 100% pass rate)
+
+---
+
+**Summary**: 6 PRs completed, ~500 production lines added, ~1442 test lines added, 48 tests passing
