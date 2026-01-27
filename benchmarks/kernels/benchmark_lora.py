@@ -859,7 +859,6 @@ class BenchmarkTensors:
             "shrink_num_warps": kernel_config["NUM_WARPS"],
             "shrink_num_stages": kernel_config["NUM_STAGES"],
             "shrink_split_k": kernel_config.get("SPLIT_K", 1),
-            "naive_block_assignment": False,
             "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
         }
 
@@ -936,7 +935,6 @@ class BenchmarkTensors:
             "expand_num_warps": kernel_config["NUM_WARPS"],
             "expand_num_stages": kernel_config["NUM_STAGES"],
             "expand_split_k": kernel_config.get("SPLIT_K", 1),
-            "naive_block_assignment": False,
             "mul_routed_weight": op_type.is_fused_moe_lora_down_fn(),
         }
 
