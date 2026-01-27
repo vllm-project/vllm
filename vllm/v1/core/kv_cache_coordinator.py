@@ -357,7 +357,8 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
         )
-        return hit_blocks, len(hit_blocks[0]) * self.block_size
+        hit_length = len(hit_blocks[0]) * self.block_size
+        return hit_blocks, hit_length
 
 
 class HybridKVCacheCoordinator(KVCacheCoordinator):

@@ -918,7 +918,19 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
+            old_computed = request.num_computed_tokens
             request.num_computed_tokens += num_scheduled_token
+
+            # Immediately free SWA out-of-window blocks after prefill completes.
+            # This ensures block pool capacity is reclaimed for concurrent
+            # requests, rather than waiting until the next scheduling cycle.
+            if (
+                old_computed < request.num_prompt_tokens
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
+                self.kv_cache_manager.remove_skipped_blocks(
+                    request.request_id, request.num_computed_tokens
+                )
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
             # may be updated again in _update_from_output for speculative
