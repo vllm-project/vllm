@@ -579,7 +579,7 @@ class GPUModelRunner(
             self.max_num_reqs, dtype=torch.int32
         )
         self.num_accepted_tokens = self._make_buffer(
-            self.max_num_reqs, dtype=torch.int64
+            self.max_num_reqs, dtype=torch.int32
         )
 
         # Only relevant for multimodal models
@@ -694,7 +694,7 @@ class GPUModelRunner(
                 self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
                 self.valid_sampled_token_count_cpu = torch.empty(
                     self.max_num_reqs,
-                    dtype=torch.int64,
+                    dtype=torch.int32,
                     device="cpu",
                     pin_memory=self.pin_memory,
                 )
