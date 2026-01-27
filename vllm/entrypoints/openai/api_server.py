@@ -514,6 +514,7 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
+    app.include_router(router)
 
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
@@ -530,6 +531,7 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
     )
 
     register_sagemaker_api_router(app, supported_tasks)
+
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import (
