@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import contextlib
 import json
 from collections.abc import AsyncGenerator
 from uuid import uuid4
@@ -162,7 +163,7 @@ class RealtimeConnection:
         completion_tokens_len: int = 0
 
         try:
-            # Create base sampling params (can be overridden per chunk in StreamingInput)
+            # Create sampling params 
             from vllm.sampling_params import RequestOutputKind, SamplingParams
 
             sampling_params = SamplingParams.from_optional(
@@ -242,9 +243,6 @@ class RealtimeConnection:
         # Cancel generation task if running
         if self.generation_task and not self.generation_task.done():
             self.generation_task.cancel()
-            try:
-                await self.generation_task
-            except asyncio.CancelledError:
-                pass
+            contextlib.suppress(asyncio.CancelledError)
 
         logger.info("Connection cleanup complete: %s", self.connection_id)
