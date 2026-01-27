@@ -76,5 +76,7 @@ class OpenAIServingRealtime(OpenAIServing):
         """
 
         # it is the model's responsibility to handle the audio stream
-        async for prompt in self.model_cls.buffer_realtime_audio(audio_stream, input_stream, self.model_config):
+        async for prompt in self.model_cls.buffer_realtime_audio(
+            audio_stream, input_stream, self.model_config
+        ):
             yield StreamingInput(prompt=prompt)

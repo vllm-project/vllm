@@ -127,7 +127,6 @@ class RealtimeConnection:
             logger.warning("Generation already in progress, ignoring commit")
             return
 
-
         # Create audio stream generator
         audio_stream = self.audio_stream_generator()
         input_stream: asyncio.Queue[list[int]] = asyncio.Queue()
@@ -143,7 +142,11 @@ class RealtimeConnection:
             self._run_generation(streaming_input_gen, input_stream)
         )
 
-    async def _run_generation(self, streaming_input_gen: AsyncGenerator, input_stream: asyncio.Queue[list[int]]):
+    async def _run_generation(
+        self,
+        streaming_input_gen: AsyncGenerator,
+        input_stream: asyncio.Queue[list[int]],
+    ):
         """Run the generation and stream results back to the client.
 
         This method:
@@ -182,7 +185,6 @@ class RealtimeConnection:
             # Stream results back to client as they're generated
             async for output in result_gen:
                 if output.outputs and len(output.outputs) > 0:
-
                     if prompt_token_ids_len is None:
                         prompt_token_ids_len = len(output.prompt_token_ids)
 

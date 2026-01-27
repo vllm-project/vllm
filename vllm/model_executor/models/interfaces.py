@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from collections.abc import Callable, Iterable, Mapping, MutableSequence
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, MutableSequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
-    AsyncGenerator,
     ClassVar,
     Literal,
     Protocol,
@@ -1020,6 +1019,7 @@ class SupportsQuant:
 @runtime_checkable
 class SupportsRealtime(Protocol):
     """The interface required for all models that support transcription."""
+
     supports_realtime: ClassVar[Literal[True]] = True
 
     @classmethod
@@ -1028,8 +1028,7 @@ class SupportsRealtime(Protocol):
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: ModelConfig,
-    ) -> AsyncGenerator[PromptType, None]:
-        ...
+    ) -> AsyncGenerator[PromptType, None]: ...
 
 
 @overload
@@ -1161,7 +1160,6 @@ def supports_transcription(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsTranscription]] | TypeIs[SupportsTranscription]:
     return getattr(model, "supports_transcription", False)
-
 
 
 @runtime_checkable

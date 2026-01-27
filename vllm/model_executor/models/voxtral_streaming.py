@@ -3,8 +3,8 @@
 
 import asyncio
 import math
-from collections.abc import Mapping
-from typing import AsyncGenerator, Literal, cast
+from collections.abc import AsyncGenerator, Mapping
+from typing import Literal, cast
 
 import numpy as np
 import torch
@@ -13,7 +13,7 @@ from mistral_common.protocol.transcription.request import (
     StreamingMode,
     TranscriptionRequest,
 )
-from mistral_common.tokens.tokenizers.audio import Audio
+from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType, TokensPrompt
@@ -42,12 +42,11 @@ from vllm.tokenizers import cached_tokenizer_from_config
 from .utils import (
     _flatten_embeddings,
 )
-from mistral_common.tokens.tokenizers.audio import AudioConfig
-from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
 logger = init_logger(__name__)
 
 _PRE_ALLOCATE_BUFFER_SIZE_IN_S = 30
+
 
 class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
     def __init__(
@@ -181,7 +180,9 @@ class VoxtralRealtimeBuffer:
         left_to_copy = max(self._filled_buffer_len - self.start_idx, 0)
 
         if left_to_copy > 0:
-            new_buffer[:left_to_copy] = self._buffer[self.start_idx: self._filled_buffer_len]
+            new_buffer[:left_to_copy] = self._buffer[
+                self.start_idx : self._filled_buffer_len
+            ]
 
         del self._buffer
         self._buffer = new_buffer
@@ -196,14 +197,16 @@ class VoxtralRealtimeBuffer:
         if put_end_idx > self._buffer_size:
             self._allocate_new_buffer()
 
-        self._buffer[self._filled_buffer_len : self._filled_buffer_len + len(audio_chunk)] = audio_chunk
+        self._buffer[
+            self._filled_buffer_len : self._filled_buffer_len + len(audio_chunk)
+        ] = audio_chunk
         self._filled_buffer_len += len(audio_chunk)
 
     def get_audio_chunk(self) -> np.ndarray | None:
         if not self.is_chunk_complete:
             return None
 
-        audio_chunk = self._buffer[self.start_idx: self.end_idx]
+        audio_chunk = self._buffer[self.start_idx : self.end_idx]
         self._start = self._end
         self._end += self._streaming_size
 
@@ -279,7 +282,9 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
                     is_first_yield = False
                 else:
                     # pop last element from input_stream
-                    all_outputs = await asyncio.wait_for(input_stream.get(), timeout=10.0)
+                    all_outputs = await asyncio.wait_for(
+                        input_stream.get(), timeout=10.0
+                    )
                     token_ids = all_outputs[-1:]
 
                 count += 1
