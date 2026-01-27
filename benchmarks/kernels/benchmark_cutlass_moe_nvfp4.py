@@ -197,7 +197,7 @@ def bench_run(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp4(
                 make_dummy_moe_config(),
                 quant_config=quant_config,
@@ -242,7 +242,7 @@ def bench_run(
         )
 
         kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(defer_input_quant=True),
+            MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp4(
                 make_dummy_moe_config(),
                 quant_config=quant_config,

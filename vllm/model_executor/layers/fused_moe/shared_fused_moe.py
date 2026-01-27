@@ -37,7 +37,7 @@ class SharedFusedMoE(FusedMoE):
             use_overlapped
             and not (
                 (self.enable_eplb and backend != "allgather_reducescatter")
-                or (self.moe_config.use_flashinfer_cutlass_kernels and self.dp_size > 1)
+                or self.moe_parallel_config.use_fi_all2allv_kernels
             )
             and self._shared_experts is not None
         )

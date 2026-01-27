@@ -106,12 +106,7 @@ def test_flashinfer_fp4_moe_no_graph(
         )
 
         flashinfer_experts = FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(
-                defer_input_quant=FlashInferExperts.expects_unquantized_inputs(
-                    moe_config=moe_config,
-                    quant_config=quant_config,
-                )
-            ),
+            MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
         )
 

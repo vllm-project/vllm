@@ -1000,7 +1000,7 @@ class GroupCoordinator:
         if self.device_communicator is not None:
             self.device_communicator.prepare_communication_buffer_for_model(model)
 
-    def dispatch(
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1011,7 +1011,7 @@ class GroupCoordinator:
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         if self.device_communicator is not None:
-            return self.device_communicator.dispatch(  # type: ignore[call-arg]
+            return self.device_communicator.dispatch_router_logits(
                 hidden_states,
                 router_logits,
                 is_sequence_parallel,
@@ -1019,6 +1019,28 @@ class GroupCoordinator:
             )
         else:
             return hidden_states, router_logits
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
+        if self.device_communicator is not None:
+            return self.device_communicator.dispatch(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                is_sequence_parallel,
+                extra_tensors,
+            )
+        else:
+            return hidden_states, topk_weights, topk_ids
 
     def combine(
         self, hidden_states, is_sequence_parallel: bool = False
