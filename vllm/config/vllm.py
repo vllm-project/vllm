@@ -915,6 +915,7 @@ class VllmConfig:
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
         from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
         if (
             self.model_config
             and vllm_is_batch_invariant()
