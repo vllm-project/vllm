@@ -347,6 +347,25 @@ class OpenAIServing:
         """
         return self._api_spans.pop(request_id, None)
 
+    def _update_first_response_time(
+        self,
+        request_id: str,
+        first_response_time: float,
+    ) -> None:
+        """Update first response timestamp in _api_spans tuple.
+
+        Completes the timing tracking infrastructure from PR5/PR6 by populating
+        the third element of the (span, arrival_time, first_response_time) tuple.
+
+        Args:
+            request_id: The request ID
+            first_response_time: time.monotonic() when first response observed
+        """
+        span_info = self._api_spans.get(request_id)
+        if span_info:
+            span, arrival_time, _ = span_info
+            self._api_spans[request_id] = (span, arrival_time, first_response_time)
+
     async def _create_api_span(
         self,
         request_id: str,

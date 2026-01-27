@@ -11,7 +11,7 @@ This document outlines the implementation plan for dual-stream journey tracing u
 - **Real-Time Emission**: Events emitted directly to spans (no buffering)
 
 **Timeline**: ~2 weeks for complete implementation
-**Total Changes**: ~560 lines added, ~150 lines removed, 41 tests
+**Total Changes**: ~618 lines added, ~280 lines removed, 77 tests
 
 ---
 
@@ -190,10 +190,10 @@ def _end_core_span_and_cleanup(self, request: Request) -> None:
 | #5 | `pr5ofjourney` | Add API span tracking dict | ~67 lines | 8 | ✅ **COMPLETED** |
 | #6 | `pr6ofjourney` | Create & close API spans | ~150 lines | 17 | ✅ **COMPLETED** |
 | #7 | `journey-tracing-07-context-propagation` | Link parent-child spans | ~25 lines | 12 | ✅ **COMPLETED** |
-| #8 | `journey-tracing-08-api-additional-events` | Emit API lifecycle events | ~80 lines | 5 | No new resources |
+| #8 | `pr8ofjourney` | Emit API lifecycle events | ~112 lines | 12 | ✅ **COMPLETED** |
 | #9 | `journey-tracing-09-remove-buffering` | Remove journey event buffering | ~150 removed | 4 | Clean break |
 
-**Total**: ~560 lines added, ~150 lines removed, 45 tests
+**Total**: ~618 lines added, ~280 lines removed, 77 tests
 
 ---
 
@@ -216,7 +216,7 @@ PR #6 (API Span + DEPARTED/ABORTED) ✅ COMPLETED
     ↓
 PR #7 (Context Propagation) ✅ COMPLETED
     ↓
-PR #8 (API Additional Events) ← no new resources, safe
+PR #8 (API Additional Events) ✅ COMPLETED
     ↓
 PR #9 (Remove Buffering) ← depends on all above working
 ```
@@ -1731,13 +1731,25 @@ async def create_chat_completion(self, ...):
 
 ---
 
-### PR #8: API - Emit Additional Events
+### PR #8: API - Emit Additional Events ✅ COMPLETED
 
-**Branch**: `journey-tracing-08-api-additional-events`
+**Status**: ✅ Merged (commit 550aab9d3, PR #16)
+
+**Branch**: `pr8ofjourney`
 
 **Goal**: Add remaining API events. No new resources, just additive event emission.
 
 **Why Safe**: No new resources created, span closure already handled (PR #6).
+
+**What was delivered**:
+- Added `EVENT_TS_MONOTONIC` attribute for API event timestamps
+- Emit `HANDOFF_TO_CORE` event after engine.generate()
+- Emit `FIRST_RESPONSE_FROM_CORE` event on first response (streaming and non-streaming)
+- Set request attributes on API spans (model, prompt tokens, sampling params)
+- Added `_update_first_response_time()` helper for timing tracking
+- All span operations fully defensive (G6 + G7 compliance)
+- 12 behavioral tests covering G1, G3-G7 (G2 verified by code inspection)
+- 795 lines added across 4 files
 
 #### Changes
 

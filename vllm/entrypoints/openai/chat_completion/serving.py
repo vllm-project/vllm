@@ -449,6 +449,15 @@ class OpenAIServingChat(OpenAIServing):
                                     e,
                                 )
 
+                            # Set request attributes on API span
+                            if isinstance(sampling_params, SamplingParams):
+                                self._set_api_span_request_attributes(
+                                    api_span,
+                                    model_name,
+                                    engine_prompt["prompt_token_ids"],
+                                    sampling_params,
+                                )
+
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.beam_search(
                         prompt=engine_prompt,
@@ -479,6 +488,19 @@ class OpenAIServingChat(OpenAIServing):
                         tokenization_kwargs=tokenization_kwargs,
                         data_parallel_rank=data_parallel_rank,
                     )
+
+                    # Emit HANDOFF_TO_CORE after submitting to engine
+                    if i == 0 and api_span:
+                        try:
+                            if api_span.is_recording():
+                                from vllm.tracing import SpanAttributes
+                                api_span.add_event(
+                                    name="api.HANDOFF_TO_CORE",
+                                    attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
+                                    timestamp=time.time_ns(),
+                                )
+                        except Exception:
+                            pass  # Defensive
 
                 generators.append(generator)
         except ValueError as e:
@@ -660,6 +682,48 @@ class OpenAIServingChat(OpenAIServing):
 
         return delta_message, function_name_returned
 
+    def _set_api_span_request_attributes(
+        self,
+        api_span: Any,
+        model_name: str,
+        prompt_token_ids: list[int],
+        sampling_params: SamplingParams,
+    ) -> None:
+        """Set request metadata attributes on API span.
+
+        Defensive: All operations wrapped in try/except. Never raises.
+
+        Args:
+            api_span: The OTEL span object (or None)
+            model_name: Model name for response
+            prompt_token_ids: Prompt tokens (for counting)
+            sampling_params: Request sampling parameters
+        """
+        if not api_span:
+            return
+
+        try:
+            if not api_span.is_recording():
+                return
+
+            from vllm.tracing import SpanAttributes
+
+            # Always set model and prompt tokens
+            api_span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL, model_name)
+            api_span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS, len(prompt_token_ids))
+
+            # Conditionally set sampling params (only if not None)
+            if sampling_params.temperature is not None:
+                api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE, sampling_params.temperature)
+            if sampling_params.top_p is not None:
+                api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, sampling_params.top_p)
+            if sampling_params.max_tokens is not None:
+                api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS, sampling_params.max_tokens)
+            if sampling_params.n is not None:
+                api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, sampling_params.n)
+        except Exception:
+            pass  # Defensive: attribute setting failures don't break request
+
     async def chat_completion_stream_generator(
         self,
         request: ChatCompletionRequest,
@@ -673,6 +737,7 @@ class OpenAIServingChat(OpenAIServing):
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
+        first_response_emitted = False  # Track FIRST_RESPONSE event emission
 
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
@@ -795,6 +860,29 @@ class OpenAIServingChat(OpenAIServing):
                     # response (by the try...catch).
                     if first_iteration:
                         num_cached_tokens = res.num_cached_tokens
+
+                        # Emit FIRST_RESPONSE_FROM_CORE once (before any yields)
+                        if not first_response_emitted:
+                            first_response_time = time.monotonic()
+                            first_response_emitted = True  # Mark as emitted immediately
+
+                            # Update timing in existing _api_spans tuple
+                            self._update_first_response_time(request_metadata.request_id, first_response_time)
+
+                            # Retrieve span from base class dict for event emission
+                            api_span, _, _ = self._get_api_span_info(request_metadata.request_id)
+                            if api_span:
+                                try:
+                                    if api_span.is_recording():
+                                        from vllm.tracing import SpanAttributes
+                                        api_span.add_event(
+                                            name="api.FIRST_RESPONSE_FROM_CORE",
+                                            attributes={SpanAttributes.EVENT_TS_MONOTONIC: first_response_time},
+                                            timestamp=time.time_ns(),
+                                        )
+                                except Exception:
+                                    pass  # Defensive
+
                         # Send first response for each request.n (index) with
                         # the role
                         role = self.get_chat_request_role(request)
@@ -872,6 +960,7 @@ class OpenAIServingChat(OpenAIServing):
 
                                     data = chunk.model_dump_json(exclude_unset=True)
                                     yield f"data: {data}\n\n"
+
                         first_iteration = False
 
                     for output in res.outputs:
@@ -1499,12 +1588,35 @@ class OpenAIServingChat(OpenAIServing):
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
+        first_response_emitted = False  # Track FIRST_RESPONSE event emission
 
         # CRITICAL: Outer try/finally ensures cleanup on ANY exception path
         try:
             # Generator iteration with specific error handling
             try:
                 async for res in result_generator:
+                    # Emit FIRST_RESPONSE_FROM_CORE on first iteration
+                    if not first_response_emitted:
+                        first_response_time = time.monotonic()
+                        first_response_emitted = True  # Mark as emitted immediately
+
+                        # Update timing in existing _api_spans tuple
+                        self._update_first_response_time(request_metadata.request_id, first_response_time)
+
+                        # Retrieve span from base class dict for event emission
+                        api_span, _, _ = self._get_api_span_info(request_metadata.request_id)
+                        if api_span:
+                            try:
+                                if api_span.is_recording():
+                                    from vllm.tracing import SpanAttributes
+                                    api_span.add_event(
+                                        name="api.FIRST_RESPONSE_FROM_CORE",
+                                        attributes={SpanAttributes.EVENT_TS_MONOTONIC: first_response_time},
+                                        timestamp=time.time_ns(),
+                                    )
+                            except Exception:
+                                pass  # Defensive
+
                     final_res = res
 
             except asyncio.CancelledError:
