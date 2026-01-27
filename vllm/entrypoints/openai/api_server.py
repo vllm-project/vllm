@@ -315,9 +315,6 @@ async def init_app_state(
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks
         )
-        if "transcription" in supported_tasks
-        else None
-    )
     from vllm.entrypoints.openai.realtime.serving import OpenAIServingRealtime
 
     state.openai_serving_realtime = (
