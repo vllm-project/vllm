@@ -3769,7 +3769,6 @@ class GPUModelRunner(
         """Broadcast sampled token ids (GPU) from last PP stage"""
         pp = get_pp_group()
         assert pp.is_last_rank
-        assert torch.distributed.is_initialized()
         # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
         assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
             "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
@@ -3782,7 +3781,6 @@ class GPUModelRunner(
         """Receive sampled token ids broadcast from last PP stage"""
         pp = get_pp_group()
         assert not pp.is_last_rank
-        assert torch.distributed.is_initialized()
         num_reqs = self.input_batch.num_reqs
         # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
         recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
