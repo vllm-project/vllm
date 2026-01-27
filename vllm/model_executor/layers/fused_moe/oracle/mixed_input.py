@@ -178,7 +178,7 @@ def convert_to_mixed_input_moe_kernel_format(
         assert w13_g_idx is not None
         assert w2_g_idx is not None
 
-        # GIDX - for activation re-ordering.
+        # GIDX - for activation re-ordering with MARLIN.
         if actorder == "group":
             num_experts = w13_g_idx.shape[0]
             w13_g_idx_sort_idxs = torch.empty_like(w13_g_idx)
@@ -243,6 +243,24 @@ def convert_to_mixed_input_moe_kernel_format(
             w2_scale, a2_gscale = marlin_act_int8_process_scales(w2_scale)
 
         layer.workspace = marlin_make_workspace_new(device, 4)
+
+    elif mixed_input_moe_backend == MixedInputMoEBackend.TRITON:
+        assert actorder != "group"
+        w13_g_idx = None
+        w13_g_idx_sort_idxs = None
+        a13_gscale = None
+        w2_g_idx = None
+        w2_g_idx_sort_idxs = None
+        a2_gscale = None
+
+        w13 = w13.transpose(1, 2).contiguous().view(torch.uint8)
+        w13_scale = w13_scale.transpose(1, 2).contiguous()
+        w2 = w2.transpose(1, 2).contiguous().view(torch.uint8)
+        w2_scale = w2_scale.transpose(1, 2).contiguous()
+    else:
+        raise ValueError(
+            f"Unknown MixedInputMoEBackend: {mixed_input_moe_backend.value=}"
+        )
 
     return (
         w13,
