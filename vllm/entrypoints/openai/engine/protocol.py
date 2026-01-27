@@ -7,7 +7,6 @@ import time
 from typing import Any, ClassVar, Literal, TypeAlias
 
 import regex as re
-import torch
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -24,8 +23,6 @@ from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
-
-_LONG_INFO = torch.iinfo(torch.long)
 
 
 class OpenAIBaseModel(BaseModel):
@@ -221,6 +218,10 @@ def get_logits_processors(
 
 
 class FunctionCall(OpenAIBaseModel):
+    # Internal field to preserve native tool call ID from tool parser.
+    # Excluded from serialization to maintain OpenAI API compatibility
+    # (function object should only contain 'name' and 'arguments').
+    id: str | None = Field(default=None, exclude=True)
     name: str
     arguments: str
 

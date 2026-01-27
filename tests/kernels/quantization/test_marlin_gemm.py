@@ -59,7 +59,7 @@ if current_platform.is_rocm():
     pytest.skip(
         "These tests require gptq_marlin_repack,"
         "marlin_int4_fp8_preprocess, gptq_marlin_24_gemm,"
-        "or gptq_marlin_gemm which are not supported on ROCm.",
+        "or marlin_gemm which are not supported on ROCm.",
         allow_module_level=True,
     )
 
@@ -417,7 +417,7 @@ def marlin_generate_valid_test_cases():
     ),
     marlin_generate_valid_test_cases(),
 )
-def test_gptq_marlin_gemm(
+def test_marlin_gemm(
     a_type,
     b_type,
     c_type,
@@ -511,7 +511,7 @@ def test_gptq_marlin_gemm(
 
     output = torch.empty((size_m, size_n), dtype=dtype, device=a_input.device)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a_input,
         output,
         marlin_q_w,
@@ -646,7 +646,7 @@ def test_marlin_gemm_subset_input():
     marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
     workspace = marlin_make_workspace_new(a_input.device)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a_input,
         None,
         marlin_q_w,
@@ -695,7 +695,7 @@ def test_marlin_gemm_with_bias(size_m):
     marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
     workspace = marlin_make_workspace_new(a_input.device)
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a_input,
         None,
         marlin_q_w,

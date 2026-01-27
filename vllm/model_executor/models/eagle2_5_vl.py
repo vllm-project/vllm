@@ -270,7 +270,6 @@ class Eagle2_5_VLForConditionalGeneration(
         return SiglipVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=self.multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             prefix=prefix,
         )
@@ -433,7 +432,7 @@ class Eagle2_5_VLForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -441,7 +440,6 @@ class Eagle2_5_VLForConditionalGeneration(
     ) -> IntermediateTensors:
         """Forward pass through the model."""
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
 
         forward_kwargs = {

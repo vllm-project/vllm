@@ -131,7 +131,7 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
 === "Apple silicon"
 
-    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:build-image-from-source"
 
 === "IBM Z (S390X)"
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:build-image-from-source"

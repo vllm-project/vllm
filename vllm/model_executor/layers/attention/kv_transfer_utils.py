@@ -19,7 +19,7 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
     On exit: saves the KV layer to the connector.
     """
     # Import at runtime to avoid circular dependency
-    from vllm.attention.layer import get_attention_context
+    from vllm.model_executor.layers.attention.attention import get_attention_context
 
     # Inspect the signature ONCE when the decorator is applied.
     sig = inspect.signature(func)

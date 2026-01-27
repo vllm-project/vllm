@@ -7,92 +7,31 @@ from pydantic import (
     Field,
 )
 
-from vllm import PoolingParams
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ChatRequestMixin,
     CompletionRequestMixin,
+    EmbedRequestMixin,
     PoolingBasicRequestMixin,
 )
 from vllm.utils import random_uuid
-from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 
-class EmbeddingCompletionRequest(PoolingBasicRequestMixin, CompletionRequestMixin):
+class EmbeddingCompletionRequest(
+    PoolingBasicRequestMixin, CompletionRequestMixin, EmbedRequestMixin
+):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/embeddings
-
-    encoding_format: EncodingFormat = "float"
-    dimensions: int | None = None
-
-    # --8<-- [start:embedding-extra-params]
-    normalize: bool | None = Field(
-        default=None,
-        description="Whether to normalize the embeddings outputs. Default is True.",
-    )
-    embed_dtype: EmbedDType = Field(
-        default="float32",
-        description=(
-            "What dtype to use for encoding. Default to using float32 for base64 "
-            "encoding to match the OpenAI python client behavior. "
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    endianness: Endianness = Field(
-        default="native",
-        description=(
-            "What endianness to use for encoding. Default to using native for "
-            "base64 encoding to match the OpenAI python client behavior."
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    # --8<-- [end:embedding-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            dimensions=self.dimensions,
-            use_activation=self.normalize,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-        )
+    pass
 
 
-class EmbeddingChatRequest(PoolingBasicRequestMixin, ChatRequestMixin):
-    encoding_format: EncodingFormat = "float"
-    dimensions: int | None = None
-
-    # --8<-- [start:chat-embedding-extra-params]
+class EmbeddingChatRequest(
+    PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin
+):
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
-    normalize: bool | None = Field(
-        default=None,
-        description="Whether to normalize the embeddings outputs. Default is True.",
-    )
-    embed_dtype: EmbedDType = Field(
-        default="float32",
-        description=(
-            "What dtype to use for encoding. Default to using float32 for base64 "
-            "encoding to match the OpenAI python client behavior. "
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    endianness: Endianness = Field(
-        default="native",
-        description=(
-            "What endianness to use for encoding. Default to using native for "
-            "base64 encoding to match the OpenAI python client behavior."
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    # --8<-- [end:chat-embedding-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            dimensions=self.dimensions,
-            use_activation=self.normalize,
-        )
 
 
 EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest
