@@ -7,14 +7,11 @@ Fast, flexible benchmarking for vLLM attention and MLA backends with an extended
 ```bash
 cd benchmarks/attention_benchmarks
 
-# Test the parser
-python test_batch_spec.py
-# ✓ All tests pass
-
-# Run one of the 4 research studies
-python benchmark.py --config configs/cutlass_numsplits.yaml
-python benchmark.py --config configs/hopper_head_count.yaml
-python benchmark.py --config configs/flashinfer_vs_cutlass.yaml
+# Run a pre-configured benchmark
+python benchmark.py --config configs/mla_decode.yaml
+python benchmark.py --config configs/mla_mixed_batch.yaml
+python benchmark.py --config configs/speculative_decode.yaml
+python benchmark.py --config configs/standard_attention.yaml
 python benchmark.py --config configs/reorder_threshold.yaml
 
 # Or run custom benchmarks
@@ -52,68 +49,51 @@ Mixed batches: Use _ to combine (e.g., "2q2k_32q1s1k")
 
 **Note**: Decode, prefill, and spec decode are just different query lengths - no special syntax needed!
 
-## Research Studies
+## Pre-configured Benchmarks
 
-The suite includes 4 pre-configured studies to answer key MLA optimization questions. Each study is a single YAML file you can run directly:
+The suite includes several pre-configured YAML benchmark configurations:
 
-### Study 1: CUTLASS MLA num-splits Optimization
+### MLA Decode Benchmark
 
-**Question:** Should we revert the CUTLASS MLA num-splits heuristic (PRs #24966, #25509)?
-
-```bash
-python benchmark.py --config configs/cutlass_numsplits.yaml
-```
-
-Tests CUTLASS MLA with different `num_kv_splits` values (1, 2, 4, 8, 16, 32) across various batch sizes and compares against auto-selection.
-
-### Study 2: FlashAttn MLA vs FlashMLA on Hopper
-
-**Question:** Does head count matter for FlashAttn MLA vs FlashMLA on Hopper GPUs?
+Tests pure decode performance across MLA backends with varying batch sizes and sequence lengths.
 
 ```bash
-# Test with default head count (128)
-python benchmark.py --config configs/hopper_head_count.yaml
-
-# Test with different head counts
-for heads in 16 32 64 128 256; do
-    python benchmark.py --config configs/hopper_head_count.yaml \
-        --num-q-heads $heads \
-        --output-csv hopper_heads_${heads}.csv
-done
+python benchmark.py --config configs/mla_decode.yaml
 ```
 
-Compares FlashAttn MLA and FlashMLA performance with varying attention head counts.
+### MLA Mixed Batch Benchmark
 
-### Study 3: FlashInfer-MLA vs Optimized CUTLASS
-
-**Question:** Is FlashInfer-MLA better than CUTLASS MLA after num-splits optimization?
+Tests chunked prefill performance with mixed prefill + decode batches.
 
 ```bash
-python benchmark.py --config configs/flashinfer_vs_cutlass.yaml
+python benchmark.py --config configs/mla_mixed_batch.yaml
 ```
 
-Compares FlashInfer-MLA against CUTLASS MLA with optimized `num_kv_splits` values.
+### Speculative Decoding Benchmark
 
-### Study 4: Reorder Batch Threshold Optimization (Decode vs Prefill Crossover)
+Tests speculative decode scenarios (K-token verification) and reorder_batch_threshold optimization.
+
+```bash
+python benchmark.py --config configs/speculative_decode.yaml
+```
+
+### Standard Attention Benchmark
+
+Tests standard attention backends (Flash/Triton/FlashInfer) with pure prefill, decode, and mixed batches.
+
+```bash
+python benchmark.py --config configs/standard_attention.yaml
+```
+
+### Reorder Threshold Study
 
 **Question:** At what query length does the prefill pipeline become faster than the decode pipeline?
 
-**Methodology:** Reproduces the original `benchmark_mla_threshold.py` study using the new interface:
-
-- For each query length (1-2048), test BOTH decode and prefill pipelines
-- Find the crossover point where prefill becomes faster
-- Analyze how this varies across batch sizes (1-256)
+Tests query lengths from 1-1024 across 9 batch sizes to find the crossover point. Uses `decode_vs_prefill` mode to compare both pipelines for each query length.
 
 ```bash
 python benchmark.py --config configs/reorder_threshold.yaml
 ```
-
-Tests query lengths from 1-2048 (fine-grained steps at low values, coarser at high values) across 9 batch sizes. For each query length, compares:
-
-- **Decode pipeline**: `threshold >= query_length`
-- **Prefill pipeline**: `threshold < query_length`
-
-Outputs the optimal threshold (last query length where decode is faster) for each batch size.
 
 ---
 
@@ -144,14 +124,16 @@ python benchmark.py \
 
 ### Parameter Sweeps
 
+Use `--sweep-param` and `--sweep-values` to run parameter sweeps from the CLI:
+
 #### CUTLASS MLA num-splits Optimization
 
 ```bash
 python benchmark.py \
     --backend cutlass_mla \
     --batch-specs "64q1s1k" "64q1s4k" "64q1s16k" \
-    --num-splits 1 2 4 8 16 \
-    --compare-auto \
+    --sweep-param num_kv_splits \
+    --sweep-values 1 2 4 8 16 \
     --output-json optimal_splits.json
 ```
 
@@ -163,7 +145,8 @@ python benchmark.py \
 python benchmark.py \
     --backend flashmla \
     --batch-specs "q4s1k" "q8s2k" \
-    --thresholds 1 4 16 64 256 512 \
+    --sweep-param reorder_batch_threshold \
+    --sweep-values 1 4 16 64 256 512 \
     --output-csv threshold_sweep.csv
 ```
 
@@ -172,28 +155,29 @@ python benchmark.py \
 ### All Command-Line Options
 
 ```text
+--config CONFIG                     # Path to YAML config file (overrides other args)
 --backends BACKEND [BACKEND ...]    # flash, triton, flashinfer, cutlass_mla,
                                     # flashinfer_mla, flashattn_mla, flashmla
 --backend BACKEND                   # Single backend (alternative to --backends)
---batch-specs SPEC [SPEC ...]       # Batch specifications (default: ["q2k", "8q1s1k"])
+--batch-specs SPEC [SPEC ...]       # Batch specifications using extended grammar
 
 # Model configuration
---num-layers N                      # Number of layers (default: 10)
---head-dim N                        # Head dimension (default: 128)
---num-q-heads N                     # Query heads (default: 32)
---num-kv-heads N                    # KV heads (default: 8)
---block-size N                      # Block size (default: 16)
+--num-layers N                      # Number of layers
+--head-dim N                        # Head dimension
+--num-q-heads N                     # Query heads
+--num-kv-heads N                    # KV heads
+--block-size N                      # Block size
 
 # Benchmark settings
 --device DEVICE                     # Device (default: cuda:0)
---repeats N                         # Repetitions (default: 1)
---warmup-iters N                    # Warmup iterations (default: 3)
+--repeats N                         # Repetitions
+--warmup-iters N                    # Warmup iterations
 --profile-memory                    # Profile memory usage
 
-# MLA-specific parameter sweeps
---num-splits N [N ...]              # CUTLASS MLA: Test multiple num_kv_splits
---thresholds N [N ...]              # FlashMLA/FlashAttn MLA: Test multiple thresholds
---compare-auto                      # CUTLASS MLA: Also test auto num_kv_splits
+# Parameter sweeps
+--sweep-param PARAM                 # Parameter name to sweep (e.g., num_kv_splits,
+                                    # reorder_batch_threshold)
+--sweep-values N [N ...]            # Values to sweep for the parameter
 
 # Output
 --output-csv FILE                   # Save to CSV
@@ -212,15 +196,10 @@ python benchmark.py \
 
 ## Using MLA Runner Directly
 
-All MLA backends are available in `mla_runner.py`:
+All MLA backends are available through `mla_runner.run_mla_benchmark()`:
 
 ```python
-from mla_runner import (
-    run_cutlass_mla_benchmark,
-    run_flashinfer_mla_benchmark,
-    run_flashattn_mla_benchmark,
-    run_flashmla_benchmark,
-)
+from mla_runner import run_mla_benchmark
 from common import BenchmarkConfig
 
 config = BenchmarkConfig(
@@ -237,17 +216,17 @@ config = BenchmarkConfig(
 )
 
 # CUTLASS MLA with specific num_kv_splits
-result = run_cutlass_mla_benchmark(config, num_kv_splits=4)
-print(f"Time: {result['mean']:.6f}s, Throughput: {result['throughput']:.1f} tok/s")
+result = run_mla_benchmark("cutlass_mla", config, num_kv_splits=4)
+print(f"Time: {result.mean_time:.6f}s")
 
 # FlashInfer-MLA
-result = run_flashinfer_mla_benchmark(config)
+result = run_mla_benchmark("flashinfer_mla", config)
 
 # FlashAttn MLA (Hopper SM90+)
-result = run_flashattn_mla_benchmark(config, reorder_batch_threshold=64)
+result = run_mla_benchmark("flashattn_mla", config, reorder_batch_threshold=64)
 
 # FlashMLA (Hopper SM90+)
-result = run_flashmla_benchmark(config, reorder_batch_threshold=64)
+result = run_mla_benchmark("flashmla", config, reorder_batch_threshold=64)
 ```
 
 ## Python API
@@ -278,19 +257,19 @@ formatter.save_json(results, "output.json")
 attention_benchmarks/
 ├── README.md                      # This file
 │
-├── batch_spec.py                  # Grammar parser (tested)
-├── common.py                      # Infrastructure
-├── runner.py                      # Standard attention helpers
-├── mla_runner.py                  # MLA helpers (ALL 4 backends)
-├── test_batch_spec.py             # Tests (all passing)
+├── batch_spec.py                  # Batch specification grammar parser
+├── common.py                      # Shared utilities and data classes
+├── runner.py                      # Standard attention benchmark runner
+├── mla_runner.py                  # MLA benchmark runner (all 4 backends)
 │
-├── benchmark.py                   # Universal benchmark script
+├── benchmark.py                   # Universal benchmark CLI
 │
-└── configs/                       # Pre-configured studies
-    ├── cutlass_numsplits.yaml         # CUTLASS num-splits optimization
-    ├── hopper_head_count.yaml         # FlashAttn vs FlashMLA head count
-    ├── flashinfer_vs_cutlass.yaml     # FlashInfer vs optimized CUTLASS
-    └── reorder_threshold.yaml         # Reorder threshold optimization
+└── configs/                       # Pre-configured benchmarks
+    ├── mla_decode.yaml            # MLA decode-only benchmark
+    ├── mla_mixed_batch.yaml       # MLA mixed prefill/decode benchmark
+    ├── speculative_decode.yaml    # Speculative decoding benchmark
+    ├── standard_attention.yaml    # Standard attention benchmark
+    └── reorder_threshold.yaml     # Reorder threshold optimization study
 ```
 
 ## Tips
@@ -305,7 +284,7 @@ attention_benchmarks/
 
 **5. Extended grammar** - Leverage spec decode, chunked prefill patterns
 
-**6. Parameter sweeps** - Use `--num-splits` or `--thresholds` to find optimal values
+**6. Parameter sweeps** - Use `--sweep-param` and `--sweep-values` to find optimal values
 
 ## Troubleshooting
 
@@ -327,12 +306,10 @@ source /path/to/vllm/.venv/bin/activate
 
 ## What's Included
 
-✅ Extended batch spec grammar with tests (all passing!)
-✅ Universal benchmark script for all backends
-✅ Standard attention support (Flash/Triton/FlashInfer)
-✅ MLA runner with ALL 4 backends
-✅ Parameter sweep modes (num-splits, thresholds)
-✅ Rich console output + CSV/JSON export
-✅ Pre-built configuration files (optional)
-
-**~5,000 lines of code, fully simplified, ready to benchmark!** 🚀
+- Extended batch spec grammar
+- Universal benchmark script for all backends
+- Standard attention support (Flash/Triton/FlashInfer)
+- MLA runner with all 4 backends (CUTLASS, FlashInfer, FlashAttn, FlashMLA)
+- Parameter sweep support via `--sweep-param` and `--sweep-values`
+- Rich console output + CSV/JSON export
+- Pre-built YAML configuration files

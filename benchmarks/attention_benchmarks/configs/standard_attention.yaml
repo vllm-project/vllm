@@ -26,8 +26,8 @@ batch_specs:
   - "2q4k_32q1s1k"     # 2 large prefill + 32 decode
 
   # Context extension
-  - "q1kkv2k"         # 1k query, 2k KV (chunked prefill)
-  - "2q1kkv4k"        # 2 requests: 1k query, 4k KV
+  - "q1ks2k"          # 1k query, 2k sequence (chunked prefill)
+  - "2q1ks4k"         # 2 requests: 1k query, 4k sequence
 
 backends:
   - flash
