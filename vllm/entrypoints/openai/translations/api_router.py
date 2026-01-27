@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from vllm.entrypoints.logger import RequestLogger
     from vllm.tasks import SupportedTask
 else:
-    RequestLogger = Any
+    RequestLogger = object
 
 logger = init_logger(__name__)
 
