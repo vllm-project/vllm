@@ -7,6 +7,7 @@ from http import HTTPStatus
 from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
+import vllm.envs as envs
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightUpdateRequest,
@@ -165,4 +166,6 @@ async def get_world_size(
 
 
 def attach_router(app: FastAPI):
+    if not envs.VLLM_SERVER_DEV_MODE:
+        return
     app.include_router(router)
