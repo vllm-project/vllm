@@ -277,7 +277,7 @@ class AttentionBackend(ABC):
 
 
 class AttentionMetadata:
-    pass
+    slot_mapping: torch.Tensor
 
 
 T = TypeVar("T", bound=AttentionMetadata)
@@ -731,15 +731,7 @@ class AttentionImpl(ABC, Generic[T]):
 
         key_cache, value_cache = kv_cache.unbind(0)
 
-        # Handle slot_mapping parameter flexibility:
-        # In practice, all current callers pass slot_mapping tensor directly.
-        # The hasattr check provides forward compatibility if future callers
-        # need to pass full metadata objects.
-        slot_mapping = (
-            attn_metadata.slot_mapping
-            if hasattr(attn_metadata, "slot_mapping")
-            else attn_metadata
-        )
+        slot_mapping = attn_metadata.slot_mapping
 
         # Default implementation using the standard reshape_and_cache_flash op.
         # NOTE(woosuk): Here, key and value are padded while slot_mapping is
