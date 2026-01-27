@@ -39,7 +39,11 @@ class PytorchInputQuantKernel(InputQuantKernel[InputQuantConfig]):
         return [cls]
 
     def apply_group_quant(
-        self, x, scale=None, scale_ub=None
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert scale is None, "Dynamic group quantization does not use scale"
 
@@ -76,7 +80,11 @@ class PytorchInputQuantKernel(InputQuantKernel[InputQuantConfig]):
         return x_quant, scales
 
     def apply_per_token_per_tensor_quant(
-        self, x, scale=None, scale_ub=None
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert (scale is not None) == self.is_static_quant
         assert scale_ub is None or (

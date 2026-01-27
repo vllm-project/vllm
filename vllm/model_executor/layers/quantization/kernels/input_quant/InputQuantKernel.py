@@ -82,6 +82,7 @@ class InputQuantKernel(ABC, Generic[_ConfigT]):
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
@@ -91,6 +92,7 @@ class InputQuantKernel(ABC, Generic[_ConfigT]):
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
@@ -99,17 +101,20 @@ class InputQuantKernel(ABC, Generic[_ConfigT]):
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
+        **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         group_shape = self.config.group_shape
 
         if group_shape.is_per_group():
-            return self.apply_group_quant(x, scale, scale_ub)
+            return self.apply_group_quant(x, scale, scale_ub, kwargs=kwargs)
 
         # for some kernels per-tensor and per-token quantization
         # share the same implementation
         # since they differ only in scale dimensionality, not computation logic.
         if group_shape.is_per_tensor() or group_shape.is_per_token():
-            return self.apply_per_token_per_tensor_quant(x, scale, scale_ub)
+            return self.apply_per_token_per_tensor_quant(
+                x, scale, scale_ub, kwargs=kwargs
+            )
 
         # TODO: Per-channel quantization not yet supported.
         # Currently no kernel implements this quantization granularity.

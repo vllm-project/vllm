@@ -246,7 +246,13 @@ class TritonInputQuantKernel(InputQuantKernel[InputQuantConfig]):
     def ordered_fallback_kernels(cls) -> list[type[InputQuantKernel[InputQuantConfig]]]:
         return [PytorchInputQuantKernel]
 
-    def apply_group_quant(self, x, scale=None, scale_ub=None):
+    def apply_group_quant(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return per_token_group_quant_fp8_triton(
             x,
             self.group_size,
@@ -254,6 +260,12 @@ class TritonInputQuantKernel(InputQuantKernel[InputQuantConfig]):
             use_ue8m0=self.use_ue8m0,
         )
 
-    def apply_per_token_per_tensor_quant(self, x, scale=None, scale_ub=None):
+    def apply_per_token_per_tensor_quant(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Currently there is no per_tensor, per_token triton kernel implementation.
         raise NotImplementedError
