@@ -103,8 +103,6 @@ def run_cutlass_moe_fp8(
         or a2_scale.size(0) == a1q.shape[0]
     ), "Intermediate scale shape mismatch"
     assert out_dtype in [torch.half, torch.bfloat16], "Invalid output dtype"
-    if expert_map is not None:
-        assert expert_num_tokens is None
 
     # We have two modes: batched experts and non-batched experts.
     # In the non-batched mode, the input tokens are not padded: thus, the shape

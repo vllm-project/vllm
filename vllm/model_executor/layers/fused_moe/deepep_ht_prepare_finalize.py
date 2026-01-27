@@ -233,7 +233,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     expert_x,
                     a1_scale,
                     quant_dtype=quant_config.quant_dtype,
-                    per_act_token_quant=False,
+                    per_act_token_quant=quant_config.per_act_token_quant,
                     block_shape=quant_config.block_shape,
                 )
 
