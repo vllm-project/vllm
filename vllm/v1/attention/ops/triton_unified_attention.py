@@ -49,7 +49,10 @@ def select_2d_config(
             num_warps = 2
 
         if current_platform.is_navi():
-            TILE_SIZE = block_size
+            # AMD Triton requires TILE_SIZE to be a power of 2
+            # Note: this may disable the fast path (TILE_SIZE == BLOCK_SIZE)
+            # for non-power-of-2 block sizes
+            TILE_SIZE = triton.next_power_of_2(block_size)
 
         if max_seqlen_q >= 256:
             BLOCK_M = 128
@@ -92,8 +95,10 @@ def select_3d_config(
 
         target_num_prgms = cu_count * cu_mult
         if current_platform.is_navi():
-            # Use TILE_SIZE = block_size for fast path (avoids div/mod operations)
-            TILE_SIZE = block_size
+            # AMD Triton requires TILE_SIZE to be a power of 2
+            # Note: this may disable the fast path (TILE_SIZE == BLOCK_SIZE)
+            # for non-power-of-2 block sizes
+            TILE_SIZE = triton.next_power_of_2(block_size)
             MIN_SEGMENTS = 16 if TILE_SIZE <= 16 else 8
         else:
             TILE_SIZE = 64
