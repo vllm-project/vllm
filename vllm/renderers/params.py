@@ -196,7 +196,7 @@ class TokenizeParams:
             max_length = self.max_input_tokens
 
         return dict(
-            truncation=self.truncate_prompt_tokens is not None,
+            truncation=max_length is not None,
             max_length=max_length,
             add_special_tokens=self.add_special_tokens,
         )
