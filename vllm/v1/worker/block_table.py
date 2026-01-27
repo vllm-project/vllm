@@ -130,8 +130,8 @@ class BlockTable:
         self.num_blocks_per_row[src_tgt] = self.num_blocks_per_row[tgt_src]
         self.block_table.np[src_tgt] = self.block_table.np[tgt_src]
 
-    def compute_slot_mapping(
-        self, req_indices: np.ndarray, positions: np.ndarray
+    def compute_slot_mapping_gpu(
+        self, req_indices: torch.Tensor, positions: torch.Tensor
     ) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
@@ -139,60 +139,6 @@ class BlockTable:
         # NOTE(woosuk): We can't simply use `token_indices // block_size`
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        if total_cp_world_size > 1:
-            # Note(hc): The DCP implement store kvcache with an interleave
-            # style, the kvcache for the token whose token_idx is i is
-            # always stored on the GPU whose dcp_rank equals i % cp_world_size:
-
-            # Use a "virtual block" which equals to world_size * block_size
-            # for block_table_indices calculation.
-            virtual_block_size = self.block_size * total_cp_world_size
-            block_table_indices = (
-                req_indices * self.max_num_blocks_per_req
-                + positions // virtual_block_size
-            )
-
-            block_numbers = self.block_table.np.ravel()[block_table_indices]
-            # Use virtual_block_size for mask calculation, which marks local
-            # tokens.
-            virtual_block_offsets = positions % virtual_block_size
-            mask = (
-                virtual_block_offsets
-                // self.cp_kv_cache_interleave_size
-                % total_cp_world_size
-                == total_cp_rank
-            )
-            # Calculate local block_offsets
-            block_offsets = (
-                virtual_block_offsets
-                // (total_cp_world_size * self.cp_kv_cache_interleave_size)
-                * self.cp_kv_cache_interleave_size
-                + virtual_block_offsets % self.cp_kv_cache_interleave_size
-            )
-            # Calculate slot_mapping
-            slot_mapping = block_numbers * self.block_size + block_offsets
-            # Write final slots, use -1 for not-local
-            self.slot_mapping.np[: req_indices.shape[0]] = np.where(
-                mask, slot_mapping, -1
-            )
-        else:
-            block_table_indices = (
-                req_indices * self.max_num_blocks_per_req + positions // self.block_size
-            )
-
-            block_numbers = self.block_table.np.ravel()[block_table_indices]
-            block_offsets = positions % self.block_size
-            np.add(
-                block_numbers * self.block_size,
-                block_offsets,
-                out=self.slot_mapping.np[: req_indices.shape[0]],
-            )
-
-    def compute_slot_mapping_gpu(
-        self, req_indices: torch.Tensor, positions: torch.Tensor
-    ) -> None:
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
         if total_cp_world_size > 1:
@@ -361,12 +307,6 @@ class MultiGroupBlockTable:
     def swap_row(self, src: int, tgt: int) -> None:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
-
-    def compute_slot_mapping(
-        self, req_indices: np.ndarray, positions: np.ndarray
-    ) -> None:
-        for block_table in self.block_tables:
-            block_table.compute_slot_mapping(req_indices, positions)
 
     def compute_slot_mapping_gpu(
         self, req_indices: torch.Tensor, positions: torch.Tensor
