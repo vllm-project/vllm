@@ -64,13 +64,12 @@ from vllm.entrypoints.openai.translations.protocol import (
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
-    ClassificationRequest,
     ClassificationResponse,
 )
 from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
-    EmbeddingRequest,
     EmbeddingResponse,
 )
 from vllm.entrypoints.pooling.pooling.protocol import (
@@ -170,6 +169,7 @@ AnyResponse: TypeAlias = (
     CompletionResponse
     | ChatCompletionResponse
     | EmbeddingResponse
+    | EmbeddingBytesResponse
     | TranscriptionResponse
     | TokenizeResponse
     | PoolingResponse
@@ -183,51 +183,21 @@ RequestT = TypeVar("RequestT", bound=AnyRequest)
 
 
 @dataclass(kw_only=True)
-class RequestProcessingMixin:
-    """
-    Mixin for request processing,
-    handling prompt preparation and engine input.
-    """
-
-    engine_prompts: list[TokensPrompt] | None = field(default_factory=list)
-
-
-@dataclass(kw_only=True)
-class ResponseGenerationMixin:
-    """
-    Mixin for response generation,
-    managing result generators and final batch results.
-    """
-
-    result_generator: (
-        AsyncGenerator[tuple[int, RequestOutput | PoolingRequestOutput], None] | None
-    ) = None
-    final_res_batch: list[RequestOutput | PoolingRequestOutput] = field(
-        default_factory=list
-    )
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-
-@dataclass(kw_only=True)
-class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, Generic[RequestT]):
+class ServeContext(Generic[RequestT]):
     request: RequestT
     raw_request: Request | None = None
     model_name: str
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
+    engine_prompts: list[TokensPrompt] | None = None
 
+    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
+        None
+    )
+    final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
 
-@dataclass(kw_only=True)
-class ClassificationServeContext(ServeContext[ClassificationRequest]):
-    pass
-
-
-@dataclass(kw_only=True)
-class EmbeddingServeContext(ServeContext[EmbeddingRequest]):
-    chat_template: str | None = None
-    chat_template_content_format: ChatTemplateContentFormatOption
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class OpenAIServing:
@@ -605,10 +575,7 @@ class OpenAIServing:
         self,
         ctx: ServeContext,
     ) -> AnyResponse | ErrorResponse:
-        generation: AsyncGenerator[AnyResponse | ErrorResponse, None]
-        generation = self._pipeline(ctx)
-
-        async for response in generation:
+        async for response in self._pipeline(ctx):
             return response
 
         return self.create_error_response("No response yielded from pipeline")
@@ -667,9 +634,7 @@ class OpenAIServing:
         ctx: ServeContext,
     ) -> ErrorResponse | None:
         """Schedule the request and get the result generator."""
-        generators: list[
-            AsyncGenerator[RequestOutput | PoolingRequestOutput, None]
-        ] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         try:
             trace_headers = (
@@ -723,7 +688,7 @@ class OpenAIServing:
                 return self.create_error_response("Engine prompts not available")
 
             num_prompts = len(ctx.engine_prompts)
-            final_res_batch: list[RequestOutput | PoolingRequestOutput | None]
+            final_res_batch: list[PoolingRequestOutput | None]
             final_res_batch = [None] * num_prompts
 
             if ctx.result_generator is None:
@@ -1011,7 +976,7 @@ class OpenAIServing:
 
     def _validate_input(
         self,
-        request: AnyRequest,
+        request: object,
         input_ids: list[int],
         input_text: str,
     ) -> TokensPrompt:
