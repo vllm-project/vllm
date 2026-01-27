@@ -11,11 +11,9 @@ This ensures that 'pip install vllm' automatically installs the correct custom w
 instead of allowing pip to download different versions from PyPI.
 """
 
+import re
 import sys
 from pathlib import Path
-
-import regex as re
-
 
 def extract_version_from_wheel(wheel_name: str) -> str:
     """

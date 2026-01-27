@@ -236,6 +236,10 @@ class VocabParallelEmbedding(CustomOp):
     ):
         super().__init__()
 
+        # Make sure no embeddings are added for LoRA
+        if org_num_embeddings is not None:
+            num_embeddings = org_num_embeddings
+
         # Keep the input dimensions.
         tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()

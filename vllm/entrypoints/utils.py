@@ -118,13 +118,13 @@ def load_aware_call(func):
     async def wrapper(*args, **kwargs):
         raw_request = kwargs.get("raw_request", args[1] if len(args) > 1 else None)
 
+        if not getattr(raw_request.app.state, "enable_server_load_tracking",
+                       False):
+            return await func(*args, **kwargs)
+
         if raw_request is None:
             raise ValueError(
-                "raw_request required when server load tracking is enabled"
-            )
-
-        if not getattr(raw_request.app.state, "enable_server_load_tracking", False):
-            return await func(*args, **kwargs)
+                "raw_request required when server load tracking is enabled")
 
         # ensure the counter exists
         if not hasattr(raw_request.app.state, "server_load_metrics"):
@@ -277,7 +277,11 @@ def should_include_usage(
 def process_lora_modules(
     args_lora_modules: list[LoRAModulePath], default_mm_loras: dict[str, str] | None
 ) -> list[LoRAModulePath]:
+<<<<<<< HEAD
     from vllm.entrypoints.openai.models.serving import LoRAModulePath
+=======
+    from vllm.entrypoints.openai.serving_models import LoRAModulePath
+>>>>>>> 48b67ba75 ([Frontend] Standardize use of `create_error_response` (#32319))
 
     lora_modules = args_lora_modules
     if default_mm_loras:
