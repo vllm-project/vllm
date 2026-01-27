@@ -31,14 +31,6 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
 
         self.routing_method_type = self.moe_config.routing_method
-        # self.routing_method_type = flashinfer.RoutingMethodType.Llama4
-        # self.routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
-
-        self.routing_bias = None
-        self.e_score_correction_bias = None
-        self.topk_group = None
-        self.num_expert_group = None
-
         self.topk = moe_config.experts_per_token
         self.intermediate_size_per_partition = (
             moe_config.intermediate_size_per_partition
@@ -205,6 +197,11 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
         apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
     ) -> torch.Tensor:
         assert activation == "silu"
         assert a1q_scale is not None
@@ -239,8 +236,8 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEPermuteExpertsUnpermute):
             output2_scale_scalar=self.quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
-            n_group=self.num_expert_group if self.num_expert_group is not None else 0,
-            topk_group=self.topk_group if self.topk_group is not None else 0,
+            n_group=(num_expert_group or 0),
+            topk_group=(topk_group or 0),
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
