@@ -201,6 +201,7 @@ class RealtimeConnection:
                     # finish
                     break
 
+            assert prompt_token_ids_len is not None
             usage = UsageInfo(
                 prompt_tokens=prompt_token_ids_len,
                 completion_tokens=completion_tokens_len,
