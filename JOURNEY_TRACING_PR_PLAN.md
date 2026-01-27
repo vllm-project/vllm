@@ -186,7 +186,7 @@ def _end_core_span_and_cleanup(self, request: Request) -> None:
 | #1 | `pr1ofjourney` | Init tracer in scheduler | ~25 lines | 4 | ✅ **COMPLETED** |
 | #2 | `journey-tracing-02-core-spans-lifecycle` | Create & cleanup core spans | ~100 lines | 6 | ✅ **COMPLETED** |
 | #3 | `pr3ofjourney` | Add journey state & cleanup | ~26 lines | 4 | ✅ **COMPLETED** |
-| #4 | `journey-tracing-04-journey-events-emit` | Emit events to core spans | ~120 lines | 7 | No new resources, defensive |
+| #4 | `pr4ofjourney` | Emit events to core spans | ~113 lines | 9 | ✅ **COMPLETED** |
 | #5 | `journey-tracing-05-api-span-tracking` | Add API span tracking dict | ~20 lines | 2 | No Pydantic field |
 | #6 | `journey-tracing-06-api-spans-full-lifecycle` | Create & close API spans | ~150 lines | 9 | **All closure paths in same PR** ✅ |
 | #7 | `journey-tracing-07-context-propagation` | Link parent-child spans | ~25 lines | 4 | No new resources |
@@ -208,7 +208,7 @@ PR #2 (Core Span + Cleanup) ✅ COMPLETED
     ↓
 PR #3 (Journey State + Cleanup) ✅ COMPLETED
     ↓
-PR #4 (Core Event Emit) ← no new resources, safe
+PR #4 (Core Event Emit) ✅ COMPLETED
     ↓
 PR #5 (API Metadata) ← independent, can be parallel
     ↓
@@ -690,11 +690,36 @@ Same as PR #2 (already covered):
 
 ### PR #4: Engine - Emit Journey Events
 
-**Branch**: `journey-tracing-04-journey-events-emit`
+**Status**: ✅ Completed (PR #12 merged)
+
+**Branch**: `pr4ofjourney`
 
 **Goal**: Add progress snapshot logic and emit events to core spans. No new resources, just additive event emission.
 
 **Why Safe**: No new resources created, just emitting events to existing spans. Defensive error handling.
+
+**What was implemented**:
+- Extended `_emit_journey_event()` to accept optional span parameter
+- Added span emission logic with defensive error handling (try/except around all OTEL calls)
+- Updated all 6 call sites to pass span from `_core_spans` dict
+- Added FINISHED emission in natural completion path (update_from_output)
+- Extended `_compute_progress_snapshot()` to support WAITING phase for QUEUED events
+- Changed QUEUED scheduler_step from None to counter (typically 0)
+- Added 9 comprehensive tests covering all event types and edge cases
+- Progress snapshot computed once and reused for both span and buffering (performance optimization)
+
+**Tests added**: 9 tests (328 lines), all passing
+- `test_events_emitted_to_span()` - Verify QUEUED, SCHEDULED emitted
+- `test_event_attributes_complete()` - Verify all attributes present
+- `test_defensive_error_handling()` - Verify request continues when add_event raises
+- `test_no_events_when_span_none()` - Verify graceful handling when tracer=None
+- `test_legacy_buffering_still_works()` - Verify parallel buffering unchanged
+- `test_first_token_dedup_set()` - Verify FIRST_TOKEN deduplication
+- `test_first_token_transition_emitted()` - Verify FIRST_TOKEN on 0→N transition
+- `test_finished_emitted_to_span()` - Verify FINISHED emission on natural completion
+- `test_preempted_event_emitted()` - Verify PREEMPTED event
+
+**Size**: ~113 lines production code (net), 328 lines test code
 
 #### Changes
 

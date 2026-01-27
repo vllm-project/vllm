@@ -3942,3 +3942,331 @@ def test_no_state_leak(mock_init_tracer):
     assert len(scheduler._first_token_emitted) == 0
     assert len(scheduler._journey_prefill_hiwater) == 0
     assert len(scheduler._core_spans) == 0
+
+
+# ============================================================================
+# PR4 Tests: Journey Event Emission to Core Spans
+# ============================================================================
+
+
+def test_events_emitted_to_span():
+    """Test key lifecycle events (QUEUED, SCHEDULED) emitted to span."""
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(enable_journey_tracing=True)
+    scheduler.tracer = Mock()  # CRITICAL: ensures _create_core_span is called
+
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        request = create_requests(num_requests=1)[0]
+
+        # QUEUED event
+        scheduler.add_request(request)
+
+        # SCHEDULED event
+        scheduler.schedule()
+
+    # Verify key lifecycle events emitted
+    event_names = [call[1]['name'] for call in mock_span.add_event.call_args_list]
+    assert 'journey.QUEUED' in event_names
+    assert 'journey.SCHEDULED' in event_names
+
+
+def test_event_attributes_complete():
+    """Test all required attributes present in span events."""
+    from vllm.tracing import SpanAttributes
+
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(enable_journey_tracing=True)
+    scheduler.tracer = Mock()  # CRITICAL: ensures span creation
+
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        request = create_requests(num_requests=1)[0]
+        scheduler.add_request(request)
+        scheduler.schedule()
+
+    # Get SCHEDULED event
+    scheduled_calls = [c for c in mock_span.add_event.call_args_list
+                       if 'SCHEDULED' in c[1]['name']]
+    assert len(scheduled_calls) >= 1
+
+    attributes = scheduled_calls[0][1]['attributes']
+
+    # Verify required attributes
+    assert SpanAttributes.JOURNEY_EVENT_TYPE in attributes
+    assert SpanAttributes.JOURNEY_TS_MONOTONIC in attributes
+    assert SpanAttributes.JOURNEY_SCHEDULER_STEP in attributes
+    assert SpanAttributes.JOURNEY_PHASE in attributes
+    assert SpanAttributes.JOURNEY_PREFILL_DONE_TOKENS in attributes
+    assert SpanAttributes.JOURNEY_PREFILL_TOTAL_TOKENS in attributes
+    assert SpanAttributes.JOURNEY_DECODE_DONE_TOKENS in attributes
+    assert SpanAttributes.JOURNEY_DECODE_MAX_TOKENS in attributes
+    assert SpanAttributes.JOURNEY_NUM_PREEMPTIONS in attributes
+    assert SpanAttributes.JOURNEY_SCHEDULE_KIND in attributes  # SCHEDULED only
+
+    # Verify values are correct types
+    assert isinstance(attributes[SpanAttributes.JOURNEY_SCHEDULER_STEP], int)
+    assert attributes[SpanAttributes.JOURNEY_PHASE] in ["WAITING", "PREFILL", "DECODE"]
+
+
+def test_defensive_error_handling():
+    """Test that span.add_event failures don't break request processing."""
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+    mock_span.add_event.side_effect = Exception("OTEL backend unavailable")
+
+    scheduler = create_scheduler(enable_journey_tracing=True)
+    scheduler.tracer = Mock()  # CRITICAL: ensures span creation
+
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        # This should NOT raise despite add_event failing
+        request = create_requests(num_requests=1)[0]
+        scheduler.add_request(request)
+        scheduler.schedule()
+
+    # Verify request was processed despite tracing failure
+    assert request.request_id in scheduler.requests
+
+
+def test_no_events_when_span_none():
+    """Test graceful handling when tracer=None (no span created)."""
+    # Create scheduler with tracing enabled but endpoint=None (tracer won't init)
+    scheduler = create_scheduler(
+        enable_journey_tracing=True,
+        otlp_traces_endpoint=None  # No endpoint = no tracer
+    )
+
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    scheduler.schedule()
+
+    # Verify scheduler.tracer is None
+    assert scheduler.tracer is None
+
+    # Verify _core_spans is empty (no span created)
+    assert request.request_id not in scheduler._core_spans
+
+    # Verify legacy buffering still works
+    events = scheduler._journey_events_buffer_by_client[request.client_index]
+    assert len(events) >= 2  # At least QUEUED and SCHEDULED
+
+
+def test_legacy_buffering_still_works():
+    """Test that both span emission AND buffering happen (parallel operation)."""
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(enable_journey_tracing=True)
+    scheduler.tracer = Mock()  # CRITICAL: ensures span creation
+
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        request = create_requests(num_requests=1)[0]
+        scheduler.add_request(request)
+        scheduler.schedule()
+
+    # Verify span emission happened
+    assert mock_span.add_event.call_count >= 2  # QUEUED, SCHEDULED
+
+    # Verify legacy buffering also happened (parallel)
+    events = scheduler._journey_events_buffer_by_client[request.client_index]
+    assert len(events) >= 2  # QUEUED, SCHEDULED
+
+    # Verify buffered events have correct structure
+    from vllm.v1.core.sched.journey_events import RequestJourneyEventType
+    queued = [e for e in events if e.event_type == RequestJourneyEventType.QUEUED][0]
+    assert queued.request_id == request.request_id
+    assert queued.scheduler_step == 0  # QUEUED uses step counter (typically 0)
+
+
+def test_first_token_dedup_set():
+    """Test dedup set prevents duplicate FIRST_TOKEN emissions."""
+    from vllm.v1.core.sched.journey_events import RequestJourneyEventType
+
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(enable_journey_tracing=True)
+    scheduler.tracer = Mock()  # CRITICAL: ensures span creation
+
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        request = create_requests(num_requests=1)[0]
+        scheduler.add_request(request)
+
+        # Ensure clean state
+        scheduler._first_token_emitted.discard(request.request_id)
+        core_span = scheduler._core_spans.get(request.request_id)
+
+        # First emission: should succeed
+        if request.request_id not in scheduler._first_token_emitted:
+            scheduler._first_token_emitted.add(request.request_id)
+            scheduler._emit_journey_event(
+                request,
+                RequestJourneyEventType.FIRST_TOKEN,
+                scheduler_step=1,
+                span=core_span,
+            )
+
+        # Second attempt: should be skipped (already in dedup set)
+        if request.request_id not in scheduler._first_token_emitted:
+            scheduler._emit_journey_event(
+                request,
+                RequestJourneyEventType.FIRST_TOKEN,
+                scheduler_step=1,
+                span=core_span,
+            )
+
+    # Count FIRST_TOKEN events on span
+    first_token_calls = [c for c in mock_span.add_event.call_args_list
+                         if 'FIRST_TOKEN' in c[1]['name']]
+    assert len(first_token_calls) == 1  # Exactly once
+
+    # Verify dedup set
+    assert request.request_id in scheduler._first_token_emitted
+
+
+def test_first_token_transition_emitted():
+    """Test FIRST_TOKEN emitted on 0->N output token transition."""
+    from vllm.v1.core.sched.journey_events import RequestJourneyEventType
+    from types import SimpleNamespace
+
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(enable_journey_tracing=True)
+    scheduler.tracer = Mock()  # CRITICAL: ensures span creation
+
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        request = create_requests(num_requests=1)[0]
+        scheduler.add_request(request)
+        output = scheduler.schedule()
+
+        # Verify pre-condition
+        assert request.num_output_tokens == 0
+        assert request.request_id not in scheduler._first_token_emitted
+
+        # Create minimal stubs for update_from_output
+        scheduler_output = SimpleNamespace(
+            scheduler_step=1,
+            num_scheduled_tokens={request.request_id: 1},
+            scheduled_spec_decode_tokens={},
+            num_invalid_spec_tokens=0,
+        )
+
+        model_output = SimpleNamespace(
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[100, 101]],  # Two tokens
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=None,
+            num_nans_in_logits=None,
+            kv_connector_output=None,
+            cudagraph_stats=None,
+        )
+
+        # Call update_from_output which will trigger FIRST_TOKEN logic
+        scheduler.update_from_output(scheduler_output, model_output)
+
+    # Verify FIRST_TOKEN emitted
+    first_token_calls = [c for c in mock_span.add_event.call_args_list
+                         if 'FIRST_TOKEN' in c[1]['name']]
+    assert len(first_token_calls) == 1
+
+    # Verify transition happened
+    assert request.num_output_tokens > 0
+    assert request.request_id in scheduler._first_token_emitted
+
+
+def test_finished_emitted_to_span():
+    """Test FINISHED event emitted to span on natural completion."""
+    from vllm.v1.core.sched.journey_events import RequestJourneyEventType
+    from types import SimpleNamespace
+
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(enable_journey_tracing=True)
+    scheduler.tracer = Mock()  # CRITICAL: ensures span creation
+
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        request = create_requests(num_requests=1)[0]
+        scheduler.add_request(request)
+        output = scheduler.schedule()
+
+        # Simulate natural completion with stopped=True
+        # Set up request to be stopped by setting status to FINISHED
+        request.status = RequestStatus.FINISHED_STOPPED
+
+        scheduler_output = SimpleNamespace(
+            scheduler_step=1,
+            num_scheduled_tokens={request.request_id: 1},
+            scheduled_spec_decode_tokens={},
+            num_invalid_spec_tokens=0,
+        )
+
+        # Mock _update_request_with_output to return stopped=True
+        def mock_update(req, tokens):
+            return tokens, True  # stopped=True
+
+        with patch.object(scheduler, '_update_request_with_output', side_effect=mock_update):
+            model_output = SimpleNamespace(
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[EOS_TOKEN_ID]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=None,
+                num_nans_in_logits=None,
+                kv_connector_output=None,
+                cudagraph_stats=None,
+            )
+
+            scheduler.update_from_output(scheduler_output, model_output)
+
+    # Verify FINISHED event emitted
+    finished_calls = [c for c in mock_span.add_event.call_args_list
+                      if 'FINISHED' in c[1]['name']]
+    assert len(finished_calls) == 1
+
+    # Verify finish_status attribute present
+    from vllm.tracing import SpanAttributes
+    attributes = finished_calls[0][1]['attributes']
+    assert SpanAttributes.JOURNEY_FINISH_STATUS in attributes
+
+    # Verify span.end was called (cleanup happened)
+    assert mock_span.end.called
+
+
+def test_preempted_event_emitted():
+    """Test PREEMPTED event emitted when request is preempted."""
+    from vllm.v1.core.sched.journey_events import RequestJourneyEventType
+    import time
+
+    mock_span = Mock()
+    mock_span.is_recording.return_value = True
+
+    scheduler = create_scheduler(enable_journey_tracing=True)
+    scheduler.tracer = Mock()  # CRITICAL: ensures span creation
+
+    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
+        request = create_requests(num_requests=1)[0]
+        scheduler.add_request(request)
+        scheduler.schedule()
+
+        # Set request to RUNNING state (required precondition for preemption)
+        request.status = RequestStatus.RUNNING
+
+        # Preempt the request using exact signature from scheduler.py
+        scheduler._preempt_request(
+            request=request,
+            timestamp=time.time(),
+            scheduler_step=1
+        )
+
+    # Verify PREEMPTED event emitted
+    preempted_calls = [c for c in mock_span.add_event.call_args_list
+                       if 'PREEMPTED' in c[1]['name']]
+    assert len(preempted_calls) == 1
+
+    # Verify request status changed
+    assert request.status == RequestStatus.PREEMPTED
