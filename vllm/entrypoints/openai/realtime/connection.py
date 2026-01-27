@@ -197,13 +197,14 @@ class RealtimeConnection:
             # Stream results back to client as they're generated
             async for output in result_gen:
                 if output.outputs and len(output.outputs) > 0:
+
                     delta = output.outputs[0].text
                     full_text += delta
 
                     # Collect token IDs from output
                     all_token_ids.extend(output.outputs[0].token_ids)
-                    await self.input_stream.put(all_token_ids)
-
+                    print("Output", all_token_ids)
+                    await input_stream.put(all_token_ids)
                     await self.send(TranscriptionDelta(delta=delta))
 
                     # TODO: Track token counts for usage stats
@@ -248,13 +249,6 @@ class RealtimeConnection:
         """Cleanup resources."""
         # Signal audio stream to stop
         self.audio_queue.put_nowait(None)
-
-        # Clear input_stream queue
-        while not self.input_stream.empty():
-            try:
-                self.input_stream.get_nowait()
-            except asyncio.QueueEmpty:
-                break
 
         # Cancel generation task if running
         if self.generation_task and not self.generation_task.done():
