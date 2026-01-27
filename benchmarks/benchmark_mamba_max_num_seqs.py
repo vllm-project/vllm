@@ -9,12 +9,13 @@ an optimal --max-num-seqs value based on where bandwidth reaches near-peak.
 
 Algorithm:
 1. Find the smallest batch size that achieves 99% of maximum observed bandwidth
-2. Apply 2x headroom for max throughput
+2. Apply headroom multiplier (empirical value) for overall throughput
+
 Tested on NVIDIA B200 with Nemotron-H models.
 
 Example:
     python benchmark_mamba_max_num_seqs.py \
-        --model nvidia/Nemotron-H-8B-Base-8K
+        --model /my_home/hf_models/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8/
 """
 
 import argparse
@@ -190,13 +191,13 @@ def find_optimal_batch_size(
     compute_dtype: torch.dtype = torch.bfloat16,
     bw_threshold: float = 0.005,
     near_peak_ratio: float = 0.99,
-    throughput_headroom: float = 2.0,
+    throughput_headroom: float = 1.75,
 ) -> tuple[int, int, list[BenchmarkResult]]:
     """
     Find the optimal batch size for serving throughput.
 
     Uses bandwidth plateau detection: finds where bandwidth reaches near-peak
-    (99% of max), then applies 2x headroom for overall system efficiency.
+    (99% of max), then applies headroom for overall system efficiency.
     This is more stable than threshold-based saturation detection.
     """
     if tp_size > 1:
@@ -272,7 +273,7 @@ def find_optimal_batch_size(
     # Apply headroom for overall throughput optimization
     # Round to nearest 64 for cleaner values
     recommended = int(near_peak_batch * throughput_headroom)
-    recommended = ((recommended + 63) // 64) * 64
+    recommended = ((recommended + 32) // 64) * 64  # Round to nearest, not up
 
     return near_peak_batch, recommended, results
 
@@ -299,6 +300,12 @@ def main():
         type=float,
         default=0.005,
         help="Bandwidth improvement threshold for saturation detection",
+    )
+    parser.add_argument(
+        "--headroom",
+        type=float,
+        default=1.75,
+        help="Headroom multiplier for recommended batch size",
     )
     parser.add_argument(
         "--dtype",
@@ -331,16 +338,13 @@ def main():
         f"({torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB)"
     )
 
-    # Empirical headroom for overall throughput optimization (tested on B200)
-    throughput_headroom = 2.0
-
     near_peak_batch, recommended, results = find_optimal_batch_size(
         config=config,
         batch_sizes=args.batch_sizes,
         tp_size=args.tensor_parallel_size,
         compute_dtype=compute_dtype,
         bw_threshold=args.bw_threshold,
-        throughput_headroom=throughput_headroom,
+        throughput_headroom=args.headroom,
     )
 
     max_bw = max(r.effective_bandwidth_tb_s for r in results)
@@ -350,7 +354,7 @@ def main():
     print(f"\n{'=' * 50}")
     print(f"RECOMMENDED --max-num-seqs: {recommended}")
     print(f"{'=' * 50}")
-    print(f"(near-peak batch {near_peak_batch} × {throughput_headroom:.1f}x headroom)")
+    print(f"(near-peak batch {near_peak_batch} × {args.headroom:.2g}x headroom)")
 
 
 if __name__ == "__main__":
