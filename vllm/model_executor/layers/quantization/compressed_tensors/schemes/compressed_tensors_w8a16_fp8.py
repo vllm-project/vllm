@@ -21,6 +21,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
+from vllm.platforms import current_platform
 
 __all__ = ["CompressedTensorsW8A16Fp8"]
 
@@ -34,6 +35,8 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
+        if current_platform.is_xpu():
+            return 0
         # ampere and up
         return 80
 
@@ -41,6 +44,8 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
     # So if we have a fused module (QKV, MLP) with per tensor scales,
     # we expand each scale to its shard's channels.
     def process_weights_after_loading(self, layer) -> None:
+        if current_platform.is_xpu():
+            return self.process_weights_after_loading_xpu(layer)
         if self.strategy == QuantizationStrategy.TENSOR:
             ws_channelwise = convert_to_channelwise(
                 layer.weight_scale, layer.logical_widths
@@ -61,6 +66,42 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                 layer.input_scale.data, requires_grad=False
             )
         prepare_fp8_layer_for_marlin(layer)
+
+    def process_weights_after_loading_xpu(self, layer) -> None:
+        # Give xpu only support to per-tensor strategy for now
+        # So if we have a fused module (QKV, MLP) with per tensor scales,
+        # requantize the weights w/ max scale
+        def requant_weight_per_tensor(layer):
+            device = layer.weight.device
+            # Get the max scale on the weight's device
+            max_scale = torch.max(layer.weight_scale.data.to(device))
+            orig_dtype = layer.weight.dtype
+            start_idx = 0
+            for index, width in enumerate(layer.logical_widths):
+                end_idx = start_idx + width
+                if width == 0:
+                    continue
+
+                shard_weight = layer.weight.data[start_idx:end_idx, :]
+                shard_scale = layer.weight_scale.data[index].to(device)
+
+                # Dequantize and then requantize with max_scale
+                dequantized_shard = shard_weight.to(torch.float32) * shard_scale
+                requantized_shard = (dequantized_shard / max_scale).to(orig_dtype)
+
+                layer.weight.data[start_idx:end_idx, :] = requantized_shard
+                start_idx = end_idx
+
+            layer.weight_scale = torch.nn.Parameter(max_scale, requires_grad=False).to(
+                device
+            )
+
+        if (
+            self.strategy == QuantizationStrategy.TENSOR
+            and len(layer.logical_widths) > 1
+        ):
+            requant_weight_per_tensor(layer)
+        layer.weight = torch.nn.Parameter(layer.weight.data.t(), requires_grad=False)
 
     def create_weights(
         self,
@@ -127,6 +168,10 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if current_platform.is_xpu():
+            return torch.ops._xpu_C.fp8_gemm_w8a16(
+                x, layer.weight, layer.weight_scale, bias
+            )
         return apply_fp8_marlin_linear(
             input=x,
             weight=layer.weight,
