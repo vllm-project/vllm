@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from
-# https://github.com/deepseek-ai/DeepSeek-OCR/blob/main/DeepSeek-OCR-master/DeepSeek-OCR-vllm/deepencoder/sam_vary_sdpa.py
+# https://github.com/deepseek-ai/DeepSeek-OCR-2/blob/main/DeepSeek-OCR2-master/DeepSeek-OCR2-vllm/deepencoderv2/qwen2_d2e.py
 
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
@@ -570,13 +570,6 @@ class CustomQwen2Decoder(nn.Module):
             initializer_range: float = 0.02,
     ):
         super().__init__()
-
-        # attn_implementation check
-        if attn_implementation == "flash_attention_2":
-            raise ValueError(
-                "CustomQwen2Decoder do not support flash_attention_2，"
-                "new attention mask needs 'sdpa' or 'eager'"
-            )
 
         # load
         Qwen2Model = getattr(transformers.models.qwen2.modeling_qwen2, 'Qwen2Model')
