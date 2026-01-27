@@ -160,6 +160,8 @@ class RealtimeConnection:
         """
         request_id = f"rt-{self.connection_id}-{uuid4()}"
         full_text = ""
+
+        prompt_token_ids_len: int = 0
         completion_tokens_len: int = 0
 
         try:
@@ -181,12 +183,11 @@ class RealtimeConnection:
                 sampling_params=sampling_params,
                 request_id=request_id,
             )
-            prompt_token_ids_len: int | None = None
 
             # Stream results back to client as they're generated
             async for output in result_gen:
                 if output.outputs and len(output.outputs) > 0:
-                    if prompt_token_ids_len is None:
+                    if not prompt_token_ids_len:
                         prompt_token_ids_len = len(output.prompt_token_ids)
 
                     delta = output.outputs[0].text
@@ -202,7 +203,6 @@ class RealtimeConnection:
                     # finish
                     break
 
-            assert prompt_token_ids_len is not None
             usage = UsageInfo(
                 prompt_tokens=prompt_token_ids_len,
                 completion_tokens=completion_tokens_len,

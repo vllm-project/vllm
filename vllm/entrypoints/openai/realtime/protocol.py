@@ -19,7 +19,7 @@ class InputAudioBufferAppend(OpenAIBaseModel):
     """Append audio chunk to buffer"""
 
     type: Literal["input_audio_buffer.append"] = "input_audio_buffer.append"
-    audio: str  # base64-encoded PCM16 @ 24kHz
+    audio: str  # base64-encoded PCM16 @ 16kHz
 
 
 class InputAudioBufferCommit(OpenAIBaseModel):

@@ -16,6 +16,7 @@ from mistral_common.protocol.transcription.request import (
 from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.envs import VLLM_ENGINE_ITERATION_TIMEOUT_S
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
@@ -143,12 +144,8 @@ class VoxtralRealtimeBuffer:
 
         # mutable objects
         streaming_delay = self._get_len_in_samples(self._config.transcription_delay_ms)
-        n_left_pad_samples = (
-            self._config.raw_audio_length_per_tok * self._config.n_left_pad_tokens
-        )
-        n_left_pad_samples = 0
         self._start = 0
-        self._end = streaming_delay + n_left_pad_samples + self._streaming_size
+        self._end = streaming_delay + self._streaming_size
 
         # always pre-allocate 30 second buffers
         self._buffer_size = _PRE_ALLOCATE_BUFFER_SIZE_IN_S * self._sampling_rate
@@ -252,15 +249,10 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
         buffer = VoxtralRealtimeBuffer(config)
         is_first_yield = True
 
-        count = 0
-
         async for audio in audio_stream:
-            print("audio shape", audio.shape)
             buffer.add_audio_chunk(audio)
 
             while (new_audio := buffer.get_audio_chunk()) is not None:
-                print("new_audio shape", new_audio.shape)
-
                 if is_first_yield:
                     # make sure that input_stream is empty
                     assert input_stream.empty()
@@ -283,16 +275,9 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
                 else:
                     # pop last element from input_stream
                     all_outputs = await asyncio.wait_for(
-                        input_stream.get(), timeout=10.0
+                        input_stream.get(), timeout=VLLM_ENGINE_ITERATION_TIMEOUT_S
                     )
                     token_ids = all_outputs[-1:]
-
-                count += 1
-                print(f"COUNT {count}")
-                print(20 * "-" + "INPUT" + 20 * "-")
-                print("token_ids", token_ids)
-                print("audio shape", new_audio.shape)
-                print("audio", new_audio)
 
                 multi_modal_data = {"audio": (new_audio, None)}
                 yield TokensPrompt(
