@@ -14,6 +14,17 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8
 )
 from vllm.platforms import current_platform
+from vllm.model_executor.layers.quantization.triton_quantization import (
+    silu_and_mul_per_block_quant_triton,
+)
+import os
+
+# Set LD_LIBRARY_PATH and LIBRARY_PATH to include cuda stubs if not present
+cuda_stubs_path = "/usr/local/cuda-12.8/targets/x86_64-linux/lib/stubs"
+if cuda_stubs_path not in os.environ.get("LD_LIBRARY_PATH", ""):
+    os.environ["LD_LIBRARY_PATH"] = cuda_stubs_path + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+if cuda_stubs_path not in os.environ.get("LIBRARY_PATH", ""):
+    os.environ["LIBRARY_PATH"] = cuda_stubs_path + ":" + os.environ.get("LIBRARY_PATH", "")
 
 DTYPES = [torch.float16, torch.bfloat16]
 QUANT_DTYPES = [torch.float8_e4m3fn, torch.int8]
@@ -93,6 +104,20 @@ def ops_impl(
     # if is_scale_transposed:
     #     scales = scales.t().contiguous()
     
+    return out, scales
+
+
+def triton_impl(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None,
+    group_size: int,
+    is_scale_transposed: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Triton kernel implementation."""
+    out, scales = silu_and_mul_per_block_quant_triton(
+        x, group_size, quant_dtype, scale_ub, is_scale_transposed
+    )
     return out, scales
 
 
@@ -299,3 +324,86 @@ def test_silu_block_quant_edge_cases(
     assert not torch.isnan(out.float()).any()
     assert not torch.isnan(scales).any()
     assert not torch.isinf(scales).any()
+
+
+@pytest.mark.parametrize("num_tokens, hidden_size", NUM_TOKENS_HIDDEN_SIZES)
+@pytest.mark.parametrize("has_scale_ub", SCALE_UBS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
+@pytest.mark.parametrize("is_scale_transposed", IS_SCALE_TRANSPOSED)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_silu_and_mul_per_block_quant_triton(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    has_scale_ub: bool,
+    dtype: torch.dtype,
+    quant_dtype: torch.dtype,
+    group_size: int,
+    is_scale_transposed: bool,
+    seed: int,
+    device: str,
+) -> None:
+    """Test SiLU+Mul+Block Quantization TRITON kernel correctness."""
+    torch.random.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+    torch.set_default_device(device)
+    torch.cuda.set_device(device)
+
+    if hidden_size % group_size != 0:
+        return
+
+    if has_scale_ub:
+        pytest.skip("Scale upper bound not yet supported")
+
+    scale = 1 / hidden_size
+    x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device=device) * scale
+    scale_ub = None
+
+    # Reference implementation
+    ref_out, ref_scales = ref_impl(x, quant_dtype, scale_ub, group_size)
+    
+    # Triton kernel implementation
+    triton_out, triton_scales = triton_impl(
+        x, quant_dtype, scale_ub, group_size, is_scale_transposed
+    )
+
+    # Assertions
+    assert not torch.isnan(triton_out.float()).any()
+    assert not torch.isinf(triton_out.float()).any()
+    assert not torch.isnan(triton_scales).any()
+    assert not torch.isinf(triton_scales).any()
+
+    # Normalize scales layout for comparison
+    if is_scale_transposed:
+        # Triton returns [num_groups, num_tokens], ref is [num_tokens, num_groups]
+        triton_scales_cmp = triton_scales.t()
+    else:
+        triton_scales_cmp = triton_scales
+
+    # Check scales
+    # Triton might have slightly different rounding, reasonable tolerance
+    assert torch.allclose(ref_scales, triton_scales_cmp, rtol=1e-3, atol=1e-3), \
+        f"Scale mismatch: max diff = {(ref_scales - triton_scales_cmp).abs().max()}"
+
+    # Check output
+    # Dequantize to check values because FP8 exact match is hard
+    
+    # Normalize layout to [num_tokens, num_groups] for expansion
+    if is_scale_transposed:
+         triton_scales_row = triton_scales.t()
+    else:
+         triton_scales_row = triton_scales
+    
+    ref_scales_expanded = ref_scales.repeat_interleave(group_size, dim=1)
+    triton_scales_expanded = triton_scales_row.repeat_interleave(group_size, dim=1)
+    
+    ref_deq = ref_out.float() * ref_scales_expanded
+    triton_deq = triton_out.float() * triton_scales_expanded
+    
+    assert torch.allclose(ref_deq, triton_deq, rtol=0.1, atol=0.1), \
+         f"Output mismatch: max diff = {(ref_deq - triton_deq).abs().max()}"

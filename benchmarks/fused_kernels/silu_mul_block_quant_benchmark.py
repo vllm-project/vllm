@@ -17,6 +17,17 @@ import vllm._custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.model_executor.layers.quantization.triton_quantization import (
+    silu_and_mul_per_block_quant_triton,
+)
+import os
+
+# Set LD_LIBRARY_PATH and LIBRARY_PATH to include cuda stubs if not present
+cuda_stubs_path = "/usr/local/cuda-12.8/targets/x86_64-linux/lib/stubs"
+if cuda_stubs_path not in os.environ.get("LD_LIBRARY_PATH", ""):
+    os.environ["LD_LIBRARY_PATH"] = cuda_stubs_path + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+if cuda_stubs_path not in os.environ.get("LIBRARY_PATH", ""):
+    os.environ["LIBRARY_PATH"] = cuda_stubs_path + ":" + os.environ.get("LIBRARY_PATH", "")
 
 
 @dataclass
@@ -84,6 +95,7 @@ def unfused_groupwise_fp8_impl(
     )
 
 
+
 def fused_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
@@ -91,6 +103,20 @@ def fused_impl(
 ):
     """Fused: SiLU+Mul+Block Quantization in single kernel."""
     out, _ = ops.silu_and_mul_per_block_quant(
+        x,
+        group_size=group_size,
+        quant_dtype=quant_dtype,
+        is_scale_transposed=False,
+    )
+
+
+def triton_impl(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    group_size: int,
+):
+    """Triton: SiLU+Mul+Block Quantization (Triton kernel)."""
+    silu_and_mul_per_block_quant_triton(
         x,
         group_size=group_size,
         quant_dtype=quant_dtype,
@@ -177,6 +203,19 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
             sub_label,
             fused_impl,
             "fused_groupwise_fp8_impl",
+        )
+    )
+
+    # Triton group-wise FP8
+    timers.append(
+        bench_fn(
+            x,
+            torch.float8_e4m3fn,
+            params.group_size,
+            label,
+            sub_label,
+            triton_impl,
+            "triton_groupwise_fp8_impl",
         )
     )
 

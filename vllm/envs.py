@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
+    VLLM_USE_TRITON_SILU_MUL_QUANT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -616,6 +617,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # loading by using reconstruct_serializable_fn_from_mega_artifact.
     "VLLM_USE_MEGA_AOT_ARTIFACT": lambda: os.environ.get(
         "VLLM_USE_MEGA_AOT_ARTIFACT", "0"
+    )
+    == "1",
+    # If set, use the Triton implementation for SiLU + Block Quantization.
+    "VLLM_USE_TRITON_SILU_MUL_QUANT": lambda: os.environ.get(
+        "VLLM_USE_TRITON_SILU_MUL_QUANT", "0"
     )
     == "1",
     # local rank of the process in the distributed setting, used to determine
