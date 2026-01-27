@@ -146,6 +146,8 @@ def _create_vllm_config(
     scheduler_config = SchedulerConfig(
         max_num_seqs=256,
         max_num_batched_tokens=8192,
+        max_model_len=8192,
+        is_encoder_decoder=False,
         enable_chunked_prefill=True,
     )
     device_config = DeviceConfig()

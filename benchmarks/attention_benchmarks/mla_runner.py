@@ -91,7 +91,7 @@ def create_minimal_vllm_config(
         "num_attention_heads": mla_dims["num_q_heads"],
         "num_key_value_heads": mla_dims["num_kv_heads"],
         "hidden_size": mla_dims["head_dim"] * mla_dims["num_q_heads"],
-        "torch_dtype": "float16",
+        "torch_dtype": "bfloat16",
         "max_position_embeddings": 163840,  # DeepSeek V3 default
         "rope_theta": 10000.0,
         "vocab_size": 128256,
@@ -110,7 +110,7 @@ def create_minimal_vllm_config(
             tokenizer=None,
             tokenizer_mode="auto",
             trust_remote_code=True,
-            dtype="float16",
+            dtype="bfloat16",
             seed=0,
             max_model_len=32768,
             quantization=None,
@@ -150,6 +150,7 @@ def create_minimal_vllm_config(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=8192,
         max_model_len=32768,
+        is_encoder_decoder=False,
         enable_chunked_prefill=True,
     )
 
@@ -186,6 +187,9 @@ _BACKEND_PROPERTIES = {
     "flashmla": {
         "query_format": "concat",  # Single concatenated tensor (vs tuple)
         "block_size": 64,  # FlashMLA uses fixed block size
+    },
+    "flashinfer_mla": {
+        "block_size": 64,  # FlashInfer MLA only supports 32 or 64
     },
 }
 
@@ -306,8 +310,8 @@ def _build_attention_metadata(
         query_start_loc=q_start_gpu,
         query_start_loc_cpu=q_start_cpu,
         seq_lens=seq_lens_gpu,
-        seq_lens_cpu=seq_lens_cpu,
-        num_computed_tokens_cpu=num_computed_tokens_cpu,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=num_computed_tokens_cpu,
         slot_mapping=slot_mapping,
         block_table_tensor=block_table_gpu,
         dcp_local_seq_lens=None,
@@ -489,7 +493,7 @@ def _create_backend_impl(
         block_size=backend_cfg["block_size"] or vllm_config.cache_config.block_size,
         num_kv_heads=1,  # MLA uses 1 KV head
         head_size=576,  # MLA head dim
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
     )
 
     # Create mock layer
@@ -611,7 +615,7 @@ def _run_single_benchmark(
         block_size,
         mla_dims["kv_lora_rank"] + mla_dims["qk_rope_head_dim"],
         device=device,
-        dtype=torch.float16,
+        dtype=torch.bfloat16,
     )
 
     # Create input tensors for both decode and prefill modes
@@ -620,7 +624,7 @@ def _run_single_benchmark(
         mla_dims,
         backend_cfg["query_format"],
         device,
-        torch.float16,
+        torch.bfloat16,
     )
 
     # Determine which forward method to use based on metadata
