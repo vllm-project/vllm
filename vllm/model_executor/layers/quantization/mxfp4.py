@@ -7,9 +7,9 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
-from vllm.attention.layer import Attention
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,

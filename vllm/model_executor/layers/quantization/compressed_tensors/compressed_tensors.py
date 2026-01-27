@@ -19,12 +19,12 @@ from compressed_tensors.quantization import (
 from compressed_tensors.transform import TransformConfig
 
 import vllm.envs as envs
-from vllm.attention.layer import Attention
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,
