@@ -246,6 +246,23 @@ def get_quant_config(
         # compressed-tensors uses a compressions_config
         hf_quant_config = getattr(model_config.hf_config, "compression_config", None)
 
+    # Pipe information about heads to enable TP-aware loading of attn_head scales
+    if (
+        hf_quant_config is not None
+        and hf_quant_config.get("quant_method") == "compressed-tensors"
+    ):
+        if hf_text_config is not None:
+            n_heads = getattr(hf_text_config, "num_attention_heads", None)
+            n_kv_heads = getattr(hf_text_config, "num_key_value_heads", None)
+        else:
+            n_heads = getattr(model_config.hf_config, "num_attention_heads", None)
+            n_kv_heads = getattr(model_config.hf_config, "num_key_value_heads", None)
+
+        hf_quant_config["total_num_heads"] = n_heads
+        hf_quant_config["total_num_kv_heads"] = (
+            n_kv_heads if n_kv_heads is not None else n_heads
+        )
+
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
 
@@ -1157,11 +1174,21 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # .mixer.attn.{k,v}_scale
         (r"\.mixer\.[kv]_proj\.([kv])_scale$", r".mixer.attn.\1_scale"),
         # Default format: .{k,v}_scale -> .attn.{k,v}_scale
-        (r"\.([kv])_scale$", r".attn.\1_scale"),
+        (r"\.([qkv])_scale$", r".attn.\1_scale"),
+        (r"\.([qkv])_zero_point$", r".attn.\1_zero_point"),
     ]
 
     # Check if name ends with k_scale or v_scale
-    if name.endswith((".k_scale", ".v_scale")):
+    if name.endswith(
+        (
+            ".k_scale",
+            ".v_scale",
+            ".q_scale",
+            ".k_zero_point",
+            ".v_zero_point",
+            ".q_zero_point",
+        )
+    ):
         import regex as re
 
         for pattern, replacement in scale_mapping_patterns:

@@ -13,7 +13,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention.layer import Attention
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -27,7 +26,6 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
-    make_fp8_moe_kernel_for_mkm,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
@@ -36,7 +34,6 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
-    make_nvfp4_moe_kernel_for_mkm,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
@@ -55,13 +52,11 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    build_flashinfer_fp4_cutlass_moe_prepare_finalize,
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -85,6 +80,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTokenSym,
     kNvfp4Dynamic,
     kNvfp4Static,
+    pad_nvfp4_activation_for_cutlass,
+    pad_nvfp4_weight_for_cutlass,
+    slice_nvfp4_output,
     swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -737,47 +735,23 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             activation_key=kFp8StaticTensorSym,
         )
 
-        # Delay creation of the kernel until after process-weights.
-        self.kernel: mk.FusedMoEModularKernel | None = None
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is not None:
-            return self.kernel.prepare_finalize.topk_indices_dtype()
-        return None
-
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        # TRT LLM not supported with all2all yet.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            return None
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            # For no-EP case, don't use the MKM framework.
-            if not self.moe.moe_parallel_config.use_all2all_kernels:
-                return None
-
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=False,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        return make_fp8_moe_kernel_for_mkm(
-            moe_config=self.moe,
-            quant_config=self.moe_quant_config,
-            experts_cls=self.experts_cls,
-            prepare_finalize=prepare_finalize,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
 
     def create_weights(
@@ -861,7 +835,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -891,11 +865,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.kernel, self.use_inplace = make_fp8_moe_kernel(
+            self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
             )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -945,41 +921,48 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             a2_scale=a2_scale,
         )
 
-    def apply(
+    @property
+    def is_monolithic(self) -> bool:
+        return self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            if layer.enable_eplb:
-                raise NotImplementedError(
-                    "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
-                )
-            # TODO(rob): this validation should happen at kernel selection
-            # time in the oracle rather than here.
-            assert layer.activation == "silu", (
-                f"Expected 'silu' activation but got {layer.activation}"
+        assert self.is_monolithic
+        assert self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+        if layer.enable_eplb:
+            raise NotImplementedError(
+                "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
             )
-            assert not layer.renormalize
-            return apply_fi_trtllm_fp8_per_tensor_moe(
-                layer=layer,
-                hidden_states=x,
-                router_logits=router_logits,
-                routing_bias=layer.e_score_correction_bias,
-                global_num_experts=layer.global_num_experts,
-                top_k=layer.top_k,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
-
-        # Expert selection
-        topk_weights, topk_ids = router.select_experts(
+        # TODO(rob): this validation should happen at kernel selection
+        # time in the oracle rather than here.
+        assert layer.activation == "silu", (
+            f"Expected 'silu' activation but got {layer.activation}"
+        )
+        assert not layer.renormalize
+        return apply_fi_trtllm_fp8_per_tensor_moe(
+            layer=layer,
             hidden_states=x,
             router_logits=router_logits,
+            routing_bias=layer.e_score_correction_bias,
+            global_num_experts=layer.global_num_experts,
+            top_k=layer.top_k,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert not self.is_monolithic
 
         # TODO(rob): this validation should happen at kernel selection
         # time in the oracle rather than here.
@@ -989,8 +972,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                 f"but got {layer.activation}"
             )
 
-        assert self.kernel is not None
-        result = self.kernel(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1002,8 +985,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
-
-        return result
 
 
 ModelOptFp8Config.LinearMethodCls = ModelOptFp8LinearMethod
@@ -1276,9 +1257,16 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.weight = Parameter(weight, requires_grad=False)
         else:
+            # Swizzle block scales and pad the packed NVFP4 weights for kernel
+            # alignment (CUTLASS/FlashInfer require K and N divisible by 32).
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
             layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
-            layer.weight = Parameter(layer.weight.data, requires_grad=False)
+
+            weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
+                layer.weight.data
+            )
+            layer.weights_padding_cols = weights_padding_cols
+            layer.weight = Parameter(weight, requires_grad=False)
 
     def apply(
         self,
@@ -1300,10 +1288,11 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             )
 
         output_dtype = x.dtype
-        output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv, self.backend)
+        x_fp4, x_blockscale = scaled_fp4_quant(
+            x, layer.input_scale_inv, is_sf_swizzled_layout=True, backend=self.backend
+        )
 
         # validate dtypes of quantized input, input block scale,
         # weight and weight_blockscale
@@ -1313,6 +1302,12 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         assert layer.weight_scale.dtype == torch.float8_e4m3fn
         assert layer.alpha.dtype == torch.float32
 
+        # Pad activations to match weight K-dimension padding
+        weights_padding_cols = getattr(layer, "weights_padding_cols", 0)
+        output_size = layer.output_size_per_partition
+        output_shape = [x.shape[0], output_size]
+        x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
+
         mm_args = (
             x_fp4,
             layer.weight,
@@ -1321,12 +1316,16 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.alpha,
             output_dtype,
         )
+
         if self.backend.startswith("flashinfer-"):
             backend_name = self.backend[len("flashinfer-") :]
             out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
         else:
             assert self.backend == "cutlass"
             out = cutlass_scaled_fp4_mm(*mm_args)
+
+        # Slice output to remove N-dimension padding
+        out = slice_nvfp4_output(out, output_size)
 
         if bias is not None:
             out = out + bias
@@ -1354,50 +1353,27 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             activation_key=kNvfp4Dynamic,
         )
 
-        # Delay creation of the kernel until after process-weights.
-        self.kernel: mk.FusedMoEModularKernel | None = None
-
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is not None:
-            return self.kernel.prepare_finalize.topk_indices_dtype()
-        return None
 
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            return None
-        elif self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTLASS:
-            # For no-EP case, don't use the MKM framework.
-            if not self.moe.moe_parallel_config.use_all2all_kernels:
-                return None
-            # For now, fp4 moe only works with the flashinfer dispatcher.
-            prepare_finalize = build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-                self.moe
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        else:
-            return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        return make_nvfp4_moe_kernel_for_mkm(
-            moe_config=self.moe,
-            quant_config=self.moe_quant_config,
-            experts_cls=self.experts_cls,
-            prepare_finalize=prepare_finalize,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
 
     def uses_weight_scale_2_pattern(self) -> bool:
@@ -1522,7 +1498,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: FusedMoE) -> None:
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
@@ -1574,15 +1550,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
         # in both cases.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config and (
-            (not self.moe.moe_parallel_config.use_all2all_kernels)
-            or self.moe.moe_parallel_config.use_naive_all2all_kernels
-        ):
+        if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.kernel = make_nvfp4_moe_kernel(
+            self.moe_mk = make_nvfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
+                shared_experts=layer.shared_experts,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
             )
 
     @property
@@ -1629,39 +1604,46 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def supports_eplb(self) -> bool:
         return True
 
-    def apply(
+    @property
+    def is_monolithic(self) -> bool:
+        return (
+            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+            and not self.moe.moe_parallel_config.enable_eplb
+        )
+
+    def apply_monolithic(
         self,
         layer: FusedMoE,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
+        assert self.is_monolithic
+        assert (
             self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
             and not layer.enable_eplb
-        ):
-            return flashinfer_trtllm_fp4_moe(
-                layer=layer,
-                x=x,
-                router_logits=router_logits,
-                top_k=layer.top_k,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                custom_routing_function=layer.custom_routing_function,
-                e_score_correction_bias=layer.e_score_correction_bias,
-            )
-
-        # Hidden_states in select_experts is only used to extract metadata
-        if isinstance(x, tuple):
-            x_routing, _ = x
-        else:
-            x_routing = x
-        topk_weights, topk_ids = router.select_experts(
-            hidden_states=x_routing,
-            router_logits=router_logits,
         )
+
+        return flashinfer_trtllm_fp4_moe(
+            layer=layer,
+            x=x,
+            router_logits=router_logits,
+            top_k=layer.top_k,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            custom_routing_function=layer.custom_routing_function,
+            e_score_correction_bias=layer.e_score_correction_bias,
+        )
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert not self.is_monolithic
 
         # EPLB path
         if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
@@ -1676,8 +1658,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 global_num_experts=layer.global_num_experts,
             )
         else:
-            assert self.kernel is not None
-            return self.kernel(
+            assert self.moe_mk is not None
+            return self.moe_mk(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,

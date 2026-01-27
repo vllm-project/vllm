@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -47,14 +48,11 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
-from vllm.v1.metrics.stats import (
-    PrefixCacheStats,
-    SchedulerStats,
-)
+from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
@@ -166,6 +164,10 @@ class Scheduler(SchedulerInterface):
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
 
+        # Counter for requests waiting for streaming input. Used to calculate
+        # number of unfinished requests
+        self.num_waiting_for_streaming_input: int = 0
+
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
@@ -226,6 +228,17 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+
+        def has_mamba_layers(kv_cache_config: KVCacheConfig) -> bool:
+            return any(
+                isinstance(group_spec.kv_cache_spec, MambaSpec)
+                for group_spec in kv_cache_config.kv_cache_groups
+            )
+
+        self.has_mamba_layers = has_mamba_layers(kv_cache_config)
+        self.need_mamba_block_aligned_split = (
+            self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+        )
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
@@ -249,6 +262,53 @@ class Scheduler(SchedulerInterface):
                 max_num_kv_tokens=self.max_num_kv_tokens,
                 vllm_config=self.vllm_config,
             )
+
+    def _mamba_block_aligned_split(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_local_computed_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
+    ) -> int:
+        assert num_external_computed_tokens == 0, (
+            "External KV connector is not verified yet"
+        )
+        # TODO: need check for resume requests
+        if request.num_output_tokens == 0:  # prefill
+            # To enable block-aligned caching of the Mamba state, `num_new_tokens`
+            # must be a multiple of `block_size`.
+            # As an exception, if `num_new_tokens` is less than `block_size`, the
+            # state is simply not cached, requiring no special handling.
+            # Additionally, when Eagle mode is enabled, FullAttn prunes the last
+            # matching block. To prevent this from causing a Mamba cache miss, the
+            # last chunk must be larger than `block_size`.
+            block_size = self.cache_config.block_size
+            last_cache_position = (
+                request.num_prompt_tokens - request.num_prompt_tokens % block_size
+            )
+            # eagle prune
+            if self.use_eagle:
+                last_cache_position = max(last_cache_position - block_size, 0)
+            num_computed_tokens = (
+                request.num_computed_tokens
+                + num_new_local_computed_tokens
+                + num_external_computed_tokens
+            )
+            num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
+            if num_computed_tokens_after_sched < last_cache_position:
+                # align to block_size
+                num_new_tokens = num_new_tokens // block_size * block_size
+            elif (
+                num_computed_tokens
+                < last_cache_position
+                < num_computed_tokens_after_sched
+            ):
+                # force to cache the last chunk
+                num_new_tokens = last_cache_position - num_computed_tokens
+            else:
+                # prefill the last few tokens
+                pass
+        return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -340,6 +400,11 @@ class Scheduler(SchedulerInterface):
                     shift_computed_tokens=1 if self.use_eagle else 0,
                 )
 
+            if self.need_mamba_block_aligned_split:
+                num_new_tokens = self._mamba_block_aligned_split(
+                    request, num_new_tokens
+                )
+
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
@@ -350,6 +415,8 @@ class Scheduler(SchedulerInterface):
                 #    its max_total_tokens or max_model_len.
                 # 2. The encoder budget is exhausted.
                 # 3. The encoder cache is exhausted.
+                # 4. Insufficient budget for a block-aligned chunk in hybrid
+                #    models with mamba cache mode \"align\".
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
@@ -504,6 +571,13 @@ class Scheduler(SchedulerInterface):
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
+                # Streaming: skip request if still waiting for next streaming req.
+                if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+                    assert not request.streaming_queue
+                    self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
+
                 # Check that adding the request still respects the max_loras
                 # constraint.
                 if (
@@ -607,6 +681,16 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
+
+                if self.need_mamba_block_aligned_split:
+                    num_new_tokens = self._mamba_block_aligned_split(
+                        request,
+                        num_new_tokens,
+                        num_new_local_computed_tokens,
+                        num_external_computed_tokens,
+                    )
+                    if num_new_tokens == 0:
+                        break
 
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an
@@ -853,6 +937,51 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
+
+    def _update_request_as_session(
+        self, session: Request, update: StreamingUpdate
+    ) -> None:
+        """
+        Updates the waiting session with the next streaming update.
+
+        Discards the last sampled output token from the prior input chunk.
+        """
+
+        # Current streaming input behaviour: Keep only computed output tokens
+        # (discard final sampled output token).
+        num_computed_tokens = session.num_computed_tokens
+        kept_output_tokens = session._all_token_ids[
+            session.num_prompt_tokens : num_computed_tokens
+        ]
+        del session._all_token_ids[num_computed_tokens:]
+        session._output_token_ids.clear()
+        assert session.prompt_token_ids is not None
+        # Extend prompt with kept output tokens.
+        session.prompt_token_ids.extend(kept_output_tokens)
+
+        if update.mm_features:
+            base = session.num_tokens
+            for mm_feature in update.mm_features:
+                mm_feature.mm_position = replace(
+                    mm_feature.mm_position, offset=mm_feature.mm_position.offset + base
+                )
+            session.mm_features.extend(update.mm_features)
+
+        session._all_token_ids.extend(update.prompt_token_ids or ())
+        session.prompt_token_ids.extend(update.prompt_token_ids or ())
+        # Update block hashes for the new tokens
+        # (mirrors Request.append_output_token_ids)
+        if session.get_hash_new_full_blocks is not None:
+            session.block_hashes.extend(session.get_hash_new_full_blocks())
+        session.num_prompt_tokens = len(session.prompt_token_ids)
+        session.arrival_time = update.arrival_time
+        session.sampling_params = update.sampling_params
+        if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+            self.num_waiting_for_streaming_input -= 1
+        session.status = RequestStatus.WAITING
+
+        if self.log_stats:
+            session.record_event(EngineCoreEventType.QUEUED)
 
     def _make_cached_request_data(
         self,
@@ -1196,30 +1325,17 @@ class Scheduler(SchedulerInterface):
                 stopped = True
 
             routed_experts = None
+            finish_reason = None
             if stopped:
-                if self.vllm_config.model_config.enable_return_routed_experts:
-                    kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
-                    block_ids = kv_blocks.get_block_ids()[0]
-                    num_tokens = request.num_tokens - 1
+                routed_experts = self._get_routed_experts(request)
 
-                    # compute slot mapping
-                    block_ids_array = np.array(block_ids, dtype=np.int32)
-                    num_blocks = len(block_ids)
-                    block_size = self.block_size
+                # Capture finish_reason BEFORE _handle_stopped_request, which may
+                # reset the status to WAITING for streaming requests that continue.
+                finish_reason = request.get_finished_reason()
+                finished = self._handle_stopped_request(request)
+                if finished:
+                    kv_transfer_params = self._free_request(request)
 
-                    # generate block offsets
-                    block_offsets = np.arange(0, block_size)
-
-                    # compute slot mapping: slot = block_id * block_size + offset
-                    slot_mapping = (
-                        block_offsets.reshape((1, block_size))
-                        + block_ids_array.reshape((num_blocks, 1)) * block_size
-                    ).flatten()[:num_tokens]
-
-                    routed_experts = self.routed_experts_reader.get_routed_experts(
-                        indices=slot_mapping
-                    )
-                kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
                 else:
@@ -1250,13 +1366,18 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if new_token_ids or pooler_output is not None or kv_transfer_params:
+            if (
+                new_token_ids
+                or pooler_output is not None
+                or kv_transfer_params
+                or stopped
+            ):
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
                         new_token_ids=new_token_ids,
-                        finish_reason=request.get_finished_reason(),
+                        finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,
@@ -1350,6 +1471,48 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
+
+    def _handle_stopped_request(self, request: Request) -> bool:
+        """Return True if finished (can be False for resumable requests)."""
+        if not request.resumable:
+            return True
+
+        if request.streaming_queue:
+            update = request.streaming_queue.popleft()
+            if update is None:
+                # Streaming request finished.
+                return True
+            self._update_request_as_session(request, update)
+        else:
+            request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+            self.num_waiting_for_streaming_input += 1
+
+        self.waiting.add_request(request)
+        return False
+
+    def _get_routed_experts(self, request: Request) -> np.ndarray | None:
+        if not self.vllm_config.model_config.enable_return_routed_experts:
+            return None
+
+        kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
+        block_ids = kv_blocks.get_block_ids()[0]
+        num_tokens = request.num_tokens - 1
+
+        # compute slot mapping
+        block_ids_array = np.array(block_ids, dtype=np.int32)
+        num_blocks = len(block_ids)
+        block_size = self.block_size
+
+        # generate block offsets
+        block_offsets = np.arange(0, block_size)
+
+        # compute slot mapping: slot = block_id * block_size + offset
+        slot_mapping = (
+            block_offsets.reshape((1, block_size))
+            + block_ids_array.reshape((num_blocks, 1)) * block_size
+        ).flatten()[:num_tokens]
+
+        return self.routed_experts_reader.get_routed_experts(indices=slot_mapping)
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
@@ -1452,10 +1615,26 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
-        self.waiting.add_request(request)
-        self.requests[request.request_id] = request
-        if self.log_stats:
-            request.record_event(EngineCoreEventType.QUEUED)
+        existing = self.requests.get(request.request_id)
+        if existing is not None:
+            update = StreamingUpdate.from_request(request)
+            if existing.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
+                assert existing.streaming_queue is not None, "duplicate request id"
+                # Queue next input chunk (or finished sentinel).
+                existing.streaming_queue.append(update)
+            elif update is not None:
+                # Commence next input chunk.
+                self._update_request_as_session(existing, update)
+            else:
+                # Streaming-input session finished.
+                self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+        else:
+            if request.resumable:
+                request.streaming_queue = deque()
+            self.waiting.add_request(request)
+            self.requests[request.request_id] = request
+            if self.log_stats:
+                request.record_event(EngineCoreEventType.QUEUED)
 
     def finish_requests(
         self, request_ids: str | Iterable[str], finished_status: RequestStatus
@@ -1486,6 +1665,8 @@ class Scheduler(SchedulerInterface):
             if request.status == RequestStatus.RUNNING:
                 running_requests_to_remove.add(request)
             else:
+                if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
+                    self.num_waiting_for_streaming_input -= 1
                 waiting_requests_to_remove.append(request)
 
         # Remove all requests from queues at once for better efficiency
@@ -1520,7 +1701,8 @@ class Scheduler(SchedulerInterface):
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
-        return len(self.waiting) + len(self.running)
+        num_waiting = len(self.waiting) - self.num_waiting_for_streaming_input
+        return num_waiting + len(self.running)
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0

@@ -27,7 +27,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils.flashinfer import flashinfer_fp4_quantize
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -120,9 +119,7 @@ def _nvfp4_quantize(
     A_scale: torch.Tensor | None,
     is_sf_swizzled_layout: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return flashinfer_fp4_quantize(
-        A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout
-    )
+    return ops.scaled_fp4_quant(A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout)
 
 
 def _fp8_quantize(

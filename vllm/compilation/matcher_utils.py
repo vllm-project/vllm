@@ -141,15 +141,18 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         key: torch.Tensor | None,
         cos_sin_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return RotaryEmbedding.forward_static(
-            positions,
-            query,
-            key,
-            self.head_size,
-            self.rotary_dim,
-            cos_sin_cache,
-            self.is_neox,
+        result: tuple[torch.Tensor, torch.Tensor | None] = (
+            RotaryEmbedding.forward_static(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.rotary_dim,
+                cos_sin_cache,
+                self.is_neox,
+            )
         )
+        return result
 
 
 class MatcherRMSNorm(MatcherCustomOp):
@@ -275,9 +278,10 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         weight: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return RMSNorm.forward_static(
+        result: tuple[torch.Tensor, torch.Tensor] = RMSNorm.forward_static(
             input, self.epsilon, input.size(-1), self.model_dtype, weight, residual
         )
+        return result
 
 
 class MatcherQuantFP8(MatcherCustomOp):
@@ -332,6 +336,7 @@ class MatcherQuantFP8(MatcherCustomOp):
             quant_key.scale.group_shape,
             column_major_scales=has_col_major_scales,
             use_ue8m0=is_e8m0,
+            compile_native=False,
         )
 
     def forward_rocm_aiter(
