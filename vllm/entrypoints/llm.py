@@ -1618,7 +1618,7 @@ class LLM:
         if isinstance(params, Sequence):
             if len(params) != num_requests:
                 raise ValueError(
-                    f"The lengths of prompts ({params})"
+                    f"The lengths of prompts ({params}) "
                     f"and lora_request ({len(params)}) must be the same."
                 )
 
@@ -1629,7 +1629,7 @@ class LLM:
         if isinstance(lora_request, Sequence):
             if len(lora_request) != num_requests:
                 raise ValueError(
-                    f"The lengths of prompts ({num_requests})"
+                    f"The lengths of prompts ({num_requests}) "
                     f"and lora_request ({len(lora_request)}) must be the same."
                 )
 
@@ -1640,7 +1640,7 @@ class LLM:
         if priority is not None:
             if len(priority) != num_requests:
                 raise ValueError(
-                    f"The lengths of prompts ({num_requests})"
+                    f"The lengths of prompts ({num_requests}) "
                     f"and priority ({len(priority)}) must be the same."
                 )
         else:
