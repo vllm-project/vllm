@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     int8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
     marlin_act_int8_process_scales,
     marlin_make_workspace_new,
     marlin_moe_permute_scales,
@@ -137,19 +138,12 @@ def select_mixed_input_moe_backend(
 def convert_to_mixed_input_moe_kernel_format(
     layer: "FusedMoE",
     mixed_input_moe_backend: MixedInputMoEBackend,
-    num_bits: int,
-    packed_factor: int,
-    group_size: int,
-    num_groups_w13: int,
-    num_groups_w2: int,
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
     w13_g_idx: torch.Tensor | None = None,
     w2_g_idx: torch.Tensor | None = None,
-    actorder: str | None = None,
-    marlin_input_dtype: torch.dtype | None = None,
 ) -> tuple[
     torch.Tensor,  # w13
     torch.Tensor,  # w13_scale
@@ -162,10 +156,19 @@ def convert_to_mixed_input_moe_kernel_format(
     torch.Tensor | None,  # w2_g_idx_sort_idxs
     torch.Tensor | None,  # a2_gscale
 ]:
+    actorder: str = layer.actorder
+
     if mixed_input_moe_backend in [
         MixedInputMoEBackend.MARLIN,
         MixedInputMoEBackend.BATCHED_MARLIN,
     ]:
+        # Extract attrs from the layer.
+        num_bits: int = layer.num_bits
+        packed_factor: int = layer.packed_factor
+        group_size: int = layer.group_size
+        num_groups_w13 = w13_scale.shape[1]
+        num_groups_w2 = w2_scale.shape[1]
+        marlin_input_dtype = get_marlin_input_dtype("")
         is_a_8bit = marlin_input_dtype is not None and marlin_input_dtype.itemsize == 1
 
         if marlin_input_dtype == torch.float8_e4m3fn:
@@ -276,36 +279,36 @@ def convert_to_mixed_input_moe_kernel_format(
     )
 
 
-def make_mixed_input_quant_config(
+def make_mixed_input_moe_quant_config(
     backend: MixedInputMoEBackend,
     num_bits: int,
+    group_size: int,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     w1_zp: torch.Tensor | None = None,
     w2_zp: torch.Tensor | None = None,
-    group_size: int | None = None,
-) -> FusedMoEQuantConfig | None:
-    if num_bits == 4:
-        return int4_w4a16_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_zp=w1_zp,
-            w2_zp=w2_zp,
-            group_size=(group_size or 0),
-        )
-    elif num_bits == 8:
-        return int8_w8a16_moe_quant_config(
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_zp=w1_zp,
-            w2_zp=w2_zp,
-            group_size=(group_size or 0),
-        )
-    else:
-        raise ValueError(
-            f"MixedInput MoE backend '{backend.value}' does not support "
-            f"{num_bits}-bit quantization."
-        )
+    w13_g_idx: torch.Tensor | None = None,
+    w2_g_idx: torch.Tensor | None = None,
+    w13_g_idx_sort_indices: torch.Tensor | None = None,
+    w2_g_idx_sort_indices: torch.Tensor | None = None,
+) -> FusedMoEQuantConfig:
+    assert num_bits in [4, 8]
+    bits_2_cls = {
+        4: int4_w4a16_moe_quant_config,
+        8: int8_w8a16_moe_quant_config,
+    }
+
+    return bits_2_cls[num_bits](
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        w1_zp=w1_zp,
+        w2_zp=w2_zp,
+        w1_g_idx=w13_g_idx,
+        w2_g_idx=w2_g_idx,
+        w1_g_idx_sort_idxs=w13_g_idx_sort_indices,
+        w2_g_idx_sort_idxs=w2_g_idx_sort_indices,
+        block_shape=[0, group_size],
+    )
 
 
 def make_mixed_input_moe_kernel(
