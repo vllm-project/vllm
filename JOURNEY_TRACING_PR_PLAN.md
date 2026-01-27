@@ -119,6 +119,63 @@ This document outlines the implementation plan for dual-stream journey tracing u
 - ✅ Idempotent operations (safe to call multiple times)
 - ✅ Safe when span is None or not recording
 
+### 9. Cleanup Decoupling (CRITICAL)
+
+**Core spans and journey state are INDEPENDENT concerns:**
+
+- ✅ **Core span cleanup**: Runs whenever `_core_spans` dict has an entry (regardless of flags)
+- ✅ **Journey state cleanup**: Only runs when `_enable_journey_tracing=True`
+- ✅ **NEVER gate span cleanup behind feature flags** - spans created = spans cleaned
+- ✅ Cleanup methods handle both concerns independently in same function
+
+**Bad (creates leaks)**:
+```python
+def _end_core_span_and_cleanup(self, request: Request) -> None:
+    if not self._enable_journey_tracing:
+        return  # ❌ SKIPS SPAN CLEANUP if flag is off!
+```
+
+**Good (decoupled)**:
+```python
+def _end_core_span_and_cleanup(self, request: Request) -> None:
+    request_id = request.request_id
+
+    # Cleanup #1: Core spans (independent of journey flag)
+    core_span = self._core_spans.pop(request_id, None)
+    if core_span is not None:
+        core_span.end(end_time=time.time_ns())
+
+    # Cleanup #2: Journey state (only if enabled)
+    if self._enable_journey_tracing:
+        self._first_token_emitted.discard(request_id)
+        self._journey_prefill_hiwater.pop(request_id, None)
+```
+
+---
+
+## Scheduler Step Counter Contract
+
+**Purpose**: Track scheduler invocations for event correlation and tracing.
+
+**Rules**:
+1. **Incremented**: At START of `schedule()` call (before any work)
+2. **Frequency**: Increments on EVERY call, even empty schedules
+3. **First value**: First schedule produces step `1` (initialized to `0`)
+4. **Lifetime**: NEVER reset - monotonic for lifetime of scheduler
+5. **Thread safety**: Scheduler is single-threaded, no locking needed
+
+**Event Correlation**:
+- `QUEUED` (in `add_request`): Uses current `scheduler_step_counter` (may be 0 if no schedule yet)
+- `SCHEDULED` (in `schedule`): Uses current step (after increment)
+- `FIRST_TOKEN` (in `update_from_output`): Uses `scheduler_output.scheduler_step`
+- `FINISHED` (in `update_from_output` or `finish_requests`): Uses output step or current step
+
+**Test Requirements**:
+- All tests follow this semantic consistently
+- Tests verify step is monotonic (never decreases)
+- Tests verify step increments even on empty schedules
+- Tests verify correlation across events for same request
+
 ---
 
 ## PR Sequence Summary
@@ -127,16 +184,16 @@ This document outlines the implementation plan for dual-stream journey tracing u
 |------|--------|------|------|-------|--------|
 | #0 | `removelegacy` | Remove EngineCoreEvent | ~130 removed | 1 new + existing | ✅ **COMPLETED** |
 | #1 | `pr1ofjourney` | Init tracer in scheduler | ~25 lines | 4 | ✅ **COMPLETED** |
-| #2 | `journey-tracing-02-core-spans-lifecycle` | Create & cleanup core spans | ~100 lines | 6 | **Cleanup in same PR** ✅ |
-| #3 | `journey-tracing-03-journey-state-cleanup` | Add journey state & cleanup | ~50 lines | 5 | Extends PR #2 cleanup |
-| #4 | `journey-tracing-04-journey-events-emit` | Emit events to core spans | ~120 lines | 6 | No new resources, defensive |
-| #5 | `journey-tracing-05-api-metadata` | Add API metadata fields | ~15 lines | 3 | No resources |
+| #2 | `journey-tracing-02-core-spans-lifecycle` | Create & cleanup core spans | ~100 lines | 6 | ✅ **COMPLETED** |
+| #3 | `journey-tracing-03-journey-state-cleanup` | Add journey state & cleanup | ~40 lines | 4 | Extends PR #2 cleanup |
+| #4 | `journey-tracing-04-journey-events-emit` | Emit events to core spans | ~120 lines | 7 | No new resources, defensive |
+| #5 | `journey-tracing-05-api-span-tracking` | Add API span tracking dict | ~20 lines | 2 | No Pydantic field |
 | #6 | `journey-tracing-06-api-spans-full-lifecycle` | Create & close API spans | ~150 lines | 9 | **All closure paths in same PR** ✅ |
 | #7 | `journey-tracing-07-context-propagation` | Link parent-child spans | ~25 lines | 4 | No new resources |
 | #8 | `journey-tracing-08-api-additional-events` | Emit API lifecycle events | ~80 lines | 5 | No new resources |
-| #9 | `journey-tracing-09-remove-buffering` | Remove legacy buffering | ~150 removed | 4 | Keep do_tracing() |
+| #9 | `journey-tracing-09-remove-buffering` | Remove journey event buffering | ~150 removed | 4 | Clean break |
 
-**Total**: ~565 lines added, ~150 lines removed, 46 tests
+**Total**: ~560 lines added, ~150 lines removed, 45 tests
 
 ---
 
@@ -344,21 +401,33 @@ class Scheduler:
         CRITICAL: This is the centralized cleanup method that must be called
         for ALL request termination paths to prevent memory leaks.
 
-        This PR only handles spans. PR #3 will extend this to clean
-        other journey state (hiwater, dedup sets).
+        This method handles TWO INDEPENDENT concerns:
+        1. Core span cleanup (runs if span exists, regardless of flags)
+        2. Journey state cleanup (runs if journey tracing enabled) - added in PR #3
+
+        Safe to call multiple times for same request (idempotent).
 
         Args:
             request: The request being terminated
         """
-        if not self._enable_journey_tracing:
-            return
-
         request_id = request.request_id
 
-        # End and remove core span
+        # Cleanup #1: Core spans (independent of journey tracing flag)
+        # CRITICAL: ALWAYS runs if span exists, never gate behind feature flags
         core_span = self._core_spans.pop(request_id, None)
-        if core_span and core_span.is_recording():
-            core_span.end(end_time=time.time_ns())
+        if core_span is not None:
+            try:
+                import time
+                core_span.end(end_time=time.time_ns())
+            except Exception as e:
+                logger.warning(
+                    "Failed to end core span for request %s: %s",
+                    request_id,
+                    e
+                )
+
+        # Cleanup #2: Journey state (only if enabled) - will be added in PR #3
+        # (PR #3 will add: self._first_token_emitted.discard(request_id), etc.)
 
     def add_request(self, request: Request) -> None:
         """Add new request to waiting queue."""
@@ -516,6 +585,8 @@ class Scheduler:
 
 **Why Safe**: State created AND cleaned in same function as PR #2. All termination paths already covered.
 
+**Scope**: ONLY state initialization and cleanup. Progress snapshot semantics tested in PR #4 when actually used.
+
 #### Changes
 
 ```python
@@ -531,74 +602,48 @@ class Scheduler:
             # NEW: Prefill progress high-water marks (survives preemption)
             self._journey_prefill_hiwater: dict[str, int] = {}
 
-    def _compute_progress_snapshot(self, request: Request) -> dict[str, Any]:
-        """Compute progress snapshot for journey events.
-
-        Handles preemption correctly by using high-water marks for prefill.
-
-        Args:
-            request: The request to compute progress for
-
-        Returns:
-            Dict with keys: phase, prefill_done_tokens, prefill_total_tokens,
-            decode_done_tokens, decode_max_tokens
-        """
-        # Determine phase
-        if request.status == RequestStatus.WAITING:
-            phase = "waiting"
-        elif request.num_computed_tokens < request.num_prompt_tokens:
-            phase = "prefill"
-        else:
-            phase = "decode"
-
-        # Prefill progress (use hiwater mark to handle preemption)
-        prefill_total = request.num_prompt_tokens
-        prefill_done = min(request.num_computed_tokens, prefill_total)
-
-        # Track high-water mark for prefill
-        if self._enable_journey_tracing:
-            current_hiwater = self._journey_prefill_hiwater.get(request.request_id, 0)
-            prefill_done = max(prefill_done, current_hiwater)
-            self._journey_prefill_hiwater[request.request_id] = prefill_done
-
-        # Decode progress
-        decode_done = max(0, request.num_computed_tokens - prefill_total)
-        decode_max = request.max_tokens if request.max_tokens else 0
-
-        return {
-            "phase": phase,
-            "prefill_done_tokens": prefill_done,
-            "prefill_total_tokens": prefill_total,
-            "decode_done_tokens": decode_done,
-            "decode_max_tokens": decode_max,
-        }
+    # NOTE: _compute_progress_snapshot() method will be added in PR #4
+    # when event emission starts using it. This PR only adds the STATE,
+    # not the logic that uses it.
 
     def _end_core_span_and_cleanup(self, request: Request) -> None:
         """End core span and cleanup all journey tracing state.
 
         CRITICAL: Extended from PR #2 to also clean journey state.
 
+        This method handles TWO INDEPENDENT concerns:
+        1. Core span cleanup (always runs if span exists)
+        2. Journey state cleanup (only if journey tracing enabled)
+
         Args:
             request: The request being terminated
         """
-        if not self._enable_journey_tracing:
-            return
-
         request_id = request.request_id
 
-        # End and remove core span (from PR #2)
+        # Cleanup #1: Core spans (from PR #2, independent of journey flag)
         core_span = self._core_spans.pop(request_id, None)
-        if core_span and core_span.is_recording():
-            core_span.end(end_time=time.time_ns())
+        if core_span is not None:
+            try:
+                import time
+                core_span.end(end_time=time.time_ns())
+            except Exception as e:
+                logger.warning(
+                    "Failed to end core span for request %s: %s",
+                    request_id,
+                    e
+                )
 
-        # NEW: Clean journey tracing state
-        self._first_token_emitted.discard(request_id)
-        self._journey_prefill_hiwater.pop(request_id, None)
+        # Cleanup #2: Journey state (NEW in PR #3, only if enabled)
+        if self._enable_journey_tracing:
+            self._first_token_emitted.discard(request_id)
+            self._journey_prefill_hiwater.pop(request_id, None)
 ```
 
 #### Safety Checklist
 
 - ✅ **State created → State cleaned in same function as PR #2**
+- ✅ **Core span cleanup decoupled** from journey flag (always runs if span exists)
+- ✅ **Journey state cleanup gated** behind `_enable_journey_tracing` flag
 - ✅ All termination paths already call `_end_core_span_and_cleanup()` (from PR #2)
 - ✅ Tests prove no set/dict growth
 - ✅ Legacy tracing untouched
@@ -622,22 +667,19 @@ Same as PR #2 (already covered):
    - Call `finish_requests()`
    - Verify state cleaned (not in set/dict)
 
-3. **`test_journey_state_cleaned_on_completion()`**
+3. **`test_journey_state_cleaned_on_completion()`** ⭐ **CRITICAL**
    - Add request, populate state
    - Simulate natural completion
-   - Verify state cleaned
+   - Verify state cleaned (catches memory leak bug)
 
 4. **`test_no_state_leak()`**
    - Add and complete 100 requests
    - Verify `_first_token_emitted` set size = 0
    - Verify `_journey_prefill_hiwater` dict size = 0
 
-5. **`test_progress_snapshot_correct()`**
-   - Test prefill phase progress
-   - Test decode phase progress
-   - Test hiwater mark handling across preemption
+**NOTE**: Progress snapshot logic (`_compute_progress_snapshot()`) will be added and tested in PR #4 when event emission starts using it. This PR focuses purely on state initialization and cleanup.
 
-**Size**: ~50 lines, 5 tests
+**Size**: ~40 lines production code, ~200 lines test code, 4 tests
 **Review Time**: ~15 minutes
 
 ---
@@ -646,7 +688,7 @@ Same as PR #2 (already covered):
 
 **Branch**: `journey-tracing-04-journey-events-emit`
 
-**Goal**: Emit events to core spans. No new resources, just additive event emission.
+**Goal**: Add progress snapshot logic and emit events to core spans. No new resources, just additive event emission.
 
 **Why Safe**: No new resources created, just emitting events to existing spans. Defensive error handling.
 
@@ -654,6 +696,48 @@ Same as PR #2 (already covered):
 
 ```python
 # vllm/v1/core/sched/scheduler.py
+
+def _compute_progress_snapshot(self, request: Request) -> dict[str, Any]:
+    """Compute progress snapshot for journey events.
+
+    Handles preemption correctly by using high-water marks for prefill.
+
+    Args:
+        request: The request to compute progress for
+
+    Returns:
+        Dict with keys: phase, prefill_done_tokens, prefill_total_tokens,
+        decode_done_tokens, decode_max_tokens
+    """
+    # Determine phase
+    if request.status == RequestStatus.WAITING:
+        phase = "waiting"
+    elif request.num_computed_tokens < request.num_prompt_tokens:
+        phase = "prefill"
+    else:
+        phase = "decode"
+
+    # Prefill progress (use hiwater mark to handle preemption)
+    prefill_total = request.num_prompt_tokens
+    prefill_done = min(request.num_computed_tokens, prefill_total)
+
+    # Track high-water mark for prefill
+    if self._enable_journey_tracing:
+        current_hiwater = self._journey_prefill_hiwater.get(request.request_id, 0)
+        prefill_done = max(prefill_done, current_hiwater)
+        self._journey_prefill_hiwater[request.request_id] = prefill_done
+
+    # Decode progress
+    decode_done = max(0, request.num_computed_tokens - prefill_total)
+    decode_max = request.max_tokens if request.max_tokens else 0
+
+    return {
+        "phase": phase,
+        "prefill_done_tokens": prefill_done,
+        "prefill_total_tokens": prefill_total,
+        "decode_done_tokens": decode_done,
+        "decode_max_tokens": decode_max,
+    }
 
 def _emit_journey_event(
     self,
@@ -877,42 +961,43 @@ def finish_requests(self, ...):
    - Verify only one event on span
    - Verify dedup set works correctly
 
-**Size**: ~120 lines, 6 tests
+7. **`test_progress_snapshot_correct()`** (moved from PR #3)
+   - Test prefill phase progress calculation
+   - Test decode phase progress calculation
+   - Test hiwater mark handling across preemption
+   - Verify progress attributes in emitted events
+
+**Size**: ~160 lines production code (includes progress snapshot), ~280 lines test code, 7 tests
 **Review Time**: ~20 minutes
 
 ---
 
-### PR #5: API - Add Request Metadata Fields
+### PR #5: API - Add Span Tracking Dict
 
-**Branch**: `journey-tracing-05-api-metadata`
+**Branch**: `journey-tracing-05-api-span-tracking`
 
-**Goal**: Add fields to RequestResponseMetadata without creating any resources.
+**Goal**: Add separate dict for tracking API spans, avoiding Pydantic serialization risks.
 
-**Why Safe**: No per-request state introduced, no spans created, just field definitions.
+**Why Safe**: No per-request state in serializable models. Spans tracked in separate dict.
+
+**Key Decision**: Store spans in `_api_spans` dict instead of Pydantic model to avoid serialization issues.
 
 #### Changes
 
 ```python
-# vllm/entrypoints/openai/engine/protocol.py
-
-from pydantic import BaseModel, ConfigDict
-
-class RequestResponseMetadata(BaseModel):
-    # Allow arbitrary types (OTEL Span) without validation
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    request_id: str
-    final_usage_info: UsageInfo | None = None
-
-    # NEW: API span tracking fields (no spans created yet)
-    api_span: Any | None = None  # OTEL Span for API-level journey tracing
-    # Timestamps for latency calculations (monotonic time)
-    arrival_time: float | None = None  # time.monotonic() when span created
-    first_response_time: float | None = None  # time.monotonic() when first output
-
 # vllm/entrypoints/openai/engine/serving.py
 
 class OpenAIServing:
+    def __init__(self, ...):
+        # ... existing init ...
+
+        # NEW: Track API spans separately (not in Pydantic model)
+        # Maps request_id → (span, arrival_time, first_response_time)
+        self._api_spans: dict[str, tuple[Any, float, float | None]] = {}
+
+        # Cache for tracing enabled check
+        self._cached_is_tracing_enabled: bool | None = None
+
     async def _get_is_tracing_enabled(self) -> bool:
         """Check if journey tracing is enabled.
 
@@ -921,39 +1006,67 @@ class OpenAIServing:
         Returns:
             True if journey tracing is enabled, False otherwise
         """
-        if not hasattr(self, '_cached_is_tracing_enabled'):
+        if self._cached_is_tracing_enabled is None:
             self._cached_is_tracing_enabled = (
                 await self.engine_client.is_tracing_enabled()
             )
         return self._cached_is_tracing_enabled
+
+    def _store_api_span(
+        self,
+        request_id: str,
+        span: Any,
+        arrival_time: float,
+    ) -> None:
+        """Store API span and timing info for a request.
+
+        Args:
+            request_id: The request ID
+            span: The OTEL span object
+            arrival_time: time.monotonic() when request arrived
+        """
+        self._api_spans[request_id] = (span, arrival_time, None)
+
+    def _get_api_span_info(
+        self,
+        request_id: str,
+    ) -> tuple[Any | None, float | None, float | None]:
+        """Get API span and timing info for a request.
+
+        Returns:
+            Tuple of (span, arrival_time, first_response_time)
+        """
+        return self._api_spans.get(request_id, (None, None, None))
+
+    def _cleanup_api_span(self, request_id: str) -> None:
+        """Remove API span tracking for a request (after span.end() called).
+
+        Args:
+            request_id: The request ID to cleanup
+        """
+        self._api_spans.pop(request_id, None)
 ```
 
 #### Safety Checklist
 
-- ✅ No per-request state introduced
-- ✅ No spans created
-- ✅ No cleanup needed
+- ✅ No per-request state in Pydantic models (avoids serialization issues)
+- ✅ Spans tracked in separate dict (safe for any object type)
+- ✅ No spans created yet (just tracking infrastructure)
+- ✅ Cleanup method provided (will be used in PR #6)
 - ✅ Legacy tracing untouched
-- ✅ Just field definitions (pure metadata)
 
 #### Tests
 
-1. **`test_metadata_fields_exist()`**
-   - Create RequestResponseMetadata instance
-   - Verify `api_span`, `arrival_time`, `first_response_time` fields exist
-   - Verify they accept None values
+1. **`test_api_span_tracking_dict_exists()`**
+   - Verify `_api_spans` dict initialized
+   - Verify empty on startup
 
-2. **`test_metadata_arbitrary_types_allowed()`**
-   - Verify Pydantic config allows arbitrary types
-   - Create metadata with mock Span object
-   - Verify no validation errors
+2. **`test_store_and_get_api_span()`**
+   - Store mock span with timing info
+   - Retrieve and verify all fields
+   - Verify cleanup removes entry
 
-3. **`test_is_tracing_enabled_cached()`**
-   - Call `_get_is_tracing_enabled()` multiple times
-   - Verify engine_client.is_tracing_enabled() called only once
-   - Verify cached value returned
-
-**Size**: ~15 lines, 3 tests
+**Size**: ~20 lines, 2 tests
 **Review Time**: ~5 minutes
 
 ---
@@ -1025,18 +1138,21 @@ class OpenAIServingChat:
 
     def _safe_emit_departed_event(
         self,
-        api_span: Any,
-        request_metadata: RequestResponseMetadata,
+        request_id: str,
     ) -> None:
-        """Emit api.DEPARTED event and end span.
+        """Emit api.DEPARTED event, end span, and cleanup tracking.
 
         CRITICAL: Idempotent - safe to call even if span already ended.
 
         Args:
-            api_span: The OTEL span object
-            request_metadata: Request metadata with timing info
+            request_id: The request ID to close span for
         """
+        # Get span from tracking dict (from PR #5)
+        api_span, arrival_time, first_response_time = self._get_api_span_info(request_id)
+
         if not api_span or not api_span.is_recording():
+            # Still cleanup even if span not recording
+            self._cleanup_api_span(request_id)
             return
 
         try:
@@ -1054,23 +1170,31 @@ class OpenAIServingChat:
             api_span.end(end_time=time.time_ns())
         except Exception:
             pass  # Defensive: tracing must never break response
+        finally:
+            # CRITICAL: Always cleanup tracking dict (from PR #5)
+            self._cleanup_api_span(request_id)
 
     def _safe_emit_aborted_event(
         self,
-        api_span: Any,
+        request_id: str,
         error_message: str,
         reason: str | None = None,
     ) -> None:
-        """Emit api.ABORTED event, set error status, and end span.
+        """Emit api.ABORTED event, set error status, end span, and cleanup tracking.
 
         CRITICAL: Idempotent - safe to call even if span already ended.
 
         Args:
-            api_span: The OTEL span object
+            request_id: The request ID to close span for
             error_message: Error message to record
             reason: Optional reason code (e.g., "client_disconnect")
         """
+        # Get span from tracking dict (from PR #5)
+        api_span, _, _ = self._get_api_span_info(request_id)
+
         if not api_span or not api_span.is_recording():
+            # Still cleanup even if span not recording
+            self._cleanup_api_span(request_id)
             return
 
         try:
@@ -1098,6 +1222,9 @@ class OpenAIServingChat:
             api_span.end(end_time=time.time_ns())
         except Exception:
             pass  # Defensive
+        finally:
+            # CRITICAL: Always cleanup tracking dict (from PR #5)
+            self._cleanup_api_span(request_id)
 
     async def create_chat_completion(
         self,
@@ -1109,18 +1236,17 @@ class OpenAIServingChat:
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
         )
 
-        # NEW: Create API span
-        api_span = None
-        arrival_time = time.monotonic()
+        # NEW: Create API span and store in tracking dict (from PR #5)
         is_tracing_enabled = await self._get_is_tracing_enabled()
         if is_tracing_enabled:
             api_span = await self._create_api_span(request_id, raw_request)
+            if api_span:
+                arrival_time = time.monotonic()
+                self._store_api_span(request_id, api_span, arrival_time)
 
-        # NEW: Initialize metadata with span
+        # Initialize metadata (no span fields needed)
         request_metadata = RequestResponseMetadata(
             request_id=request_id,
-            api_span=api_span,
-            arrival_time=arrival_time,
         )
 
         # ... existing code ...
@@ -1140,31 +1266,31 @@ class OpenAIServingChat:
 
             # ... existing code ...
         except GenerationError as e:
-            # NEW: Close span on generation error
+            # NEW: Close span on generation error (uses request_id from metadata)
             self._safe_emit_aborted_event(
-                request_metadata.api_span,
+                request_metadata.request_id,
                 f"Generation error: {e}",
                 "generation_error"
             )
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
             yield "data: [DONE]\n\n"
-            return  # Span closed, safe to return
+            return  # Span closed and cleaned, safe to return
         except Exception as e:
             # NEW: Close span on unexpected exception
             self._safe_emit_aborted_event(
-                request_metadata.api_span, str(e), "exception"
+                request_metadata.request_id, str(e), "exception"
             )
             logger.exception("Error in chat completion stream generator.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
             yield "data: [DONE]\n\n"
-            return  # Span closed, safe to return
+            return  # Span closed and cleaned, safe to return
 
         # Send final done message
         yield "data: [DONE]\n\n"
 
-        # NEW: Close span on success
-        self._safe_emit_departed_event(request_metadata.api_span, request_metadata)
+        # NEW: Close span on success (retrieves span from dict, ends it, cleans up)
+        self._safe_emit_departed_event(request_metadata.request_id)
 
     async def chat_completion_full_generator(
         self,
@@ -1188,7 +1314,7 @@ class OpenAIServingChat:
                     final_res = res
             except asyncio.CancelledError:
                 self._safe_emit_aborted_event(
-                    request_metadata.api_span,
+                    request_metadata.request_id,
                     "Client disconnected",
                     "client_disconnect"
                 )
@@ -1196,7 +1322,7 @@ class OpenAIServingChat:
                 return self.create_error_response("Client disconnected")
             except ValueError as e:
                 self._safe_emit_aborted_event(
-                    request_metadata.api_span, str(e), "validation_error"
+                    request_metadata.request_id, str(e), "validation_error"
                 )
                 span_closed = True
                 return self.create_error_response(e)
@@ -1206,32 +1332,37 @@ class OpenAIServingChat:
 
             # ... existing response building code ...
 
-            # NEW: Close span on success
-            self._safe_emit_departed_event(request_metadata.api_span, request_metadata)
+            # NEW: Close span on success (retrieves span from dict, ends it, cleans up)
+            self._safe_emit_departed_event(request_metadata.request_id)
             span_closed = True
 
             return response
         finally:
             # CRITICAL: Outer finally catches ALL other exceptions
-            if not span_closed and request_metadata.api_span:
-                self._safe_emit_aborted_event(
-                    request_metadata.api_span,
-                    "Unexpected error during request processing",
-                )
+            # Check if span exists in dict (not if metadata has span field)
+            if not span_closed:
+                span, _, _ = self._get_api_span_info(request_metadata.request_id)
+                if span:
+                    self._safe_emit_aborted_event(
+                        request_metadata.request_id,
+                        "Unexpected error during request processing",
+                    )
 ```
 
 #### Safety Checklist
 
-- ✅ **Spans created → Spans closed on all paths**
-  - ✅ Streaming success → DEPARTED + span.end()
-  - ✅ Streaming GenerationError → ABORTED + span.end()
-  - ✅ Streaming exception → ABORTED + span.end()
-  - ✅ Non-streaming success → DEPARTED + span.end()
-  - ✅ Non-streaming CancelledError → ABORTED + span.end()
-  - ✅ Non-streaming ValueError → ABORTED + span.end()
-  - ✅ Non-streaming unexpected exception → ABORTED + span.end() in finally
+- ✅ **Spans created → Spans closed AND tracking dict cleaned on all paths**
+  - ✅ Streaming success → DEPARTED + span.end() + cleanup dict
+  - ✅ Streaming GenerationError → ABORTED + span.end() + cleanup dict
+  - ✅ Streaming exception → ABORTED + span.end() + cleanup dict
+  - ✅ Non-streaming success → DEPARTED + span.end() + cleanup dict
+  - ✅ Non-streaming CancelledError → ABORTED + span.end() + cleanup dict
+  - ✅ Non-streaming ValueError → ABORTED + span.end() + cleanup dict
+  - ✅ Non-streaming unexpected exception → ABORTED + span.end() + cleanup dict in finally
+- ✅ **Tracking dict cleanup** in finally blocks (from PR #5)
+- ✅ **No Pydantic serialization risk** (spans in separate dict, not model fields)
 - ✅ Idempotent span.end() (checks is_recording())
-- ✅ Tests prove all paths close span
+- ✅ Tests prove all paths close span AND cleanup dict
 - ✅ Legacy tracing untouched
 - ✅ Defensive error handling
 
@@ -1559,19 +1690,39 @@ async def chat_completion_full_generator(self, ...):
 
 ---
 
-### PR #9: Cleanup - Remove Journey Buffering
+### PR #9: Cleanup - Remove Journey Event Buffering (Clean Break)
 
 **Branch**: `journey-tracing-09-remove-buffering`
 
-**Goal**: Remove journey events buffering logic now that spans work end-to-end. Keep do_tracing() and RequestJourneyEvent dataclass.
+**Goal**: Remove journey event buffering and export now that OTEL spans are the sole tracing path.
 
-**Why Safe**: Spans work end-to-end (PRs #2-8). Buffering no longer needed. do_tracing() and Prometheus metrics remain functional.
+**Why Safe**: Spans work end-to-end (PRs #2-8). Journey event buffering no longer needed for tracing.
 
-**IMPORTANT**: This PR removes buffering LOGIC only, not the underlying data structures:
-- ✅ KEEP: `OutputProcessor.do_tracing()` (current OTEL export mechanism)
-- ✅ KEEP: `RequestJourneyEvent` dataclass (needed for Prometheus timestamp extraction)
-- ❌ REMOVE: Buffer dictionaries and buffering logic in scheduler
-- ❌ REMOVE: Buffer flushing code in `schedule()`
+**Clean Break Decision**: Journey tracing moves to OTEL spans exclusively. Prometheus metrics use direct timestamp capture.
+
+**What Gets Removed**:
+- ❌ Journey event buffer dictionaries in scheduler
+- ❌ Journey event buffering logic in `_emit_journey_event()`
+- ❌ Journey event flushing in `schedule()`
+- ❌ Journey event export logic in `do_tracing()` (OTEL path only)
+
+**What Stays**:
+- ✅ `do_tracing()` method (for non-journey tracing, if any other uses exist)
+- ✅ `RequestJourneyEvent` dataclass (kept in code, just not buffered/exported)
+- ✅ Prometheus metrics (use direct timestamp capture in scheduler, not journey events)
+
+**Key Change**: Replace journey event timestamp extraction with direct capture:
+
+```python
+# OLD (removed):
+# Buffer journey events → Extract timestamps in metrics collector
+
+# NEW (PR #9):
+# Capture timestamps directly for Prometheus metrics
+if self.log_stats:
+    request.queued_ts = time.time()  # Direct capture
+    request.scheduled_ts = time.time()  # When scheduled
+```
 
 #### Changes
 
@@ -1618,21 +1769,21 @@ class OutputProcessor:
         self,
         engine_core_outputs: list[EngineCoreOutput],
         engine_core_timestamp: float,
-        journey_events: list[RequestJourneyEvent] | None = None,  # Keep parameter for compatibility
+        journey_events: list[RequestJourneyEvent] | None = None,  # Keep for API compat
     ) -> OutputProcessorOutput:
         """Process outputs from engine core.
 
         Args:
             engine_core_outputs: Outputs from engine core
             engine_core_timestamp: Timestamp when outputs produced
-            journey_events: No longer buffered (kept for API compatibility)
+            journey_events: Deprecated, no longer used (kept for API compatibility)
         """
-        # REMOVED: journey_events buffering in req_state.journey_events
-        # Note: Journey events now emitted directly to spans in scheduler (PR #4)
+        # REMOVED: journey_events buffering and export logic
+        # Journey tracing now uses OTEL spans exclusively (PRs #2-8)
 
         # KEEP: All existing output processing logic
-        # KEEP: do_tracing() method (current OTEL export mechanism)
-        # KEEP: Timestamp extraction from journey events (for Prometheus metrics)
+        # KEEP: do_tracing() method (for other tracing, if any)
+        # REMOVED from do_tracing(): Journey event export code
 
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
@@ -1645,6 +1796,35 @@ class OutputProcessor:
             reqs_to_abort=reqs_to_abort,
         )
 
+    def do_tracing(self, ...):
+        """Export tracing data to OTEL.
+
+        UPDATED: Journey event export removed.
+        This method remains for other tracing purposes if needed.
+        """
+        # REMOVED: Journey event export logic
+        # Journey events now emitted directly to spans in real-time
+
+        # KEEP: Any other tracing export logic that may exist
+        pass
+
+# vllm/v1/core/sched/scheduler.py
+
+# NEW: Direct timestamp capture for Prometheus metrics
+def add_request(self, request: Request) -> None:
+    # ... existing code ...
+
+    # Capture timestamp directly for Prometheus (replaces journey event extraction)
+    if self.log_stats:
+        request.queued_ts = time.time()
+
+def schedule(self, ...):
+    # ... when scheduling request ...
+
+    # Capture timestamp directly for Prometheus
+    if self.log_stats and schedule_kind == ScheduleKind.FIRST:
+        request.scheduled_ts = time.time()
+
 # vllm/v1/core/sched/journey_events.py
 
 # NO CHANGES to this file
@@ -1656,13 +1836,15 @@ class OutputProcessor:
 
 #### Safety Checklist
 
-- ✅ Spans work end-to-end (PRs #2-8)
-- ✅ No functionality lost (spans replace buffering for OTEL export)
-- ✅ **do_tracing() PRESERVED** (current OTEL export mechanism, NOT being removed)
-- ✅ **RequestJourneyEvent PRESERVED** (needed for Prometheus metrics)
-- ✅ **Prometheus metrics still work** (timestamp extraction from journey events preserved)
-- ✅ Tests verify spans still work
-- ✅ Backward compatible (journey_events parameter kept for compatibility)
+- ✅ Spans work end-to-end (PRs #2-8) - OTEL tracing complete
+- ✅ No functionality lost (spans are sole tracing path, buffering obsolete)
+- ✅ **Clean break**: Journey event buffering and export removed completely
+- ✅ **do_tracing() PRESERVED** (method stays, journey export logic removed)
+- ✅ **RequestJourneyEvent PRESERVED** (dataclass kept in code, not buffered/exported)
+- ✅ **Prometheus metrics still work** (use direct timestamp capture, not journey events)
+- ✅ Tests verify spans still work after buffering removed
+- ✅ Tests verify Prometheus metrics still work with direct capture
+- ✅ Backward compatible (journey_events parameter kept for API compatibility)
 
 #### Tests
 
@@ -1683,12 +1865,14 @@ class OutputProcessor:
    - Verify parent-child linkage
    - Verify all events on both spans
 
-4. **`test_current_tracing_preserved()`**
-   - Verify do_tracing() method still exists
-   - Verify do_tracing() still called (current OTEL export mechanism)
-   - Verify Prometheus metrics still work (timestamp extraction functional)
+4. **`test_prometheus_metrics_with_direct_capture()`**
+   - Add and complete request with log_stats=True
+   - Verify `request.queued_ts` set directly (not from journey events)
+   - Verify `request.scheduled_ts` set directly
+   - Verify Prometheus metrics collector can access timestamps
+   - Prove metrics work WITHOUT journey event buffering
 
-**Size**: ~150 lines removed, 4 tests
+**Size**: ~150 lines removed, ~100 lines added (direct timestamp capture), 4 tests
 **Review Time**: ~20 minutes
 
 ---
