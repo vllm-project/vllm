@@ -763,7 +763,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AiterFlashAttentionMetadata,
-    ) -> torch.Tensor:
+    ) -> None:
         """Perform KV cache update separately from attention forward pass.
 
         RocmAiterFA overrides the default implementation to support shuffle
@@ -775,9 +775,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
             value: Value tensor with shape [num_tokens, num_kv_heads, head_size].
             kv_cache: The KV cache tensor.
             attn_metadata: Attention metadata containing slot_mapping.
-
-        Returns:
-            The KV cache tensor.
         """
         # Skip if sharing KV cache with an earlier attention layer
         if self.kv_sharing_target_layer_name is not None:
@@ -815,8 +812,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
-
-        return kv_cache
 
     def extend_for_sliding_window(
         self,

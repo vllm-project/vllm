@@ -1208,12 +1208,11 @@ class FlashInferImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
-    ) -> torch.Tensor:
+    ) -> None:
         """Perform KV cache update separately from attention forward pass.
 
-        FlashInfer overrides the default implementation because:
-        1. It accesses kv_cache differently (direct indexing vs unbind)
-        2. It requires FP8 dtype conversion for FlashInfer API compatibility
+        FlashInfer overrides the default implementation because it accesses
+        kv_cache differently (direct indexing vs unbind).
 
         Args:
             layer: The attention layer instance.
@@ -1221,9 +1220,6 @@ class FlashInferImpl(AttentionImpl):
             value: Value tensor with shape [num_tokens, num_kv_heads, head_size].
             kv_cache: The KV cache tensor.
             attn_metadata: Attention metadata containing slot_mapping.
-
-        Returns:
-            The KV cache tensor (possibly with dtype changed for FP8).
         """
         # Skip if sharing KV cache with an earlier attention layer
         if self.kv_sharing_target_layer_name is not None:
@@ -1244,16 +1240,6 @@ class FlashInferImpl(AttentionImpl):
             layer._k_scale,
             layer._v_scale,
         )
-
-        # The FlashInfer API requires data to be in fp8_e4m3 or fp8_e5m2
-        # to process the cache when the kv_cache_dtype is fp8
-        if self.kv_cache_dtype.startswith("fp8"):
-            torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-                self.kv_cache_dtype
-            )
-            kv_cache = kv_cache.view(torch_dtype)
-
-        return kv_cache
 
     def forward(
         self,
@@ -1356,6 +1342,14 @@ class FlashInferImpl(AttentionImpl):
         value = value[:num_actual_tokens]
         output_padded = output
         output = output[:num_actual_tokens]
+
+        # The FlashInfer API requires data to be in fp8_e4m3 or fp8_e5m2
+        # to process the cache when the kv_cache_dtype is fp8.
+        if self.kv_cache_dtype.startswith("fp8"):
+            torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.kv_cache_dtype
+            )
+            kv_cache = kv_cache.view(torch_dtype)
 
         if attn_metadata.use_cascade:
             # Cascade attention (rare case).
