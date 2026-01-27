@@ -771,7 +771,7 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
 
     resp = await serving_chat.create_chat_completion(req)
     assert isinstance(resp, ErrorResponse)
-    assert "max_tokens" in resp.error.message
+    assert "context length is only" in resp.error.message
 
 
 @pytest.mark.asyncio
@@ -811,7 +811,7 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
 
     resp = await serving_chat.create_chat_completion(req)
     assert isinstance(resp, ErrorResponse)
-    assert "maximum context length" in resp.error.message
+    assert "context length is only" in resp.error.message
 
 
 @pytest.mark.asyncio
@@ -875,6 +875,14 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_engine.io_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
+    orig_tokenize_prompt_async = mock_engine.renderer.tokenize_prompt_async
+
+    captured_prompts = []
+
+    async def tokenize_prompt_async(prompt, **kwargs):
+        captured_prompts.append(prompt)
+        return await orig_tokenize_prompt_async(prompt, **kwargs)
+
     serving_chat = _build_serving_chat(mock_engine)
 
     # Test cache_salt
@@ -887,9 +895,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
 
-    engine_prompt = serving_chat.renderer.tokenize_prompt_async.await_args_list[0].args[
-        0
-    ]
+    engine_prompt = captured_prompts[0]
     assert "cache_salt" not in engine_prompt
 
     # Test with certain cache_salt
@@ -897,9 +903,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
 
-    engine_prompt = serving_chat.renderer.tokenize_prompt_async.await_args_list[1].args[
-        0
-    ]
+    engine_prompt = captured_prompts[1]
     assert engine_prompt.get("cache_salt") == "test_salt"
 
 
