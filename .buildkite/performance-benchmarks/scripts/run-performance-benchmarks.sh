@@ -449,7 +449,7 @@ run_serving_tests() {
 
     # save the compilation mode and optimization level on the serving results
     # whenever they are set
-    compilation_mode=$(echo "$server_params" | jq -r '."compilation_config.mode"')
+    compilation_config_mode=$(echo "$server_params" | jq -r '."compilation_config.mode"')
     optimization_level=$(echo "$server_params" | jq -r '.optimization_level')
 
     # iterate over different QPS
@@ -473,9 +473,7 @@ run_serving_tests() {
           --result-filename ${new_test_name}.json \
           --request-rate $qps \
           --max-concurrency $max_concurrency \
-          --metadata "tensor_parallel_size=$tp" \
-          --metadata "compilation_mode=$compilation_mode" \
-          --metadata "optimization_level=$optimization_level" \
+          --metadata tensor_parallel_size=$tp compilation_config.mode=$compilation_config_mode optimization_level=$optimization_level \
           $client_args $client_remote_args "
 
         echo "Running test case $test_name with qps $qps"
