@@ -519,7 +519,9 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
 
         # For DeepSeekV3.2, a custom fp8 format is used when fp8 kv-cache is enabled.
         cache_config = vllm_config.cache_config
-        if cache_config.cache_dtype.startswith("fp8"):
+        if not current_platform.is_rocm() and cache_config.cache_dtype.startswith(
+            "fp8"
+        ):
             cache_config.cache_dtype = "fp8_ds_mla"
             logger.info("Using custom fp8 kv-cache format for DeepSeekV3.2")
         if cache_config.cache_dtype == "bfloat16":

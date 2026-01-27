@@ -15,6 +15,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBaseImpl,
     get_mla_dims,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -310,6 +311,7 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
     paged_kv_last_page_len: torch.Tensor
     paged_kv_indices: torch.Tensor
     paged_kv_indptr: torch.Tensor
+    attn_out_dtype: torch.dtype
 
     block_size: int = 1
     topk_tokens: int = 2048
@@ -332,6 +334,7 @@ class ROCMAiterMLASparseMetadataBuilder(
     ):
         self.kv_cache_spec = kv_cache_spec
         self.model_config = vllm_config.model_config
+        self.model_dtype = vllm_config.model_config.dtype
         parallel_config = vllm_config.parallel_config
         self.device = device
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -422,6 +425,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             block_table=common_attn_metadata.block_table_tensor,
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
+            attn_out_dtype=self.model_dtype,
             topk_tokens=self.topk_tokens,
             qo_indptr=qo_indptr,
             paged_kv_last_page_len=paged_kv_last_page_len,
@@ -496,8 +500,9 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
         self.is_fp8bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
-    def _forward_bf16_kv(
+    def _forward_mla(
         self,
+        layer: AttentionLayer,
         q: torch.Tensor,  # [sq, heads, d_qk]
         kv_c_and_k_pe_cache: torch.Tensor,  # [blocks, heads, d_qk]
         attn_metadata: ROCMAiterMLASparseMetadata,
@@ -505,10 +510,14 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         num_tokens = q.shape[0]
         output = torch.empty(
             [num_tokens, self.num_heads, self.kv_lora_rank],
-            dtype=q.dtype,
+            dtype=attn_metadata.attn_out_dtype,
             device=q.device,
         )
 
+        # print("kv cache shape: ", kv_c_and_k_pe_cache.shape, flush=True)
+        # print("kv cache dtype: ", kv_c_and_k_pe_cache.dtype, flush=True)
+        # print("q scale: ", layer._q_scale, flush=True)
+        # print("k scale: ", layer._k_scale, flush=True)
         rocm_aiter_ops.mla_decode_fwd(
             q,
             kv_c_and_k_pe_cache,
@@ -519,6 +528,8 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
             attn_metadata.paged_kv_indptr,
             attn_metadata.paged_kv_indices,
             attn_metadata.paged_kv_last_page_len,
+            q_scale=layer._q_scale,
+            kv_scale=layer._k_scale,
         )
 
         return output[:, : self.num_heads, :]
@@ -609,7 +620,14 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
                 scale=layer._k_scale,
             )
 
-        attn_out = self._forward_bf16_kv(q, kv_cache, attn_metadata)
+        fp8_attention = self.kv_cache_dtype.startswith("fp8")
+        if fp8_attention:
+            original_q_shape = q.shape
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+            q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
+            q = q.view(original_q_shape)
+
+        attn_out = self._forward_mla(layer, q, kv_cache, attn_metadata)
 
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
         return output

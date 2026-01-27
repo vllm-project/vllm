@@ -207,13 +207,8 @@ class RocmPlatform(Platform):
         from vllm._aiter_ops import rocm_aiter_ops
 
         block_size = attn_selector_config.block_size
-        kv_cache_dtype = attn_selector_config.kv_cache_dtype
 
         if attn_selector_config.use_sparse:
-            if kv_cache_dtype and kv_cache_dtype.startswith("fp8"):
-                raise ValueError(
-                    "ROCMAiterMLASparseBackend doesn't support fp8 kv_cache_dtype."
-                )
             logger.info_once("Using Sparse MLA backend.")
             return AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
 
