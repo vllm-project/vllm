@@ -167,7 +167,7 @@ def select_nvfp4_moe_backend(
             k_cls, config, weight_key, activation_key, activation_format
         )
         if supported:
-            logger.info_once(_make_log_backend(backend), scope="local")
+            logger.info_once(_make_log_backend(backend))
             return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
 
