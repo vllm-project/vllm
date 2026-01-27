@@ -1647,7 +1647,9 @@ class LLM:
             priority = [0] * num_requests
 
         if any(param.truncate_prompt_tokens is not None for param in engine_params):
-            # Remove this after deprecating params.truncate_prompt_tokens
+            # TODO: Remove this after deprecating params.truncate_prompt_tokens
+            # Then, move the code from the `else` block to the top and let
+            # `self._preprocess_completion` handle prompt normalization
             engine_prompts = [
                 engine_prompt
                 for in_prompt, param in zip(in_prompts, engine_params)
@@ -1661,7 +1663,7 @@ class LLM:
             ]
         else:
             engine_prompts = self._preprocess_completion(
-                prompts,
+                in_prompts,
                 tokenization_kwargs=tokenization_kwargs,
             )
 
