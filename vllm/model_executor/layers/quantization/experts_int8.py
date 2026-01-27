@@ -128,7 +128,6 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         intermediate_size_per_partition: int,
         hidden_size: int,
     ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
-        """Create Int8 per-channel scale tensors."""
         # WEIGHT_SCALES (per-channel for int8)
         w13_weight_scale = torch.nn.Parameter(
             torch.zeros(

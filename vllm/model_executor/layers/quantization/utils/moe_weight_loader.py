@@ -94,19 +94,7 @@ class MoeQuantizationCallbacks(Protocol):
 
 class MoeOnlineWeightLoader:
     """
-    Handles deferred weight loading and quantization for MoE layers.
-
-    This class provides a deferred weight loading pattern that:
-    1. Creates weights on meta device initially
-    2. Materializes weights just-in-time when loading starts
-    3. Tracks loading progress using CopyNumelCounter
-    4. Calls quantization callback when all weights are loaded
-
-    Usage:
-        loader = MoeOnlineWeightLoader(moe_quant_callbacks)
-        loader.create_weights(layer, num_experts, ...)
-        # Later, after model loading:
-        loader.process_weights_after_loading(layer)
+    Handles weight loading and quantization for MoE layers.
     """
 
     def __init__(self, moe_quant_callbacks: MoeQuantizationCallbacks):
@@ -121,12 +109,6 @@ class MoeOnlineWeightLoader:
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        """
-        Create MoE weights on meta device with deferred loading.
-
-        Creates weights on meta device with a patched weight loader that
-        tracks loading progress and triggers quantization when complete.
-        """
         # Store layer dimensions
         layer.intermediate_size_per_partition = intermediate_size_per_partition
         layer.hidden_size = hidden_size
@@ -188,7 +170,6 @@ class MoeOnlineWeightLoader:
         hidden_size: int,
         extra_weight_attrs: dict,
     ) -> None:
-        """Create and register scale parameters."""
         w13_weight_scale, w2_weight_scale = (
             self.moe_quant_callbacks.create_scale_tensors(
                 layer,
@@ -211,11 +192,6 @@ class MoeOnlineWeightLoader:
         weight_loader: Callable,
         extra_weight_attrs: dict,
     ) -> Callable:
-        """
-        Creates a patched weight loader that tracks loading progress
-        and calls quantization when complete.
-        """
-
         def patched_weight_loader(param, loaded_weight, *args, **kwargs):
             # Add a counter to track how many elements we have updated
             if not hasattr(layer, "_loaded_numel"):
@@ -274,11 +250,9 @@ class MoeOnlineWeightLoader:
         return patched_weight_loader
 
     def _on_all_weights_loaded(self, layer: Module) -> None:
-        """Called when all MoE weights have been loaded."""
         self.process_weights_after_loading(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        """Process weights after loading - materialize dummy weights and quantize."""
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
@@ -309,7 +283,6 @@ class MoeOnlineWeightLoader:
         self.moe_quant_callbacks.setup_kernel(layer, w13, w2, w13_scale, w2_scale)
 
     def _materialize_dummy_weights(self, layer: Module) -> None:
-        """Materialize weights that are still on meta device (dummy weights)."""
         if layer.w13_weight.device == torch.device("meta"):
             w13_weight = torch.nn.Parameter(
                 torch.empty_like(layer.w13_weight, device=layer._load_device),

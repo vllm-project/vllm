@@ -1090,7 +1090,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         intermediate_size_per_partition: int,
         hidden_size: int,
     ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
-        """Create FP8 per-expert scale tensors."""
         layer.weight_block_size = None
 
         # WEIGHT_SCALES (per-expert for FP8)
@@ -1120,7 +1119,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
     ) -> None:
-        """Setup the kernel after quantization."""
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
             layer,
