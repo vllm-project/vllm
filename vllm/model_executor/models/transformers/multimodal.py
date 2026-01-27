@@ -278,6 +278,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
         # In Transformers v5 this is handled by the conversion mapping
+        # TODO(hmellor): Remove this when we drop support for Transformers v4
         if Version(transformers.__version__) < Version("5.0.0"):
             # Backwards compatibility for prev released models. State dicts back then
             # had different formats and cannot be loaded with `AutoModel` mapping as is
