@@ -9,7 +9,7 @@ an optimal --max-num-seqs value based on where bandwidth reaches near-peak.
 
 Algorithm:
 1. Find the smallest batch size that achieves 99% of maximum observed bandwidth
-2. Apply headroom multiplier (empirical value) for overall throughput
+2. Apply headroom multiplier (empirical value) for throughput (output tokens/sec)
 
 Tested on NVIDIA B200 with Nemotron-H models.
 
@@ -112,12 +112,6 @@ def benchmark_ssm_kernel(
     # Create tensors matching Mamba2 decode phase shapes.
     # These shapes follow the "with heads" variant used by MambaMixer2.
     # Reference: tests/kernels/mamba/test_mamba_ssm.py
-    #   - see test_selective_state_update_with_heads_with_batch_indices()
-    #   - state: (batch, nheads, headdim, dstate) - uses state_dtype
-    #   - x, dt, z: (batch, nheads, headdim) - uses compute_dtype
-    #   - A: (nheads, headdim, dstate) - always float32 for precision
-    #   - B, C: (batch, ngroups, dstate) - uses compute_dtype
-    #   - D, dt_bias: (nheads, headdim) - uses compute_dtype
     state = torch.randn(
         batch_size, nheads, dim, dstate, device=device, dtype=config.state_dtype
     )
@@ -198,7 +192,6 @@ def find_optimal_batch_size(
 
     Uses bandwidth plateau detection: finds where bandwidth reaches near-peak
     (99% of max), then applies headroom for overall system efficiency.
-    This is more stable than threshold-based saturation detection.
     """
     if tp_size > 1:
         config = config._replace(num_heads=config.num_heads // tp_size)
