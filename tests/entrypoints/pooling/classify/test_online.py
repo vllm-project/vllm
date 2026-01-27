@@ -401,7 +401,7 @@ async def test_score(server: RemoteOpenAIServer, model_name: str):
             "documents": "pong",
         },
     )
-    assert response.json()["error"]["type"] == "BadRequestError"
+    assert response.json()["detail"] == 'Not Found'
 
 
 @pytest.mark.asyncio
@@ -416,7 +416,7 @@ async def test_rerank(server: RemoteOpenAIServer, model_name: str):
             "documents": ["pong"],
         },
     )
-    assert response.json()["error"]["type"] == "BadRequestError"
+    assert response.json()["detail"] == 'Not Found'
 
 
 @pytest.mark.asyncio
