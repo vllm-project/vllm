@@ -1,22 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Demonstrates reinforcement learning from human feedback (RLHF) using vLLM and Ray,
+Demonstrates reinforcement learning using vLLM and Ray,
 with native weight syncing APIs at engine instance.
 
 The script separates training and inference workloads onto distinct GPUs
 so that Ray can manage process placement and inter-process communication.
-A Hugging Face Transformer model occupies GPU 0 for training, whereas a
-tensor-parallel vLLM inference engine occupies GPU 1–2.
+A Hugging Face Transformer model occupies one GPU for training, whereas a
+2x tensor-parallel vLLM inference engine occupies two GPUs.
 
 The example performs the following steps:
-
-* Load the training model on GPU 0.
-* Split the inference model across GPUs 1–2 using vLLM's tensor parallelism
-  and Ray placement groups with dummy weights.
-* Generate text from a list of prompts using the inference engine.
+* Load the training model on one gpu (scheduled via ray)
+* Initialize the inference model with dummy weights across
+  two gpus using vLLM's tensor parallelism and Ray placement groups.
+* Generate gibberish from a list of prompts using the randomly initialized
+  inference engine.
 * Update the weights of the training model and broadcast the updated weights
   to the inference engine by using a Ray collective RPC group.
+* Generating from the list of prompts after weight sync should result
+  in sensible outputs.
 
 This example assumes a single-node cluster with three GPUs, but Ray
 supports multi-node clusters. vLLM expects the GPUs are only used for vLLM
@@ -75,13 +77,18 @@ class TrainModel:
 
     def init_weight_transfer_group(self, master_address, master_port, world_size):
         """Initialize the NCCL process group for weight transfer."""
-        self.model_update_group = NCCLWeightTransferEngine.stateless_init_process_group(
-            master_address, master_port, 0, world_size, self.device
+        self.model_update_group = NCCLWeightTransferEngine.trainer_init(
+            dict(
+                master_address=master_address,
+                master_port=master_port,
+                world_size=world_size,
+            ),
+            device=self.device,
         )
 
     def broadcast_weights(self, packed: bool = True):
         """Broadcast weights to the inference engine."""
-        NCCLWeightTransferEngine.trainer_broadcast_weights(
+        NCCLWeightTransferEngine.trainer_send_weights(
             iterator=self.model.named_parameters(),
             group=self.model_update_group,
             packed=packed,
@@ -90,9 +97,7 @@ class TrainModel:
 
 # Initialize Ray and set the visible devices. The vLLM engine will
 # be placed on GPUs 1 and 2.
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
-ray.init(runtime_env={"excludes": [".git/objects/pack/"]})
-# ray.init()
+ray.init()
 
 # Create a placement group that reserves GPU 1–2 for the vLLM inference engine.
 # Learn more about Ray placement groups:

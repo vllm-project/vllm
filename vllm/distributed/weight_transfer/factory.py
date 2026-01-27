@@ -89,7 +89,13 @@ class WeightTransferEngineFactory:
             ValueError: If the backend is not registered
         """
         backend = config.backend
-        engine_cls = cls.get_engine_class(backend)
+        if backend not in cls._registry:
+            available = list(cls._registry.keys())
+            raise ValueError(
+                f"Invalid weight transfer backend: {backend}. "
+                f"Available engines: {available}"
+            )
+        engine_cls = cls._registry[backend]()
 
         logger.info(
             "Creating weight transfer engine: %s",
@@ -97,60 +103,6 @@ class WeightTransferEngineFactory:
         )
 
         return engine_cls(config, parallel_config)
-
-    @classmethod
-    def get_engine_class(cls, backend: str) -> type[WeightTransferEngine]:
-        """Get a registered engine class by name.
-
-        Args:
-            backend: Name of the registered engine
-
-        Returns:
-            The engine class
-
-        Raises:
-            ValueError: If the engine is not registered
-        """
-        if backend not in cls._registry:
-            available = list(cls._registry.keys())
-            raise ValueError(
-                f"Invalid weight transfer backend: {backend}. "
-                f"Available engines: {available}"
-            )
-        return cls._registry[backend]()
-
-    @classmethod
-    def list_engines(cls) -> list[str]:
-        """List all registered engine names.
-
-        Returns:
-            List of registered engine names
-        """
-        return list(cls._registry.keys())
-
-    @classmethod
-    def unregister_engine(cls, name: str) -> None:
-        """Unregister an engine by name.
-
-        Args:
-            name: Name of the engine to unregister
-
-        Raises:
-            KeyError: If the engine is not registered
-        """
-        del cls._registry[name]
-
-    @classmethod
-    def is_registered(cls, name: str) -> bool:
-        """Check if an engine is registered.
-
-        Args:
-            name: Name of the engine to check
-
-        Returns:
-            True if the engine is registered
-        """
-        return name in cls._registry
 
 
 # Register built-in weight transfer engines here.

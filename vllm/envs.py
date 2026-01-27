@@ -258,7 +258,7 @@ if TYPE_CHECKING:
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_PACKED_TENSOR_NUM_BUFFERS: int = 2
-    VLLM_PACKED_TENSOR_BUFFER_SIZE: int = 1024 * 1024 * 1024  # 1GB
+    VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES: int = 1024 * 1024 * 1024  # 1GB
 
 
 def get_default_cache_root():
@@ -1681,8 +1681,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_PACKED_TENSOR_NUM_BUFFERS", "2")
     ),
     # Size in bytes for each packed tensor buffer (default 1GB)
-    "VLLM_PACKED_TENSOR_BUFFER_SIZE": lambda: int(
-        os.getenv("VLLM_PACKED_TENSOR_BUFFER_SIZE", str(1024 * 1024 * 1024))
+    "VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES": lambda: int(
+        os.getenv("VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES", str(1024 * 1024 * 1024))
     ),
 }
 

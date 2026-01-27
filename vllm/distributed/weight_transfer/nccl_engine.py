@@ -101,12 +101,14 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
         worker_rank = dp_rank * world_size_per_dp + tp_rank
         rank = worker_rank + init_info.rank_offset
         # Create stateless process group
-        self.model_update_group = NCCLWeightTransferEngine.stateless_init_process_group(
-            init_info.master_address,
-            init_info.master_port,
-            rank,
-            init_info.world_size,
-            torch.cuda.current_device(),
+        self.model_update_group = (
+            NCCLWeightTransferEngine._stateless_init_process_group(
+                init_info.master_address,
+                init_info.master_port,
+                rank,
+                init_info.world_size,
+                torch.cuda.current_device(),
+            )
         )
 
     def receive_weights(
@@ -171,7 +173,7 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
             self.model_update_group = None
 
     @staticmethod
-    def trainer_broadcast_weights(
+    def trainer_send_weights(
         iterator: Iterator[tuple[str, torch.Tensor]],
         group: Any,
         src: int = 0,
@@ -191,13 +193,15 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
             packed: Whether to use packed tensor broadcasting for efficiency.
                    When True, multiple tensors are batched together before
                    broadcasting to reduce NCCL communication overhead.
+            stream: CUDA stream to use for broadcasting if packed is False.
+                    If packed is True, new streams will be created for each buffer.
 
         Example:
             >>> from vllm.distributed.weight_transfer.nccl_engine import (
             ...     NCCLWeightTransferEngine,
             ... )
             >>> param_iter = ((n, p) for n, p in model.named_parameters())
-            >>> NCCLWeightTransferEngine.trainer_broadcast_weights(
+            >>> NCCLWeightTransferEngine.trainer_send_weights(
             ...     param_iter, group, packed=True
             ... )
         """
@@ -226,7 +230,64 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
                 )
 
     @staticmethod
-    def stateless_init_process_group(
+    def trainer_init(
+        init_info: NCCLInitInfo | dict,
+        device: torch.device | int | str | None = None,
+    ) -> "PyNcclCommunicator":
+        """
+        Initialize NCCL process group for trainer-side weight transfer.
+
+        The trainer is always rank 0 in the process group.
+
+        Args:
+            init_info: Either an NCCLInitInfo object or a dict with keys:
+                - master_address: str
+                - master_port: int
+                - world_size: int
+                Optionally can include 'device' if not passed separately.
+            device: The CUDA device to use. If not provided, must be in init_info.
+
+        Returns:
+            PyNcclCommunicator for weight transfer.
+
+        Example:
+            >>> from vllm.distributed.weight_transfer.nccl_engine import (
+            ...     NCCLWeightTransferEngine,
+            ... )
+            >>> group = NCCLWeightTransferEngine.trainer_init(
+            ...     dict(
+            ...         master_address=master_address,
+            ...         master_port=master_port,
+            ...         world_size=world_size,
+            ...     ),
+            ...     device=torch.device("cuda:0"),
+            ... )
+        """
+        if isinstance(init_info, dict):
+            master_address = init_info["master_address"]
+            master_port = init_info["master_port"]
+            world_size = init_info["world_size"]
+            if device is None:
+                device = init_info.get("device")
+        else:
+            # NCCLInitInfo object
+            master_address = init_info.master_address
+            master_port = init_info.master_port
+            world_size = init_info.world_size
+            # NCCLInitInfo doesn't have device, so device param is required
+
+        if device is None:
+            raise ValueError(
+                "device must be provided either in init_info or as a separate parameter"
+            )
+
+        # Trainer is always rank 0
+        return NCCLWeightTransferEngine._stateless_init_process_group(
+            master_address, master_port, 0, world_size, device
+        )
+
+    @staticmethod
+    def _stateless_init_process_group(
         master_address, master_port, rank, world_size, device
     ):
         """

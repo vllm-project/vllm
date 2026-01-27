@@ -6,7 +6,6 @@ Unit tests for engine classes (parsing, validation, registry).
 Integration test for NCCL weight transfer between processes using Ray.
 """
 
-from dataclasses import dataclass
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,10 +15,6 @@ import torch
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
-from vllm.distributed.weight_transfer.base import (
-    BackendInitInfo,
-    WeightTransferEngine,
-)
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLInitInfo,
     NCCLUpdateInfo,
@@ -166,33 +161,6 @@ class TestEngineRegistry:
         parallel_config = create_mock_parallel_config()
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
             WeightTransferEngineFactory.create_engine(config, parallel_config)
-
-    def test_register_custom_engine(self):
-        """Test registering a custom engine."""
-
-        @dataclass
-        class CustomInitInfo(BackendInitInfo):
-            pass
-
-        class CustomEngine(WeightTransferEngine):
-            init_info_cls = CustomInitInfo
-            update_info_cls = NCCLUpdateInfo  # Reuse for simplicity
-
-            def init_transfer(self, init_info):
-                pass
-
-            def receive_weights(self, update_info, load_weights):
-                pass
-
-            def shutdown(self):
-                pass
-
-        # Register custom engine
-        WeightTransferEngineFactory.register_engine("custom_test", CustomEngine)
-        assert WeightTransferEngineFactory.is_registered("custom_test")
-
-        # Clean up
-        WeightTransferEngineFactory.unregister_engine("custom_test")
 
     def test_register_duplicate_raises(self):
         """Test registering duplicate engine name raises."""

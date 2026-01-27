@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Demonstrates reinforcement learning from human feedback (RLHF) using vLLM
-via HTTP API, with new weight syncing APIs.
+via HTTP API, with native weight syncing APIs.
 
 Unlike rlhf.py which creates a vLLM instance programmatically, this script
 assumes you have already started a vLLM server using `vllm serve`. It uses:
@@ -187,8 +187,13 @@ def main():
     init_thread.start()
 
     # Initialize NCCL process group on trainer side
-    model_update_group = NCCLWeightTransferEngine.stateless_init_process_group(
-        master_address, master_port, 0, world_size, torch.device(device)
+    model_update_group = NCCLWeightTransferEngine.trainer_init(
+        dict(
+            master_address=master_address,
+            master_port=master_port,
+            world_size=world_size,
+        ),
+        device=torch.device(device),
     )
 
     # Wait for init_weight_transfer to complete
@@ -217,7 +222,7 @@ def main():
 
     # Broadcast all weights from trainer to vLLM workers
     print("Broadcasting weights via NCCL...")
-    NCCLWeightTransferEngine.trainer_broadcast_weights(
+    NCCLWeightTransferEngine.trainer_send_weights(
         iterator=train_model.named_parameters(),
         group=model_update_group,
         packed=True,

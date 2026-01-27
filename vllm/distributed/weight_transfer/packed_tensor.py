@@ -27,7 +27,7 @@ def packed_broadcast_producer(
                        packing, should return a tensor
 
     """
-    target_packed_tensor_size = envs.VLLM_PACKED_TENSOR_BUFFER_SIZE
+    target_packed_tensor_size = envs.VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES
     num_buffers = envs.VLLM_PACKED_TENSOR_NUM_BUFFERS
 
     streams = [torch.cuda.Stream() for _ in range(num_buffers)]
@@ -40,8 +40,6 @@ def packed_broadcast_producer(
     ]
 
     while True:
-        # Move to the next buffer
-        buffer_idx = (buffer_idx + 1) % num_buffers
         # Synchronize the current stream
         streams[buffer_idx].synchronize()
         # Start tasks for the new buffer in a new stream
@@ -63,6 +61,8 @@ def packed_broadcast_producer(
                     packing_tensor_list[buffer_idx], dim=0
                 )
                 group.broadcast(packed_tensors[buffer_idx], src=src)
+                # Move to the next buffer
+                buffer_idx = (buffer_idx + 1) % num_buffers
             except StopIteration:
                 # Do the last broadcast if there are remaining tensors
                 if len(packing_tensor_list[buffer_idx]) > 0:
@@ -92,66 +92,64 @@ def packed_broadcast_consumer(
 
     def unpack_tensor(
         packed_tensor: torch.Tensor,
-        meta_data_list: list[tuple[str, list[int], torch.dtype, int, int]],
+        names: list[str],
+        shapes: list[list[int]],
+        dtypes: list[torch.dtype],
+        tensor_sizes: list[int],
     ) -> list[tuple[str, torch.Tensor]]:
         """Unpack a single tensor into a list of tensors.
 
         Args:
             packed_tensor: The packed torch.uint8 tensor to unpack
-            meta_data_list: List[(name, shape, dtype, offset, tensor_size)]
+            names: List of tensor names
+            shapes: List of tensor shapes
+            dtypes: List of tensor dtypes
+            tensor_sizes: List of tensor sizes in bytes
 
         Returns:
             unpacked List[(name, tensor)]
         """
-        # Perform batched split with torch.split_with_sizes
-        packed_tensor_sizes = [meta[4] for meta in meta_data_list]
-        unpacked_tensors = packed_tensor.split_with_sizes(packed_tensor_sizes)
+        unpacked_tensors = packed_tensor.split_with_sizes(tensor_sizes)
 
         unpacked_list = [
-            (
-                meta_data_list[i][0],
-                tensor.view(meta_data_list[i][2]).view(*meta_data_list[i][1]),
+            (name, tensor.view(dtype).view(*shape))
+            for name, shape, dtype, tensor in zip(
+                names, shapes, dtypes, unpacked_tensors
             )
-            for i, tensor in enumerate(unpacked_tensors)
         ]
 
         return unpacked_list
 
-    target_packed_tensor_size = envs.VLLM_PACKED_TENSOR_BUFFER_SIZE
+    target_packed_tensor_size = envs.VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES
     num_buffers = envs.VLLM_PACKED_TENSOR_NUM_BUFFERS
 
     streams = [torch.cuda.Stream() for _ in range(num_buffers)]
     buffer_idx = 0
 
-    packing_tensor_meta_data: list[
-        list[tuple[str, list[int], torch.dtype, int, int]]
-    ] = [[] for _ in range(num_buffers)]
+    packing_tensor_meta_data: list[list[tuple[str, list[int], torch.dtype, int]]] = [
+        [] for _ in range(num_buffers)
+    ]
     packing_tensor_sizes: list[int] = [0 for _ in range(num_buffers)]
-    offsets: list[int] = [0 for _ in range(num_buffers)]
     packed_tensors: list[torch.Tensor] = [
         torch.empty(0, dtype=torch.uint8, device="cuda") for _ in range(num_buffers)
     ]
 
     while True:
-        # Move to the next buffer
-        buffer_idx = (buffer_idx + 1) % num_buffers
         # Synchronize the current stream
         streams[buffer_idx].synchronize()
         with torch.cuda.stream(streams[buffer_idx]):
             # Initialize the packing tensor meta data
             packing_tensor_meta_data[buffer_idx] = []
             packing_tensor_sizes[buffer_idx] = 0
-            offsets[buffer_idx] = 0
             try:
                 # Form a packed tensor
                 while True:
                     name, (shape, dtype) = next(iterator)
                     tensor_size = math.prod(shape) * dtype.itemsize
                     packing_tensor_meta_data[buffer_idx].append(
-                        (name, shape, dtype, offsets[buffer_idx], tensor_size)
+                        (name, shape, dtype, tensor_size)
                     )
                     packing_tensor_sizes[buffer_idx] += tensor_size
-                    offsets[buffer_idx] += tensor_size
                     if packing_tensor_sizes[buffer_idx] > target_packed_tensor_size:
                         break
                 # Create a packed tensor and broadcast it
@@ -160,12 +158,20 @@ def packed_broadcast_consumer(
                 )
                 group.broadcast(packed_tensors[buffer_idx], src=src)
                 # Load the packed tensor into the model
+                names, shapes, dtypes, tensor_sizes = zip(
+                    *packing_tensor_meta_data[buffer_idx]
+                )
                 post_unpack_func(
                     unpack_tensor(
                         packed_tensors[buffer_idx],
-                        packing_tensor_meta_data[buffer_idx],
+                        list(names),
+                        list(shapes),
+                        list(dtypes),
+                        list(tensor_sizes),
                     )
                 )
+                # Move to the next buffer
+                buffer_idx = (buffer_idx + 1) % num_buffers
             except StopIteration:
                 # Do the last broadcast if there are remaining tensors
                 if len(packing_tensor_meta_data[buffer_idx]) > 0:
@@ -177,10 +183,16 @@ def packed_broadcast_consumer(
                     )
                     group.broadcast(packed_tensors[buffer_idx], src=src)
                     # Load the packed tensor into the model
+                    names, shapes, dtypes, tensor_sizes = zip(
+                        *packing_tensor_meta_data[buffer_idx]
+                    )
                     post_unpack_func(
                         unpack_tensor(
                             packed_tensors[buffer_idx],
-                            packing_tensor_meta_data[buffer_idx],
+                            list(names),
+                            list(shapes),
+                            list(dtypes),
+                            list(tensor_sizes),
                         )
                     )
                 break

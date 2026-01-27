@@ -61,7 +61,7 @@ steps:
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
   - tests/compile/fullgraph/test_basic_correctness.py
-  - examples/offline_inference/weight_syncing/
+  - examples/offline_inference/new_weight_syncing/
   - tests/examples/offline_inference/data_parallel.py
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
@@ -96,9 +96,8 @@ steps:
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
-  - cd ../examples/offline_inference/weight_syncing
+  - cd ../examples/offline_inference/new_weight_syncing
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
 
 - label: Distributed Tests (8 GPUs)(H100)

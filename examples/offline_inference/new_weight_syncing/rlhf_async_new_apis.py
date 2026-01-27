@@ -1,24 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Demonstrates asynchronous reinforcement learning from human feedback (RLHF)
-using vLLM and Ray, with the new weight syncing APIs
+Demonstrates async reinforcement learning using vLLM and Ray,
+with native weight syncing APIs at engine instance.
 
 The script separates training and inference workloads onto distinct GPUs
 so that Ray can manage process placement and inter-process communication.
-A Hugging Face Transformer model occupies GPU 0 for training, whereas a
-tensor-parallel vLLM inference engine occupies GPU 1–2.
+A Hugging Face Transformer model occupies one GPU for training, whereas a
+2x tensor-parallel vLLM inference engine occupies two GPUs.
 
 The example performs the following steps:
-
-* Load the training model on GPU 0.
-* Split the inference model across GPUs 1–2 using vLLM's tensor parallelism
-  and Ray placement groups.
-* Start generation from a list of prompts using the inference engine.
+* Load the training model on one gpu (scheduled via ray)
+* Initialize the inference model with dummy weights across
+  two gpus using vLLM's tensor parallelism and Ray placement groups.
+* Generate gibberish from a list of prompts using the randomly initialized
+  inference engine.
 * Pause generation once generation completes for one sequence
 * Update the weights of the training model and broadcast the updated weights
-  to the inference engine by using a Ray collective RPC group. Note that
-  for demonstration purposes we simply zero out the weights.
+  to the inference engine by using a Ray collective RPC group.
 * Resume generation and print out the results
 
 This example assumes a single-node cluster with three GPUs, but Ray
@@ -27,7 +26,6 @@ workloads. Residual GPU activity interferes with vLLM memory profiling and
 causes unexpected behavior.
 """
 
-import asyncio
 import os
 import uuid
 from dataclasses import asdict
@@ -36,7 +34,6 @@ import ray
 import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from rlhf_utils import stateless_init_process_group
 from transformers import AutoModelForCausalLM
 
 import vllm
@@ -52,8 +49,43 @@ from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLWeightTransferEngine,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
+from vllm.v1.executor import Executor
 
 MODEL_NAME = "facebook/opt-125m"
+
+
+class MyLLM(vllm.AsyncLLMEngine):
+    """Configure the vLLM worker for Ray placement group execution."""
+
+    def __init__(self, **kwargs):
+        os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0,1"
+        engine_args = vllm.AsyncEngineArgs(**kwargs)
+        vllm_config = engine_args.create_engine_config()
+        executor_class = Executor.get_class(vllm_config)
+        super().__init__(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_requests=engine_args.enable_log_requests,
+            log_stats=not engine_args.disable_log_stats,
+        )
+
+    async def generate_with_retry(
+        self, prompt: str, sampling_params: vllm.SamplingParams
+    ) -> vllm.RequestOutput:
+        finish_reason = "abort"
+        while finish_reason == "abort":
+            async for request_output in self.generate(
+                prompt, sampling_params, request_id=str(uuid.uuid4())
+            ):
+                output = request_output
+            finish_reason = output.outputs[0].finish_reason
+            if finish_reason == "abort":
+                print(
+                    f"ABORT, prompt: [{prompt}], "
+                    f"generated text: [{output.outputs[0].text}]"
+                )
+            prompt += output.outputs[0].text
+        return output
 
 
 @ray.remote(num_gpus=1)
@@ -86,83 +118,27 @@ class TrainModel:
 
     def init_weight_transfer_group(self, master_address, master_port, world_size):
         """Initialize the NCCL process group for weight transfer."""
-        self.model_update_group = stateless_init_process_group(
-            master_address, master_port, 0, world_size, self.device
+        self.model_update_group = NCCLWeightTransferEngine.trainer_init(
+            dict(
+                master_address=master_address,
+                master_port=master_port,
+                world_size=world_size,
+            ),
+            device=self.device,
         )
 
     def broadcast_weights(self, packed: bool = True):
         """Broadcast weights to the inference engine."""
-        NCCLWeightTransferEngine.trainer_broadcast_weights(
+        NCCLWeightTransferEngine.trainer_send_weights(
             iterator=self.model.named_parameters(),
             group=self.model_update_group,
             packed=packed,
         )
 
 
-class MyLLM:
-    """Simple wrapper over AsyncLLM for supporting async RL."""
-
-    def __init__(self, **kwargs):
-        os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0,1"
-        self.engine = vllm.AsyncLLMEngine.from_engine_args(
-            vllm.AsyncEngineArgs(**kwargs)
-        )
-        self.generation_paused_event = asyncio.Event()
-
-    async def generate(
-        self, prompt: str, sampling_params: vllm.SamplingParams
-    ) -> vllm.RequestOutput:
-        async for request_output in self.engine.generate(
-            prompt, sampling_params, request_id=str(uuid.uuid4())
-        ):
-            final_output = request_output
-        return final_output
-
-    async def generate_with_retry(
-        self, prompt: str, sampling_params: vllm.SamplingParams
-    ) -> vllm.RequestOutput:
-        finish_reason = "abort"
-        while finish_reason == "abort":
-            await self._wait_for_generation_to_resume()
-            output = await self.generate(prompt, sampling_params)
-            finish_reason = output.outputs[0].finish_reason
-            if finish_reason == "abort":
-                print(f"REQ ABORTED, prompt: {prompt}, text: {output.outputs[0].text}")
-            prompt += output.outputs[0].text
-        return output
-
-    async def abort_generation(self) -> None:
-        self.generation_paused_event.set()
-        return await self.engine.pause_generation(wait_for_inflight_requests=False)
-
-    async def resume_generation(self) -> None:
-        await self.engine.resume_generation()
-        self.generation_paused_event.clear()
-
-    async def collective_rpc(self, method: str, args: tuple = ()):
-        return await self.engine.collective_rpc(method, args=args)
-
-    async def _wait_for_generation_to_resume(self) -> None:
-        """Waits for generation to be resumed, intended for in-flight weight updates
-        and partial rollouts."""
-        while self.generation_paused_event.is_set():
-            await asyncio.sleep(0.5)
-
-    async def init_weight_transfer(self, request: WeightTransferInitRequest) -> None:
-        print("reached init weight transfer")
-        return await self.engine.init_weight_transfer(request)
-
-    async def update_weights(self, request: WeightUpdateRequest) -> None:
-        return await self.engine.update_weights(request)
-
-    async def finalize_weight_update(self) -> None:
-        return await self.engine.finalize_weight_update()
-
-
 # Initialize Ray and set the visible devices. The vLLM engine will
 # be placed on GPUs 1 and 2.
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
-ray.init(runtime_env={"excludes": [".git/objects/pack/"]})
+ray.init()
 
 # Launch the training model actor. Ray's resource scheduler will allocate
 # 1 GPU (via num_gpus=1 in the decorator), ensuring pg_inference gets different GPUs.
@@ -193,6 +169,7 @@ llm = ray.remote(
     enforce_eager=True,
     tensor_parallel_size=2,
     distributed_executor_backend="ray",
+    load_format="dummy",
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
 
@@ -244,13 +221,13 @@ generation_futures = [
 
 finished, pending = ray.wait(generation_futures, num_returns=1)
 
-# Abort generation in preparation for weight sync
-ray.get(llm.abort_generation.remote())
+# Pause generation in preparation for weight sync
+ray.get(llm.pause_generation.remote(wait_for_inflight_requests=False))
 
 # Simulate a training step by zeroing out all model weights.
 # In a real RLHF training loop the weights would be updated using the gradient
 # from an RL objective such as PPO on a reward model.
-ray.get(train_model.zero_weights.remote())
+# ray.get(train_model.zero_weights.remote())
 
 # Synchronize the updated weights to the inference engine using batched API.
 # Collect all weight metadata from the training actor
@@ -281,15 +258,30 @@ ray.get(llm.finalize_weight_update.remote())
 # Resume generation since weight sync is complete
 ray.get(llm.resume_generation.remote())
 
-# Get all outputs
-outputs = ray.get(finished) + ray.get(pending)
+# Get outputs separately - finished completed before pause, pending were paused/resumed
+finished_outputs = ray.get(finished)
+pending_outputs = ray.get(pending)
 
-# We expect the first output to be normal generation.
-# The other outputs should have generated regular results midway
-# and then have garbage tokens because we zero'd out the weights
+# Requests that finished before the pause: all generation used original weights
 print("-" * 50)
-for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
+print("Requests that completed BEFORE weight change:")
+print("-" * 50)
+for output in finished_outputs:
+    print(f"Prompt: {output.prompt!r}")
+    print(f"Generated (with original weights): {output.outputs[0].text!r}")
+    print("-" * 50)
+
+# Requests that were paused mid-generation: some text before, some after weight change
+print("Requests that were PAUSED and RESUMED after weight change:")
+print("-" * 50)
+for output in pending_outputs:
+    # Find the original prompt by checking which one this output started with
+    original_prompt = next(p for p in prompts if output.prompt.startswith(p))
+    # output.prompt contains original prompt + text generated before pause
+    # output.outputs[0].text is what was generated after resuming with new weights
+    text_before_pause = output.prompt[len(original_prompt) :]
+    text_after_pause = output.outputs[0].text
+    print(f"Original prompt: {original_prompt!r}")
+    print(f"Generated before weight change: {text_before_pause!r}")
+    print(f"Generated after weight change: {text_after_pause!r}")
     print("-" * 50)

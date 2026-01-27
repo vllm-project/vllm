@@ -11,6 +11,10 @@ import torch
 
 from vllm import envs
 from vllm.distributed.weight_transfer.nccl_engine import NCCLUpdateInfo
+from vllm.distributed.weight_transfer.packed_tensor import (
+    packed_broadcast_consumer,
+    packed_broadcast_producer,
+)
 
 
 class MockCommunicationGroup:
@@ -96,17 +100,13 @@ class TestPackedBroadcastProducer:
 
     def test_producer_broadcasts_tensors(self, monkeypatch):
         """Test that producer broadcasts all tensors."""
-        from vllm.distributed.weight_transfer.packed_tensor import (
-            packed_broadcast_producer,
-        )
-
         params = create_mock_model_params()
         params_cuda = [(name, tensor.cuda()) for name, tensor in params]
 
         mock_group = MockCommunicationGroup()
 
         # Use a small target size to force multiple batches
-        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE", 500)
+        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES", 500)
         packed_broadcast_producer(
             iterator=iter(params_cuda),
             group=mock_group,
@@ -120,10 +120,6 @@ class TestPackedBroadcastProducer:
 
     def test_producer_single_large_tensor(self, monkeypatch):
         """Test with a single tensor larger than target size."""
-        from vllm.distributed.weight_transfer.packed_tensor import (
-            packed_broadcast_producer,
-        )
-
         # Create a large tensor
         large_tensor = torch.randn(1000, 1000, dtype=torch.float32).cuda()
         params = [("large_weight", large_tensor)]
@@ -131,7 +127,7 @@ class TestPackedBroadcastProducer:
         mock_group = MockCommunicationGroup()
 
         # Small target size to force the tensor to exceed it
-        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE", 100)
+        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES", 100)
         packed_broadcast_producer(
             iterator=iter(params),
             group=mock_group,
@@ -150,10 +146,6 @@ class TestPackedBroadcastProducer:
 
     def test_producer_multiple_batches(self, monkeypatch):
         """Test that tensors are properly batched when exceeding target size."""
-        from vllm.distributed.weight_transfer.packed_tensor import (
-            packed_broadcast_producer,
-        )
-
         # Create many small tensors
         params = [
             (f"weight_{i}", torch.randn(10, 10, dtype=torch.float32).cuda())
@@ -163,7 +155,7 @@ class TestPackedBroadcastProducer:
         mock_group = MockCommunicationGroup()
 
         # Small target size to force multiple batches
-        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE", 2000)
+        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES", 2000)
         packed_broadcast_producer(
             iterator=iter(params),
             group=mock_group,
@@ -181,13 +173,9 @@ class TestPackedBroadcastProducer:
 
     def test_producer_empty_iterator(self, monkeypatch):
         """Test producer handles empty iterator gracefully."""
-        from vllm.distributed.weight_transfer.packed_tensor import (
-            packed_broadcast_producer,
-        )
-
         mock_group = MockCommunicationGroup()
 
-        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE", 1000)
+        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES", 1000)
         packed_broadcast_producer(
             iterator=iter([]),
             group=mock_group,
@@ -208,18 +196,13 @@ class TestPackedBroadcastConsumer:
 
     def test_consumer_receives_tensors(self, monkeypatch):
         """Test that consumer receives and unpacks tensors."""
-        from vllm.distributed.weight_transfer.packed_tensor import (
-            packed_broadcast_consumer,
-            packed_broadcast_producer,
-        )
-
         params = create_mock_model_params()
         params_cuda = [(name, tensor.cuda()) for name, tensor in params]
 
         # First, run producer to get the broadcasted tensors
         producer_group = MockCommunicationGroup()
 
-        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE", 2000)
+        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES", 2000)
         packed_broadcast_producer(
             iterator=iter(params_cuda),
             group=producer_group,
@@ -269,17 +252,12 @@ class TestPackedBroadcastRoundtrip:
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     def test_roundtrip_different_dtypes(self, dtype, monkeypatch):
         """Test roundtrip with different data types."""
-        from vllm.distributed.weight_transfer.packed_tensor import (
-            packed_broadcast_consumer,
-            packed_broadcast_producer,
-        )
-
         params = create_mock_model_params(num_layers=2, dtype=dtype)
         params_cuda = [(name, tensor.cuda()) for name, tensor in params]
 
         producer_group = MockCommunicationGroup()
 
-        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE", 1000)
+        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES", 1000)
         packed_broadcast_producer(
             iterator=iter(params_cuda),
             group=producer_group,
@@ -314,11 +292,6 @@ class TestPackedBroadcastRoundtrip:
 
     def test_roundtrip_mixed_dtypes(self, monkeypatch):
         """Test roundtrip with mixed data types."""
-        from vllm.distributed.weight_transfer.packed_tensor import (
-            packed_broadcast_consumer,
-            packed_broadcast_producer,
-        )
-
         # Create params with mixed dtypes
         params = [
             ("layer1.weight", torch.randn(10, 20, dtype=torch.float32).cuda()),
@@ -328,7 +301,7 @@ class TestPackedBroadcastRoundtrip:
 
         producer_group = MockCommunicationGroup()
 
-        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE", 500)
+        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES", 500)
         packed_broadcast_producer(
             iterator=iter(params),
             group=producer_group,
@@ -365,17 +338,12 @@ class TestPackedBroadcastRoundtrip:
     @pytest.mark.parametrize("target_size", [100, 1000, 10000, 100000])
     def test_roundtrip_different_batch_sizes(self, target_size, monkeypatch):
         """Test roundtrip with different target batch sizes."""
-        from vllm.distributed.weight_transfer.packed_tensor import (
-            packed_broadcast_consumer,
-            packed_broadcast_producer,
-        )
-
         params = create_mock_model_params(num_layers=5)
         params_cuda = [(name, tensor.cuda()) for name, tensor in params]
 
         producer_group = MockCommunicationGroup()
 
-        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE", target_size)
+        monkeypatch.setattr(envs, "VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES", target_size)
         packed_broadcast_producer(
             iterator=iter(params_cuda),
             group=producer_group,
