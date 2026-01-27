@@ -168,7 +168,6 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         w13_scale: torch.Tensor,
         w2_scale: torch.Tensor,
     ) -> None:
-        """Setup the modular kernel after quantization."""
         # Update layer weights with quantized versions
         layer.w13_weight = torch.nn.Parameter(w13, requires_grad=False)
         layer.w2_weight = torch.nn.Parameter(w2, requires_grad=False)
