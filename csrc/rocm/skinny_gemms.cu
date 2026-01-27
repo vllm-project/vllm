@@ -13,6 +13,13 @@
 #include "dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
 
+// TODO(rasmith): The kernels in this file are susceptible to integer overflow
+// issues, do not take strides, and are unable to handle PyTorch tensors that
+// return is_contiguous() as False (the tensors may actually be contiguous
+// in memory).
+//
+// However, it may be possible to fix these kernels to handle both issues.
+
 #if defined(__HIPCC__) && \
     (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__GFX9__
