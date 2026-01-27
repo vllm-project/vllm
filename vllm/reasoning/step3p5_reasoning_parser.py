@@ -3,15 +3,16 @@
 
 from collections.abc import Sequence
 
-from transformers import PreTrainedTokenizerBase
+from vllm.tokenizers import TokenizerLike
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    DeltaMessage,
+)
+from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
-
 
 class Step3p5ReasoningParser(BaseThinkingReasoningParser):
     """
@@ -31,7 +32,7 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
     def end_token(self) -> str:
         return "</think>"
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         # Used to hold a trailing "\n" from reasoning content so we can decide

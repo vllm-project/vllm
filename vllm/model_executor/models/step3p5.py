@@ -177,7 +177,6 @@ class Step3p5MLP(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(hidden_states)
-        # dynamo 在sharedfusedmoe里面 合不了silu的两个torch op，不如直接调用cuda op
         intermediate_act = self.act_fn.forward_cuda(gate_up)
         output, _ = self.down_proj(intermediate_act)
         return output
