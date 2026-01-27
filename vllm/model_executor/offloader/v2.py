@@ -159,11 +159,6 @@ class OffloaderV2(BaseOffloader):
         self.buffer_pool: StaticBufferPool | None = None
         self.total_offloaded_bytes = 0
 
-        # Register this instance for custom ops
-        from vllm.model_executor.offloader.v2_ops import set_offloader_instance
-
-        set_offloader_instance(self)
-
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
@@ -274,15 +269,12 @@ class OffloaderV2(BaseOffloader):
             # Events used in previous captures can be in invalid state.
             torch.cuda.current_stream().wait_stream(self.copy_stream)
 
-    def sync_before_graph_capture(self):
-        """Sync copy stream before CUDA graph capture or replay.
+    def sync_prev_onload(self):
+        """Sync previous onload operations.
 
-        Pre-capture prefetches from warmup must complete before capture.
-        This method ensures those dependencies are satisfied.
-
-        Call this:
-        1. Before capturing a CUDA graph
-        2. Before replaying a CUDA graph (if prefetches were issued outside)
+        Ensures any H2D copies in flight on copy_stream complete before
+        the compute stream continues. Call this before CUDA graph
+        capture/replay or when synchronization is needed.
         """
         torch.cuda.current_stream().wait_stream(self.copy_stream)
 

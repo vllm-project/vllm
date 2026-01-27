@@ -71,6 +71,22 @@ class BaseOffloader(ABC):
         """
         return
 
+    def sync_prev_onload(self) -> None:  # noqa: B027
+        """Sync previous onload operations. Override in subclasses."""
+        pass
+
+    def join_after_forward(self) -> None:  # noqa: B027
+        """Join streams after forward. Override in subclasses."""
+        pass
+
+    def _wait_for_layer(self, layer_idx: int) -> None:  # noqa: B027
+        """Wait for layer prefetch. Override in subclasses."""
+        pass
+
+    def _start_prefetch(self, layer_idx: int) -> None:  # noqa: B027
+        """Start layer prefetch. Override in subclasses."""
+        pass
+
 
 class NoopOffloader(BaseOffloader):
     """No-op offloader that returns modules as-is without any offloading."""

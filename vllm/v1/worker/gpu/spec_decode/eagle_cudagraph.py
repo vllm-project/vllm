@@ -6,10 +6,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.model_executor.offloader.v2_ops import (
-    join_offloader_after_forward,
-    sync_offloader_before_capture,
-)
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -95,7 +92,7 @@ class EagleCudaGraphManager:
             # Join offloader's copy stream after forward to avoid unjoined
             # stream error. The last layer's start_prefetch forks copy_stream,
             # but wait_prefetch only happens in the next forward pass.
-            join_offloader_after_forward()
+            get_offloader().join_after_forward()
         self.graphs[num_tokens] = graph
 
     @torch.inference_mode()
@@ -122,5 +119,5 @@ class EagleCudaGraphManager:
         assert num_tokens in self.graphs
         # Sync offloader before replay - ensures any external dependencies
         # from pre-capture prefetches are satisfied.
-        sync_offloader_before_capture()
+        get_offloader().sync_prev_onload()
         self.graphs[num_tokens].replay()

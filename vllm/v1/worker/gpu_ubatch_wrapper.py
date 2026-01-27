@@ -20,7 +20,7 @@ from vllm.forward_context import (
     override_forward_context,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.offloader.v2_ops import sync_offloader_before_capture
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_deep_gemm
@@ -243,7 +243,7 @@ class UBatchWrapper:
 
             # Sync offloader's copy stream before capture.
             # Ensure any pre-capture prefetches from offloader are complete.
-            sync_offloader_before_capture()
+            get_offloader().sync_prev_onload()
 
             with torch.cuda.graph(
                 cudagraph_metadata.cudagraph,
@@ -464,7 +464,7 @@ class UBatchWrapper:
             cudagraph_metadata = self.cudagraphs[num_tokens]
             # Sync offloader before replay - ensures any external dependencies
             # from pre-capture prefetches are satisfied.
-            sync_offloader_before_capture()
+            get_offloader().sync_prev_onload()
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs
         else:

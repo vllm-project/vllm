@@ -12,10 +12,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.offloader.v2_ops import (
-    join_offloader_after_forward,
-    sync_offloader_before_capture,
-)
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -125,7 +122,7 @@ class CudaGraphManager:
 
         # Sync offloader's copy stream before capture.
         # Ensure any pre-capture prefetches from offloader are complete.
-        sync_offloader_before_capture()
+        get_offloader().sync_prev_onload()
 
         with (
             set_forward_context(
@@ -145,7 +142,7 @@ class CudaGraphManager:
             # Join offloader's copy stream after forward to avoid unjoined
             # stream error. The last layer's start_prefetch forks copy_stream,
             # but wait_prefetch only happens in the next forward pass.
-            join_offloader_after_forward()
+            get_offloader().join_after_forward()
             self.hidden_states[:num_tokens] = hidden_states
         self.graphs[num_tokens] = graph
 
@@ -177,7 +174,7 @@ class CudaGraphManager:
         assert num_tokens in self.graphs
         # Sync offloader before replay - ensures any external dependencies
         # from pre-capture prefetches are satisfied.
-        sync_offloader_before_capture()
+        get_offloader().sync_prev_onload()
         self.graphs[num_tokens].replay()
         assert self.hidden_states is not None
         return self.hidden_states[:num_tokens]
