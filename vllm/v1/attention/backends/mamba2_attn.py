@@ -158,36 +158,44 @@ class Mamba2AttentionMetadataBuilder(
         last_chunk_indices = []
         seqlen_pos = 0
 
+        block_size = self.kv_cache_spec.block_size
+
         for req_idx in range(num_prefills):
             this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
+
             this_new_tokens = (
                 query_start_loc_p_cpu[req_idx + 1].item()
                 - query_start_loc_p_cpu[req_idx].item()
             )
+         
+            while this_new_tokens > 0:
 
-            # if computed tokens are not chunk-aligned, use the first
-            # chunk to finish it off
-            if this_num_computed % self.chunk_size != 0:
-                seq_idx.append(req_idx)
-                cu_chunk_seqlen.append(seqlen_pos)
-                # how many tokens to finish the chunk?
-                chunk_len = (
-                    cdiv(this_num_computed, self.chunk_size) * self.chunk_size
-                    - this_num_computed
-                )
-                # we can only use at most this_new_tokens
-                chunk_len = min(chunk_len, this_new_tokens)
-                seqlen_pos += chunk_len
-                this_new_tokens -= chunk_len
+                # are we starting a new sequence?
+                is_first = len(last_chunk_indices) == req_idx
 
-            n_chunks = cdiv(this_new_tokens, self.chunk_size)
-            for chunk in range(n_chunks):
-                seq_idx.append(req_idx)
-                cu_chunk_seqlen.append(seqlen_pos)
-                chunk_len = min(self.chunk_size, this_new_tokens)
-                seqlen_pos += chunk_len
-                this_new_tokens -= chunk_len
+                if is_first and this_num_computed % block_size != 0:
+                    # how many tokens to finish the block?
+                    chunks_len = (
+                        cdiv(this_num_computed, block_size) * block_size
+                        - this_num_computed
+                    )
+                else:
+                    # partition the next block into chunks
+                    chunks_len = block_size
 
+                # we only have this_new_tokens to fill
+                chunks_len = min(this_new_tokens, chunks_len)
+
+                # pack tokens into chunks
+                while chunks_len > 0:
+                    seq_idx.append(req_idx)
+                    cu_chunk_seqlen.append(seqlen_pos)
+                    chunk_len = min(chunks_len, self.chunk_size)
+                    seqlen_pos += chunk_len
+                    chunks_len -= chunk_len
+                    this_new_tokens -= chunk_len
+
+            # check we packed all
             assert this_new_tokens == 0
             last_chunk_indices.append(len(cu_chunk_seqlen) - 1)
 

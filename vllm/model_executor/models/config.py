@@ -480,11 +480,20 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             # easily by changing the way we layout chunks in the
             # mamba2 kernels.
 
+            '''
             base_chunk_size = mamba_block_size or model_config.get_mamba_chunk_size()
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
+            '''
+            
+            attn_block_size = kernel_block_alignment_size * cdiv(
+                mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
+            )
+            cache_config.mamba_block_size = attn_block_size
+
+
         else:
             # Without prefix caching, select minimum valid attention block size
             # to minimize mamba state padding
