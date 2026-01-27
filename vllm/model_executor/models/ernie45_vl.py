@@ -36,7 +36,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -119,7 +119,6 @@ class Ernie4_5_VisionAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -153,7 +152,6 @@ class Ernie4_5_VisionAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -266,7 +264,6 @@ class Ernie4_5_VisionBlock(nn.Module):
         act_layer: type[nn.Module] = QuickGELU,
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -282,7 +279,6 @@ class Ernie4_5_VisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
 
@@ -357,7 +353,6 @@ class Ernie4_5_VisionTransformer(nn.Module):
         vision_config,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -393,7 +388,6 @@ class Ernie4_5_VisionTransformer(nn.Module):
                     mlp_ratio=mlp_ratio,
                     norm_layer=norm_layer,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                 )
                 for layer_idx in range(depth)
@@ -405,13 +399,9 @@ class Ernie4_5_VisionTransformer(nn.Module):
         )
         self.ln = nn.LayerNorm(hidden_size, eps=1e-6)
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend if multimodal_config else None
-        )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
         )
 
     @property
@@ -1308,7 +1298,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
             self.resampler_model = VariableResolutionResamplerModel(
@@ -1661,7 +1650,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

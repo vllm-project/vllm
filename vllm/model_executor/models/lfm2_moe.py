@@ -25,6 +25,8 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -455,7 +457,7 @@ class Lfm2MoeModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -640,6 +642,10 @@ class Lfm2MoeForCausalLM(
             conv_kernel=hf_config.conv_L_cache,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.short_conv_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -724,7 +730,7 @@ class Lfm2MoeForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

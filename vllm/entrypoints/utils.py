@@ -6,6 +6,8 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
+from logging import Logger
+from string import Template
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -13,9 +15,12 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
+from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.logger import init_logger
+from vllm.inputs import EmbedsPrompt, TokensPrompt
+from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
@@ -29,11 +34,15 @@ if TYPE_CHECKING:
         StreamOptions,
     )
     from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+    from vllm.entrypoints.openai.responses.protocol import (
+        ResponsesRequest,
+    )
 else:
     ChatCompletionRequest = object
     CompletionRequest = object
     StreamOptions = object
     LoRAModulePath = object
+    ResponsesRequest = object
 
 
 logger = init_logger(__name__)
@@ -208,11 +217,26 @@ def _validate_truncation_size(
 
 def get_max_tokens(
     max_model_len: int,
-    request: "ChatCompletionRequest | CompletionRequest",
-    input_length: int,
+    request: "CompletionRequest | ChatCompletionRequest | ResponsesRequest",
+    prompt: TokensPrompt | EmbedsPrompt,
     default_sampling_params: dict,
 ) -> int:
-    max_tokens = getattr(request, "max_completion_tokens", None) or request.max_tokens
+    # NOTE: Avoid isinstance() for better efficiency
+    max_tokens: int | None = None
+    if max_tokens is None:
+        # ChatCompletionRequest
+        max_tokens = getattr(request, "max_completion_tokens", None)
+    if max_tokens is None:
+        # ResponsesRequest
+        max_tokens = getattr(request, "max_output_tokens", None)
+    if max_tokens is None:
+        # CompletionRequest (also a fallback for ChatCompletionRequest)
+        max_tokens = getattr(request, "max_tokens", None)
+
+    input_length = length_from_prompt_token_ids_or_embeds(
+        prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        prompt.get("prompt_embeds"),  # type: ignore[arg-type]
+    )
     default_max_tokens = max_model_len - input_length
     max_output_tokens = current_platform.get_max_output_tokens(input_length)
 
@@ -295,3 +319,28 @@ def process_lora_modules(
 def sanitize_message(message: str) -> str:
     # Avoid leaking memory address from object reprs
     return re.sub(r" at 0x[0-9a-f]+>", ">", message)
+
+
+def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
+    if envs.VLLM_DISABLE_LOG_LOGO or (formatter := current_formatter_type(lgr)) is None:
+        message = "vLLM server version %s, serving model %s"
+    else:
+        logo_template = Template(
+            "\n       ${w}█     █     █▄   ▄█${r}\n"
+            " ${o}▄▄${r} ${b}▄█${r} ${w}█     █     █ ▀▄▀ █${r}  version ${w}%s${r}\n"
+            "  ${o}█${r}${b}▄█▀${r} ${w}█     █     █     █${r}  model   ${w}%s${r}\n"
+            "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
+        )
+        colors = {
+            "w": "\033[97;1m",  # white
+            "o": "\033[93m",  # orange
+            "b": "\033[94m",  # blue
+            "r": "\033[0m",  # reset
+        }
+        if formatter != "color":
+            # monochrome logo (no ansi escape codes)
+            colors = dict.fromkeys(colors, "")
+
+        message = logo_template.substitute(colors)
+
+    lgr.info(message, version, model_name)

@@ -24,6 +24,7 @@ from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
@@ -602,6 +603,8 @@ class SupportsPP(Protocol):
 
     def forward(
         self,
+        input_ids: Tensor | None,
+        positions: Tensor,
         *,
         intermediate_tensors: IntermediateTensors | None,
     ) -> IntermediateTensors | None:
@@ -630,6 +633,8 @@ class _SupportsPPType(Protocol):
 
     def forward(
         self,
+        input_ids: Tensor | None,
+        positions: Tensor,
         *,
         intermediate_tensors: IntermediateTensors | None,
     ) -> Tensor | IntermediateTensors: ...
@@ -773,6 +778,19 @@ class IsHybrid(Protocol):
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+        """
+        ...
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, ...]:
+        """Calculate copy-function callables for each Mamba state.
+
+        Returns:
+            A tuple of MambaStateCopyFunc callables that correspond, in order,
+            to the Mamba states produced by the model. Each callable accepts
+            (state, block_ids, cur_block_idx, num_accepted_tokens) and returns
+            a MambaCopySpec describing the memory-copy parameters for prefix
+            caching in align mode.
         """
         ...
 

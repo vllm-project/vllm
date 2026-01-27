@@ -272,7 +272,6 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             self.vision_tower = init_vision_tower_for_llava(
                 config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -510,7 +509,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
