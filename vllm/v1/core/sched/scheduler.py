@@ -1163,7 +1163,7 @@ class Scheduler(SchedulerInterface):
                 break
 
             # Calculate the number of embeddings to schedule in the current range
-            # of scheduled encoder placholder tokens.
+            # of scheduled encoder placeholder tokens.
             start_idx_rel = max(0, num_computed_tokens - start_pos)
             end_idx_rel = min(
                 num_encoder_tokens, num_computed_tokens + num_new_tokens - start_pos
