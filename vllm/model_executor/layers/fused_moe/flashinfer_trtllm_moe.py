@@ -77,6 +77,18 @@ def _supports_routing_method(
         raise ValueError("Unsupported quantization scheme.")
 
 
+def _supports_routing_method_bf16(
+    routing_method: RoutingMethodType,
+) -> bool:
+    return routing_method in [
+        RoutingMethodType.Default,
+        RoutingMethodType.Renormalize,
+        RoutingMethodType.DeepSeekV3,
+        RoutingMethodType.Llama4,
+        RoutingMethodType.RenormalizeNaive,
+    ]
+
+
 def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
     """Supports TRTLLM Kernel does not support EPLB."""
     return not moe_parallel_config.enable_eplb
@@ -108,6 +120,34 @@ def is_supported_config_trtllm(
     elif not _supports_routing_method(
         weight_key, activation_key, moe_config.routing_method
     ):
+        return False, _make_reason("routing method")
+    elif activation_format != mk.FusedMoEActivationFormat.Standard:
+        return False, _make_reason("activation format")
+
+    return True, None
+
+
+def is_supported_config_trtllm_bf16(
+    moe_config: FusedMoEConfig,
+    activation_format: mk.FusedMoEActivationFormat,
+) -> tuple[bool, str | None]:
+    """
+    This method mirrors mk.FusedMoEPermuteExpertsUnpermute.is_supported_config
+    for BF16 unquantized kernels.
+    """
+
+    def _make_reason(reason: str) -> str:
+        return f"kernel does not support {reason}"
+
+    if not _supports_current_device():
+        return False, _make_reason("current device")
+    elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
+        return False, _make_reason("no act_and_mul MLP layer")
+    elif not _supports_activation(moe_config.activation):
+        return False, _make_reason(f"{moe_config.activation} activation")
+    elif not _supports_parallel_config(moe_config.moe_parallel_config):
+        return False, _make_reason("parallel config")
+    elif not _supports_routing_method_bf16(moe_config.routing_method):
         return False, _make_reason("routing method")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
         return False, _make_reason("activation format")
@@ -302,7 +342,7 @@ def flashinfer_fused_moe_bf16(
     intermediate_size: int,
     local_expert_offset: int,
     local_num_experts: int,
-    routing_method_type: int = RoutingMethodType.Renormalize,
+    routing_method_type: int,
     tune_max_num_tokens: int = 8192,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_bf16_moe

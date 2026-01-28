@@ -14,6 +14,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
+    is_supported_config_trtllm_bf16,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
@@ -55,7 +58,7 @@ def select_unquantized_moe_backend(
     use_dp: bool,
 ) -> UnquantizedMoeBackend:
     """
-    Select the primary FP8 MoE backend
+    Select the primary Unquantized MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
 
@@ -64,11 +67,19 @@ def select_unquantized_moe_backend(
 
     rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
+    activation_format = (
+        mk.FusedMoEActivationFormat.BatchedExperts
+        if moe_config.moe_parallel_config.use_batched_activation_format
+        else mk.FusedMoEActivationFormat.Standard
+    )
+
+    # Check if FlashInfer TRTLLM BF16 MoE is supported
+    trtllm_supported, _ = is_supported_config_trtllm_bf16(
+        moe_config=moe_config,
+        activation_format=activation_format,
+    )
     flashinfer_trtllm_moe_enabled = (
-        has_flashinfer()
-        and envs.VLLM_USE_FLASHINFER_MOE_FP16
-        and moe_config.is_act_and_mul
-        and current_platform.has_device_capability(100)
+        has_flashinfer() and envs.VLLM_USE_FLASHINFER_MOE_FP16 and trtllm_supported
     )
     # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
     flashinfer_cutlass_moe_enabled = (
@@ -89,14 +100,11 @@ def select_unquantized_moe_backend(
         elif flashinfer_cutlass_moe_enabled:
             backend = UnquantizedMoeBackend.FLASHINFER_CUTLASS
         else:
-            if (
-                not envs.VLLM_USE_FLASHINFER_MOE_FP16
-                and current_platform.has_device_capability(100)
-            ):
+            if not envs.VLLM_USE_FLASHINFER_MOE_FP16 and trtllm_supported:
                 logger.info_once(
-                    "FlashInfer TRTLLM MoE is available on Blackwell+ GPUs but "
-                    "not enabled, consider setting VLLM_USE_FLASHINFER_MOE_FP16=1 "
-                    "to enable it.",
+                    "FlashInfer TRTLLM MoE is available but not enabled, "
+                    "consider setting VLLM_USE_FLASHINFER_MOE_FP16=1 "
+                    "to enable it for better performance.",
                     scope="local",
                 )
             elif use_ep and (not use_dp):

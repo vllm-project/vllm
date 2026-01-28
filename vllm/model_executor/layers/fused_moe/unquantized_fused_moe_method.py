@@ -74,10 +74,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             or current_platform.is_xpu()
             or self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
         )
-        if self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
-            import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: F401
-
-            self.flashinfer_trtllm_moe = torch.ops.vllm.flashinfer_fused_moe_bf16
 
         if self.is_monolithic:
             self.apply_monolithic: Callable = self._select_monolithic()
@@ -359,9 +355,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: F401
+
         assert self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
 
-        return self.flashinfer_trtllm_moe(
+        return torch.ops.vllm.flashinfer_fused_moe_bf16(
             routing_logits=router_logits,
             routing_bias=layer.e_score_correction_bias,
             hidden_states=x,
@@ -375,7 +373,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             local_expert_offset=layer.ep_rank * layer.local_num_experts,
             local_num_experts=layer.local_num_experts,
             routing_method_type=layer.routing_method_type,
-            tune_max_num_tokens=8192,
         )
 
     def forward_monolithic_cpu(
