@@ -59,16 +59,6 @@ async def test_api_server_initializes_tracer_when_journey_tracing_enabled():
     dummy_sock = Mock(spec=socket.socket)
     dummy_sock.close = Mock()
 
-    # Track whether init_tracer was called
-    init_tracer_called = False
-    init_tracer_args = None
-
-    def mock_init_tracer(instrumenting_module_name, otlp_traces_endpoint):
-        nonlocal init_tracer_called, init_tracer_args
-        init_tracer_called = True
-        init_tracer_args = (instrumenting_module_name, otlp_traces_endpoint)
-        return Mock()  # Return mock tracer
-
     # Mock build_async_engine_client to return our fake client
     @asynccontextmanager
     async def mock_build_async_engine_client(*args, **kwargs):
@@ -97,8 +87,8 @@ async def test_api_server_initializes_tracer_when_journey_tracing_enabled():
         with patch.object(api_server, "build_app", mock_build_app):
             with patch.object(api_server, "init_app_state", mock_init_app_state):
                 with patch.object(api_server, "serve_http", mock_serve_http):
-                    # Patch init_tracer in the api_server module's namespace
-                    with patch("vllm.tracing.init_tracer", side_effect=mock_init_tracer):
+                    # Patch init_tracer in vllm.tracing module
+                    with patch("vllm.tracing.init_tracer") as mock_init_tracer:
                         with patch("vllm.tracing.is_otel_available", return_value=True):
                             # Run the server worker
                             await api_server.run_server_worker(
@@ -108,10 +98,7 @@ async def test_api_server_initializes_tracer_when_journey_tracing_enabled():
                             )
 
     # ASSERTION: init_tracer was called with correct arguments
-    assert init_tracer_called, \
-        "init_tracer was not called - API tracer not initialized"
-    assert init_tracer_args == ("vllm.api", "http://localhost:4317"), \
-        f"init_tracer called with wrong args: {init_tracer_args}"
+    mock_init_tracer.assert_called_once_with("vllm.api", "http://localhost:4317")
 
 
 @pytest.mark.asyncio

@@ -950,7 +950,7 @@ async def run_server_worker(
                     from vllm.tracing import init_tracer, is_otel_available
                     if is_otel_available():
                         init_tracer("vllm.api", endpoint)
-                        logger.info("Initialized tracer for API process: %s", endpoint)
+                        logger.debug("Initialized tracer for API process: %s", endpoint)
                 except Exception as e:
                     # Tracing should never break server startup
                     logger.warning("Failed to initialize API tracer: %s", e)
