@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
-from huggingface_hub import get_safetensors_metadata
+from huggingface_hub import constants, get_safetensors_metadata
 from packaging.version import Version
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
@@ -23,6 +23,7 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import parse_safetensors_file_metadata
 
 from .config_parser_base import ConfigParserBase
@@ -48,7 +49,6 @@ except ImportError:
     from transformers.configuration_utils import (
         ALLOWED_LAYER_TYPES as ALLOWED_ATTENTION_LAYER_TYPES,
     )
-
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -580,7 +580,11 @@ def get_config(
         try:
             # First check for Mistral to avoid defaulting to
             # Transformers implementation.
-            if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
+            if is_mistral_model_repo(
+                model_name_or_path=str(model), revision=revision
+            ) and file_or_path_exists(
+                model=model, config_name=MISTRAL_CONFIG_NAME, revision=revision
+            ):
                 config_format = "mistral"
             elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
                 model, HF_CONFIG_NAME, revision=revision
@@ -624,6 +628,10 @@ def get_config(
             ).format(model=model)
 
             raise ValueError(error_message) from e
+
+    if config_format == "mistral":
+        constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"
+        constants.SAFETENSORS_INDEX_FILE = "consolidated.safetensors.index.json"
 
     config_parser = get_config_parser(config_format)
     config_dict, config = config_parser.parse(
