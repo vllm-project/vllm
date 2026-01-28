@@ -267,11 +267,13 @@ def on_gfx12x() -> bool:
 
 
 def on_mi3xx() -> bool:
-    return _ON_MI3XX
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950", "gfx1250"])
 
 
 def on_gfx9() -> bool:
-    return _ON_GFX9
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950", "gfx1250"])
 
 
 def on_gfx90a() -> bool:
@@ -283,7 +285,8 @@ def on_gfx942() -> bool:
 
 
 def on_gfx950() -> bool:
-    return _ON_GFX950
+    GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+    return any(arch in GPU_ARCH for arch in ["gfx950", "gfx1250"])
 
 
 @cache
@@ -779,9 +782,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        return (
-            "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
-        )
+        return "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
 
     @classmethod
     def supports_mx(cls) -> bool:

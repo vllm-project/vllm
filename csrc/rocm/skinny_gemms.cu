@@ -22,7 +22,7 @@
 // However, it may be possible to fix these kernels to handle both issues.
 
 #if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__) || defined(__gfx1250__))
   #define __HIP__GFX9__
 #endif
 
@@ -36,11 +36,21 @@
   #define __HIP__GFX12__
 #endif
 
-#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
+#if defined(__HIPCC__) &&                                                    \
+    (defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1150__) || \
+     defined(__gfx1151__) || defined(__gfx1200__) || defined(__gfx1201__))
+  #define __HIP__GFX1X__
+#endif
+
+#if defined(__HIPCC__) && (defined(__gfx1200__) || defined(__gfx1201__))
+  #define __HIP__GFX12__
+#endif
+
+#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__) || defined(__gfx1250__))
   #define __HIP__MI3XX__
 #endif
 
-#if defined(__gfx950__)
+#if defined(__gfx950__)  || defined(__gfx1250__)
   #define LDS_SIZE 160 * 1024
 #else
   #define LDS_SIZE 64 * 1024
@@ -1291,9 +1301,9 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
-// This version targets cases skinny where CUs are not filled
-// Wave-SplitK is used with reduction done via atomics.
-#if defined(__gfx950__)
+#if defined(__gfx950__) || defined(__gfx1250__)  // TODO: Add NAVI support
+  // This version targets big A[] cases, where it is much larger than LDS
+  // capacity
   #define WVSPLITKRC_1KPASS
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GrpsShrB, int CHUNKK, int DTRMNSTC>

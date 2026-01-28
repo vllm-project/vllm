@@ -350,10 +350,46 @@ steps:
   # To build a specific version, trigger the build from that branch/tag.
   #
   # Environment variables for ROCm builds (set via Buildkite UI or schedule):
+  #   ROCM_PYTHON_VERSION: Python version (default: 3.12)
+  #   PYTORCH_ROCM_ARCH: GPU architectures (default: gfx90a;gfx942;gfx950;gfx1250;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151)
+  #   ROCM_UPLOAD_WHEELS: Upload to S3 (default: false for nightly, true for releases)
+  #   ROCM_FORCE_REBUILD: Force rebuild base wheels, ignore S3 cache (default: false)
   #
   # Note: ROCm version is determined by BASE_IMAGE in docker/Dockerfile.rocm_base
   #
   # =============================================================================
+
+  # ROCm Input Step - Collect build configuration (manual trigger only)
+  - input: "ROCm Wheel Release Build Configuration"
+    key: input-rocm-config
+    depends_on: ~
+    if: build.source == "ui"
+    fields:
+      - text: "Python Version"
+        key: "rocm-python-version"
+        default: "3.12"
+        hint: "Python version (e.g., 3.12)"
+      - text: "GPU Architectures"
+        key: "rocm-pytorch-rocm-arch"
+        default: "gfx90a;gfx942;gfx950;gfx1250;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
+        hint: "Semicolon-separated GPU architectures"
+      - select: "Upload Wheels to S3"
+        key: "rocm-upload-wheels"
+        default: "true"
+        options:
+          - label: "No - Build only (nightly/dev)"
+            value: "false"
+          - label: "Yes - Upload to S3 (release)"
+            value: "true"
+      - select: "Force Rebuild Base Wheels"
+        key: "rocm-force-rebuild"
+        default: "false"
+        hint: "Ignore S3 cache and rebuild base wheels from scratch"
+        options:
+          - label: "No - Use cached wheels if available"
+            value: "false"
+          - label: "Yes - Rebuild even if cache exists"
+            value: "true"
 
   # ROCm Job 1: Build ROCm Base Wheels (with S3 caching)
   - label: ":rocm: Build ROCm Base Image & Wheels"
@@ -365,9 +401,18 @@ steps:
       - |
         set -euo pipefail
 
-        # Generate cache key
-        CACHE_KEY=$$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
-        ECR_CACHE_TAG="public.ecr.aws/q9t5s3a7/vllm-release-repo:$${CACHE_KEY}-rocm-base"
+        # Get values from meta-data (set by input step) or use defaults
+        PYTHON_VERSION="$$(buildkite-agent meta-data get rocm-python-version 2>/dev/null || echo '')"
+        export PYTHON_VERSION="$${PYTHON_VERSION:-3.12}"
+
+        PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
+        export PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1250;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
+
+        # Check for force rebuild flag
+        ROCM_FORCE_REBUILD="$${ROCM_FORCE_REBUILD:-}"
+        if [ -z "$${ROCM_FORCE_REBUILD}" ]; then
+          ROCM_FORCE_REBUILD="$$(buildkite-agent meta-data get rocm-force-rebuild 2>/dev/null || echo '')"
+        fi
 
         echo "========================================"
         echo "ROCm Base Build Configuration"
@@ -524,6 +569,10 @@ steps:
         cp artifacts/rocm-base-wheels/*.whl docker/context/base-wheels/
         echo "Base wheels for vLLM build:"
         ls -lh docker/context/base-wheels/
+
+        # Get GPU architectures from meta-data
+        PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
+        PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1250;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
 
         echo "========================================"
         echo "Building vLLM wheel with:"
