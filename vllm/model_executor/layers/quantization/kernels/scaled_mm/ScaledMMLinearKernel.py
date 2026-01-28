@@ -12,6 +12,11 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    process_fp8_weight_tensor_strategy,
+)
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 
@@ -22,7 +27,7 @@ class ScaledMMLinearLayerConfig:
 
 @dataclass
 class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
-    # TODO: Chnage to QuantKey like FP8ScaledMMLinearLayerConfig
+    # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
     is_static_input_scheme: bool
     is_channelwise: bool
     input_symmetric: bool
@@ -33,6 +38,16 @@ class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
     out_dtype: torch.dtype | None
+
+
+@dataclass
+class FP8W8A8LinearLayerConfig(FP8ScaledMMLinearLayerConfig):
+    pass
+
+
+@dataclass
+class FP8W8A16LinearLayerConfig(FP8ScaledMMLinearLayerConfig):
+    pass
 
 
 _FP8ParamsT = tuple[
@@ -97,6 +112,34 @@ class FP8ScaledMMLinearKernel(
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
+        super().__init__(c, layer_param_names)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
+    def _get_layer_params(self, layer) -> _FP8ParamsT:
+        w, w_s, x_s, x_s_ub = self.layer_param_names
+        return (
+            getattr(layer, w),
+            getattr(layer, w_s),
+            getattr(layer, x_s, None),
+            getattr(layer, x_s_ub, None),
+        )
+
+    @abstractmethod
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+
+class FP8W8A8LinearKernel(FP8ScaledMMLinearKernel):
+    def __init__(
+        self, c: FP8W8A8LinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
         act_scale_descriptor = c.activation_quant_key.scale
         self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
@@ -107,7 +150,29 @@ class FP8ScaledMMLinearKernel(
         super().__init__(c, layer_param_names)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
+        w_q, w_s, i_s, _, _ = self._get_layer_params(layer)
+
+        weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
+            w_q,
+            w_s,
+            layer.logical_widths,
+            i_s,
+        )
+        if self.config.activation_quant_key.scale.static:
+            assert input_scale is not None
+            input_scale = input_scale.max()
+
+        weight = weight.t()
+        # Update layer with new values.
+
+        w_q_name, w_s_name, i_s_name, _, _ = self.layer_param_names
+
+        replace_parameter(layer, w_q_name, weight.data)
+        replace_parameter(layer, w_s_name, weight_scale.data)
+        if input_scale is not None:
+            replace_parameter(layer, i_s_name, input_scale)
+        else:
+            layer.input_scale = None
 
     def _get_layer_params(self, layer) -> _FP8ParamsT:
         w, w_s, x_s, x_s_ub = self.layer_param_names
@@ -171,6 +236,40 @@ class FP8ScaledMMLinearKernel(
 
     def get_output_padding(self) -> int | None:
         return None
+
+
+class FP8W8A16LinearKernel(FP8ScaledMMLinearKernel):
+    """
+    FP8W8A16LinearKernel provides a kernel implementation for scenarios where GPUs lack native FP8 hardware support.
+
+    This kernel leverages the Marlin kernel for efficient weight-only FP8 quantization, enabling fast inference on hardware that does not natively support FP8 operations.
+    Unlike FP8W8A8LinearKernel, which is designed for platforms with full FP8 support, FP8W8A16LinearKernel uses FP8 quantized weights but processes activations in FP16, making it suitable for a broader range of GPUs.
+    Intended usage: select this kernel when deploying on platforms without FP8 hardware acceleration, or when higher activation precision is desired.
+    Supported platforms: GPUs without FP8 hardware support; for platforms with FP8 support, prefer FP8W8A8LinearKernel for optimal performance.
+    """
+
+    def __init__(
+        self, c: FP8W8A16LinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        act_scale_descriptor = c.activation_quant_key.scale
+        self.quant_fp8 = QuantFP8(
+            static=act_scale_descriptor.static,
+            group_shape=act_scale_descriptor.group_shape,
+            num_token_padding=self.get_output_padding(),
+        )
+        self.fp8_dtype = current_platform.fp8_dtype()
+        super().__init__(c, layer_param_names)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        raise NotImplementedError
 
 
 class Int8ScaledMMLinearKernel(

@@ -4,7 +4,7 @@
 
 import torch
 
-from vllm.model_executor.layers.quantization.kernels.fp8_w8a16.FP8W8A16LinearKernel import (  # noqa: E501
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     FP8W8A16LinearKernel,
     FP8W8A16LinearLayerConfig,
 )
@@ -16,7 +16,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.platforms import current_platform
 
 
-class FP8MarlinLinearKernel(FP8W8A16LinearKernel):
+class MarlinFP8ScaledMMLinearKernel(FP8W8A16LinearKernel):
     """
     FP8 Marlin kernel for GPUs that lack FP8 hardware support.
     Leverages the Marlin kernel for fast weight-only FP8 quantization.
