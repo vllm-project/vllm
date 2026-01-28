@@ -341,35 +341,66 @@ def bool_to_emoji(value: bool) -> str:
     return "✅" if value else "❌"
 
 
-def generate_markdown_table(backends: list[dict[str, Any]], title: str) -> str:
-    """Generate a markdown table from backend info."""
+def generate_markdown_table(
+    backends: list[dict[str, Any]], title: str, is_mla_table: bool = False
+) -> str:
+    """Generate a markdown table from backend info.
+
+    Args:
+        backends: List of backend info dictionaries.
+        title: Table title.
+        is_mla_table: If True, include MLA and Sparse columns (for MLA table).
+                      If False, exclude them (for standard attention table).
+    """
     if not backends:
         return f"## {title}\n\nNo backends found.\n"
 
-    header = (
-        "| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes "
-        "| MLA | Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |"
-    )
-    separator = (
-        "|---------|--------|-----------------|-------------|------------"
-        "|-----|------|--------|-----------|-----------------|--------------|"
-    )
+    if is_mla_table:
+        header = (
+            "| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes "
+            "| Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |"
+        )
+        separator = (
+            "|---------|--------|-----------------|-------------|------------"
+            "|------|--------|-----------|-----------------|--------------|"
+        )
+    else:
+        header = (
+            "| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes "
+            "| Sink | MM Prefix | Attention Types | Compute Cap. |"
+        )
+        separator = (
+            "|---------|--------|-----------------|-------------|------------"
+            "|------|-----------|-----------------|--------------|"
+        )
     lines = [f"## {title}", "", header, separator]
 
     for info in sorted(backends, key=lambda x: x["name"]):
-        row = "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
-            info["name"],
-            info["dtypes"],
-            info["kv_cache_dtypes"],
-            info["block_sizes"],
-            info["head_sizes"],
-            bool_to_emoji(info["is_mla"]),
-            bool_to_emoji(info["supports_sink"]),
-            bool_to_emoji(info["is_sparse"]),
-            bool_to_emoji(info["supports_mm_prefix"]),
-            info["attn_types"],
-            info["compute_capability"],
-        )
+        if is_mla_table:
+            row = "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+                info["name"],
+                info["dtypes"],
+                info["kv_cache_dtypes"],
+                info["block_sizes"],
+                info["head_sizes"],
+                bool_to_emoji(info["supports_sink"]),
+                bool_to_emoji(info["is_sparse"]),
+                bool_to_emoji(info["supports_mm_prefix"]),
+                info["attn_types"],
+                info["compute_capability"],
+            )
+        else:
+            row = "| {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+                info["name"],
+                info["dtypes"],
+                info["kv_cache_dtypes"],
+                info["block_sizes"],
+                info["head_sizes"],
+                bool_to_emoji(info["supports_sink"]),
+                bool_to_emoji(info["supports_mm_prefix"]),
+                info["attn_types"],
+                info["compute_capability"],
+            )
         lines.append(row)
 
     lines.append("")
@@ -607,14 +638,13 @@ def generate_legend() -> str:
 |--------|-------------|
 | **Dtypes** | Supported model data types (fp16, bf16, fp32) |
 | **KV Cache Dtypes** | Supported KV cache data types (auto, fp8, fp8_e4m3, etc.) |
-| **Block Sizes** | Supported KV cache block sizes (×N means multiples of N) |
+| **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
 | **Head Sizes** | Supported attention head sizes |
-| **MLA** | Multi-head Latent Attention support (for DeepSeek-style models) |
 | **Sink** | Attention sink support (for StreamingLLM) |
-| **Sparse** | Sparse attention support |
+| **Sparse** | Sparse attention support (MLA only) |
 | **MM Prefix** | Multimodal prefix full attention support |
 | **Attention Types** | Supported attention patterns (Decoder, Encoder, Enc-Dec) |
-| **Compute Cap.** | Required CUDA compute capability |
+| **Compute Cap.** | Required CUDA compute capability (N/A for non-CUDA backends) |
 
 **Symbols:** ✓ = Supported, ✗ = Not supported
 """
@@ -667,9 +697,13 @@ def generate_docs() -> str:
     # Add legend and feature tables
     doc_lines.append(generate_legend())
     standard_title = "Standard Attention (MHA, MQA, GQA) Backends"
-    doc_lines.append(generate_markdown_table(non_mla_backends, standard_title))
+    doc_lines.append(
+        generate_markdown_table(non_mla_backends, standard_title, is_mla_table=False)
+    )
     mla_title = "MLA (Multi-head Latent Attention) Backends"
-    doc_lines.append(generate_markdown_table(mla_backends, mla_title))
+    doc_lines.append(
+        generate_markdown_table(mla_backends, mla_title, is_mla_table=True)
+    )
 
     return "\n".join(doc_lines)
 

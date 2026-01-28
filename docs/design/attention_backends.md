@@ -145,42 +145,41 @@ Priority is **1 = highest** (tried first).
 |--------|-------------|
 | **Dtypes** | Supported model data types (fp16, bf16, fp32) |
 | **KV Cache Dtypes** | Supported KV cache data types (auto, fp8, fp8_e4m3, etc.) |
-| **Block Sizes** | Supported KV cache block sizes (×N means multiples of N) |
+| **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
 | **Head Sizes** | Supported attention head sizes |
-| **MLA** | Multi-head Latent Attention support (for DeepSeek-style models) |
 | **Sink** | Attention sink support (for StreamingLLM) |
-| **Sparse** | Sparse attention support |
+| **Sparse** | Sparse attention support (MLA only) |
 | **MM Prefix** | Multimodal prefix full attention support |
 | **Attention Types** | Supported attention patterns (Decoder, Encoder, Enc-Dec) |
-| **Compute Cap.** | Required CUDA compute capability |
+| **Compute Cap.** | Required CUDA compute capability (N/A for non-CUDA backends) |
 
 **Symbols:** ✓ = Supported, ✗ = Not supported
 
 ## Standard Attention (MHA, MQA, GQA) Backends
 
-| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes | MLA | Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |
-|---------|--------|-----------------|-------------|------------|-----|------|--------|-----------|-----------------|--------------|
-| CPU_ATTN | fp16, bf16, fp32 | auto | ×1 | 32, 64, 80, 96, 112, 128, 160, 192, 224, 256 | ❌ | ❌ | ❌ | ❌ | All | Any |
-| FLASHINFER | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3, fp8_e5m2 | 16, 32, 64 | 64, 128, 256 | ❌ | ❌ | ❌ | ❌ | Decoder | 7.x-12.x |
-| FLASH_ATTN | fp16, bf16 | auto | ×16 | Any | ❌ | ❌ | ❌ | ❌ | All | ≥8.0 |
-| FLASH_ATTN_DIFFKV | fp16, bf16 | auto | ×1 | Any | ❌ | ❌ | ❌ | ❌ | Decoder | Any |
-| FLEX_ATTENTION | fp16, bf16, fp32 | auto, bfloat16 | ×1 | Any | ❌ | ❌ | ❌ | ✅ | Decoder, Encoder Only | Any |
-| ROCM_AITER_FA | fp16, bf16 | auto | ×16 | 64, 128, 256 | ❌ | ❌ | ❌ | ❌ | Decoder | Any |
-| ROCM_AITER_UNIFIED_ATTN | fp16, bf16 | auto | ×1 | Any | ❌ | ❌ | ❌ | ❌ | Decoder | Any |
-| ROCM_ATTN | fp16, bf16, fp32 | auto | 16, 32, 544 | 32, 64, 96, 128, 160, 192, 224, 256 | ❌ | ❌ | ❌ | ❌ | Decoder | Any |
-| TREE_ATTN | fp16, bf16 | auto | ×16 | 32, 64, 96, 128, 160, 192, 224, 256 | ❌ | ❌ | ❌ | ❌ | Decoder | Any |
-| TRITON_ATTN | fp16, bf16, fp32 | auto, bfloat16, fp8, fp8_e4m3, fp8_e5m2 | ×16 | Any | ❌ | ✅ | ❌ | ✅ | All | Any |
+| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes | Sink | MM Prefix | Attention Types | Compute Cap. |
+|---------|--------|-----------------|-------------|------------|------|-----------|-----------------|--------------|
+| CPU_ATTN | fp16, bf16, fp32 | auto | ×1 | 32, 64, 80, 96, 112, 128, 160, 192, 224, 256 | ❌ | ❌ | All | Any |
+| FLASHINFER | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3, fp8_e5m2 | 16, 32, 64 | 64, 128, 256 | ❌ | ❌ | Decoder | 7.x-12.x |
+| FLASH_ATTN | fp16, bf16 | auto | ×16 | Any | ❌ | ❌ | All | ≥8.0 |
+| FLASH_ATTN_DIFFKV | fp16, bf16 | auto | ×1 | Any | ❌ | ❌ | Decoder | Any |
+| FLEX_ATTENTION | fp16, bf16, fp32 | auto, bfloat16 | ×1 | Any | ❌ | ✅ | Decoder, Encoder Only | Any |
+| ROCM_AITER_FA | fp16, bf16 | auto | ×16 | 64, 128, 256 | ❌ | ❌ | Decoder | Any |
+| ROCM_AITER_UNIFIED_ATTN | fp16, bf16 | auto | ×1 | Any | ❌ | ❌ | Decoder | Any |
+| ROCM_ATTN | fp16, bf16, fp32 | auto | 16, 32, 544 | 32, 64, 96, 128, 160, 192, 224, 256 | ❌ | ❌ | Decoder | Any |
+| TREE_ATTN | fp16, bf16 | auto | ×16 | 32, 64, 96, 128, 160, 192, 224, 256 | ❌ | ❌ | Decoder | Any |
+| TRITON_ATTN | fp16, bf16, fp32 | auto, bfloat16, fp8, fp8_e4m3, fp8_e5m2 | ×16 | Any | ✅ | ✅ | All | Any |
 
 ## MLA (Multi-head Latent Attention) Backends
 
-| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes | MLA | Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |
-|---------|--------|-----------------|-------------|------------|-----|------|--------|-----------|-----------------|--------------|
-| CUTLASS_MLA | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3 | 128 | Any | ✅ | ❌ | ❌ | ❌ | Decoder | 10.x |
-| FLASHINFER_MLA | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3 | 32, 64 | Any | ✅ | ❌ | ❌ | ❌ | Decoder | 10.x |
-| FLASHMLA | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3 | 64 | Any | ✅ | ❌ | ❌ | ❌ | Decoder | 9.x-10.x |
-| FLASHMLA_SPARSE | bf16 | auto, bfloat16, fp8_ds_mla | 64 | 576 | ✅ | ❌ | ✅ | ❌ | Decoder | 9.x-10.x |
-| FLASH_ATTN_MLA | fp16, bf16 | auto, bfloat16 | ×16 | Any | ✅ | ❌ | ❌ | ❌ | Decoder | 9.x |
-| ROCM_AITER_MLA | fp16, bf16 | auto | 1 | Any | ✅ | ❌ | ❌ | ❌ | Decoder | Any |
-| ROCM_AITER_MLA_SPARSE | fp16, bf16 | auto | ×1 | 576 | ✅ | ❌ | ❌ | ❌ | Decoder | Any |
-| ROCM_AITER_TRITON_MLA | fp16, bf16 | auto | ×1 | Any | ✅ | ❌ | ❌ | ❌ | Decoder | Any |
-| TRITON_MLA | fp16, bf16 | auto, bfloat16 | ×1 | Any | ✅ | ❌ | ❌ | ❌ | Decoder | Any |
+| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes | Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |
+|---------|--------|-----------------|-------------|------------|------|--------|-----------|-----------------|--------------|
+| CUTLASS_MLA | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3 | 128 | Any | ❌ | ❌ | ❌ | Decoder | 10.x |
+| FLASHINFER_MLA | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3 | 32, 64 | Any | ❌ | ❌ | ❌ | Decoder | 10.x |
+| FLASHMLA | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3 | 64 | Any | ❌ | ❌ | ❌ | Decoder | 9.x-10.x |
+| FLASHMLA_SPARSE | bf16 | auto, bfloat16, fp8_ds_mla | 64 | 576 | ❌ | ✅ | ❌ | Decoder | 9.x-10.x |
+| FLASH_ATTN_MLA | fp16, bf16 | auto, bfloat16 | ×16 | Any | ❌ | ❌ | ❌ | Decoder | 9.x |
+| ROCM_AITER_MLA | fp16, bf16 | auto | 1 | Any | ❌ | ❌ | ❌ | Decoder | Any |
+| ROCM_AITER_MLA_SPARSE | fp16, bf16 | auto | ×1 | 576 | ❌ | ❌ | ❌ | Decoder | Any |
+| ROCM_AITER_TRITON_MLA | fp16, bf16 | auto | ×1 | Any | ❌ | ❌ | ❌ | Decoder | Any |
+| TRITON_MLA | fp16, bf16 | auto, bfloat16 | ×1 | Any | ❌ | ❌ | ❌ | Decoder | Any |
