@@ -51,7 +51,7 @@ def packed_broadcast_producer(
         # Synchronize the current stream
         streams[buffer_idx].synchronize()
         # Start tasks for the new buffer in a new stream
-        with torch.cuda.stream(streams[buffer_idx]):
+        with streams[buffer_idx]:
             try:
                 # Initialize the packing tensor list and sizes
                 packing_tensor_list[buffer_idx] = []
@@ -155,7 +155,7 @@ def packed_broadcast_consumer(
     while True:
         # Synchronize the current stream
         streams[buffer_idx].synchronize()
-        with torch.cuda.stream(streams[buffer_idx]):
+        with streams[buffer_idx]:
             # Initialize the packing tensor meta data
             packing_tensor_meta_data[buffer_idx] = []
             packing_tensor_sizes[buffer_idx] = 0

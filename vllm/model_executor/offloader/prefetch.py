@@ -500,7 +500,7 @@ class _ModuleOffloader:
         torch.cuda.current_stream().record_event(fork_event)
         self.copy_stream.wait_event(fork_event)
 
-        with torch.cuda.stream(self.copy_stream):
+        with self.copy_stream:
             for name, offloader in self._param_offloaders.items():
                 cpu_storage = offloader._cpu_storage
                 gpu_buffer = offloader._gpu_buffer

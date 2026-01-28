@@ -112,7 +112,7 @@ def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
 
 @contextlib.contextmanager
 def stream(to_stream: torch.cuda.Stream, from_stream: torch.cuda.Stream):
-    """Lightweight version of torch.cuda.stream() context manager which
+    """Lightweight version of torch.Stream context manager which
     avoids current_stream and device lookups.
     """
     try:
