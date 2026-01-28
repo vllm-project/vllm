@@ -1035,11 +1035,13 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.vpm = vpm = self.init_vision_module(
+            self.vpm = self.init_vision_module(
                 config, quant_config, prefix=maybe_prefix(prefix, "vpm")
             )
             self.vision_dim = (
-                vpm.embed_dim if self.version == (2, 0) else vpm.embeddings.embed_dim
+                self.vpm.embed_dim
+                if self.version == (2, 0)
+                else self.vpm.embeddings.embed_dim
             )
             self.embed_dim = self.config.hidden_size
 
@@ -1145,7 +1147,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

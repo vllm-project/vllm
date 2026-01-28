@@ -267,6 +267,12 @@ class VllmConfig:
         vllm_factors.append(__version__)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
+            if (
+                self.compilation_config
+                and getattr(self.compilation_config, "compile_mm_encoder", False)
+                and self.model_config.multimodal_config
+            ):
+                vllm_factors.append(self.model_config.multimodal_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.cache_config:
@@ -1003,6 +1009,17 @@ class VllmConfig:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
+        if self.cache_config.mamba_cache_mode == "align":
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                assert (
+                    self.scheduler_config.long_prefill_token_threshold
+                    >= self.cache_config.block_size
+                )
+            assert not self.scheduler_config.disable_chunked_mm_input, (
+                "Chunked MM input is required because we need the flexibility to "
+                "schedule a multiple of block_size tokens even if they are in the "
+                "middle of a mm input"
+            )
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()
