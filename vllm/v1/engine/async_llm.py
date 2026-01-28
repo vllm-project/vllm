@@ -816,6 +816,37 @@ class AsyncLLM(EngineClient):
             logger.info_once("Waiting for pending KV transfers to complete")
             await asyncio.sleep(poll_interval)
 
+    async def drain(self, timeout: float) -> bool:
+        """Drain in-flight requests before shutdown.
+
+        Signals the engine to stop accepting new requests and waits for
+        existing requests to complete.
+
+        Args:
+            timeout: Maximum time to wait for drain in seconds.
+
+        Returns:
+            True if drain completed successfully, False if timed out or failed.
+        """
+        start_time = time.monotonic()
+        try:
+            success = await self.engine_core.drain_async(timeout)
+            elapsed = time.monotonic() - start_time
+            if success:
+                logger.info("Drain: complete in %.1fs", elapsed)
+            else:
+                remaining = self.get_num_unfinished_requests()
+                logger.warning(
+                    "Drain: timed out after %.1fs, "
+                    "%d requests remaining, proceeding with shutdown",
+                    elapsed,
+                    remaining,
+                )
+            return success
+        except Exception as e:
+            logger.warning("Drain: failed: %s", e)
+            return False
+
     def get_num_unfinished_requests(self) -> int:
         """Return the number of in-flight requests."""
         return self.output_processor.get_num_unfinished_requests()

@@ -200,6 +200,21 @@ class EngineClient(ABC):
         """Return the number of in-flight requests."""
         ...
 
+    @abstractmethod
+    async def drain(self, timeout: float) -> bool:
+        """Drain in-flight requests before shutdown.
+
+        Signals the engine to stop accepting new requests and waits for
+        existing requests to complete.
+
+        Args:
+            timeout: Maximum time to wait for drain in seconds.
+
+        Returns:
+            True if drain completed successfully, False if timed out or failed.
+        """
+        ...
+
     async def scale_elastic_ep(
         self, new_data_parallel_size: int, drain_timeout: int = 300
     ) -> None:

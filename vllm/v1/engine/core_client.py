@@ -6,6 +6,7 @@ import multiprocessing
 import queue
 import sys
 import threading
+import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -268,6 +269,17 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def has_pending_kv_transfers_async(self) -> bool:
+        raise NotImplementedError
+
+    async def drain_async(self, timeout: float) -> bool:
+        """Signal engine to drain and wait for completion.
+
+        Args:
+            timeout: Maximum time to wait in seconds.
+
+        Returns:
+            True if drain completed, False if timed out or failed.
+        """
         raise NotImplementedError
 
 
@@ -635,6 +647,23 @@ class MPClient(EngineCoreClient):
                     )
             except Exception:
                 logger.debug_once("Failed to send DRAIN, engines may be gone")
+
+    async def drain_async(self, timeout: float) -> bool:
+        """Signal engines to drain and wait for completion."""
+        start_time = time.monotonic()
+        self._send_drain_to_engines()
+
+        ready_to_exit = self.resources.ready_to_exit_event
+        while not ready_to_exit.is_set():
+            elapsed = time.monotonic() - start_time
+            if elapsed >= timeout:
+                return False
+            if self.resources.engine_dead:
+                logger.warning("Drain: engine died during drain")
+                return False
+            await asyncio.sleep(0.1)
+
+        return True
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""

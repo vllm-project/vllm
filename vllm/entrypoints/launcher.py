@@ -4,7 +4,6 @@
 import asyncio
 import signal
 import socket
-import time
 from http import HTTPStatus
 from typing import Any
 
@@ -116,58 +115,7 @@ async def serve_http(
         )
 
         set_rejecting_requests(True)
-
-        start_time = time.monotonic()
-        try:
-            # send drain signal to engines via IPC if available
-            core = getattr(engine_client, "engine_core", None)
-            if core is not None and hasattr(core, "_send_drain_to_engines"):
-                core._send_drain_to_engines()
-
-                # wait for ready_to_exit event (set when engines finish draining)
-                ready_to_exit = core.resources.ready_to_exit_event
-                while not ready_to_exit.is_set():
-                    elapsed = time.monotonic() - start_time
-                    if elapsed >= drain_timeout:
-                        remaining = engine_client.get_num_unfinished_requests()
-                        logger.warning(
-                            "Drain: timed out after %.1fs, "
-                            "%d requests remaining, proceeding with shutdown",
-                            elapsed,
-                            remaining,
-                        )
-                        return
-                    if core.resources.engine_dead:
-                        logger.warning("Drain: engine died during drain")
-                        return
-                    await asyncio.sleep(0.1)
-
-                elapsed = time.monotonic() - start_time
-                logger.info("Drain: complete in %.1fs", elapsed)
-            else:
-                # in-process engine (--disable-frontend-multiprocessing) has no
-                # separate EngineCore process, so poll request count directly
-                poll_interval = 0.1
-                while True:
-                    remaining = engine_client.get_num_unfinished_requests()
-                    elapsed = time.monotonic() - start_time
-
-                    if remaining == 0:
-                        logger.info("Drain: complete in %.1fs", elapsed)
-                        break
-
-                    if elapsed >= drain_timeout:
-                        logger.warning(
-                            "Drain: timed out after %.1fs, "
-                            "%d requests remaining, proceeding with shutdown",
-                            elapsed,
-                            remaining,
-                        )
-                        break
-
-                    await asyncio.sleep(poll_interval)
-        except Exception as e:
-            logger.warning("Drain: failed: %s", e)
+        await engine_client.drain(drain_timeout)
 
     def signal_handler() -> None:
         # prevents the uvicorn signal handler to exit early
