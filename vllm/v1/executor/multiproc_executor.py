@@ -56,6 +56,7 @@ from vllm.utils.system_utils import (
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.utils import shutdown
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -98,9 +99,6 @@ class MultiprocExecutor(Executor):
         super().__init__(vllm_config)
 
     def _init_executor(self) -> None:
-        # Call self.shutdown at exit to clean up
-        # and ensure workers will be terminated.
-        self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
         self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
@@ -164,6 +162,14 @@ class MultiprocExecutor(Executor):
 
             # Wait for all local workers to be ready.
             self.workers = WorkerProc.wait_for_ready(unready_workers)
+
+            # ensure workers will be terminated on gc
+            self._finalizer = weakref.finalize(
+                self,
+                shutdown,
+                [w.proc for w in self.workers],
+                [w.death_writer for w in self.workers if w.death_writer],
+            )
 
             # Start background thread to monitor worker health if not in headless mode.
             if self.monitor_workers:
