@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs.data import PromptType, StreamingInput
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsRealtime, supports_realtime
+from vllm.model_executor.models.interfaces import SupportsRealtime
 
 logger = init_logger(__name__)
 

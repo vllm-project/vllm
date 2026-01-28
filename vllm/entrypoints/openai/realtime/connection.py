@@ -109,9 +109,7 @@ class RealtimeConnection:
                         value=len(audio_array) / 1024**2,
                     )
                 if len(audio_array) == 0:
-                    raise VLLMValidationError(
-                        "Can't process empty audio."
-                    )
+                    raise VLLMValidationError("Can't process empty audio.")
 
                 # Put audio chunk in queue
                 self.audio_queue.put_nowait(audio_array)
