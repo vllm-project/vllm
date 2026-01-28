@@ -60,10 +60,6 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
-# worker shutdown timeouts
-_WORKER_NATURAL_EXIT_TIMEOUT = 5.0
-_WORKER_SIGTERM_TIMEOUT = 2.0
-
 
 class FutureWrapper(Future):
     def __init__(
@@ -380,9 +376,9 @@ class MultiprocExecutor(Executor):
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
-        """Ensure that all worker processes are terminated. Assumes death
-        pipes have been closed. Waits for natural exit, then falls back to
-        terminate/kill."""
+        """Ensure that all worker processes are terminated. Assumes workers have
+        received termination requests. Waits for processing, then sends
+        termination and kill signals if needed."""
 
         def wait_for_termination(procs, timeout):
             if not time:
@@ -850,15 +846,9 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
         assert self.rpc_broadcast_mq is not None
         while True:
-            try:
-                method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
-                    cancel=cancel, indefinite=True
-                )
-            except RuntimeError as e:
-                # dequeue raises RuntimeError("cancelled") when cancel event is set
-                if "cancelled" in str(e):
-                    return
-                raise
+            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
+                cancel=cancel, indefinite=True
+            )
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)

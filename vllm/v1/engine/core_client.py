@@ -601,7 +601,6 @@ class MPClient(EngineCoreClient):
         if self.resources.engine_dead:
             return
         try:
-            logger.info("Sending SHUTDOWN to %d engine(s)", len(self.core_engines))
             for engine_id in self.core_engines:
                 self.input_socket.send_multipart(
                     [engine_id, EngineCoreRequestType.SHUTDOWN.value],
@@ -611,18 +610,31 @@ class MPClient(EngineCoreClient):
             logger.debug_once("Failed to send SHUTDOWN, engines may be gone")
 
     def _send_drain_to_engines(self):
-        """Send DRAIN message to all engine cores via ZMQ."""
+        """Send DRAIN message to all engine cores."""
         if self.resources.engine_dead:
             return
-        try:
-            logger.info("Sending DRAIN to %d engine(s)", len(self.core_engines))
-            for engine_id in self.core_engines:
-                self.input_socket.send_multipart(
-                    [engine_id, EngineCoreRequestType.DRAIN.value],
-                    flags=zmq.NOBLOCK,
+        # prefer death pipe for drain signaling if engine_manager available
+        if self.resources.engine_manager is not None and hasattr(
+            self.resources.engine_manager, "signal_drain"
+        ):
+            logger.info(
+                "Sending DRAIN to %d engine(s) via death pipe",
+                len(self.core_engines),
+            )
+            self.resources.engine_manager.signal_drain()
+        else:
+            # fallback to ZMQ
+            try:
+                logger.info(
+                    "Sending DRAIN to %d engine(s) via ZMQ", len(self.core_engines)
                 )
-        except Exception:
-            logger.debug_once("Failed to send DRAIN, engines may be gone")
+                for engine_id in self.core_engines:
+                    self.input_socket.send_multipart(
+                        [engine_id, EngineCoreRequestType.DRAIN.value],
+                        flags=zmq.NOBLOCK,
+                    )
+            except Exception:
+                logger.debug_once("Failed to send DRAIN, engines may be gone")
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
