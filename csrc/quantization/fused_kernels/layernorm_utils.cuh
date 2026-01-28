@@ -558,6 +558,8 @@ __device__ __forceinline__ float compute_packed_sum_squares(
 
 // RMSNorm: output = input * rms_inv * weight
 // rms_inv = rsqrt(mean(x^2) + epsilon)
+// Match Python reference: cast to target dtype after rms_inv multiplication,
+// then multiply with weight in target dtype precision.
 template <class Type>
 __device__ __forceinline__ PackedVec<Type> compute_rms_norm(
     const PackedVec<Type>& in_vec, const PackedVec<Type>& w_vec,
@@ -569,19 +571,17 @@ __device__ __forceinline__ PackedVec<Type> compute_rms_norm(
     if constexpr (std::is_same_v<Type, half>) {
       in_fp2 = __half22float2(in_vec.elts[i]);
       w_fp2 = __half22float2(w_vec.elts[i]);
+      // Cast to half after rms_inv, then multiply with weight in half
+      half2 normalized = __float22half2_rn(
+          make_float2(in_fp2.x * rms_inv, in_fp2.y * rms_inv));
+      result.elts[i] = __hmul2(normalized, w_vec.elts[i]);
     } else {
       in_fp2 = __bfloat1622float2(in_vec.elts[i]);
       w_fp2 = __bfloat1622float2(w_vec.elts[i]);
-    }
-
-    float2 out_fp2;
-    out_fp2.x = in_fp2.x * rms_inv * w_fp2.x;
-    out_fp2.y = in_fp2.y * rms_inv * w_fp2.y;
-
-    if constexpr (std::is_same_v<Type, half>) {
-      result.elts[i] = __float22half2_rn(out_fp2);
-    } else {
-      result.elts[i] = __float22bfloat162_rn(out_fp2);
+      // Cast to bfloat16 after rms_inv, then multiply with weight in bfloat16
+      __nv_bfloat162 normalized = __float22bfloat162_rn(
+          make_float2(in_fp2.x * rms_inv, in_fp2.y * rms_inv));
+      result.elts[i] = __hmul2(normalized, w_vec.elts[i]);
     }
   }
   return result;
