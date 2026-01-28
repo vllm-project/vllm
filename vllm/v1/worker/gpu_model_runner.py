@@ -1010,11 +1010,11 @@ class GPUModelRunner(
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
-                # PP non-last rank: token ids may come from scheduler (non-async PP)
-                # or via the GPU broadcast path (async PP).
-                new_token_ids: list[int] = []
-                if req_data.new_token_ids:
-                    # When using PP without async scheduling, the scheduler sends
+                if not req_data.new_token_ids:
+                    # Async scheduled PP: Sampled tokens propagated via GPU broadcast.
+                    new_token_ids: list[int] = []
+                else:
+                    # Non-async scheduling with PP: The scheduler sends
                     # sampled token ids back because there's no direct communication
                     # between the first-stage worker and the last-stage worker.
                     new_token_ids = req_data.new_token_ids[i]
