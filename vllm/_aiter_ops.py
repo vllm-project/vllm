@@ -8,7 +8,7 @@ from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
@@ -980,12 +980,6 @@ class rocm_aiter_ops:
     def register_ops_once() -> None:
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
-            tags = (
-                tuple()
-                if is_torch_equal_or_newer("2.7.0")
-                else (torch.Tag.needs_fixed_stride_order,)
-            )
-
             # register all the custom ops here
             direct_register_custom_op(
                 op_name="rocm_aiter_asm_moe_tkw1",
@@ -1040,7 +1034,6 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
                 mutates_args=["o"],
                 fake_impl=_rocm_aiter_mla_decode_fwd_fake,
-                tags=tags,
             )
 
             direct_register_custom_op(

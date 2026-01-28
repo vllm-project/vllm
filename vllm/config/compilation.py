@@ -764,10 +764,9 @@ class CompilationConfig:
         #    and it is not yet a priority. RFC here:
         #    https://github.com/vllm-project/vllm/issues/14703
 
-        if is_torch_equal_or_newer("2.6"):
-            KEY = "enable_auto_functionalized_v2"
-            if KEY not in self.inductor_compile_config:
-                self.inductor_compile_config[KEY] = False
+        KEY = "enable_auto_functionalized_v2"
+        if KEY not in self.inductor_compile_config:
+            self.inductor_compile_config[KEY] = False
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
