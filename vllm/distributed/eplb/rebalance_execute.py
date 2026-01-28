@@ -507,18 +507,22 @@ async def transfer_layer(
     return is_unchanged, is_received_locally, recv_metadata
 
 
-def find_cycles(old: torch.Tensor, new: torch.Tensor):
+def find_cycles(old_expert_indices: torch.Tensor, new_expert_indices: torch.Tensor):
     """
     Find all cycles in the permutation from old to new.
-    old[i] = expert at physical location i (before)
-    new[i] = expert at physical location i (after)
+    Args:
+        old_expert_indices: Shape (num_physical_experts).
+        new_expert_indices: Shape (num_physical_experts).
     """
-    n = len(old)
+    n = len(old_expert_indices)
     visited = [False] * n
     cycles = []
 
     for start_pos in range(n):
-        if visited[start_pos] or old[start_pos] == new[start_pos]:
+        if (
+            visited[start_pos]
+            or old_expert_indices[start_pos] == new_expert_indices[start_pos]
+        ):
             continue
 
         cycle = []
@@ -529,9 +533,9 @@ def find_cycles(old: torch.Tensor, new: torch.Tensor):
             cycle.append(pos)
 
             # Which expert is now at this position?
-            expert = new[pos].item()
+            expert = new_expert_indices[pos].item()
             # Where was this expert before?
-            next_pos = (old == expert).nonzero()[0].item()
+            next_pos = (old_expert_indices == expert).nonzero()[0].item()
 
             pos = next_pos
 
@@ -542,14 +546,17 @@ def find_cycles(old: torch.Tensor, new: torch.Tensor):
 
 
 def apply_transfer_cap(
-    old: torch.Tensor, new: torch.Tensor, max_transfers: int
+    old_expert_indices: torch.Tensor,
+    new_expert_indices: torch.Tensor,
+    max_transfers: int,
 ) -> None:
     """
     Cap transfers by undoing complete cycles. Modifies new in-place.
-    old[i] = expert at physical location i (before)
-    new[i] = expert at physical location i (after)
+    Args:
+        old_expert_indices: Shape (num_physical_experts).
+        new_expert_indices: Shape (num_physical_experts).
     """
-    cycles = find_cycles(old, new)
+    cycles = find_cycles(old_expert_indices, new_expert_indices)
 
     # Calculate total transfers
     total_transfers = sum(len(cycle) for cycle in cycles)
@@ -565,7 +572,7 @@ def apply_transfer_cap(
     for cycle in cycles:
         # Undo this cycle
         for pos in cycle:
-            new[pos] = old[pos]
+            new_expert_indices[pos] = old_expert_indices[pos]
 
         transfers_remaining -= len(cycle)
 
@@ -577,24 +584,29 @@ def apply_transfer_cap(
 def cap_num_transfers(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
-    num_weights_per_expert: int,
+    num_tensors_per_expert: int,
     max_num_transfers: int = 1000,
 ) -> None:
     """
+    Detects if the total number of transfer operations exceeds
+    max_num_transfers. If it does, then apply_transfer_cap will undo transfers
+    until the number of transfers is below max_num_transfers.
+
     Args:
         old_global_expert_indices: Shape (num_moe_layers, num_physical_experts).
         new_global_expert_indices: Shape (num_moe_layers, num_physical_experts).
-        num_weights_per_expert: Number of weights per expert.
-        max_num_transfers: Maximum number of total transfers allowed (default: 1000).
+        num_weights_per_expert: Number of tensors in each layer
+        associated with a single expert.
+        max_num_transfers: Maximum number of total transfers allowed.
     """
     num_moe_layers = old_global_expert_indices.shape[0]
     for layer in range(num_moe_layers):
         old_layer_indices = old_global_expert_indices[layer]
         new_layer_indices = new_global_expert_indices[layer]
         num_expert_transfers = (old_layer_indices != new_layer_indices).sum().item()
-        total_num_transfers = num_expert_transfers * num_weights_per_expert
+        total_num_transfers = num_expert_transfers * num_tensors_per_expert
         if total_num_transfers >= max_num_transfers:
-            max_expert_transfers = max_num_transfers // num_weights_per_expert
+            max_expert_transfers = max_num_transfers // num_tensors_per_expert
             apply_transfer_cap(
                 old_layer_indices, new_layer_indices, max_expert_transfers
             )
