@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.openai.realtime.protocol import (
     ErrorEvent,
     InputAudioBufferAppend,
+    InputAudioBufferCommit,
     SessionCreated,
     TranscriptionDelta,
     TranscriptionDone,
@@ -47,6 +48,7 @@ class RealtimeConnection:
         self.generation_task: asyncio.Task | None = None
 
         self._is_connected = False
+        self._is_input_finished = False
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
     async def handle_connection(self):
@@ -119,7 +121,12 @@ class RealtimeConnection:
                 await self.send_error("Invalid audio data", "invalid_audio")
 
         elif event_type == "input_audio_buffer.commit":
-            await self.start_generation()
+            commit_event = InputAudioBufferCommit(**event)
+            # final signals that the audio is finished
+            if commit_event.final:
+                self._is_input_finished = True
+            else:
+                await self.start_generation()
         else:
             await self.send_error(f"Unknown event type: {event_type}", "unknown_event")
 
@@ -209,7 +216,12 @@ class RealtimeConnection:
                     completion_tokens_len += len(output.outputs[0].token_ids)
 
                 if not self._is_connected:
-                    # finish
+                    # finish because websocket connection was killed
+                    break
+
+                if self.audio_queue.empty() and self._is_input_finished:
+                    # finish because client signals that audio input
+                    # is finished
                     break
 
             usage = UsageInfo(

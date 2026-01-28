@@ -26,6 +26,7 @@ class InputAudioBufferCommit(OpenAIBaseModel):
     """Process accumulated audio buffer"""
 
     type: Literal["input_audio_buffer.commit"] = "input_audio_buffer.commit"
+    final: bool = False
 
 
 # Server -> Client Events
