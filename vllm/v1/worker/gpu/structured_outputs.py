@@ -81,9 +81,9 @@ class StructuredOutputsWorker:
             BLOCK_SIZE=BLOCK_SIZE,
         )
 
-        # Record an event so future iterations can wait for this kernel to finish
-        # before reusing the bitmask buffer.
-        self.event.record(current_stream)
+        # Ensure the copy stream waits for the device tensors to finish being used
+        # before it re-uses or deallocates them
+        self.copy_stream.wait_stream(current_stream)
 
 
 # Adapted from
