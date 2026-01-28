@@ -45,6 +45,7 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
+    AttentionLayer,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -1203,7 +1204,7 @@ class FlashInferImpl(AttentionImpl):
 
     def do_kv_cache_update(
         self,
-        layer: torch.nn.Module,
+        layer: AttentionLayer,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
