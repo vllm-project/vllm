@@ -589,9 +589,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         # Compute slot mappings: [num_kv_cache_groups, num_tokens]
-        positions = self.input_buffers.positions[:num_tokens]
         slot_mappings = self.block_tables.compute_slot_mappings(
-            idx_mapping, query_start_loc, positions
+            idx_mapping,
+            query_start_loc,
+            self.input_buffers.positions[:num_tokens],
         )
         # Layer name -> slot mapping.
         slot_mappings_by_layer = build_slot_mappings_by_layer(
@@ -827,7 +828,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 inputs_embeds = self.encoder_runner.get_inputs_embeds(
                     self.model, input_batch.input_ids, mm_embeds, is_mm_embed
                 )
-                input_batch.inputs_embeds = inputs_embeds[:num_tokens_after_padding]
+                input_batch.inputs_embeds = inputs_embeds[
+                    : input_batch.num_tokens_after_padding
+                ]
         else:
             # No actual tokens to run. A dummy run for DP or memory profiling.
             num_reqs = min(num_tokens_after_padding, self.max_num_reqs)

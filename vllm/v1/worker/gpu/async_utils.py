@@ -57,7 +57,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # Going forward, we should keep the data structures as NumPy arrays
         # rather than Python lists.
         sampled_token_ids: list[list[int]] = self.sampled_token_ids.tolist()
-        for token_ids, num_tokens in zip(sampled_token_ids, self.num_sampled_tokens_np):
+        num_sampled_tokens: list[int] = self.num_sampled_tokens_np.tolist()
+        for token_ids, num_tokens in zip(sampled_token_ids, num_sampled_tokens):
             del token_ids[num_tokens:]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
