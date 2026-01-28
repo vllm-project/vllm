@@ -19,7 +19,6 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.utils import rocm_unquantized_gemm
-from vllm.platforms import current_platform
 
 from .backend import TestBackend
 
