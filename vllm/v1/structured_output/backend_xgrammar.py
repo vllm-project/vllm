@@ -69,7 +69,7 @@ class XgrammarBackend(StructuredOutputBackend):
                 if idx < vocab_size:
                     encoded_vocab[idx] = token
             stop_token_ids = [self.tokenizer.eos_token_id]
-            backend_str = self.tokenizer.tokenizer.backend_tokenizer.to_str()
+            backend_str = self.tokenizer.tokenizer.backend_tokenizer.to_str()  # type: ignore[attr-defined]
             metadata = xgr.TokenizerInfo._detect_metadata_from_hf(backend_str)
             tokenizer_info = xgr.TokenizerInfo(
                 encoded_vocab=encoded_vocab,

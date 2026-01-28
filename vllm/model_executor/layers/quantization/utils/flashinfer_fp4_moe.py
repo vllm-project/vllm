@@ -8,22 +8,17 @@ import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
+    FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
-    FlashInferCuteDSLExperts,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4Static,
     swizzle_blockscale,
 )
 from vllm.platforms import current_platform
@@ -44,8 +39,87 @@ __all__ = [
     "is_flashinfer_fp4_cutlass_moe_available",
     "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
-    "build_flashinfer_fp4_cutlass_moe_prepare_finalize",
 ]
+
+#
+# Methods used by the oracle for kernel selection.
+#
+
+
+def _supports_current_device() -> bool:
+    """Supports only Blackwell-family GPUs."""
+    p = current_platform
+    return p.is_cuda() and p.is_device_capability_family(100)
+
+
+def _supports_no_act_and_mul() -> bool:
+    """Does not support non-gated MoE (i.e. Nemotron-Nano)."""
+    return False
+
+
+def _supports_quant_scheme(
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+) -> bool:
+    """Supports Nvfp4 quantization."""
+    SUPPORTED_W_A = [
+        (kNvfp4Static, kNvfp4Dynamic),
+    ]
+    return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+def _supports_activation(activation: str) -> bool:
+    """Supports silu activation only."""
+    return activation in ["silu"]
+
+
+def _supports_routing_method(
+    routing_method: RoutingMethodType,
+) -> bool:
+    """Monolithic kernels need to express router support."""
+    # NOTE(rob): potentially allow others here. This is a conservative list.
+    return routing_method in [
+        RoutingMethodType.DeepSeekV3,
+        RoutingMethodType.Renormalize,
+        RoutingMethodType.RenormalizeNaive,
+        RoutingMethodType.Llama4,
+    ]
+
+
+def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+    """Supports EP."""
+    return True
+
+
+def is_supported_config_trtllm(
+    moe_config: FusedMoEConfig,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    activation_format: mk.FusedMoEActivationFormat,
+) -> tuple[bool, str | None]:
+    """
+    This method mirrors mk.FusedMoEPermuteExpertsUnpermute.is_supported_config
+    """
+
+    def _make_reason(reason: str) -> str:
+        return f"kernel does not support {reason}"
+
+    if not _supports_current_device():
+        return False, _make_reason("current device")
+    elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
+        return False, _make_reason("no act_and_mul MLP layer")
+    elif not _supports_activation(moe_config.activation):
+        return False, _make_reason(f"{moe_config.activation} activation")
+    elif not _supports_quant_scheme(weight_key, activation_key):
+        return False, _make_reason("quantization scheme")
+    elif not _supports_parallel_config(moe_config.moe_parallel_config):
+        return False, _make_reason("parallel config")
+    elif not _supports_routing_method(moe_config.routing_method):
+        return False, _make_reason("routing method")
+    elif activation_format != mk.FusedMoEActivationFormat.Standard:
+        return False, _make_reason("activation format")
+
+    return True, None
 
 
 def is_flashinfer_fp4_cutlass_moe_available() -> bool:
@@ -82,48 +156,6 @@ def reorder_w1w3_to_w3w1(
     return (
         torch.cat([w3, w1], dim=dim).contiguous(),
         torch.cat([s3, s1], dim=dim).contiguous(),
-    )
-
-
-def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-    moe: FusedMoEConfig,
-) -> mk.FusedMoEPrepareAndFinalize:
-    """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
-    use_dp = moe.moe_parallel_config.dp_size > 1
-    enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
-    return create_flashinfer_prepare_finalize(
-        use_dp=use_dp, use_nvfp4=True, enable_alltoallv=enable_alltoallv
-    )
-
-
-def select_nvfp4_gemm_impl(
-    moe: FusedMoEConfig,
-    moe_quant_config: FusedMoEQuantConfig,
-    allow_flashinfer: bool,
-) -> mk.FusedMoEPermuteExpertsUnpermute:
-    """Return a GEMM *experts* implementation for NV-FP4 fused-MoE layers"""
-
-    if allow_flashinfer:
-        if envs.VLLM_FLASHINFER_MOE_BACKEND == "masked_gemm":
-            return FlashInferCuteDSLExperts(
-                out_dtype=moe.in_dtype,
-                quant_config=moe_quant_config,
-            )
-        elif envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput":
-            return FlashInferExperts(
-                out_dtype=moe.in_dtype,
-                quant_config=moe_quant_config,
-                ep_rank=moe.moe_parallel_config.ep_rank,
-                ep_size=moe.moe_parallel_config.ep_size,
-                tp_rank=moe.moe_parallel_config.tp_rank,
-                tp_size=moe.moe_parallel_config.tp_size,
-                use_dp=moe.moe_parallel_config.dp_size > 1,
-            )
-
-    # native cutlass experts currently don't support DP; TP case won't call this
-    raise ValueError(
-        "CutlassExpertsFp4 doesn't support DP. Use flashinfer CUTLASS "
-        "Fused MoE backend instead (set VLLM_USE_FLASHINFER_MOE_FP4=1)"
     )
 
 
@@ -295,10 +327,8 @@ def flashinfer_trtllm_fp4_moe(
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # hidden_states is the already quantized
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(
+            x, layer.a1_gscale, is_sf_swizzled_layout=False
         )
 
     # Determine routing method type
@@ -346,7 +376,6 @@ def flashinfer_trtllm_fp4_moe(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         routed_scaling_factor=None,
-        tile_tokens_dim=None,
         routing_method_type=routing_method_type,
         do_finalize=True,
     )[0]
@@ -398,10 +427,8 @@ def flashinfer_trtllm_fp4_routed_moe(
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # Quantize input to FP4
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(
+            x, layer.a1_gscale, is_sf_swizzled_layout=False
         )
 
     # Call TRT-LLM FP4 block-scale MoE kernel
@@ -432,7 +459,6 @@ def flashinfer_trtllm_fp4_routed_moe(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         routed_scaling_factor=None,
-        tile_tokens_dim=None,
         routing_method_type=1,
         do_finalize=True,
     )[0]

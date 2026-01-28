@@ -43,25 +43,21 @@ This guide will help you quickly get started with vLLM to perform:
 
 === "AMD ROCm"
 
-    Use a pre-built docker image from Docker Hub. The public stable image is [rocm/vllm:latest](https://hub.docker.com/r/rocm/vllm). There is also a development image at [rocm/vllm-dev](https://hub.docker.com/r/rocm/vllm-dev).
-    
-    The `-v` flag in the `docker run` command below mounts a local directory into the container. Replace `<path/to/your/models>` with the path on your host machine to the directory containing your models. The models will then be accessible inside the container at `/app/models`.
-    
-    ???+ console "Commands"
-        ```bash
-        docker pull rocm/vllm-dev:nightly # to get the latest image
-        docker run -it --rm \
-        --network=host \
-        --group-add=video \
-        --ipc=host \
-        --cap-add=SYS_PTRACE \
-        --security-opt seccomp=unconfined \
-        --device /dev/kfd \
-        --device /dev/dri \
-        -v <path/to/your/models>:/app/models \
-        -e HF_HOME="/app/models" \
-        rocm/vllm-dev:nightly
-        ```
+    If you are using AMD GPUs, you can install vLLM using `uv`.
+
+    It's recommended to use [uv](https://docs.astral.sh/uv/), as it gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). `uv` is also a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
+
+    ```bash
+    uv venv --python 3.12 --seed
+    source .venv/bin/activate
+    uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+    ```
+
+    !!! note
+        It currently supports Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
+
+    !!! note    
+        Note that, previously, docker images were published using AMD's docker release pipeline and were located `rocm/vlm-dev`. This is being deprecated by using vLLM's docker release pipeline.
 
 === "Google TPU"
 
@@ -294,14 +290,7 @@ python script.py --attention-backend FLASHINFER
 Some of the available backend options include:
 
 - On NVIDIA CUDA: `FLASH_ATTN` or `FLASHINFER`.
-- On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA` or `ROCM_AITER_UNIFIED_ATTN`.
-
-For AMD ROCm, you can further control the specific Attention implementation using the following options:
-
-- Triton Unified Attention: Set the environment variables `VLLM_ROCM_USE_AITER=0 VLLM_ROCM_USE_AITER_MHA=0` and pass `--attention-config.use_prefill_decode_attention=false` as a CLI argument.
-- AITER Unified Attention: Set the environment variables `VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 VLLM_ROCM_USE_AITER_MHA=0` and pass `--attention-config.use_prefill_decode_attention=false` as a CLI argument.
-- Triton Prefill-Decode Attention: Set the environment variables `VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=0` and pass `--attention-config.use_prefill_decode_attention=true` as a CLI argument.
-- AITER Multi-head Attention: Set the environment variables `VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MHA=1` and pass `--attention-config.use_prefill_decode_attention=false` as a CLI argument.
+- On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA`, `ROCM_AITER_UNIFIED_ATTN`, `TRITON_MLA`, `ROCM_AITER_MLA` or `ROCM_AITER_TRITON_MLA`.
 
 !!! warning
     There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [docker/Dockerfile](../../docker/Dockerfile) for instructions on how to install it.

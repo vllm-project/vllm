@@ -66,6 +66,9 @@ class CPUWorker(Worker):
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
                     lambda cpus: cpus[-1:]
                 )
+            elif cpu_arch == CpuArchEnum.ARM:
+                # For AArch64, no SMT
+                self.local_omp_cpuid = self._get_autobind_cpu_ids(lambda cpus: cpus)
             else:
                 self.local_omp_cpuid = "nobind"
         elif omp_cpuids == "nobind":

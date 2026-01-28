@@ -224,6 +224,7 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             encoder_layers=encoder_args["n_layers"],
             encoder_ffn_dim=encoder_args["hidden_dim"],
             encoder_attention_heads=encoder_args["n_heads"],
+            encoder_head_dim=encoder_args["head_dim"],
             vocab_size=encoder_args["vocab_size"],
             max_source_positions=encoder_args["max_source_positions"],
             is_encoder_decoder=False,  # Override WhisperConfig default
@@ -231,6 +232,8 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             sliding_window=sliding_window,
             block_pool_size=block_pool_size,
             pos_embed=encoder_args.get("pos_embed", "sinusoidal"),
+            # only needed for RoPE
+            max_position_embeddings=block_pool_size * config["max_position_embeddings"],
         ),
     }
     if quant_config:

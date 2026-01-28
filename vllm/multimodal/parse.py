@@ -384,6 +384,13 @@ class VideoEmbeddingItems(EmbeddingItems):
         super().__init__(data, "video", expected_hidden_size)
 
 
+class VisionChunkProcessorItems(ProcessorBatchItems[Any]):
+    """Processor items for vision chunks (unified image and video chunks)."""
+
+    def __init__(self, data: Sequence[Any]) -> None:
+        super().__init__(data, "vision_chunk")
+
+
 _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 
@@ -652,11 +659,23 @@ class MultiModalDataParser:
 
         return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
+    def _parse_vision_chunk_data(
+        self,
+        data: ModalityData[Any],
+    ) -> ModalityDataItems[Any, Any] | None:
+        """Parse vision chunk data (unified image and video chunks)."""
+        if data is None or self._is_empty(data):
+            return None
+        if self.is_embeddings(data):
+            raise ValueError("Do not support embedding data for vision_chunk right now")
+        return VisionChunkProcessorItems(data)
+
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {
             "audio": self._parse_audio_data,
             "image": self._parse_image_data,
             "video": self._parse_video_data,
+            "vision_chunk": self._parse_vision_chunk_data,
         }
 
     def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:

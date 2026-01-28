@@ -115,8 +115,11 @@ def can_initialize(
         # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
         # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
         # L4 supports FA3.
+        # Step1ForCausalLM requires TRITON_ATTN for use_alibi_sqrt support.
         attention_config = (
-            {"backend": "TRITON_ATTN"} if model_arch == "GptOssForCausalLM" else None
+            {"backend": "TRITON_ATTN"}
+            if model_arch in ("GptOssForCausalLM", "Step1ForCausalLM")
+            else None
         )
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")

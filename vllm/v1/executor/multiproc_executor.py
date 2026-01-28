@@ -104,16 +104,7 @@ class MultiprocExecutor(Executor):
         self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
-        self.world_size = self.parallel_config.world_size
-        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
-            f"global world_size ({self.parallel_config.world_size}) must be "
-            f"divisible by nnodes_within_dp "
-            f"({self.parallel_config.nnodes_within_dp}). "
-        )
-        self.local_world_size = self.parallel_config.local_world_size
-        tp_size = self.parallel_config.tensor_parallel_size
-        pp_size = self.parallel_config.pipeline_parallel_size
-        pcp_size = self.parallel_config.prefill_context_parallel_size
+        tp_size, pp_size, pcp_size = self._get_parallel_sizes()
         assert self.world_size == tp_size * pp_size * pcp_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tp_size}) x pipeline"
@@ -154,6 +145,7 @@ class MultiprocExecutor(Executor):
             )
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
+                is_driver_worker = self._is_driver_worker(global_rank)
                 unready_workers.append(
                     WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
@@ -162,6 +154,7 @@ class MultiprocExecutor(Executor):
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
+                        is_driver_worker=is_driver_worker,
                     )
                 )
 
@@ -199,6 +192,11 @@ class MultiprocExecutor(Executor):
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
+
+            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+
+            self._post_init_executor()
+
             success = True
         finally:
             if not success:
@@ -209,9 +207,26 @@ class MultiprocExecutor(Executor):
                         uw.death_writer.close()
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
-        self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
-
         self.output_rank = self._get_output_rank()
+
+    def _get_parallel_sizes(self) -> tuple[int, int, int]:
+        self.world_size = self.parallel_config.world_size
+        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
+            f"global world_size ({self.parallel_config.world_size}) must be "
+            f"divisible by nnodes_within_dp "
+            f"({self.parallel_config.nnodes_within_dp}). "
+        )
+        self.local_world_size = self.parallel_config.local_world_size
+        tp_size = self.parallel_config.tensor_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        pcp_size = self.parallel_config.prefill_context_parallel_size
+        return tp_size, pp_size, pcp_size
+
+    def _post_init_executor(self) -> None:
+        pass
+
+    def _is_driver_worker(self, rank: int) -> bool:
+        return rank % self.parallel_config.tensor_parallel_size == 0
 
     def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
@@ -376,14 +391,17 @@ class MultiprocExecutor(Executor):
                 time.sleep(0.1)
             return False
 
+        active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
+        # Give processes time to clean themselves up properly first
+        if wait_for_termination(active_procs(), 4):
+            return
+
         # Send SIGTERM if still running
-        active_procs = [proc for proc in worker_procs if proc.is_alive()]
-        for p in active_procs:
+        for p in active_procs():
             p.terminate()
-        if not wait_for_termination(active_procs, 4):
+        if not wait_for_termination(active_procs(), 4):
             # Send SIGKILL if still running
-            active_procs = [p for p in active_procs if p.is_alive()]
-            for p in active_procs:
+            for p in active_procs():
                 p.kill()
 
     def shutdown(self):
@@ -517,6 +535,7 @@ class WorkerProc:
         distributed_init_method: str,
         input_shm_handle: Handle,
         shared_worker_lock: LockType,
+        is_driver_worker: bool,
     ):
         self.rank = rank
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
@@ -524,7 +543,6 @@ class WorkerProc:
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]
-        is_driver_worker = rank % vllm_config.parallel_config.tensor_parallel_size == 0
         all_kwargs[local_rank] = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -571,6 +589,7 @@ class WorkerProc:
         distributed_init_method: str,
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
+        is_driver_worker: bool,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # (reader, writer)
@@ -588,6 +607,7 @@ class WorkerProc:
             "ready_pipe": (reader, writer),
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
+            "is_driver_worker": is_driver_worker,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
@@ -684,6 +704,9 @@ class WorkerProc:
             nonlocal shutdown_requested
             if not shutdown_requested:
                 shutdown_requested = True
+                logger.debug(
+                    "WorkerProc handling signal %d, raising SystemExit", signum
+                )
                 raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the worker
@@ -756,6 +779,13 @@ class WorkerProc:
             # any worker dies. Set this value so we don't re-throw
             # SystemExit() to avoid zmq exceptions in __del__.
             shutdown_requested = True
+
+        except SystemExit as e:
+            # SystemExit is raised on SIGTERM or SIGKILL, which usually indicates that
+            # the graceful shutdown process did not succeed
+            logger.warning("WorkerProc was terminated")
+            # SystemExit must never be ignored
+            raise e
 
         finally:
             if ready_writer is not None:

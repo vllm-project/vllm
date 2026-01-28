@@ -41,7 +41,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         return self._parser.is_reasoning_end(input_ids)
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
         return self._parser.is_reasoning_end_streaming(input_ids, delta_ids)
 
@@ -70,3 +70,19 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
             current_token_ids,
             delta_token_ids,
         )
+
+
+class DeepSeekV3ReasoningWithThinkingParser(DeepSeekV3ReasoningParser):
+    """
+    DeepSeekV3ReasoningParser that defaults to thinking mode.
+    """
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        thinking = chat_kwargs.get("thinking", None)
+        enable_thinking = chat_kwargs.get("enable_thinking", None)
+        if thinking is None and enable_thinking is None:
+            chat_kwargs["thinking"] = True
+            chat_kwargs["enable_thinking"] = True
+            kwargs["chat_template_kwargs"] = chat_kwargs
+        super().__init__(tokenizer, *args, **kwargs)

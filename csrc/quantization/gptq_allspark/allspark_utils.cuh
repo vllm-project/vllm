@@ -7,7 +7,7 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <iostream>
-#include "../gptq_marlin/marlin_dtypes.cuh"
+#include "../marlin/marlin_dtypes.cuh"
 using marlin::MarlinScalarType2;
 
 namespace allspark {

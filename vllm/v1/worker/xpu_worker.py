@@ -107,7 +107,8 @@ class XPUWorker(Worker):
 
         torch.xpu.empty_cache()
         torch_allocated_bytes = torch.xpu.memory_stats()["allocated_bytes.all.current"]
-        total_allocated_bytes = self.xpu_get_mem_info()[1] - self.xpu_get_mem_info()[0]
+        free_mem, total_mem = self.xpu_get_mem_info()
+        total_allocated_bytes = total_mem - free_mem
 
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:

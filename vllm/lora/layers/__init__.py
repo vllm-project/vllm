@@ -4,6 +4,7 @@ from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.lora.layers.column_parallel_linear import (
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithLoRA,
@@ -29,6 +30,7 @@ __all__ = [
     "ColumnParallelLinearWithShardedLoRA",
     "MergedColumnParallelLinearWithLoRA",
     "MergedColumnParallelLinearWithShardedLoRA",
+    "MergedColumnParallelLinearVariableSliceWithLoRA",
     "MergedQKVParallelLinearWithLoRA",
     "MergedQKVParallelLinearWithShardedLoRA",
     "QKVParallelLinearWithLoRA",

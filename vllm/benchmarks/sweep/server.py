@@ -4,6 +4,7 @@ import contextlib
 import os
 import signal
 import subprocess
+import time
 from types import TracebackType
 
 import requests
@@ -87,6 +88,29 @@ class ServerProcess:
             port = 8000  # The default value in vllm serve
 
         return f"http://{host}:{port}"
+
+    def is_server_ready(self) -> bool:
+        server_address = self._get_vllm_server_address()
+        try:
+            response = requests.get(f"{server_address}/health")
+            return response.status_code == 200
+        except requests.RequestException:
+            return False
+
+    def wait_until_ready(self, timeout: int) -> None:
+        start_time = time.monotonic()
+        while not self.is_server_ready():
+            # Check if server process has crashed
+            if self._server_process.poll() is not None:
+                returncode = self._server_process.returncode
+                raise RuntimeError(
+                    f"Server process crashed with return code {returncode}"
+                )
+            if time.monotonic() - start_time > timeout:
+                raise TimeoutError(
+                    f"Server failed to become ready within {timeout} seconds."
+                )
+            time.sleep(1)
 
     def reset_caches(self) -> None:
         server_cmd = self.server_cmd

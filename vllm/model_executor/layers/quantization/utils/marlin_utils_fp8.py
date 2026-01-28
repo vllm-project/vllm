@@ -66,7 +66,7 @@ def apply_fp8_marlin_linear(
         # inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
         raise RuntimeError("Marlin W8A8 is not supported.")
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a=inputs,
         c=None,
         b_q_weight=weight,

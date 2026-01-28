@@ -38,6 +38,9 @@ class MedusaProposer:
         self,
         target_hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,  # unused
     ) -> torch.Tensor:
         # Generate blocks and compute logits
         blocks = self.model(target_hidden_states)

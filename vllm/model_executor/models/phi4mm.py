@@ -1027,12 +1027,13 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         # Tensor/Pipeline parallel not supported for now.
         assert get_pp_group().world_size == 1, "pipeline parallel is not supported"
 
-        self.vision_encoder = Phi4MMImageEncoder(
-            config,
-            quant_config,
-            prefix="model.vision_embed_tokens",
-            model_dir=config._name_or_path,
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision_encoder = Phi4MMImageEncoder(
+                config,
+                quant_config,
+                prefix="model.vision_embed_tokens",
+                model_dir=config._name_or_path,
+            )
 
         if isinstance(config.embd_layer["audio_embd_layer"], dict):
             embedding_config = {
@@ -1044,10 +1045,13 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
                 "embedding_cls": self.config.embd_layer["embedding_cls"]
             }
 
-        self.embed_tokens_extend = AudioEmbedding(config, **embedding_config)
-        self.model = LlamaModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.embed_tokens_extend = AudioEmbedding(config, **embedding_config)
+
+        with self._mark_language_model(vllm_config):
+            self.model = LlamaModel(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+            )
 
         self.lm_head = ParallelLMHead(
             config.vocab_size,
@@ -1207,7 +1211,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1245,6 +1249,3 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             connector=["audio_projection_for_vision", "audio_projection"],
             tower_model=["vision_encoder", "embed_tokens_extend"],
         )
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model

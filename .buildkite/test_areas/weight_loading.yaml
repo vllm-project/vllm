@@ -5,7 +5,7 @@ steps:
 - label: Weight Loading Multiple GPU  # 33min
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_devices: 2
   optional: true
   source_file_dependencies:
   - vllm/
@@ -15,8 +15,8 @@ steps:
 
 - label: Weight Loading Multiple GPU - Large Models # optional
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
-  gpu: a100
+  num_devices: 2
+  device: a100
   optional: true
   source_file_dependencies:
   - vllm/
