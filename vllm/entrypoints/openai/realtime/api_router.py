@@ -33,11 +33,13 @@ async def realtime_endpoint(websocket: WebSocket):
     1. Client connects to ws://host/v1/realtime
     2. Server sends session.created event
     3. Client optionally sends session.update with model/params
-    4. Client sends input_audio_buffer.append events with base64 PCM16 chunks
-    5. Client sends input_audio_buffer.commit when ready
+    4. Client sends input_audio_buffer.commit when ready
+    5. Client sends input_audio_buffer.append events with base64 PCM16 chunks
     6. Server processes and sends transcription.delta events
     7. Server sends transcription.done with final text + usage
-    8. Repeat from step 4 for next utterance
+    8. Repeat from step 5 for next utterance
+    9. Optionally, client sends input_audio_buffer.commit with final=True
+       to signal audio input is finished. Useful when streaming audio files
 
     Audio format: PCM16, 16kHz, mono, base64-encoded
     """
