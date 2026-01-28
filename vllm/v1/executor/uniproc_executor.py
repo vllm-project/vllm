@@ -136,9 +136,6 @@ class UniProcExecutor(Executor):
         if worker := self.driver_worker:
             worker.shutdown()
 
-        if torch.distributed.is_initialized():
-            torch.distributed.destroy_process_group()
-
 
 class ExecutorWithExternalLauncher(UniProcExecutor):
     """An executor that uses external launchers to launch engines,

@@ -341,6 +341,9 @@ class InprocClient(EngineCoreClient):
     def dp_engines_running(self) -> bool:
         return False
 
+    def __del__(self):
+        self.shutdown()
+
 
 @dataclass
 class BackgroundResources:

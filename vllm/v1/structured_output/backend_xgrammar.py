@@ -169,7 +169,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
     _is_terminated: bool = field(default=False, repr=False, hash=False)
 
     def __post_init__(self):
-        atexit.register(self.close)
+        atexit.register(self.clean)
 
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
@@ -224,7 +224,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self.num_processed_tokens = 0
         self.matcher.reset()
 
-    def close(self):
+    def clean(self):
         if hasattr(self, "matcher"):
             self.matcher = None
         if hasattr(self, "ctx"):
