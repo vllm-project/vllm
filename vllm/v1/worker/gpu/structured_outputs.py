@@ -16,6 +16,9 @@ class StructuredOutputsWorker:
         vocab_size: int,
         device: torch.device,
     ):
+        self.logits_indices = torch.zeros(
+            max_num_logits, dtype=torch.int32, device=device
+        )
         self.grammar_bitmask = torch.zeros(
             (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
         )
@@ -60,7 +63,9 @@ class StructuredOutputsWorker:
             logits_indices = torch.tensor(
                 mapping, dtype=torch.int32, device="cpu", pin_memory=True
             )
-            logits_indices = logits_indices.to(self.device, non_blocking=True)
+            logits_indices = self.logits_indices[: len(mapping)].copy_(
+                logits_indices, non_blocking=True
+            )
 
         # Ensure all async copies are complete before launching the kernel.
         current_stream = torch.cuda.current_stream()
