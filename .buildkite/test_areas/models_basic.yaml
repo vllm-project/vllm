@@ -39,6 +39,7 @@ steps:
     - pytest -v -s models/test_transformers.py models/test_registry.py
 
 - label: Basic Models Test (Other CPU) # 5min
+  depends_on: image-build-cpu
   timeout_in_minutes: 10
   source_file_dependencies:
   - vllm/
