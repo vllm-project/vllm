@@ -296,16 +296,23 @@ Journey tracing helps you understand system behavior at scale:
 - Error rate (% of requests ending in ABORTED)
 
 **Sampling for production:**
-vLLM traces all requests when enabled. For high-volume production:
-- Use OTEL collector sampling (configure in collector config)
-- Or use head-based sampling at the tracer level
-- Start with 1-10% sampling, adjust based on overhead
+vLLM traces all requests when enabled. For high-volume production, use sampling:
 
-**Example OTEL collector config with sampling:**
+**Server-side sampling** (reduces vLLM overhead - CPU, memory, network):
+```bash
+# Set before starting vLLM to sample 10% of traces at the source
+export OTEL_TRACES_SAMPLER=traceidratio
+export OTEL_TRACES_SAMPLER_ARG=0.1
+
+vllm serve MODEL --enable-journey-tracing --otlp-traces-endpoint http://localhost:4317
+```
+
+**Collector-side sampling** (reduces storage only, vLLM still creates all traces):
 ```yaml
+# OTEL collector config - samples after receiving traces
 processors:
   probabilistic_sampler:
-    sampling_percentage: 10  # Sample 10% of traces
+    sampling_percentage: 10
 
 service:
   pipelines:
@@ -314,6 +321,8 @@ service:
       processors: [probabilistic_sampler]
       exporters: [jaeger]
 ```
+
+For high request rates (>1000 RPS), use server-side sampling to reduce vLLM overhead.
 
 ---
 
@@ -439,7 +448,7 @@ Overhead depends on your workload:
 
 **Recommendations:**
 - ✅ Safe to enable in production with moderate traffic
-- ✅ Use sampling for high-volume production (>1000 RPS)
+- ✅ Use server-side sampling for high-volume production (>1000 RPS)
 - ✅ Monitor CPU/memory before and after enabling
 - ⚠️ Overhead scales with request rate, not model size
 
@@ -513,7 +522,16 @@ Overhead depends on your workload:
 
 **Solutions:**
 
-1. **Enable sampling:**
+1. **Enable server-side sampling** (reduces vLLM overhead):
+   ```bash
+   # Set before starting vLLM to sample 10% at source
+   export OTEL_TRACES_SAMPLER=traceidratio
+   export OTEL_TRACES_SAMPLER_ARG=0.1
+
+   vllm serve MODEL --enable-journey-tracing --otlp-traces-endpoint http://localhost:4317
+   ```
+
+   Or use collector-side sampling (reduces storage only):
    ```yaml
    # OTEL collector config
    processors:
