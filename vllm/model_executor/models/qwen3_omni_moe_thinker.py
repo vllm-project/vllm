@@ -79,6 +79,15 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.platforms import current_platform
+
+is_gfx1x = False
+if current_platform.is_rocm():
+    try:
+        from vllm.platforms.rocm import on_gfx1x
+
+        is_gfx1x = on_gfx1x()
+    except ImportError:
+        is_gfx1x = False
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -908,19 +917,28 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             hidden_states = hidden_states + pos_embeds
         rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw)
 
-        # Fix for ROCm hipErrorIllegalState: compute repeat_interleave on CPU
-        if current_platform.is_rocm():
-            grid_thw_cpu = grid_thw.cpu()
-            cu_seqlens = (
-                torch.repeat_interleave(
-                    grid_thw_cpu[:, 1] * grid_thw_cpu[:, 2], grid_thw_cpu[:, 0]
-                )
-                .cumsum(
-                    dim=0,
-                    dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-                )
-                .to(device=grid_thw.device)
+        # Workaround for a ROCm RDNA3 (gfx11)
+        # specific bug where torch.repeat_interleave
+        # causes hipErrorIllegalState/kernel crashes.
+        # This does not affect CDNA (MI300+).
+        # We use a vectorized cumsum + searchsorted
+        # approach to avoid the faulty kernel.
+        if is_gfx1x:
+            repeat_counts = grid_thw[:, 0]
+            values = grid_thw[:, 1] * grid_thw[:, 2]
+            repeat_cumsum = repeat_counts.cumsum(0)
+            total_items = repeat_cumsum[-1].item()
+
+            indices = torch.searchsorted(
+                repeat_cumsum,
+                torch.arange(total_items, device=grid_thw.device),
+                right=True,
             )
+            cu_seqlens = values[indices].cumsum(
+                dim=0,
+                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+            )
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
         else:
             cu_seqlens = torch.repeat_interleave(
                 grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
