@@ -115,6 +115,8 @@ class SpecDecodeBaseProposer:
         # Use draft model's M-RoPE setting, not target model's
         # Draft models may be text-only even if target is multimodal
         self.uses_mrope = self.draft_model_config.uses_mrope
+        self.uses_xdrope_dim = self.vllm_config.model_config.uses_xdrope_dim
+        self.draft_uses_xdrope_dim = self.draft_model_config.uses_xdrope_dim
         if self.uses_mrope:
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
@@ -128,6 +130,12 @@ class SpecDecodeBaseProposer:
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
                 (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
+            )
+        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            self.xdrope_positions = torch.zeros(
+                (self.uses_xdrope_dim, self.max_num_tokens + 1),
+                dtype=torch.int64,
+                device=device,
             )
         else:
             # RoPE need (max_num_tokens,)
@@ -221,11 +229,15 @@ class SpecDecodeBaseProposer:
     def _get_positions(self, num_tokens: int):
         if self.uses_mrope:
             return self.mrope_positions[:, :num_tokens]
+        if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            return self.xdrope_positions[:, :num_tokens]
         return self.positions[:num_tokens]
 
     def _set_positions(self, num_tokens: int, positions: torch.Tensor):
         if self.uses_mrope:
             self.mrope_positions[:, :num_tokens] = positions
+        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            self.xdrope_positions[:, :num_tokens] = positions
         else:
             # Convert M-RoPE positions if target model uses M-RoPE
             # but draft doesn't, For text inputs, all M-RoPE
@@ -403,7 +415,7 @@ class SpecDecodeBaseProposer:
             return draft_token_ids.view(-1, 1)
 
         if self.uses_mrope:
-            positions = self.positions[:, last_token_indices]
+            positions = self.mrope_positions[:, last_token_indices]
         else:
             positions = self.positions[last_token_indices]
         if self.method in (
@@ -623,6 +635,8 @@ class SpecDecodeBaseProposer:
         self.input_ids[last_token_indices] = next_token_ids
 
         # copy inputs to buffer for cudagraph
+        if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
+            target_positions = target_positions[0]
         self._set_positions(num_tokens, target_positions)
 
         return num_tokens, last_token_indices, cad
@@ -1126,6 +1140,8 @@ class SpecDecodeBaseProposer:
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
                 "Qwen3VLMoeForConditionalGeneration",
+                "HunYuanVLForConditionalGeneration",
+                "GlmOcrForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
