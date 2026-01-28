@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pickle as pkl
-import time
+
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import product
@@ -14,6 +13,9 @@ from torch.utils.benchmark import Measurement as TMeasurement
 from tqdm import tqdm
 
 import vllm._custom_ops as ops
+from vllm.model_executor.layers.quantization.triton_quantization import (
+    silu_and_mul_per_block_quant_triton,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -58,10 +60,10 @@ def unfused_fp8_impl(
     """Unfused: SiLU+Mul then per-tensor quantize."""
     hidden = x.shape[-1] // 2
     gate, up = x.split(hidden, dim=-1)
-    
+
     # SiLU(gate) * up
     silu_out = F.silu(gate) * up
-    
+
     # Per-tensor quantize (no group_size used here)
     silu_out, _ = ops.scaled_fp8_quant(silu_out)
 
@@ -74,10 +76,10 @@ def unfused_groupwise_fp8_impl(
     """Unfused: SiLU+Mul then group-wise quantize."""
     hidden = x.shape[-1] // 2
     gate, up = x.split(hidden, dim=-1)
-    
+
     # SiLU(gate) * up
     silu_out = F.silu(gate) * up
-    
+
     # Group quantize - use group_size directly
     silu_out, _ = per_token_group_quant_fp8(
         silu_out, group_size=group_size, use_ue8m0=False
@@ -91,6 +93,20 @@ def fused_impl(
 ):
     """Fused: SiLU+Mul+Block Quantization in single kernel."""
     out, _ = ops.silu_and_mul_per_block_quant(
+        x,
+        group_size=group_size,
+        quant_dtype=quant_dtype,
+        is_scale_transposed=False,
+    )
+
+
+def triton_impl(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    group_size: int,
+):
+    """Triton: SiLU+Mul+Block Quantization (Triton kernel)."""
+    silu_and_mul_per_block_quant_triton(
         x,
         group_size=group_size,
         quant_dtype=quant_dtype,
@@ -180,6 +196,19 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
         )
     )
 
+    # Triton group-wise FP8
+    timers.append(
+        bench_fn(
+            x,
+            torch.float8_e4m3fn,
+            params.group_size,
+            label,
+            sub_label,
+            triton_impl,
+            "triton_groupwise_fp8_impl",
+        )
+    )
+
     print_timers(timers)
 
     return timers
@@ -195,25 +224,20 @@ def main():
     bench_params = get_bench_params()
 
     print(f"Running {len(bench_params)} benchmark configurations...")
-    print(f"This will take approximately {len(bench_params) * 3} seconds (1s per variant)")
+    print(
+        f"This will take approximately {len(bench_params) * 3} seconds (1s per variant)"
+    )
     print()
 
     timers = []
     for bp in tqdm(bench_params):
         result_timers = bench(bp, "silu-mul-block-quant", bp.description())
         timers.extend(result_timers)
-    
-    print("\n" + "="*80)
-    print("FINAL COMPARISON - ALL RESULTS")
-    print("="*80)
-    print_timers(timers)
 
-    # Pickle all the results
-    timestamp = int(time.time())
-    filename = f"silu_mul_block_quant-{timestamp}.pkl"
-    with open(filename, "wb") as f:
-        pkl.dump(timers, f)
-    print(f"\nResults saved to: {filename}")
+    print("\n" + "=" * 80)
+    print("FINAL COMPARISON - ALL RESULTS")
+    print("=" * 80)
+    print_timers(timers)
 
 
 if __name__ == "__main__":
