@@ -117,6 +117,31 @@ def run_glmasr(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# FunAudioChat
+def run_funaudiochat(question: str, audio_count: int) -> ModelRequestData:
+    # NOTE: FunAudioChat is not available on the HuggingFace Hub at the time of
+    # writing. Pass a local model path via `--model`.
+    model_name = "funaudiochat"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"audio": audio_count},
+        enforce_eager=True,
+    )
+
+    audio_in_prompt = "".join(
+        ["<|audio_bos|><|AUDIO|><|audio_eos|>\n" for _ in range(audio_count)]
+    )
+    prompt = f"{audio_in_prompt}{question}"
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Granite Speech
 def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
     # NOTE - the setting in this example are somewhat different from what is
@@ -410,6 +435,7 @@ model_example_map = {
     "audioflamingo3": run_audioflamingo3,
     "gemma3n": run_gemma3n,
     "glmasr": run_glmasr,
+    "funaudiochat": run_funaudiochat,
     "granite_speech": run_granite_speech,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
@@ -434,6 +460,12 @@ def parse_args():
         default="ultravox",
         choices=model_example_map.keys(),
         help='Huggingface "model_type".',
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model ID or local path override. Required for funaudiochat.",
     )
     parser.add_argument(
         "--num-prompts", type=int, default=1, help="Number of prompts to run."
@@ -467,6 +499,9 @@ def main(args):
     if model not in model_example_map:
         raise ValueError(f"Model type {model} is not supported.")
 
+    if model == "funaudiochat" and not args.model:
+        raise ValueError("--model is required when --model-type=funaudiochat")
+
     if args.tensor_parallel_size is not None and args.tensor_parallel_size < 1:
         raise ValueError(
             f"tensor_parallel_size must be a positive integer, "
@@ -477,6 +512,8 @@ def main(args):
     req_data = model_example_map[model](
         question_per_audio_count[audio_count], audio_count
     )
+    if model == "funaudiochat":
+        req_data.engine_args.model = args.model
 
     # Disable other modalities to save memory
     default_limits = {"image": 0, "video": 0, "audio": 0}
