@@ -52,7 +52,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -1406,11 +1406,6 @@ direct_register_custom_op(
     op_func=inplace_fused_experts,
     mutates_args=["hidden_states"],
     fake_impl=inplace_fused_experts_fake,
-    tags=(
-        ()
-        if is_torch_equal_or_newer("2.7.0")
-        else (torch.Tag.needs_fixed_stride_order,)
-    ),
 )
 
 
@@ -1501,11 +1496,6 @@ direct_register_custom_op(
     op_name="outplace_fused_experts",
     op_func=outplace_fused_experts,
     fake_impl=outplace_fused_experts_fake,
-    tags=(
-        ()
-        if is_torch_equal_or_newer("2.7.0")
-        else (torch.Tag.needs_fixed_stride_order,)
-    ),
 )
 
 
