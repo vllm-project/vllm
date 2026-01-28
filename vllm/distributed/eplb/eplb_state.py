@@ -27,7 +27,7 @@ physical experts.
 """
 
 import threading
-from collections.abc import Sequence
+from collections.abc import Sequence, Sized
 from dataclasses import dataclass
 
 import numpy as np
@@ -799,6 +799,10 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
+        # Make sure there's a __len__ method
+        assert isinstance(eplb_model_state.model.expert_weights[0], Sized)
+        num_tensors_per_expert = len(eplb_model_state.model.expert_weights[0])
+        # logger.info("NUM TENSORS PER EXPERT %d", num_tensors_per_expert)
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
@@ -820,7 +824,7 @@ class EplbState:
             cap_num_transfers(
                 eplb_model_state.physical_to_logical_map,
                 new_physical_to_logical_map,
-                13,
+                num_tensors_per_expert,
             )
             new_logical_to_physical_map = torch.argsort(
                 new_physical_to_logical_map, dim=-1

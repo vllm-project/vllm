@@ -331,6 +331,7 @@ def move_to_buffer(
                 for b in expert_weights_buffers
             ]
 
+    logger.info("NUM P2P OPS: %d", len(p2p_ops))
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops and cuda_stream is not None:
         with torch.cuda.stream(cuda_stream):
