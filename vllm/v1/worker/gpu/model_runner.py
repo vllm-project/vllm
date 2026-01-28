@@ -168,6 +168,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.structured_outputs_worker = StructuredOutputsWorker(
             max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
             vocab_size=self.vocab_size,
+            device=self.device,
         )
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
