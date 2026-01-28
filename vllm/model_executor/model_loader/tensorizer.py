@@ -87,10 +87,43 @@ def tensorizer_kwargs_arg(value):
 
 
 class MetaTensorMode(TorchDispatchMode):
-    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        kwargs = kwargs or {}
+    """
+    A TorchDispatchMode that redirects tensor allocations to the meta device.
 
-        if func._schema.name == "aten::empty" and "device" not in kwargs:
+    This prevents actual GPU memory allocation during model initialization,
+    allowing the model skeleton to be created without memory overhead before
+    weights are loaded via tensorizer.
+    """
+
+    # Tensor factory operations that allocate memory and should be redirected
+    _FACTORY_OPS = frozenset(
+        {
+            "aten::empty",
+            "aten::zeros",
+            "aten::ones",
+            "aten::full",
+            "aten::rand",
+            "aten::randn",
+            "aten::empty_like",
+            "aten::zeros_like",
+            "aten::ones_like",
+            "aten::full_like",
+            "aten::rand_like",
+            "aten::randn_like",
+            "aten::empty_strided",
+            "aten::new_empty",
+            "aten::new_zeros",
+            "aten::new_ones",
+            "aten::new_full",
+            "aten::new_empty_strided",
+        }
+    )
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs if kwargs is not None else {}
+
+        if func._schema.name in self._FACTORY_OPS:
+            # Force device to meta, overriding any specified device
             kwargs["device"] = "meta"
 
         return func(*args, **kwargs)
