@@ -599,6 +599,67 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
             )
 
 
+def _test_rearrange_expert_weights_over_limit(env, world_size) -> None:
+    set_env_vars_and_device(env)
+    ensure_model_parallel_initialized(
+        tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+    )
+
+    ep_group = get_tp_group().cpu_group
+    ep_rank = torch.distributed.get_rank()
+    device = torch.device(f"cuda:{ep_rank}")
+
+    num_layers = 1
+    num_local_experts = 2
+    total_physical_experts = world_size * num_local_experts
+    num_logical_experts = total_physical_experts // 2
+    hidden_sizes = [32]
+
+    # Create different index distributions
+    old_redundancy = create_redundancy_config(
+        num_logical_experts, total_physical_experts
+    )
+    new_redundancy = create_redundancy_config(
+        num_logical_experts, total_physical_experts
+    )
+
+    old_indices = create_expert_indices_with_redundancy(
+        num_layers, num_logical_experts, total_physical_experts, old_redundancy
+    )
+    new_indices = create_expert_indices_with_redundancy(
+        num_layers, num_logical_experts, total_physical_experts, new_redundancy
+    )
+
+    expert_weights = create_expert_weights(
+        num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
+    )
+
+    # Save original weights
+    original_weights = []
+    for layer_weights in expert_weights:
+        layer_copy = []
+        for weight in layer_weights:
+            layer_copy.append(weight.clone())
+        original_weights.append(layer_copy)
+
+    # Execute profile mode rearrangement
+    rearrange_expert_weights_inplace(
+        old_indices,
+        new_indices,
+        expert_weights,
+        ep_group,
+    )
+
+    # In profile mode, the weights should remain unchanged
+    for layer in range(num_layers):
+        for weight_idx in range(len(hidden_sizes)):
+            torch.testing.assert_close(
+                expert_weights[layer][weight_idx],
+                original_weights[layer][weight_idx],
+                msg="In profile mode, the weights should remain unchanged",
+            )
+
+
 @pytest.mark.parametrize("world_size", [2, 4])
 def test_rearrange_expert_weights_profile_mode(world_size):
     """Test profile mode (should not copy actual weights)"""

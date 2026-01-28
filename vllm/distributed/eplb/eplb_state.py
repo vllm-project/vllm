@@ -48,6 +48,7 @@ from .async_worker import start_async_worker
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     RecvMetadata,
+    cap_num_transfers,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -816,6 +817,14 @@ class EplbState:
                 eplb_model_state.physical_to_logical_map,
             )
 
+            cap_num_transfers(
+                eplb_model_state.physical_to_logical_map,
+                new_physical_to_logical_map,
+                13,
+            )
+            new_logical_to_physical_map = torch.argsort(
+                new_physical_to_logical_map, dim=-1
+            ).unsqueeze(-1)
             if not self.is_async or is_profile:
                 # Update expert weights
                 rearrange_expert_weights_inplace(

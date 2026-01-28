@@ -507,6 +507,99 @@ async def transfer_layer(
     return is_unchanged, is_received_locally, recv_metadata
 
 
+def find_cycles(old: torch.Tensor, new: torch.Tensor):
+    """
+    Find all cycles in the permutation from old to new.
+    old[i] = expert at physical location i (before)
+    new[i] = expert at physical location i (after)
+    """
+    n = len(old)
+    visited = [False] * n
+    cycles = []
+
+    for start_pos in range(n):
+        if visited[start_pos] or old[start_pos] == new[start_pos]:
+            continue
+
+        cycle = []
+        pos = start_pos
+
+        while not visited[pos]:
+            visited[pos] = True
+            cycle.append(pos)
+
+            # Which expert is now at this position?
+            expert = new[pos].item()
+            # Where was this expert before?
+            next_pos = (old == expert).nonzero()[0].item()
+
+            pos = next_pos
+
+        if len(cycle) > 1:
+            cycles.append(cycle)
+
+    return cycles
+
+
+def apply_transfer_cap(
+    old: torch.Tensor, new: torch.Tensor, max_transfers: int
+) -> None:
+    """
+    Cap transfers by undoing complete cycles. Modifies new in-place.
+    old[i] = expert at physical location i (before)
+    new[i] = expert at physical location i (after)
+    """
+    cycles = find_cycles(old, new)
+
+    # Calculate total transfers
+    total_transfers = sum(len(cycle) for cycle in cycles)
+
+    if total_transfers <= max_transfers:
+        return
+
+    # Sort cycles by length (undo smallest first)
+    cycles.sort(key=len)
+
+    transfers_remaining = total_transfers
+
+    for cycle in cycles:
+        # Undo this cycle
+        for pos in cycle:
+            new[pos] = old[pos]
+
+        transfers_remaining -= len(cycle)
+
+        # If we're now under the cap, stop
+        if transfers_remaining <= max_transfers:
+            break
+
+
+def cap_num_transfers(
+    old_global_expert_indices: torch.Tensor,
+    new_global_expert_indices: torch.Tensor,
+    num_weights_per_expert: int,
+    max_num_transfers: int = 1000,
+) -> None:
+    """
+    Args:
+        old_global_expert_indices: Shape (num_moe_layers, num_physical_experts).
+        new_global_expert_indices: Shape (num_moe_layers, num_physical_experts).
+        num_weights_per_expert: Number of weights per expert.
+        max_num_transfers: Maximum number of total transfers allowed (default: 1000).
+    """
+    num_moe_layers = old_global_expert_indices.shape[0]
+    for layer in range(num_moe_layers):
+        old_layer_indices = old_global_expert_indices[layer]
+        new_layer_indices = new_global_expert_indices[layer]
+        num_expert_transfers = (old_layer_indices != new_layer_indices).sum().item()
+        total_num_transfers = num_expert_transfers * num_weights_per_expert
+        if total_num_transfers >= max_num_transfers:
+            max_expert_transfers = max_num_transfers // num_weights_per_expert
+            apply_transfer_cap(
+                old_layer_indices, new_layer_indices, max_expert_transfers
+            )
+
+
 def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
