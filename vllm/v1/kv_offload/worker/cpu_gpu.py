@@ -162,7 +162,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             last_event = last_transfer.end_event
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
-        with torch.cuda.stream(stream):
+        with stream:
             start_event.record(stream)
             for src_tensor, dst_tensor, block_size_in_bytes in zip(
                 self.src_tensors,

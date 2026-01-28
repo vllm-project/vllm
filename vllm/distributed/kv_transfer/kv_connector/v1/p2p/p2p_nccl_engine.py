@@ -358,7 +358,7 @@ class P2pNcclEngine:
             )
             return None
 
-        with torch.cuda.stream(self.recv_stream):
+        with self.recv_stream:
             tensor = torch.empty(
                 data["shape"], dtype=getattr(torch, data["dtype"]), device=self.device
             )
@@ -393,7 +393,7 @@ class P2pNcclEngine:
             elif data["cmd"] == "PUT":
                 tensor_id = data["tensor_id"]
                 try:
-                    with torch.cuda.stream(self.recv_stream):
+                    with self.recv_stream:
                         tensor = torch.empty(
                             data["shape"],
                             dtype=getattr(torch, data["dtype"]),
@@ -594,7 +594,7 @@ class P2pNcclEngine:
         if stream is None:
             stream = current_stream()
 
-        with torch.cuda.stream(stream):
+        with stream:
             self.nccl.ncclSend(
                 buffer_type(tensor.data_ptr()),
                 tensor.numel(),
@@ -613,7 +613,7 @@ class P2pNcclEngine:
         if stream is None:
             stream = current_stream()
 
-        with torch.cuda.stream(stream):
+        with stream:
             self.nccl.ncclRecv(
                 buffer_type(tensor.data_ptr()),
                 tensor.numel(),

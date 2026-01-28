@@ -31,7 +31,7 @@ class StructuredOutputsWorker:
             return
 
         # Asynchronously copy the bitmask to GPU.
-        with torch.cuda.stream(self.copy_stream):
+        with self.copy_stream:
             bitmask = async_copy_to_gpu(
                 grammar_bitmask, out=self.grammar_bitmask[: grammar_bitmask.shape[0]]
             )
@@ -48,7 +48,7 @@ class StructuredOutputsWorker:
             mapping.extend(range(logits_start_idx, logits_end_idx))
 
         # Asynchronously copy the mapping to GPU.
-        with torch.cuda.stream(self.copy_stream):
+        with self.copy_stream:
             logits_indices = torch.tensor(
                 mapping, dtype=torch.int32, device="cpu", pin_memory=True
             )

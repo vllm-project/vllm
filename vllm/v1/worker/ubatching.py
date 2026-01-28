@@ -195,7 +195,7 @@ def dbo_get_previous_event(func, *args, **kwargs):
         ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
         ctx = _CURRENT_CONTEXTS[ctx_idx]
         # execute callable on the ubatch compute stream to record/wait events there
-        with torch.cuda.stream(ctx.compute_stream):
+        with ctx.compute_stream:
             return func(*args, **kwargs)
 
 
