@@ -19,6 +19,9 @@ from torch.distributed import (
     get_global_rank,
 )
 
+from vllm.distributed.parallel_state import (
+    get_ep_group,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -331,7 +334,8 @@ def move_to_buffer(
                 for b in expert_weights_buffers
             ]
 
-    logger.info("NUM P2P OPS: %d", len(p2p_ops))
+    if len(p2p_ops) > 600:
+        logger.info("NUM P2P OPS: %d", len(p2p_ops))
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops and cuda_stream is not None:
         with torch.cuda.stream(cuda_stream):
@@ -601,6 +605,18 @@ def cap_num_transfers(
         max_num_transfers: Maximum number of total transfers allowed.
     """
     num_moe_layers = old_global_expert_indices.shape[0]
+    ep_group = get_ep_group().device_group
+    ep_rank = ep_group.rank()
+
+    is_main_rank = ep_rank == 0
+    if is_main_rank:
+        num_transfers = []
+        for layer in range(num_moe_layers):
+            old_layer_indices = old_global_expert_indices[layer]
+            new_layer_indices = new_global_expert_indices[layer]
+            num_expert_transfers = (old_layer_indices != new_layer_indices).sum().item()
+            num_transfers.append(num_expert_transfers * num_tensors_per_expert)
+        logger.info("NUM TRANSFERS BEFORE: %s", num_transfers)
     for layer in range(num_moe_layers):
         old_layer_indices = old_global_expert_indices[layer]
         new_layer_indices = new_global_expert_indices[layer]
@@ -611,6 +627,14 @@ def cap_num_transfers(
             apply_transfer_cap(
                 old_layer_indices, new_layer_indices, max_expert_transfers
             )
+    if is_main_rank:
+        num_transfers = []
+        for layer in range(num_moe_layers):
+            old_layer_indices = old_global_expert_indices[layer]
+            new_layer_indices = new_global_expert_indices[layer]
+            num_expert_transfers = (old_layer_indices != new_layer_indices).sum().item()
+            num_transfers.append(num_expert_transfers * num_tensors_per_expert)
+        logger.info("NUM TRANSFERS AFTER: %s", num_transfers)
 
 
 def rearrange_expert_weights_inplace(
