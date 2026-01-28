@@ -97,7 +97,7 @@ def test_sharded_state_loader(
     ctx = mp.get_context("spawn")
 
     platform_args = {}
-    if not current_platform.is_rocm():
+    if current_platform.is_rocm():
         platform_args["max_num_seqs"] = 1
 
     # Run in separate processes for memory & CUDA isolation
