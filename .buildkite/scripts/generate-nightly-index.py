@@ -201,7 +201,7 @@ def generate_index_and_metadata(
                     metadata.json
             ...
 
-    metadata.json stores a dump of all-wheel files' metadata in a machine-readable format:
+    metadata.json stores a dump of all wheel files' metadata in a machine-readable format:
         [
             {
                 "package_name": "vllm",
