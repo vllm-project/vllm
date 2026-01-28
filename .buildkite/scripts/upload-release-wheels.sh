@@ -16,7 +16,7 @@ else
     echo "Git version for commit $BUILDKITE_COMMIT: $GIT_VERSION"
 fi
 # sanity check for version mismatch
-if [ "v$RELEASE_VERSION" != "$GIT_VERSION" ]; then
+if [ "$RELEASE_VERSION" != "$GIT_VERSION" ]; then
   if [ "$FORCE_RELEASE_IGNORE_VERSION_MISMATCH" == "true" ]; then
     echo "[WARNING] Force release and ignore version mismatch"
   else
@@ -24,6 +24,7 @@ if [ "v$RELEASE_VERSION" != "$GIT_VERSION" ]; then
     exit 1
   fi
 fi
+PURE_VERSION=${RELEASE_VERSION#v} # remove leading 'v'
 
 # check pypi token
 if [ -z "$PYPI_TOKEN" ]; then
@@ -81,16 +82,16 @@ echo "Existing wheels on S3:"
 aws s3 ls "$S3_COMMIT_PREFIX"
 echo "Copying wheels to local directory"
 mkdir -p $DIST_DIR
-# include only wheels for the release version, ignore all files with "dev" or "rc" in the name
-aws s3 cp --recursive --exclude "*" --include "vllm-${RELEASE_VERSION}*.whl" --exclude "*dev*" --exclude "*rc*" "$S3_COMMIT_PREFIX" $DIST_DIR
+# include only wheels for the release version, ignore all files with "dev" or "rc" in the name (without excluding 'aarch64')
+aws s3 cp --recursive --exclude "*" --include "vllm-${PURE_VERSION}*.whl" --exclude "*dev*" --exclude "*rc[0-9]*" "$S3_COMMIT_PREFIX" $DIST_DIR
 echo "Wheels copied to local directory"
 # generate source tarball
-git archive --format=tar.gz --output="$DIST_DIR/vllm-${RELEASE_VERSION}.tar.gz" $BUILDKITE_COMMIT
+git archive --format=tar.gz --output="$DIST_DIR/vllm-${PURE_VERSION}.tar.gz" $BUILDKITE_COMMIT
 ls -la $DIST_DIR
 
 
 # upload wheels to PyPI (only default variant, i.e. files without '+' in the name)
-PYPI_WHEEL_FILES=$(find $DIST_DIR -name "vllm-${RELEASE_VERSION}*.whl" -not -name "*+*")
+PYPI_WHEEL_FILES=$(find $DIST_DIR -name "vllm-${PURE_VERSION}*.whl" -not -name "*+*")
 if [ -z "$PYPI_WHEEL_FILES" ]; then
   echo "No default variant wheels found, quitting..."
   exit 1
