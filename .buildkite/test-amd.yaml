@@ -1509,6 +1509,9 @@ steps:
   source_file_dependencies:
   - vllm/
   commands:
+  # Work around HIP bug tracked here: https://github.com/ROCm/hip/issues/3876
+  # TODO: Remove when the bug is fixed in a future ROCm release
+  - export TORCH_NCCL_BLOCKING_WAIT=1
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
