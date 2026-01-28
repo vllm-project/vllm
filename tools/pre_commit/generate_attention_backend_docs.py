@@ -26,6 +26,7 @@ RELEVANT_PATTERNS = [
     "vllm/v1/attention/backends/*.py",
     "vllm/v1/attention/backends/**/*.py",
     "vllm/platforms/cuda.py",
+    "tools/pre_commit/generate_attention_backend_docs.py",
     "docs/design/attention_backends.md",
 ]
 
@@ -337,7 +338,7 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
 
 def bool_to_emoji(value: bool) -> str:
     """Convert a boolean to a checkmark or X emoji."""
-    return "✓" if value else "✗"
+    return "✅" if value else "❌"
 
 
 def generate_markdown_table(backends: list[dict[str, Any]], title: str) -> str:
@@ -704,12 +705,13 @@ def main():
     new_content = generate_docs()
 
     if args.check:
-        regen_cmd = "python tools/pre_commit/generate_attention_backend_docs.py"
-        if not output_path.exists():
-            print(f"❌ Missing: {output_path}\nRun '{regen_cmd}' to generate.")
-            sys.exit(1)
-        if output_path.read_text() != new_content:
-            print(f"❌ Out of date: {output_path}\nRun '{regen_cmd}' to update.")
+        needs_update = (
+            not output_path.exists() or output_path.read_text() != new_content
+        )
+        if needs_update:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(new_content)
+            print(f"🔄 Regenerated: {output_path}")
             sys.exit(1)
         print(f"✅ Up to date: {output_path}")
         sys.exit(0)
