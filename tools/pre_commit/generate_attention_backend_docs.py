@@ -49,6 +49,7 @@ BACKENDS_DIR = REPO_ROOT / "vllm" / "v1" / "attention" / "backends"
 REGISTRY_FILE = BACKENDS_DIR / "registry.py"
 CUDA_PLATFORM_FILE = REPO_ROOT / "vllm" / "platforms" / "cuda.py"
 FA_UTILS_FILE = BACKENDS_DIR / "fa_utils.py"
+FLASHINFER_UTILS_FILE = REPO_ROOT / "vllm" / "utils" / "flashinfer.py"
 
 
 def parse_registry() -> dict[str, str]:
@@ -159,6 +160,59 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
             "compute_capability": fa3_compute_cap,
             "supports_fp8": fa3_supports_fp8,
             "supports_sink": fa3_supports_sinks,
+        },
+    }
+
+
+def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
+    """Parse flashinfer.py to detect TRTLLM-specific features.
+
+    FLASHINFER uses TRTLLM attention on SM100 (Blackwell), which has different
+    capabilities (e.g., sink support) than native FlashInfer on earlier GPUs.
+    """
+    if not FLASHINFER_UTILS_FILE.exists():
+        return {}
+
+    try:
+        tree = ast.parse(FLASHINFER_UTILS_FILE.read_text())
+    except Exception:
+        return {}
+
+    trtllm_compute_cap: str | None = None
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+
+        # Parse supports_trtllm_attention for compute capability
+        # Look for: current_platform.is_device_capability_family(100)
+        if node.name == "supports_trtllm_attention":
+            for n in ast.walk(node):
+                if (
+                    isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "is_device_capability_family"
+                    and n.args
+                    and isinstance(n.args[0], ast.Constant)
+                    and isinstance(n.args[0].value, int)
+                ):
+                    cap = n.args[0].value
+                    # Convert 100 -> "10.x"
+                    trtllm_compute_cap = f"{cap // 10}.x"
+                    break
+
+    if not trtllm_compute_cap:
+        return {}
+
+    return {
+        "native": {
+            # Native FlashInfer: everything except SM100
+            "supports_sink": False,
+        },
+        "trtllm": {
+            # TRTLLM pathway on Blackwell
+            "compute_capability": trtllm_compute_cap,
+            "supports_sink": True,
         },
     }
 
@@ -799,6 +853,9 @@ def generate_docs() -> str:
     # Parse FlashAttention FA2/FA3 feature differences
     fa_features = parse_flash_attn_features()
 
+    # Parse FlashInfer TRTLLM feature differences (native vs TRTLLM on Blackwell)
+    fi_features = parse_flashinfer_trtllm_features()
+
     # Collect backend info
     all_backends = []
     for backend_name, class_path in attention_backends_map.items():
@@ -847,6 +904,42 @@ def generate_docs() -> str:
                 expanded_backends.append(backend)
         all_backends = expanded_backends
 
+    # Expand FLASHINFER into native and TRTLLM variants
+    if fi_features:
+        expanded_backends = []
+        for backend in all_backends:
+            if backend["name"] == "FLASHINFER":
+                # Parse original compute capability to get min CC
+                orig_cap = backend["compute_capability"]
+                parts = orig_cap.replace(".x", "").split("-")
+                min_cc = parts[0] if parts else "7"
+                trtllm_cc = fi_features["trtllm"]["compute_capability"]
+
+                # Create native entry (pre-Blackwell GPUs)
+                native = backend.copy()
+                native["name"] = "FLASHINFER"
+                native["version"] = "Native†"
+                native["_sort_key"] = "FLASHINFER"
+                native["_sort_order"] = 0
+                native["supports_sink"] = fi_features["native"]["supports_sink"]
+                # Native FlashInfer is used on GPUs before SM100 (Blackwell)
+                native["compute_capability"] = f"{min_cc}.x-9.x"
+
+                # Create TRTLLM entry
+                trtllm = backend.copy()
+                trtllm["name"] = "FLASHINFER"
+                trtllm["version"] = "TRTLLM†"
+                trtllm["_sort_key"] = "FLASHINFER"
+                trtllm["_sort_order"] = 1
+                trtllm["compute_capability"] = trtllm_cc
+                trtllm["supports_sink"] = fi_features["trtllm"]["supports_sink"]
+
+                expanded_backends.append(native)
+                expanded_backends.append(trtllm)
+            else:
+                expanded_backends.append(backend)
+        all_backends = expanded_backends
+
     # Split into MLA and non-MLA
     mla_backends = [b for b in all_backends if b["is_mla"]]
     non_mla_backends = [b for b in all_backends if not b["is_mla"]]
@@ -881,13 +974,21 @@ def generate_docs() -> str:
     doc_lines.append(
         generate_markdown_table(non_mla_backends, standard_title, is_mla_table=False)
     )
-    # Add footnote for FA2/FA3 version selection
+    # Add footnotes for version/variant distinctions (in table order)
+    footnotes = []
+    if fi_features:
+        footnotes.append(
+            "> **†** FLASHINFER uses TRTLLM attention on Blackwell (SM100), which "
+            "supports sinks. Disable via `--attention-config.use_trtllm_attention=0`."
+        )
     if fa_features:
-        doc_lines.append(
+        footnotes.append(
             "> **\\*** Specify the FlashAttention version via "
             "`--attention-config.flash_attn_version=2` or `3`. Default is FA3 on SM90, "
-            "FA2 otherwise.\n"
+            "FA2 otherwise."
         )
+    if footnotes:
+        doc_lines.append("\n>\n".join(footnotes) + "\n")
     mla_title = "MLA (Multi-head Latent Attention) Backends"
     doc_lines.append(
         generate_markdown_table(mla_backends, mla_title, is_mla_table=True)
