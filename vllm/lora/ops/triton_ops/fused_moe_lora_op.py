@@ -167,6 +167,7 @@ def _fused_moe_lora_kernel(
     # whether use naive block assignment
     naive_block_assignment: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
+    ADD_INPUTS: tl.constexpr,
     USE_B_L2_CACHE: tl.constexpr,  # new, enable .ca load for B
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
@@ -442,6 +443,7 @@ def _fused_moe_lora_shrink(
         token_mapping_factor=1 if mul_routed_weight else top_k_num,
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=False,
+        ADD_INPUTS=False,
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=True,
         **shrink_config,
@@ -548,8 +550,8 @@ def _fused_moe_lora_expand(
         w1_lora_b_stacked.stride(2),
         out_view.stride(1),
         out_view.stride(2),
-        stride_tl,
-        stride_el,
+        sorted_token_ids.stride(0),
+        expert_ids.stride(0),
         slice_a_size=a_intermediate_cache1.numel() // num_slices,
         slice_c_size=slice_c_size,
         num_slice_a=num_slices,
@@ -557,6 +559,7 @@ def _fused_moe_lora_expand(
         token_mapping_factor=1,
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
+        ADD_INPUTS=True,
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=False,
         **expand_config,
