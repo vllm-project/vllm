@@ -312,7 +312,7 @@ class ModelConfig:
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
-    multimodal_tensor_ipc: InitVar[bool | None] = None
+    multimodal_tensor_ipc: InitVar[Literal["msgspec", "torch"] | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -428,7 +428,7 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
-        multimodal_tensor_ipc: bool | None,
+        multimodal_tensor_ipc: Literal["msgspec", "torch"] | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(

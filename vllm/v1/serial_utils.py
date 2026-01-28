@@ -154,16 +154,17 @@ class MsgpackEncoder:
     By default, arrays below 256B are serialized inline Larger will get sent
     via dedicated messages. Note that this is a per-tensor limit.
 
-    When multimodal_tensor_ipc is enabled and tensor_queues is provided,
+    When multimodal_tensor_ipc is "torch" and tensor_queues is provided,
     all multimodal tensors (CUDA and CPU) will be sent via
     torch.multiprocessing.Queue for zero-copy IPC instead of serialization.
+    When "msgspec", tensors use standard msgspec serialization.
     """
 
     def __init__(
         self,
         size_threshold: int | None = None,
         tensor_queues: list[Any] | None = None,
-        multimodal_tensor_ipc: bool = True,
+        multimodal_tensor_ipc: str = "msgspec",
     ):
         if size_threshold is None:
             size_threshold = envs.VLLM_MSGPACK_ZERO_COPY_THRESHOLD
@@ -175,7 +176,7 @@ class MsgpackEncoder:
         self.size_threshold = size_threshold
         # Tensor IPC queues for sharing multimodal tensors (one per engine core)
         self.tensor_queues = tensor_queues
-        # Enable IPC for all multimodal tensors (CUDA and CPU)
+        # IPC method for multimodal tensors
         self.multimodal_tensor_ipc = multimodal_tensor_ipc
         # Target engine index for routing tensors to the correct queue
         self.target_engine_index: int | None = None
@@ -328,10 +329,10 @@ class MsgpackEncoder:
         assert self.aux_buffers is not None
 
         # Check if we should use IPC for this tensor
-        # IPC is used when: multimodal_tensor_ipc is enabled, queues are available,
+        # IPC is used when: multimodal_tensor_ipc is "torch", queues are available,
         # and we have a target engine
         if (
-            self.multimodal_tensor_ipc
+            self.multimodal_tensor_ipc == "torch"
             and self.tensor_queues is not None
             and self.target_engine_index is not None
         ):
@@ -348,7 +349,7 @@ class MsgpackEncoder:
         # Standard serialization fallback
         # For CUDA tensors without IPC support, we need to move to CPU first
         if obj.is_cuda:
-            if self.multimodal_tensor_ipc and self.tensor_queues is not None:
+            if self.multimodal_tensor_ipc == "torch" and self.tensor_queues is not None:
                 # Only warn if IPC was expected but unavailable
                 logger.warning(
                     "CUDA tensor without IPC support encountered "

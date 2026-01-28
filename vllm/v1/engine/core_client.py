@@ -522,13 +522,13 @@ class MPClient(EngineCoreClient):
                     )
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
-            # Get IPC config from multimodal_config, falling back to env var
-            multimodal_tensor_ipc = False  # Default
+            # Get IPC config from multimodal_config, falling back to default
+            multimodal_tensor_ipc = "msgspec"  # Default
             if vllm_config.model_config.multimodal_config is not None:
                 mm_ipc = (
                     vllm_config.model_config.multimodal_config.multimodal_tensor_ipc
                 )
-                multimodal_tensor_ipc = mm_ipc if mm_ipc is not None else False
+                multimodal_tensor_ipc = mm_ipc if mm_ipc is not None else "msgspec"
 
             self.encoder = MsgpackEncoder(
                 tensor_queues=tensor_queues,

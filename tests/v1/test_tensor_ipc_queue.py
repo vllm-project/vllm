@@ -343,16 +343,10 @@ def mixed_tensor_encoder_process(
     ready_event: EventType,
     retrieval_done: EventType,
 ):
-    """Process that encodes mixed CPU/CUDA tensors.
-
-    Old behavior: only CUDA via IPC.
-    """
+    """Process that encodes mixed CPU/CUDA tensors."""
     try:
-        # Use old behavior: multimodal_tensor_ipc defaults to True but only CUDA went
-        # through. For this test, we want to test the old behavior where only CUDA
-        # uses IPC.
         encoder = MsgpackEncoder(
-            tensor_queues=tensor_queues, multimodal_tensor_ipc=False
+            tensor_queues=tensor_queues, multimodal_tensor_ipc="torch"
         )
         encoder.set_target_engine(0)
 
@@ -482,7 +476,7 @@ def cpu_tensor_ipc_encoder_process(
     try:
         # Create encoder with IPC enabled for all tensors
         encoder = MsgpackEncoder(
-            tensor_queues=tensor_queues, multimodal_tensor_ipc=True
+            tensor_queues=tensor_queues, multimodal_tensor_ipc="torch"
         )
         encoder.set_target_engine(target_engine)
 
@@ -614,11 +608,13 @@ def test_cpu_tensor_ipc():
 
 
 def test_ipc_disabled_mode():
-    """Test that IPC is disabled when multimodal_tensor_ipc=False."""
+    """Test that IPC is disabled when multimodal_tensor_ipc="msgspec"."""
     tensor_queues = [torch_mp.Queue()]
 
     # Create encoder with IPC disabled
-    encoder = MsgpackEncoder(tensor_queues=tensor_queues, multimodal_tensor_ipc=False)
+    encoder = MsgpackEncoder(
+        tensor_queues=tensor_queues, multimodal_tensor_ipc="msgspec"
+    )
     encoder.set_target_engine(0)
 
     # Create a CPU tensor
@@ -652,11 +648,13 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
     tensor_queues = [torch_mp.Queue()]
 
     # Create encoder with IPC enabled for all tensors
-    encoder = MsgpackEncoder(tensor_queues=tensor_queues, multimodal_tensor_ipc=True)
+    encoder = MsgpackEncoder(tensor_queues=tensor_queues, multimodal_tensor_ipc="torch")
     encoder.set_target_engine(0)
 
     # Verify encoder configuration
-    assert encoder.multimodal_tensor_ipc is True, "IPC should be enabled"
+    assert encoder.multimodal_tensor_ipc == "torch", (
+        "Torch queue-based IPC should be enabled"
+    )
     assert encoder.tensor_queues is not None, "Tensor queues should be set"
     assert encoder.target_engine_index == 0, "Target engine should be set"
 

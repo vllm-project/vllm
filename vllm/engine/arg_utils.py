@@ -476,7 +476,9 @@ class EngineArgs:
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
-    multimodal_tensor_ipc: bool | None = MultiModalConfig.multimodal_tensor_ipc
+    multimodal_tensor_ipc: Literal["msgspec", "torch"] | None = (
+        MultiModalConfig.multimodal_tensor_ipc
+    )
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -1001,15 +1003,8 @@ class EngineArgs:
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
         multimodal_group.add_argument(
-            "--enable-multimodal-tensor-ipc",
-            action=argparse.BooleanOptionalAction,
-            default=False,
-            help="Enable IPC (inter-process communication) for multimodal tensors. "
-            "When enabled, all multimodal tensors (CUDA and CPU) are "
-            "transferred via torch.multiprocessing shared memory for "
-            "zero-copy IPC. When disabled, all tensors use standard "
-            "serialization. If not specified, defaults to False.",
-            dest="multimodal_tensor_ipc",
+            "--multimodal-tensor-ipc",
+            **multimodal_kwargs["multimodal_tensor_ipc"],
         )
 
         # LoRA related configs
