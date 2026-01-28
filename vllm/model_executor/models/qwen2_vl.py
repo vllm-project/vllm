@@ -49,7 +49,7 @@ from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -841,8 +841,8 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
                 height=image_height,
                 width=image_width,
                 factor=patch_size * merge_size,
-                min_pixels=image_processor.min_pixels,
-                max_pixels=image_processor.max_pixels,
+                min_pixels=image_processor.size["shortest_edge"],
+                max_pixels=image_processor.size["longest_edge"],
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
@@ -914,9 +914,7 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         merge_size = vision_config.spatial_merge_size
         if max_pixels is None:
             image_processor = self.get_image_processor()
-            max_pixels = (
-                image_processor.max_pixels or image_processor.size["longest_edge"]
-            )
+            max_pixels = image_processor.size["longest_edge"]
         unit = patch_size * merge_size
         max_seq_len = max_pixels // (unit * unit)
 

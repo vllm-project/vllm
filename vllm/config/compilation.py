@@ -32,9 +32,6 @@ else:
 
 logger = init_logger(__name__)
 
-# Explicitly exports Range
-__all__ = ["Range"]
-
 
 class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
@@ -296,9 +293,10 @@ class DynamicShapesConfig:
     until this change picked up https://github.com/pytorch/pytorch/pull/169239.
     """
 
-    assume_32_bit_indexing: bool = True
+    assume_32_bit_indexing: bool = False
     """
     whether all tensor sizes can use 32 bit indexing.
+    `True` requires PyTorch 2.10+
     """
 
     def compute_hash(self) -> str:
@@ -611,6 +609,10 @@ class CompilationConfig:
     """Per-model forward context
     Map from layer name to layer objects that need to be accessed outside
     model code, e.g., Attention, FusedMOE when dp_size>1."""
+
+    static_all_moe_layers: list[str] = field(default_factory=list, init=False)
+    """The names of all the MOE layers in the model
+    """
 
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
