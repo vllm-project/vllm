@@ -35,6 +35,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import (
@@ -68,14 +69,15 @@ class InputProcessor:
 
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
-        max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
-            self.model_config
-        )
-        max_tokens_per_mm_item = max(max_tokens_by_modality.values(), default=0)
-        self.encoder_cache_size = max(
-            self.vllm_config.scheduler_config.max_num_batched_tokens,
-            max_tokens_per_mm_item,
-        )
+        self.mm_encoder_cache_size = 0
+        if self.mm_registry.supports_multimodal_inputs(self.model_config):
+            max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
+                self.model_config
+            )
+            _, self.mm_encoder_cache_size = compute_mm_encoder_budget(
+                self.vllm_config.scheduler_config, 
+                max_tokens_by_modality
+            )
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
@@ -756,14 +758,14 @@ class InputProcessor:
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
                     embed_length = mm_position.get_num_embeds
-                    if embed_length > self.encoder_cache_size:
+                    if embed_length > self.mm_encoder_cache_size:
                         raise ValueError(
                             f"The {prompt_type} prompt contains a multimodal item "
-                            f"in modality '{modality}' "
-                            f"with length {embed_length}, which exceeds the "
-                            f"calculated encoder cache size {self.encoder_cache_size}. "
-                            "Please reduce frames/resolution or increase "
-                            "--max-num-batched-tokens."
+                            f"in modality {modality!r} with length {embed_length}, "
+                            f"which exceeds the calculated encoder cache size "
+                            f"{self.mm_encoder_cache_size}. Please reduce "
+                            f"frames/resolution or increase --max-num-batched-tokens "
+                            f"to at least {embed_length}."
                         )
 
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
