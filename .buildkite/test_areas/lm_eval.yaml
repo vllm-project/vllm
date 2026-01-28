@@ -61,7 +61,7 @@ steps:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor/config-h100.txt
   
 - label: MoE Refactor Integration Test (B200 - TEMPORARY)
-  gpu: b200
+  device: b200
   optional: true
   num_devices: 2
   commands:
