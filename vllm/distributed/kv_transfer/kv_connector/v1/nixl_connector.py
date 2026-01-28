@@ -1360,6 +1360,7 @@ class NixlConnectorWorker:
                 if base_addr in seen_base_addresses:
                     continue
 
+                logger.info("XXX cache shape %s", cache.shape)
                 kernel_block_size = cache.shape[block_size_position]
                 if self.block_size != kernel_block_size:
                     logger.info_once(
