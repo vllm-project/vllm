@@ -271,7 +271,7 @@ Taking `MMEncoderAttention` as an example:
 ??? code
 
     ```python
-    from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
+    from vllm.model_executor.layers.attention import MMEncoderAttention
     from vllm.model_executor.custom_op import CustomOp
 
 
