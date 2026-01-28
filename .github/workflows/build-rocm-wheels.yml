@@ -125,8 +125,9 @@ jobs:
 
       - name: Install vLLM build requirements
         run: |
-          pip install -r requirements/build.txt
-          pip install -r requirements/common.txt
+          # Use ROCm index to avoid overwriting ROCm torch with CUDA torch from PyPI
+          pip install -r requirements/build.txt --extra-index-url ${{ env.PYTORCH_INDEX_URL }}
+          pip install -r requirements/common.txt --extra-index-url ${{ env.PYTORCH_INDEX_URL }}
 
       - name: Build wheel
         env:
