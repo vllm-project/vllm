@@ -261,7 +261,8 @@ __global__ void silu_and_mul_per_block_quant_kernel_large(
 // =============================================================================
 
 // Threshold for switching to large kernel (num_groups > this value)
-constexpr int32_t LARGE_KERNEL_THRESHOLD = 32;
+// constexpr int32_t LARGE_KERNEL_THRESHOLD = 32;
+constexpr int32_t LARGE_KERNEL_WORK_THRESHOLD = 4096;
 
 template <typename scalar_in_t>
 void silu_and_mul_per_block_quant_dispatch(
@@ -285,8 +286,9 @@ void silu_and_mul_per_block_quant_dispatch(
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     
     // Decide which kernel to use based on num_groups
-    bool use_large_kernel = (num_groups > LARGE_KERNEL_THRESHOLD);
-    
+    //bool use_large_kernel = (num_groups > LARGE_KERNEL_THRESHOLD);
+    bool use_large_kernel = (num_tokens * num_groups > LARGE_KERNEL_WORK_THRESHOLD);
+
     if (use_large_kernel) {
         // Large kernel: one block per (token, group) pair
         // Block size = group_size (64 or 128)
