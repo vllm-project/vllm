@@ -866,7 +866,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nano_vl_dummy", is_available_online=False, trust_remote_code=True
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
-        "xlangai/OpenCUA-7B", trust_remote_code=True
+        "xlangai/OpenCUA-7B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "HF model uses remote code that is not compatible with latest Transformers"  # noqa: E501
+        },
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
