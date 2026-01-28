@@ -98,7 +98,7 @@ class GPTQConfig(QuantizationConfig):
         if self.weight_bits == 4:
             logger.warning_once(
                 "Currently, the 4-bit gptq_gemm kernel for GPTQ is buggy. "
-                "Please switch to gptq_marlin or gptq_bitblas."
+                "Please switch to gptq_marlin."
             )
 
         self.modules_in_block_to_quantize = modules_in_block_to_quantize or []
