@@ -7,6 +7,8 @@ _CONFIG_REGISTRY = {
     "baichuan": BaiChuanConfig,
     "aquila": AquilaConfig,
     "qwen": QWenConfig,
+    "minimax": MiniMaxConfig,
+    "minimax_m2": MiniMaxConfig,
     "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
     "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
 }

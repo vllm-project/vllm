@@ -23,6 +23,8 @@ _MODEL_REGISTRY = {
     "InternLMForCausalLM": InternLMForCausalLM,
     "LlamaForCausalLM": LlamaForCausalLM,
     "LLaMAForCausalLM": LlamaForCausalLM,  # For decapoda-research/llama-*
+    "MiniMaxForCausalLM": MiniMaxForCausalLM,  # MiniMax-M2
+    "MiniMaxM2ForCausalLM": MiniMaxForCausalLM,  # MiniMax-M2 alias
     "MPTForCausalLM": MPTForCausalLM,
     "OPTForCausalLM": OPTForCausalLM,
     "QWenLMHeadModel": QWenLMHeadModel,
