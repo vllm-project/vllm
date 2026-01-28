@@ -127,14 +127,16 @@ def test_responses_api_logprobs_with_return_tokens_as_token_ids():
     """Test that return_tokens_as_token_ids works in Responses API logprobs."""
     from unittest.mock import MagicMock
 
+    from vllm.entrypoints.openai.engine.serving import OpenAIServing
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
     from vllm.logprobs import Logprob as SampleLogprob
 
     serving = MagicMock(spec=OpenAIServingResponses)
     serving.return_tokens_as_token_ids = True
+    serving._get_decoded_token = OpenAIServing._get_decoded_token
 
     tokenizer = MagicMock()
-    tokenizer.decode = lambda x: "decoded"
+    tokenizer.decode = lambda token_id: "decoded"
 
     token_ids = [100, 200, 300]
     sample_logprobs = [
