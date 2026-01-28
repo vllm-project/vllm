@@ -7,7 +7,6 @@ import pytest
 import torch
 
 from tests.utils import multi_gpu_test
-from vllm import _custom_ops as ops
 from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -18,6 +17,9 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.lora.ops.triton_ops import fused_moe_lora
+from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+    moe_align_block_size,
+)
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
 
@@ -25,14 +27,6 @@ from vllm.utils.torch_utils import set_random_seed
 @pytest.fixture(autouse=True)
 def reset_device(reset_default_device):
     pass
-
-
-def round_up(x, base):
-    return ((x + base - 1) // base) * base
-
-
-def CEILDIV(x, y):
-    return (x + y - 1) // y
 
 
 def assign_loras_to_tokens(num_tokens: int, num_sequences: int, max_loras: int):
@@ -137,35 +131,20 @@ def use_fused_moe_lora_kernel(
     fully_sharded=False,
     offset=0,
 ):
-    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
-    max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-    max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
+    # Virtual expert approach: combine (lora_id, expert_id) into one index
+    num_expert_lora = num_experts * max_loras
+    token_lora_expanded = token_lora_mapping.unsqueeze(1)  # (num_tokens, 1)
+    has_lora = token_lora_expanded >= 0
+    topk_ids_lora = token_lora_expanded * num_experts + topk_ids
+    topk_ids_lora = topk_ids_lora.masked_fill(~has_lora, -1)
 
-    # init output tensors
-    sorted_token_ids = torch.empty(
-        (max_loras * max_num_tokens_padded,),
-        dtype=torch.int32,
-    )
-    expert_ids = torch.empty((max_loras * max_num_m_blocks,), dtype=torch.int32)
-    num_tokens_post_padded = torch.empty((max_loras,), dtype=torch.int32)
-    adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
-    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32)
-
-    # call kernel
-    ops.moe_lora_align_block_size(
-        topk_ids,
-        token_lora_mapping,
-        num_experts,
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+        topk_ids_lora,
         block_size,
-        max_loras,
-        max_num_tokens_padded,
-        max_num_m_blocks,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        adapter_enabled,
-        lora_ids,
+        num_expert_lora,
     )
+
+    adapter_enabled = torch.ones(max_loras, dtype=torch.int32)
 
     config = {
         "BLOCK_SIZE_M": 16,
@@ -178,8 +157,6 @@ def use_fused_moe_lora_kernel(
     }
 
     mul_routed_weight = False
-    expert_ids = expert_ids.view(max_loras, -1)
-    sorted_token_ids = sorted_token_ids.view(max_loras, -1)
 
     fused_moe_lora(
         output,
@@ -192,7 +169,6 @@ def use_fused_moe_lora_kernel(
         num_tokens_post_padded,
         max_lora_rank,
         top_k_num,
-        lora_ids,
         adapter_enabled,
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],

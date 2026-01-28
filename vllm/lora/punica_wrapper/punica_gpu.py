@@ -323,19 +323,20 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         topk_ids_lora to -1 to indicate they should be skipped.
         """
 
-        (token_lora_mapping, _, _, _, _, _) = self.token_mapping_meta.meta_args(
+        (token_lora_mapping, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(
             num_tokens
         )
 
         # Number of virtual experts = num_experts * max_loras
         num_expert_lora = num_experts * max_loras
-        token_lora_expanded = token_lora_mapping.unsqueeze(1)  # (num_tokens, 1)
+        token_lora_expanded = token_lora_mapping.unsqueeze(1)
 
         # Create mask for valid LoRA tokens
-        has_lora = token_lora_expanded >= 0  # (num_tokens, 1)
-
+        has_lora = torch.zeros_like(token_lora_expanded, dtype=torch.bool)
+        for lora_id in lora_ids:
+            has_lora |= (token_lora_expanded == lora_id) & (token_lora_expanded >= 0)
         topk_ids_lora = token_lora_expanded * num_experts + topk_ids
-        topk_ids_lora = topk_ids_lora.masked_fill(~has_lora, -1)
+        topk_ids_lora = topk_ids_lora.masked_fill(~has_lora, num_expert_lora)
 
         # Call standard moe_align_block_size with num_expert_lora + 1 virtual
         # experts (the extra slot absorbs non-LoRA tokens harmlessly).
