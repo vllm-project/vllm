@@ -55,10 +55,10 @@ def fp8_mqa_logits_torch(
     q = q.to(torch.bfloat16)
 
     mask_lo = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
+        torch.arange(0, seq_len_kv, device=q.device)[None, :] >= cu_seqlen_ks[:, None]
     )
     mask_hi = (
-        torch.arange(0, seq_len_kv, device="cuda")[None, :] < cu_seqlen_ke[:, None]
+        torch.arange(0, seq_len_kv, device=q.device)[None, :] < cu_seqlen_ke[:, None]
     )
     mask = mask_lo & mask_hi
 
@@ -95,7 +95,7 @@ def fp8_paged_mqa_logits_torch(
     context_lens = context_lens.tolist()
     for i in range(batch_size):
         context_len = context_lens[i]
-        q_offsets = torch.arange(context_len - next_n, context_len, device="cuda")
+        q_offsets = torch.arange(context_len - next_n, context_len, device=q.device)
         weight_slice = (
             weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
         )
@@ -103,7 +103,7 @@ def fp8_paged_mqa_logits_torch(
             block_idx = block_tables[i][block_rk]
             qx, kx = q[i], kv_cache[block_idx]
             k_offsets = torch.arange(
-                block_rk * block_size, (block_rk + 1) * block_size, device="cuda"
+                block_rk * block_size, (block_rk + 1) * block_size, device=q.device
             )
             mask = (k_offsets[None, :] < context_len) & (
                 k_offsets[None, :] <= q_offsets[:, None]

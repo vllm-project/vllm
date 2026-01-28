@@ -128,7 +128,7 @@ def _bf16_mla_sparse_kernel(
 
     max_logits = e_max * LOGE2
     # calculate lse
-    lse = max_logits + tl.log(e_sum) * LOGE2
+    lse = max_logits + tl.log2(e_sum) * LOGE2
 
     # write output
     offs_o = cur_q * stride_out_token + cur_head[:, None] * stride_out_head + offs_dv[None, :]
