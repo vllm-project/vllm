@@ -340,22 +340,21 @@ class TpKVTopology:
             if self._cross_layers_blocks:
                 # prepend layers dimension
                 kv_cache_shape = (80,) + kv_cache_shape
-            try:
-                kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=self._cross_layers_blocks
-                )
-            except (AttributeError, NotImplementedError):
-                kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
+                try:
+                    kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
+                        include_num_layers_dimension=self._cross_layers_blocks
+                    )
+                except (AttributeError, NotImplementedError):
+                    kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
 
-            # permute kv_cache_shape according to stride_order
-            kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+                # In case of cross layers permute kv_cache_shape according to
+                # stride_order to retrieve physical position of block_size
+                kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
-            physical_block_size_position = kv_cache_shape.index(16)
+            block_size_position = kv_cache_shape.index(16)
 
-            assert physical_block_size_position is not None
-            self._physical_block_size_position = -(
-                len(kv_cache_shape) - physical_block_size_position
-            )
+            assert block_size_position is not None
+            self._block_size_position = -(len(kv_cache_shape) - block_size_position)
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
@@ -382,7 +381,7 @@ class TpKVTopology:
 
     @property
     def block_size_position(self) -> int:
-        return self._physical_block_size_position
+        return self._block_size_position
 
     def tp_ratio(
         self,
