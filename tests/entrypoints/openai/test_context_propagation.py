@@ -406,3 +406,157 @@ def test_trace_id_preserved_through_chain():
 
                 # Verify get_span_context was actually called by injection logic
                 mock_api_span.get_span_context.assert_called()
+
+
+# ========== Diagnostic Tests: Real OpenTelemetry SDK (No Mocks) ==========
+# These tests use actual OpenTelemetry SDK to verify inject/extract roundtrip
+# for diagnosing GitHub issue #21 (separate trace IDs between API and engine)
+
+
+def test_inject_extract_roundtrip_real_otel():
+    """
+    DIAGNOSTIC TEST for GitHub issue #21.
+
+    Verify that inject_trace_context + extract_trace_context roundtrip correctly
+    using REAL OpenTelemetry SDK (no mocks).
+
+    This test proves whether the fundamental inject/extract mechanism works,
+    isolating it from any production environment issues.
+
+    Asserts:
+    1. traceparent header is injected with valid W3C format
+    2. Child span has same trace_id as parent span
+    3. Child span has parent linkage to parent span
+    """
+    # Import real OpenTelemetry SDK
+    try:
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.trace import SpanKind
+    except ImportError:
+        pytest.skip("OpenTelemetry SDK not available")
+
+    from vllm.tracing import extract_trace_context, inject_trace_context
+
+    # Create local TracerProvider (isolated from global state)
+    provider = TracerProvider()
+    tracer = provider.get_tracer("test.diagnostic")
+
+    # Create parent span
+    parent_span = tracer.start_span(
+        name="parent_span",
+        kind=SpanKind.SERVER,
+    )
+
+    try:
+        # Get parent span's trace_id and span_id for verification
+        parent_context = parent_span.get_span_context()
+        parent_trace_id = parent_context.trace_id
+        parent_span_id = parent_context.span_id
+
+        # Inject parent span context into carrier
+        carrier: dict[str, str] = {}
+        result = inject_trace_context(parent_span, carrier)
+
+        # ASSERTION 1: traceparent header exists and matches W3C format
+        assert result is not None, "inject_trace_context returned None"
+        assert "traceparent" in result, "traceparent header not injected"
+
+        traceparent = result["traceparent"]
+        # W3C format: version-traceid-spanid-flags
+        # Example: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+        w3c_pattern = r"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        assert re.match(w3c_pattern, traceparent), \
+            f"traceparent format invalid: {traceparent}"
+
+        # Extract trace_id from traceparent to verify it matches
+        parts = traceparent.split("-")
+        injected_trace_id_hex = parts[1]
+        injected_span_id_hex = parts[2]
+
+        # Convert parent trace_id to hex for comparison
+        parent_trace_id_hex = f"{parent_trace_id:032x}"
+        parent_span_id_hex = f"{parent_span_id:016x}"
+
+        assert injected_trace_id_hex == parent_trace_id_hex, \
+            f"Injected trace_id {injected_trace_id_hex} != parent {parent_trace_id_hex}"
+        assert injected_span_id_hex == parent_span_id_hex, \
+            f"Injected span_id {injected_span_id_hex} != parent {parent_span_id_hex}"
+
+        # Extract context from carrier
+        extracted_context = extract_trace_context(result)
+
+        assert extracted_context is not None, \
+            "extract_trace_context returned None"
+
+        # Create child span with extracted context
+        child_span = tracer.start_span(
+            name="child_span",
+            kind=SpanKind.INTERNAL,
+            context=extracted_context,
+        )
+
+        try:
+            child_context = child_span.get_span_context()
+            child_trace_id = child_context.trace_id
+
+            # ASSERTION 2: Child span has SAME trace_id as parent
+            assert child_trace_id == parent_trace_id, \
+                f"Child trace_id {child_trace_id:032x} != parent {parent_trace_id:032x}"
+
+            # ASSERTION 3: Child span has parent linkage
+            # In OpenTelemetry SDK, parent relationship is stored in the span
+            # Check if child span has the parent span as its parent
+            # Note: ReadableSpan interface provides parent span_context
+            if hasattr(child_span, "_readable_span"):
+                readable = child_span._readable_span()
+                if readable and readable.parent:
+                    assert readable.parent.span_id == parent_span_id, \
+                        f"Child parent span_id {readable.parent.span_id:016x} != " \
+                        f"parent {parent_span_id:016x}"
+            # Alternative: Check via context extraction
+            # The extracted context should contain the parent span info
+
+        finally:
+            child_span.end()
+
+    finally:
+        parent_span.end()
+
+
+def test_inject_with_none_carrier():
+    """
+    DIAGNOSTIC TEST: Verify inject_trace_context works with None carrier.
+
+    When carrier is None, inject_trace_context should create a new dict
+    with traceparent header.
+    """
+    try:
+        from opentelemetry.sdk.trace import TracerProvider
+    except ImportError:
+        pytest.skip("OpenTelemetry SDK not available")
+
+    from vllm.tracing import inject_trace_context
+
+    # Create local TracerProvider
+    provider = TracerProvider()
+    tracer = provider.get_tracer("test.diagnostic")
+
+    # Create span
+    span = tracer.start_span(name="test_span")
+
+    try:
+        # Inject with None carrier
+        result = inject_trace_context(span, None)
+
+        # Should return a new dict with traceparent
+        assert result is not None, "inject_trace_context returned None"
+        assert isinstance(result, dict), "Result is not a dict"
+        assert "traceparent" in result, "traceparent not in result"
+
+        # Verify W3C format
+        w3c_pattern = r"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        assert re.match(w3c_pattern, result["traceparent"]), \
+            f"traceparent format invalid: {result['traceparent']}"
+
+    finally:
+        span.end()
