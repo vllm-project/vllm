@@ -104,12 +104,8 @@ def test_whisper_multi_lora(whisper_lora_files):
     llm = create_whisper_llm(enable_lora=True, max_loras=4)
 
     # Test with different LoRA IDs using the same adapter
-    outputs_lora1 = run_whisper_inference(
-        llm, lora_path=whisper_lora_files, lora_id=1
-    )
-    outputs_lora2 = run_whisper_inference(
-        llm, lora_path=whisper_lora_files, lora_id=2
-    )
+    outputs_lora1 = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=1)
+    outputs_lora2 = run_whisper_inference(llm, lora_path=whisper_lora_files, lora_id=2)
 
     # Both should produce valid outputs
     assert len(outputs_lora1[0]) > 0

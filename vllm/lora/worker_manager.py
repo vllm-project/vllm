@@ -55,10 +55,12 @@ class WorkerLoRAManager:
         # out-of-tree (OOT) encoder-decoder models
         if vllm_config.model_config.is_encoder_decoder:
             self.max_position_embeddings = getattr(
-                text_config, "max_target_positions", None)
+                text_config, "max_target_positions", None
+            )
         else:
             self.max_position_embeddings = getattr(
-                text_config, "max_position_embeddings", None)
+                text_config, "max_position_embeddings", None
+            )
         self.device = device
         # Lazily initialized by create_lora_manager.
         self._adapter_manager: LoRAModelManager
