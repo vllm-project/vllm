@@ -407,6 +407,7 @@ class FusedMoE(CustomOp):
         if prefix in compilation_config.static_forward_context:
             raise ValueError("Duplicate layer name: {}".format(prefix))
         compilation_config.static_forward_context[prefix] = self
+        compilation_config.static_all_moe_layers.append(prefix)
         self.layer_name = prefix
 
         self.enable_eplb = enable_eplb
@@ -571,9 +572,6 @@ class FusedMoE(CustomOp):
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
         )
-        self.moe_config_use_flashinfer_cutlass_kernels = (
-            self.moe_config.use_flashinfer_cutlass_kernels
-        )
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
                 "Mori needs to be used with aiter fused_moe for now."
@@ -646,6 +644,11 @@ class FusedMoE(CustomOp):
     # This is called after all weight loading and post-processing, so it
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
+        # NOTE(rob): WIP refactor. For quant methods that own the MK
+        # we create the MK during process_weights_after_loading.
+        if self.quant_method.supports_internal_mk or self.quant_method.is_monolithic:
+            return None
+
         self.ensure_moe_quant_config_init()
         # routing_tables only needed for round-robin expert placement with
         # DeepEP all2all backend.
@@ -729,14 +732,6 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_mori_kernels
 
     @property
-    def use_flashinfer_cutlass_kernels(self):
-        return (
-            self.moe_quant_config is not None
-            and self.moe_quant_config.quant_dtype == "nvfp4"
-            and self.moe_config_use_flashinfer_cutlass_kernels
-        )
-
-    @property
     def use_marlin_kernels(self):
         return getattr(self.quant_method, "use_marlin", False)
 
@@ -746,7 +741,7 @@ class FusedMoE(CustomOp):
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
             or self.moe_parallel_config.use_mori_kernels
-            or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
+            or self.moe_parallel_config.use_fi_all2allv_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     @property
@@ -1536,7 +1531,7 @@ class FusedMoE(CustomOp):
         assert self.quant_method is not None
         return (
             isinstance(self.quant_method, FusedMoEModularMethod)
-            and self.quant_method.fused_experts.output_is_reduced()
+            and self.quant_method.moe_mk.output_is_reduced()  # type: ignore[union-attr]
         )
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
@@ -1576,7 +1571,7 @@ class FusedMoE(CustomOp):
             # Can be unavailable or None in unittests
             if (
                 is_forward_context_available()
-                and get_forward_context().remaining_moe_layers is not None
+                and get_forward_context().all_moe_layers is not None
             ):
                 return "from_forward_context"
             return self.layer_name
@@ -1769,7 +1764,7 @@ class FusedMoE(CustomOp):
         self.ensure_dp_chunking_init()
 
         has_separate_shared_experts = (
-            not isinstance(self.quant_method, FusedMoEModularMethod)
+            not self.quant_method.mk_owns_shared_expert
             and self.shared_experts is not None
         )
 
@@ -1793,8 +1788,10 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
-            self.quant_method, FusedMoEModularMethod
+        # NOTE(rob): once we finish migrating all the quant methods to use
+        # MKs, we can remove the naive dispatch/combine path from here.
+        do_naive_dispatch_combine = (
+            self.dp_size > 1 and not self.quant_method.supports_internal_mk
         )
 
         ctx = get_forward_context()
@@ -1822,7 +1819,7 @@ class FusedMoE(CustomOp):
                 else:
                     hidden_states_to_dispatch = hidden_states
 
-                dispatch_res = get_ep_group().dispatch(
+                dispatch_res = get_ep_group().dispatch_router_logits(
                     hidden_states_to_dispatch,
                     router_logits,
                     self.is_sequence_parallel,
@@ -1995,13 +1992,17 @@ class FusedMoE(CustomOp):
 def get_layer_from_name(layer_name: str) -> FusedMoE:
     forward_context: ForwardContext = get_forward_context()
     if layer_name == "from_forward_context":
-        if not forward_context.remaining_moe_layers:
+        all_moe_layers = forward_context.all_moe_layers
+        assert all_moe_layers is not None
+        moe_layer_index = forward_context.moe_layer_index
+        if moe_layer_index >= len(all_moe_layers):
             raise AssertionError(
-                "We expected the number of MOE layers in `remaining_moe_layers` "
+                "We expected the number of MOE layers in `all_moe_layers` "
                 "to be equal to the number of "
                 "{vllm.moe_forward, vllm.moe_forward_shared} calls."
             )
-        layer_name = forward_context.remaining_moe_layers.pop()
+        layer_name = all_moe_layers[moe_layer_index]
+        forward_context.moe_layer_index += 1
     self = cast(FusedMoE, forward_context.no_compile_layers[layer_name])
     return self
 

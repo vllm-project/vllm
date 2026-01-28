@@ -112,18 +112,14 @@ async def test_long_audio_request(mary_had_lamb, whisper_client):
 @pytest.mark.asyncio
 async def test_completion_endpoints(whisper_client):
     # text to text model
-    res = await whisper_client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "system", "content": "You are a helpful assistant."}],
-    )
-    err = res.error
-    assert err["code"] == 400
-    assert err["message"] == "The model does not support Chat Completions API"
+    with pytest.raises(openai.NotFoundError):
+        await whisper_client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "system", "content": "You are a helpful assistant."}],
+        )
 
-    res = await whisper_client.completions.create(model=MODEL_NAME, prompt="Hello")
-    err = res.error
-    assert err["code"] == 400
-    assert err["message"] == "The model does not support Completions API"
+    with pytest.raises(openai.NotFoundError):
+        await whisper_client.completions.create(model=MODEL_NAME, prompt="Hello")
 
 
 @pytest.mark.asyncio

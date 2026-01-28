@@ -24,7 +24,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GLM-4V model compatible with HuggingFace weights."""
+"""Inference-only GLM-4.1V & GLM-4.6V-Flash, AutoGLM-Phone-9B model
+compatible with HuggingFace weights."""
 
 import itertools
 import math
@@ -51,7 +52,7 @@ from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
+from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
@@ -1418,7 +1419,7 @@ class Glm4vForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-        if config.model_type == "glm4v":
+        if config.model_type in ("glm4v", "glm_ocr"):
             architectures = ["Glm4ForCausalLM"]
         elif config.model_type == "glm4v_moe":
             architectures = ["Glm4MoeForCausalLM"]
@@ -1711,7 +1712,7 @@ class Glm4vForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
