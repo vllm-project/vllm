@@ -232,20 +232,18 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
     @staticmethod
     def trainer_init(
         init_info: NCCLInitInfo | dict,
-        device: torch.device | int | str | None = None,
     ) -> "PyNcclCommunicator":
         """
         Initialize NCCL process group for trainer-side weight transfer.
 
-        The trainer is always rank 0 in the process group.
+        The trainer is always rank 0 in the process group. Uses the current
+        CUDA device (torch.cuda.current_device()).
 
         Args:
             init_info: Either an NCCLInitInfo object or a dict with keys:
                 - master_address: str
                 - master_port: int
                 - world_size: int
-                Optionally can include 'device' if not passed separately.
-            device: The CUDA device to use. If not provided, must be in init_info.
 
         Returns:
             PyNcclCommunicator for weight transfer.
@@ -260,30 +258,21 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
             ...         master_port=master_port,
             ...         world_size=world_size,
             ...     ),
-            ...     device=torch.device("cuda:0"),
             ... )
         """
         if isinstance(init_info, dict):
             master_address = init_info["master_address"]
             master_port = init_info["master_port"]
             world_size = init_info["world_size"]
-            if device is None:
-                device = init_info.get("device")
         else:
             # NCCLInitInfo object
             master_address = init_info.master_address
             master_port = init_info.master_port
             world_size = init_info.world_size
-            # NCCLInitInfo doesn't have device, so device param is required
-
-        if device is None:
-            raise ValueError(
-                "device must be provided either in init_info or as a separate parameter"
-            )
 
         # Trainer is always rank 0
         return NCCLWeightTransferEngine._stateless_init_process_group(
-            master_address, master_port, 0, world_size, device
+            master_address, master_port, 0, world_size, torch.cuda.current_device()
         )
 
     @staticmethod

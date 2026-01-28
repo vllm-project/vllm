@@ -193,7 +193,6 @@ def main():
             master_port=master_port,
             world_size=world_size,
         ),
-        device=torch.device(device),
     )
 
     # Wait for init_weight_transfer to complete

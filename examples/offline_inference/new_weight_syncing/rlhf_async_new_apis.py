@@ -95,12 +95,9 @@ class TrainModel:
     """Ray actor that wraps the training model on a dedicated GPU."""
 
     def __init__(self, model_name: str):
-        self.device = torch.device("cuda:0")
-        torch.cuda.set_device(self.device)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, dtype=torch.bfloat16
-        )
-        self.model.to(self.device)
+        ).to("cuda:0")
 
     def get_weight_metadata(self):
         """Return weight names, dtypes, and shapes for weight transfer."""
@@ -121,7 +118,6 @@ class TrainModel:
                 master_port=master_port,
                 world_size=world_size,
             ),
-            device=self.device,
         )
 
     def broadcast_weights(self, packed: bool = True):
