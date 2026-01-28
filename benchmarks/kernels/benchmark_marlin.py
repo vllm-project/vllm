@@ -204,7 +204,6 @@ def bench_run(
         "CUBLAS_M_THRESHOLD": CUBLAS_M_THRESHOLD,
         # Kernels
         "marlin_gemm": ops.marlin_gemm,
-        "gptq_marlin_24_gemm": ops.gptq_marlin_24_gemm,
         "gptq_marlin_repack": ops.gptq_marlin_repack,
         "allspark_w8a16_gemm": ops.allspark_w8a16_gemm,
     }

@@ -878,7 +878,6 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
-                "gptq_marlin_24",
                 "gptq_marlin",
                 "awq_marlin",
                 "ipex",
