@@ -168,7 +168,7 @@ def _parse_return_list(
                 and elt.args
                 and isinstance(elt.args[0], ast.Constant)
             ):
-                sizes.append(f"×{elt.args[0].value}")
+                sizes.append(f"%{elt.args[0].value}")
         if sizes:
             return sizes
     return []
@@ -178,7 +178,7 @@ def parse_block_sizes(node: ast.ClassDef) -> str:
     """Parse get_supported_kernel_block_sizes method."""
     method = find_method(node, "get_supported_kernel_block_sizes")
     sizes = _parse_return_list(method, handle_multiple_of=True)
-    return ", ".join(sizes) if sizes else "×1"
+    return ", ".join(sizes) if sizes else "Any"
 
 
 def parse_head_sizes(node: ast.ClassDef) -> str:
