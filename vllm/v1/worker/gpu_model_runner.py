@@ -1010,11 +1010,13 @@ class GPUModelRunner(
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
-                # When using PP, the scheduler sends the sampled tokens back,
-                # because there's no direct communication between the first-
-                # stage worker and the last-stage worker.
+                # PP non-last rank: token ids may come from scheduler (non-async PP)
+                # or via the GPU broadcast path (async PP).
                 new_token_ids: list[int] = []
                 if req_data.new_token_ids:
+                    # When using PP without async scheduling, the scheduler sends
+                    # sampled token ids back because there's no direct communication
+                    # between the first-stage worker and the last-stage worker.
                     new_token_ids = req_data.new_token_ids[i]
                     # Add the sampled token(s) from the previous step (if any).
                     # This doesn't include "unverified" tokens like spec tokens.
@@ -3793,19 +3795,16 @@ class GPUModelRunner(
         # can map req_id -> previous batch row
         discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[0]
         discard_req_indices_set = set(discard_req_indices)
-        self.input_batch.prev_req_id_to_index = {
-            req_id: i
-            for i, req_id in enumerate(self.input_batch.req_ids)
-            if i not in discard_req_indices_set
-        }
-
-        # PP+async scheduling: advance per-request local cached output length by
-        # appending a placeholder (-1) token id.
+        prev_req_id_to_index: dict[str, int] = {}
         for i, req_id in enumerate(self.input_batch.req_ids):
             if i in discard_req_indices_set:
                 continue
+            prev_req_id_to_index[req_id] = i
+            # PP+async scheduling: advance per-request local cached output length by
+            # appending a placeholder (-1) token id.
             if (req_state := self.requests.get(req_id)) is not None:
                 req_state.output_token_ids.append(-1)
+        self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
