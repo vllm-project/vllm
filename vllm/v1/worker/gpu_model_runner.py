@@ -21,7 +21,6 @@ import torch.nn as nn
 from tqdm import tqdm
 
 import vllm.envs as envs
-from vllm.attention.layer import Attention, MLAAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -50,6 +49,7 @@ from vllm.forward_context import (
 )
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
@@ -150,7 +150,6 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
@@ -185,6 +184,7 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 logger = init_logger(__name__)
 
@@ -439,13 +439,15 @@ class GPUModelRunner(
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
             self.drafter: (
-                NgramProposer
+                NgramProposer  # noqa: F823
                 | SuffixDecodingProposer
                 | EagleProposer
                 | DraftModelProposer
                 | MedusaProposer
             )
             if self.speculative_config.method == "ngram":
+                from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
@@ -3848,6 +3850,8 @@ class GPUModelRunner(
         spec_config = self.speculative_config
         assert spec_config is not None
         if spec_config.method == "ngram":
+            from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.drafter.propose(

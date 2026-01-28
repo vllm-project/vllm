@@ -4,9 +4,9 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
