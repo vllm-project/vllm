@@ -25,21 +25,39 @@ from .backend import TestBackend
 
 class TestModel(torch.nn.Module):
     def __init__(
-        self, hidden_size: int, num_local_experts: int, x_pad_to_multiple: int
+        self,
+        num_layers: int,
+        hidden_size: int,
+        num_local_experts: int,
+        x_pad_to_multiple: int,
     ):
         super().__init__()
-        self.norm = RMSNorm(hidden_size, eps=1e-5)
-        self.router = torch.nn.Linear(hidden_size, num_local_experts)
+        self.num_layers = num_layers
+        self.hidden_size = hidden_size
         self.x_pad_to_multiple = x_pad_to_multiple
         self.pad_dim = x_pad_to_multiple - (hidden_size % x_pad_to_multiple)
 
-    def forward(self, x, residual):
-        x, residual = self.norm(x, residual)
-        router_logits = rocm_unquantized_gemm(
-            self, x, self.router.weight, self.router.bias
-        )
-        x = torch.nn.functional.pad(x, (0, self.pad_dim), mode="constant", value=0.0)
-        return x, residual, router_logits
+        self.norm = [RMSNorm(hidden_size, eps=1e-5) for _ in range(num_layers)]
+        self.router = [
+            torch.nn.Linear(hidden_size, num_local_experts) for _ in range(4)
+        ]
+
+    def forward(self, x):
+        # avoid having graph input be an arg to a pattern directly
+        x = resid = torch.relu(x)
+        all_router_logits = []
+        for layer in range(self.num_layers):
+            x = x[:, : self.hidden_size]
+            x, resid = self.norm[layer](x, resid)
+            router_logits = rocm_unquantized_gemm(
+                self, x, self.router[layer].weight, self.router[layer].bias
+            )
+            x = torch.nn.functional.pad(
+                x, (0, self.pad_dim), mode="constant", value=0.0
+            )
+            all_router_logits.append(router_logits)
+
+        return x, resid, *all_router_logits
 
     def ops_in_model_before(self):
         return [
@@ -52,6 +70,7 @@ class TestModel(torch.nn.Module):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("num_layers", [3])
 @pytest.mark.parametrize("hidden_size", [2880])
 @pytest.mark.parametrize("num_local_experts", [128])
 @pytest.mark.parametrize("x_pad_to_multiple", [256])
@@ -61,6 +80,7 @@ class TestModel(torch.nn.Module):
 )
 def test_fuse_act_padding(
     dtype: torch.dtype,
+    num_layers: int,
     hidden_size: int,
     num_local_experts: int,
     x_pad_to_multiple: int,
@@ -90,23 +110,19 @@ def test_fuse_act_padding(
             PostCleanupPass(vllm_config),
         ]
         backend = TestBackend(*passes)
-        model = TestModel(hidden_size, num_local_experts, x_pad_to_multiple)
+        model = TestModel(num_layers, hidden_size, num_local_experts, x_pad_to_multiple)
 
         x = torch.rand(1, hidden_size)
-        residual = torch.rand(1, hidden_size)
         torch._dynamo.mark_dynamic(x, 0)
-        torch._dynamo.mark_dynamic(residual, 0)
 
-        x_unfused, residual_unfused, router_logits_unfused = model(x, residual)
+        outputs_unfused = model(x)
 
         model_fused = torch.compile(model, backend=backend)
-        x_fused, residual_fused, router_logits_fused = model_fused(x, residual)
+        outputs_fused = model_fused(x)
 
-        torch.testing.assert_close(x_fused, x_unfused)
-        torch.testing.assert_close(residual_fused, residual_unfused)
-        torch.testing.assert_close(router_logits_fused, router_logits_unfused)
+        torch.testing.assert_close(outputs_unfused, outputs_fused)
 
-        assert fusion_pass.matched_count == 1
+        assert fusion_pass.matched_count == num_layers
 
         backend.check_before_ops(model.ops_in_model_before())
         backend.check_after_ops(model.ops_in_model_after())
