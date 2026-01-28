@@ -4,7 +4,7 @@
 from collections.abc import Callable
 
 import torch
-from compressed_tensors.quantization import QuantizationStrategy
+from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
@@ -31,12 +31,17 @@ from vllm.model_executor.utils import replace_parameter
 
 __all__ = ["CompressedTensorsW8A16Fp8"]
 
-SUPPORTED_STRATEGIES = [QuantizationStrategy.CHANNEL, QuantizationStrategy.TENSOR]
+strategy_to_parameter_type = {
+    QuantizationStrategy.BLOCK: BlockQuantScaleParameter,
+    QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
+    QuantizationStrategy.TENSOR: PerTensorScaleParameter,
+}
 
 
 class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
-    def __init__(self, strategy: str, is_static_input_scheme: bool):
-        self.strategy = strategy
+    def __init__(self, weight_quant: QuantizationArgs, is_static_input_scheme: bool):
+        self.weight_quant = weight_quant
+        self.strategy = weight_quant.strategy
         self.is_static_input_scheme = is_static_input_scheme
         self.weight_block_size = self.weight_quant.block_structure
 
@@ -83,36 +88,14 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
-        if self.strategy == QuantizationStrategy.TENSOR:
-            scale = create_fp8_scale_parameter(
-                PerTensorScaleParameter,
-                output_partition_sizes,
-                input_size_per_partition,
-                None,
-                weight_loader,
-            )
-            layer.register_parameter("weight_scale", scale)
-        elif self.strategy == QuantizationStrategy.CHANNEL:
-            scale = create_fp8_scale_parameter(
-                ChannelQuantScaleParameter,
-                output_partition_sizes,
-                input_size_per_partition,
-                None,
-                weight_loader,
-            )
-            layer.register_parameter("weight_scale", scale)
-        else:
-            assert self.strategy == QuantizationStrategy.BLOCK
-            assert self.weight_block_size is not None
-            scale = create_fp8_scale_parameter(
-                BlockQuantScaleParameter,
-                output_partition_sizes,
-                input_size_per_partition,
-                self.weight_block_size,
-                weight_loader,
-            )
-            # The weight_scale_inv name is intentional for deepseekv3
-            layer.register_parameter("weight_scale_inv", scale)
+        weight_scale = create_fp8_scale_parameter(
+            strategy_to_parameter_type[self.strategy],
+            output_partition_sizes,
+            input_size_per_partition,
+            layer.weight_block_size,
+            weight_loader,
+        )
+        layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE (to deal with converted checkpoints)
         if self.is_static_input_scheme:
@@ -123,24 +106,19 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             layer.register_parameter("input_scale", input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        weight = layer.weight
+        weight_scale = layer.weight_scale
         size_k_first = True
         # TODO(rob): refactor block quant into separate class.
         if self.strategy == QuantizationStrategy.BLOCK:
-            assert not self.act_q_static
+            assert self.is_static_input_scheme is False
             size_k_first = False
-
-            weight, weight_scale_inv = process_fp8_weight_block_strategy(
-                layer.weight, layer.weight_scale_inv
+            weight, weight_scale = process_fp8_weight_block_strategy(
+                weight, weight_scale
             )
-
-            # Update layer with new values
-            replace_parameter(layer, "weight", weight.data)
-            replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
-
         else:
             # Weights must be transposed for marlin
-            weight = layer.weight.t()
-            weight_scale = layer.weight_scale
+            weight = weight.t()
             if self.strategy == QuantizationStrategy.TENSOR:
                 # If we have a fused module (QKV, MLP) with per tensor scales,
                 # we expand each scale to its shard's channels.
@@ -148,9 +126,9 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                     weight_scale, layer.logical_widths
                 )
 
-            # Update layer with new values.
-            replace_parameter(layer, "weight", weight.data)
-            replace_parameter(layer, "weight_scale", weight_scale.data)
+        # Update layer with new values
+        replace_parameter(layer, "weight", weight.data)
+        replace_parameter(layer, "weight_scale", weight_scale.data)
 
         prepare_fp8_layer_for_marlin(layer, size_k_first=size_k_first)
 
@@ -160,14 +138,10 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.strategy == QuantizationStrategy.BLOCK:
-            weight_scale = layer.weight_scale_inv
-        else:
-            weight_scale = layer.weight_scale
         return apply_fp8_marlin_linear(
             input=x,
             weight=layer.weight,
-            weight_scale=weight_scale,
+            weight_scale=layer.weight_scale,
             workspace=layer.workspace,
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
