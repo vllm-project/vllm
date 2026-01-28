@@ -485,9 +485,10 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             for spec, group_ids, manager_cls in self.attention_groups:
                 is_full_attn = isinstance(spec, FullAttentionSpec)
 
-                # Full attention: reuse cached blocks (downward-closed property)
+                # Full attention or eagle: reuse cached blocks
+                # (downward-closed property)
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
-                if is_full_attn and cached_blocks is not None:
+                if (is_full_attn or self.use_eagle) and cached_blocks is not None:
                     # For full attention, we only need to compute the cache hit
                     # length once. Starting from the second iteration, if the
                     # curr_hit_length is reduced by other groups, we can simply
@@ -513,10 +514,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     for group_id, blocks in zip(group_ids, hit_blocks):
                         hit_blocks_by_group[group_id] = blocks
 
-            if self.use_eagle:
-                hit_length = curr_hit_length
-                break
-            elif curr_hit_length < hit_length:
+            if curr_hit_length < hit_length:
                 hit_length = curr_hit_length
             else:
                 break
