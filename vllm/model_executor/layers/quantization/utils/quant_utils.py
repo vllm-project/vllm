@@ -191,6 +191,51 @@ def group_broadcast(t, shape):
     return t
 
 
+def prep_scale_for_group_broadcast(
+    scale: torch.Tensor,
+    x: torch.Tensor,
+    group_shape: GroupShape | None,
+) -> torch.Tensor:
+    """
+    Prepare the input quantization scale for group broadcasting.
+
+    Args:
+        scale: The scale tensor (scalar or 1D).
+        x: Target tensor whose shape determines broadcast dimensions.
+        group_shape: GroupShape to broadcast over.
+
+    Returns:
+        scale reshaped for correct broadcasting.
+    """
+    if scale.numel() == 1:
+        # For per-tensor quant, keep the scale as a scalar (not reshaped to (1, 1)).
+        # This avoids misclassifying it as channelwise quant in Fp8LinearOp.apply,
+        # where the "per_tensor_activations" check relies on "x_scale.dim() < 2":
+        #   per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
+        # For all other cases, reshape scalar scales to (1, 1) for broadcasting.
+        return (
+            scale
+            if group_shape is not None and group_shape.is_per_tensor()
+            else scale.reshape(1, 1)
+        )
+    if scale.ndim == 1:
+        assert group_shape is not None, (
+            "group_shape must be provided to correctly broadcast 1D scale"
+        )
+        rows, cols = _normalize_quant_group_shape(x, group_shape)
+        # Determine broadcasting dimension: either rows or columns match group size
+        if rows == x.shape[-2]:
+            scale = scale.unsqueeze(-2)
+        elif cols == x.shape[-1]:
+            scale = scale.unsqueeze(-1)
+        else:
+            raise ValueError(
+                f"1D scale with shape {scale.shape} cannot be broadcast to x with shape"
+                f" {x.shape}, group_shape={(rows, cols)}"
+            )
+    return scale
+
+
 # Quantize assuming once scale per group of elements with shape group_shape,
 # example group shapes:
 #  * (-1, -1)   for per-tensor quantization
@@ -241,7 +286,7 @@ def scaled_quantize(
     _, fp8_max = get_fp8_min_max()
     scale = fp8_max / amax
 
-    # Apply scale and convert form:
+    # Apply scale and convert from:
     # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
     x_scl_sat = (
         (x_blkd_permd * scale.unsqueeze(-1))
@@ -261,29 +306,7 @@ def scaled_dequantize(
     group_shape: GroupShape | None = None,
     out_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    if group_shape is not None:
-        group_shape = _normalize_quant_group_shape(x_q, group_shape)
-
-    if x_s.numel() == 1:  # scalar
-        x_s = x_s.reshape(1, 1)  # normalize all scalar-like tensors to (1, 1)
-    if x_s.ndim == 1:
-        if group_shape is None:
-            raise AssertionError(
-                "if x_s is 1D tensor, group_shape must be provided otherwise "
-                "its ambiguous which dimension to broadcast x_s to"
-            )
-        # unsqueeze the scales for the dimension where we want to broadcast
-        # across the full extent
-        if group_shape[0] == x_q.shape[-2]:
-            x_s = x_s.unsqueeze(-2)
-        elif group_shape[1] == x_q.shape[-1]:
-            x_s = x_s.unsqueeze(-1)
-        else:
-            raise AssertionError(
-                "if x_s is a vector we should be broadcasting it to the full "
-                "extent of one of the dimensions"
-            )
-
+    x_s = prep_scale_for_group_broadcast(x_s, x_q, group_shape)
     if group_shape is not None:
         assert x_s.shape[-1] == x_q.shape[-1] // group_shape[1]
         assert x_s.shape[-2] == x_q.shape[-2] // group_shape[0]
@@ -845,3 +868,70 @@ def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tens
         t |= ((nib - 8) & 0xF) << shift
 
     return t
+
+
+def round_up(x: int, m: int) -> int:
+    """Round up x to the nearest multiple of m."""
+    return (x + m - 1) // m * m
+
+
+def pad_nvfp4_weight_for_cutlass(
+    weight: torch.Tensor,
+    alignment: int = 32,
+) -> tuple[torch.Tensor, int]:
+    """
+    Pad packed NVFP4 weights so that both N (rows) and K (columns) satisfy
+    the alignment constraints required by CUTLASS / FlashInfer FP4 kernels.
+
+    CUTLASS FP4 kernel requires both K and N matrix dimensions to be divisible
+    by 32 for aligned memory access and efficient tensor core operations.
+    """
+    weight_current_rows = weight.shape[0]
+
+    # Pad N dimension (rows) if not aligned
+    if weight_current_rows % alignment != 0:
+        total_rows = round_up(weight_current_rows, alignment)
+        pad_rows = total_rows - weight_current_rows
+        weight = torch.nn.functional.pad(weight, (0, 0, 0, pad_rows)).contiguous()
+
+    # Check K dimension alignment
+    # 2 FP4 items are packed per byte in the input dimension
+    weight_current_col_bytes = weight.shape[1]
+    weight_current_col_elements = weight_current_col_bytes * 2
+
+    weights_padding_bytes = 0
+    if weight_current_col_elements % alignment != 0:
+        total_cols = round_up(weight_current_col_elements, alignment)
+        pad_cols = total_cols - weight_current_col_elements
+        # Convert from FP4 element count to bytes (2 FP4 values per byte)
+        # pad_cols is always even since alignment=32 and current elements are even
+        pad_bytes = pad_cols // 2
+        weight = torch.nn.functional.pad(weight, (0, pad_bytes, 0, 0)).contiguous()
+        weights_padding_bytes = pad_bytes
+
+    return weight, weights_padding_bytes
+
+
+def pad_nvfp4_activation_for_cutlass(
+    x_fp4: torch.Tensor,
+    weights_padding_bytes: int,
+) -> torch.Tensor:
+    """
+    Pad packed FP4 activations to match the K-dimension padding applied to weights.
+    The padding is in bytes (tensor dimension), not FP4 elements.
+    """
+    if weights_padding_bytes > 0:
+        return torch.nn.functional.pad(x_fp4, (0, weights_padding_bytes)).contiguous()
+    return x_fp4
+
+
+def slice_nvfp4_output(
+    out: torch.Tensor,
+    output_size: int,
+) -> torch.Tensor:
+    """
+    Slice the output tensor to remove padding in N dimension if weight was padded.
+    """
+    if out.shape[-1] != output_size:
+        return out[..., :output_size].contiguous()
+    return out
