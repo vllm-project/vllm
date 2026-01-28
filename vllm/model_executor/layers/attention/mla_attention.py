@@ -1698,6 +1698,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+    forward_includes_kv_cache_update: bool = True
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -2267,6 +2268,24 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError
 
+    def _update_kv_cache(
+        self,
+        layer: AttentionLayer,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: M,
+    ) -> None:
+        if kv_cache.numel() > 0:
+            ops.concat_and_cache_mla(
+                k_c_normed,
+                k_pe.squeeze(1),
+                kv_cache,
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype=self.kv_cache_dtype,
+                scale=layer._k_scale,
+            )
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -2336,15 +2355,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         prefill_k_c_normed = k_c_normed[num_decode_tokens:]
 
         # write the latent and rope to kv cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=layer._k_scale,
-            )
+        if self.forward_includes_kv_cache_update:
+            self._update_kv_cache(layer, k_c_normed, k_pe, kv_cache, attn_metadata)
 
         if fp8_attention:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
