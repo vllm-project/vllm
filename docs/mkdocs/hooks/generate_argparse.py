@@ -4,6 +4,7 @@ import importlib.metadata
 import importlib.util
 import logging
 import sys
+import textwrap
 import traceback
 from argparse import SUPPRESS, Action, HelpFormatter
 from collections.abc import Iterable
@@ -152,22 +153,21 @@ class MarkdownFormatter(HelpFormatter):
             heading_md = f"{self._argument_heading_prefix} {option_strings}\n\n"
             self._markdown_output.append(heading_md)
 
-            if choices := action.choices:
-                choices = f"`{'`, `'.join(str(c) for c in choices)}`"
-                self._markdown_output.append(f"Possible choices: {choices}\n\n")
-            elif (metavar := action.metavar) and isinstance(metavar, (list, tuple)):
-                metavar = f"`{'`, `'.join(str(m) for m in metavar)}`"
-                self._markdown_output.append(f"Possible choices: {metavar}\n\n")
+            if action.choices or isinstance(action.metavar, (list, tuple)):
+                choices_iterable = action.choices or action.metavar
+                choices = f"`{'`, `'.join(str(c) for c in choices_iterable)}`"
+                self._markdown_output.append(f":   Possible choices: {choices}\n\n")
 
             if action.help:
-                self._markdown_output.append(f"{action.help}\n\n")
+                help_dd = ":" + textwrap.indent(action.help, "    ")[1:]
+                self._markdown_output.append(f"{help_dd}\n\n")
 
             # None usually means the default is determined at runtime
             if (default := action.default) != SUPPRESS and default is not None:
                 # Make empty string defaults visible
                 if default == "":
                     default = '""'
-                self._markdown_output.append(f"Default: `{default}`\n\n")
+                self._markdown_output.append(f":   Default: `{default}`\n\n")
 
     def format_help(self):
         """Return the formatted help as markdown."""
