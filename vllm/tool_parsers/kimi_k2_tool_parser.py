@@ -39,9 +39,9 @@ class KimiK2ToolParser(ToolParser):
         # Section-level state management to prevent token leakage
         self.in_tool_section: bool = False
         self.token_buffer: str = ""
-        # Buffer size: empirical worst-case for longest marker (~30 chars) * 2
-        # + safety margin for unicode + partial overlap. Prevents unbounded growth.
-        self.buffer_max_size: int = 1024
+        # Buffer size: increased to handle large tool call arguments (file paths,
+        # nested JSON). 4096 bytes provides headroom for most practical cases.
+        self.buffer_max_size: int = 4096
         self.section_char_count: int = 0  # Track characters processed in tool section
         self.max_section_chars: int = 8192  # Force exit if section exceeds this
         self._buffer_overflow_logged: bool = False  # Log overflow once per session
@@ -60,6 +60,25 @@ class KimiK2ToolParser(ToolParser):
 
         self.tool_call_start_token: str = "<|tool_call_begin|>"
         self.tool_call_end_token: str = "<|tool_call_end|>"
+
+        # All markers that should be stripped from content
+        # Includes tool markers and thinking markers that may leak
+        self.all_tool_markers: list[str] = [
+            "<|tool_calls_section_begin|>",
+            "<|tool_calls_section_end|>",
+            "<|tool_call_section_begin|>",
+            "<|tool_call_section_end|>",
+            "<|tool_call_begin|>",
+            "<|tool_call_end|>",
+            "<|tool_call_argument_begin|>",
+        ]
+
+        # Regex pattern to strip thinking blocks: <think>...</think>
+        # This handles both complete thinking blocks and partial markers
+        self.thinking_pattern = re.compile(
+            r"<think>.*?</think>|<think>|</think>",
+            re.DOTALL
+        )
 
         self.tool_call_regex = re.compile(
             r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[^<]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>(?:(?!<\|tool_call_begin\|>).)*?)\s*<\|tool_call_end\|>",
@@ -126,6 +145,32 @@ class KimiK2ToolParser(ToolParser):
                 found_end = True
         return cleaned, found_begin, found_end
 
+    def _strip_all_tool_markers(self, text: str) -> str:
+        """
+        Strip ALL tool-related markers and thinking blocks from text.
+        This prevents any marker from leaking into content.
+        """
+        cleaned = text
+        for marker in self.all_tool_markers:
+            cleaned = cleaned.replace(marker, "")
+        # Also strip thinking blocks that may leak into content
+        cleaned = self.thinking_pattern.sub("", cleaned)
+        return cleaned
+
+    def _clean_content(self, text: str) -> str | None:
+        """
+        Clean content before returning to client.
+        Strips "(no content)" placeholder and returns None if empty.
+        """
+        if text is None:
+            return None
+        # Strip "(no content)" placeholder that model sometimes generates
+        cleaned = text.replace("(no content)", "")
+        # Return None if content is empty after cleaning
+        if not cleaned.strip():
+            return None
+        return cleaned
+
     def _reset_section_state(self) -> None:
         """Reset state when exiting tool section."""
         self.in_tool_section = False
@@ -155,8 +200,10 @@ class KimiK2ToolParser(ToolParser):
     ) -> ExtractedToolCallInformation:
         # sanity check; avoid unnecessary processing
         if self.tool_calls_start_token not in model_output:
+            # Filter "(no content)" from non-tool responses
+            cleaned_output = self._clean_content(model_output) or ""
             return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=model_output
+                tools_called=False, tool_calls=[], content=cleaned_output
             )
 
         else:
@@ -185,16 +232,20 @@ class KimiK2ToolParser(ToolParser):
                     )
 
                 content = model_output[: model_output.find(self.tool_calls_start_token)]
+                # Filter "(no content)" from tool call responses
+                cleaned_content = self._clean_content(content) or ""
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
-                    content=content if content else None,
+                    content=cleaned_content,
                 )
 
             except Exception:
                 logger.exception("Error in extracting tool call from response.")
+                # Filter "(no content)" from error fallback
+                cleaned_output = self._clean_content(model_output) or ""
                 return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
+                    tools_called=False, tool_calls=[], content=cleaned_output
                 )
 
     def extract_tool_calls_streaming(
@@ -240,6 +291,29 @@ class KimiK2ToolParser(ToolParser):
             self.token_buffer = buffered_text  # Use cleaned buffer
             self.section_char_count = 0  # Reset counter for new section
 
+            # CRITICAL: Extract content that appeared BEFORE the section marker
+            # and return it as reasoning content. This prevents content from
+            # leaking into the tool call stream.
+            content_before_marker = None
+            for variant in self.tool_calls_start_token_variants:
+                if variant in delta_text:
+                    marker_pos = delta_text.find(variant)
+                    if marker_pos > 0:
+                        content_before_marker = delta_text[:marker_pos]
+                    break
+
+            if content_before_marker and content_before_marker.strip():
+                cleaned = self._clean_content(content_before_marker)
+                if cleaned:
+                    logger.debug(
+                        "Returning content before tool section: '%s'",
+                        cleaned[:50] if len(cleaned) > 50 else cleaned
+                    )
+                    return DeltaMessage(content=cleaned)
+            # If no content before marker, continue to process tool calls
+            # but don't return content from this delta
+            return None
+
         if found_section_end and self.in_tool_section:
             logger.debug("Detected section end marker")
             # CRITICAL: Don't exit early if tool_call_end is in this chunk.
@@ -264,9 +338,11 @@ class KimiK2ToolParser(ToolParser):
                         if len(parts) > 1:
                             post_section_content = parts[1]
                         break
-                if post_section_content.strip():
-                    return DeltaMessage(content=post_section_content)
-                return DeltaMessage(content="")
+                cleaned = self._clean_content(post_section_content)
+                if cleaned:
+                    return DeltaMessage(content=cleaned)
+                # Return None to skip empty chunks (avoids "(no content)" in clients)
+                return None
         else:
             self.token_buffer = buffered_text
 
@@ -280,7 +356,8 @@ class KimiK2ToolParser(ToolParser):
             logger.debug("No tool call tokens found!")
             # Don't clear buffer - it needs to accumulate partial markers across deltas
             # Buffer overflow is already protected by lines 215-224
-            return DeltaMessage(content=delta_text)
+            cleaned = self._clean_content(delta_text)
+            return DeltaMessage(content=cleaned) if cleaned else None
 
         # Strip section markers from delta_text for subsequent processing
         # NOTE: This preprocessing happens BEFORE the regex-based tool call
@@ -300,8 +377,11 @@ class KimiK2ToolParser(ToolParser):
                 )
                 self._reset_section_state()
                 # Deferred exit already handled by forced exit above
-                # Return remaining content as reasoning (or empty delta if no content)
-                return DeltaMessage(content=delta_text if delta_text.strip() else "")
+                # Strip all markers before returning as content
+                cleaned_text = self._strip_all_tool_markers(delta_text)
+                cleaned_text = self._clean_content(cleaned_text)
+                # Return remaining content as reasoning, or None for empty content
+                return DeltaMessage(content=cleaned_text) if cleaned_text else None
 
         try:
             # figure out where we are in the parsing by counting tool call
@@ -331,10 +411,11 @@ class KimiK2ToolParser(ToolParser):
                         "In tool section before first tool, suppressing: %s",
                         delta_text,
                     )
-                    # Return empty delta to maintain iterator contract
-                    return DeltaMessage(content="")
+                    # Return None to skip this chunk (avoids "(no content)" in clients)
+                    return None
                 logger.debug("Generating text content! skipping tool parsing.")
-                return DeltaMessage(content=delta_text)
+                cleaned = self._clean_content(delta_text)
+                return DeltaMessage(content=cleaned) if cleaned else None
 
             if self.tool_call_end_token in delta_text:
                 logger.debug("tool_call_end_token in delta_text")
@@ -382,8 +463,12 @@ class KimiK2ToolParser(ToolParser):
                 cur_tool_start_count == cur_tool_end_count
                 and cur_tool_end_count >= prev_tool_end_count
             ):
-                if self.prev_tool_call_arr is None or len(self.prev_tool_call_arr) == 0:
-                    logger.debug("attempting to close tool call, but no tool call")
+                if (self.prev_tool_call_arr is None
+                    or len(self.prev_tool_call_arr) == 0
+                    or self.current_tool_id >= len(self.prev_tool_call_arr)):
+                    logger.debug(
+                        "attempting to close tool call, but no tool call or invalid index"
+                    )
                     # Handle deferred section exit before returning
                     if deferred_section_exit and self.in_tool_section:
                         self._reset_section_state()
@@ -431,10 +516,17 @@ class KimiK2ToolParser(ToolParser):
                     # Handle deferred section exit before returning
                     if deferred_section_exit:
                         self._reset_section_state()
-                    return DeltaMessage(content="")
-                text = delta_text.replace(self.tool_call_start_token, "")
-                text = text.replace(self.tool_call_end_token, "")
-                delta = DeltaMessage(tool_calls=[], content=text)
+                    # Return None to skip this chunk (avoids "(no content)" in clients)
+                    return None
+                # Strip ALL tool markers, not just start/end
+                text = self._strip_all_tool_markers(delta_text)
+                # Clean and skip empty content after stripping
+                text = self._clean_content(text)
+                if not text:
+                    if deferred_section_exit and self.in_tool_section:
+                        self._reset_section_state()
+                    return None
+                delta = DeltaMessage(content=text)
                 # Handle deferred section exit before returning
                 if deferred_section_exit and self.in_tool_section:
                     self._reset_section_state()
@@ -442,6 +534,8 @@ class KimiK2ToolParser(ToolParser):
 
             current_tool_call = dict()
             if tool_call_portion:
+                # Strip leading/trailing whitespace to fix regex matching
+                tool_call_portion = tool_call_portion.strip()
                 current_tool_call_matches = self.stream_tool_call_portion_regex.match(
                     tool_call_portion
                 )
@@ -474,6 +568,14 @@ class KimiK2ToolParser(ToolParser):
                 tool_id = current_tool_call.get("id")
                 if function_name:
                     self.current_tool_name_sent = True
+
+                    # CRITICAL: Initialize prev_tool_call_arr before returning
+                    # This prevents IndexError on subsequent iterations
+                    if len(self.prev_tool_call_arr) <= self.current_tool_id:
+                        self.prev_tool_call_arr.append(current_tool_call)
+                    else:
+                        self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
+
                     return DeltaMessage(
                         tool_calls=[
                             DeltaToolCall(
@@ -498,11 +600,11 @@ class KimiK2ToolParser(ToolParser):
                 # CRITICAL: Never return content if we're in a tool section
                 if self.in_tool_section:
                     return None
-                delta = (
-                    DeltaMessage(content=delta_text)
-                    if text_portion is not None
-                    else None
-                )
+                if text_portion is not None:
+                    cleaned = self._clean_content(delta_text)
+                    delta = DeltaMessage(content=cleaned) if cleaned else None
+                else:
+                    delta = None
                 return delta
 
             # now, the nitty-gritty of tool calls
@@ -583,7 +685,7 @@ class KimiK2ToolParser(ToolParser):
 
             # handle saving the state for the current tool into
             # the "prev" list for use in diffing for the next iteration
-            if self.current_tool_id == len(self.prev_tool_call_arr) - 1:
+            if self.current_tool_id < len(self.prev_tool_call_arr):
                 self.prev_tool_call_arr[self.current_tool_id] = current_tool_call
             else:
                 self.prev_tool_call_arr.append(current_tool_call)
@@ -597,4 +699,7 @@ class KimiK2ToolParser(ToolParser):
 
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
+            # Handle deferred section exit before returning
+            if deferred_section_exit and self.in_tool_section:
+                self._reset_section_state()
             return None  # do not stream a delta. skip this token ID.
