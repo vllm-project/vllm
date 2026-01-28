@@ -226,7 +226,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             last_event = last_transfer.end_event
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
-        with torch.cuda.stream(stream):
+        with stream:
             start_event.record(stream)
             if total > 0:
                 ops.swap_blocks_batch(batch_src, batch_dst, batch_sizes)

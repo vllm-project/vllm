@@ -7,6 +7,7 @@ This involves the exchange of expert weights between GPUs.
 """
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import numpy as np
@@ -237,7 +238,8 @@ def move_to_buffer(
             expert = new_local_expert_ids[dst]
             src_local = expert_to_src_map.get(expert, -1)
             if src_local != -1:
-                with torch.cuda.stream(cuda_stream):
+                astream = cuda_stream if cuda_stream is not None else nullcontext()
+                with astream:
                     for w, b in zip(expert_weights, expert_weights_buffers):
                         b[dst].copy_(w[src_local], non_blocking=True)
 

@@ -37,7 +37,7 @@ def maybe_execute_in_parallel(
     if aux_stream is not None:
         event0.record()
         result0 = fn0()
-        with torch.cuda.stream(aux_stream):
+        with aux_stream:
             event0.wait()
             result1 = fn1()
             event1.record()

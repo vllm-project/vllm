@@ -6,6 +6,7 @@ EPLB communicator implementations and factory.
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from contextlib import nullcontext
 
 import torch
 from torch.distributed import (
@@ -85,7 +86,10 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
         if not self._p2p_ops:
             return
         try:
-            with torch.cuda.stream(self._cuda_stream):
+            astream = (
+                self._cuda_stream if self._cuda_stream is not None else nullcontext()
+            )
+            with astream:
                 reqs = batch_isend_irecv(self._p2p_ops)
                 for req in reqs:
                     req.wait()
@@ -144,7 +148,10 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                 recv_staging.append((tensor, cpu_tensor))
 
         try:
-            with torch.cuda.stream(self._cuda_stream):
+            astream = (
+                self._cuda_stream if self._cuda_stream is not None else nullcontext()
+            )
+            with astream:
                 build_ops()
         finally:
             self._ops.clear()
@@ -162,7 +169,8 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
 
         if not recv_staging:
             return
-        with torch.cuda.stream(self._cuda_stream):
+        astream = self._cuda_stream if self._cuda_stream is not None else nullcontext()
+        with astream:
             for dst_tensor, cpu_tensor in recv_staging:
                 dst_tensor.copy_(cpu_tensor, non_blocking=True)
 

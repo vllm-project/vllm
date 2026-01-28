@@ -149,7 +149,8 @@ class SharedExperts:
         # TODO: assert that maybe_sync_shared_experts_stream has been called.
 
         # Run shared experts in parallel on a separate stream.
-        with torch.cuda.stream(self._stream):
+        assert self._stream is not None
+        with self._stream:
             output = self._layer(shared_experts_input)
         current_stream().wait_stream(self._stream)
 
