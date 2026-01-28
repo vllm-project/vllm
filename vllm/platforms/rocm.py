@@ -97,19 +97,19 @@ def on_gfx1x() -> bool:
 @cache
 def on_mi3xx() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950"])
+    return any(arch in GPU_ARCH for arch in ["gfx942", "gfx950", "gfx1250"])
 
 
 @cache
 def on_gfx9() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950", "gfx1250"])
 
 
 @cache
 def on_gfx950() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    return any(arch in GPU_ARCH for arch in ["gfx950"])
+    return any(arch in GPU_ARCH for arch in ["gfx950", "gfx1250"])
 
 
 @cache

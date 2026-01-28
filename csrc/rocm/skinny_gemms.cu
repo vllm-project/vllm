@@ -14,15 +14,15 @@
 #include "quantization/w8a8/fp8/common.cuh"
 
 #if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__) || defined(__gfx1250__))
   #define __HIP__GFX9__
 #endif
 
-#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
+#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__) || defined(__gfx1250__))
   #define __HIP__MI3XX__
 #endif
 
-#if defined(__gfx950__)
+#if defined(__gfx950__)  || defined(__gfx1250__)
   #define LDS_SIZE 160 * 1024
 #else
   #define LDS_SIZE 64 * 1024
@@ -1358,7 +1358,7 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
-#if defined(__gfx950__)  // TODO: Add NAVI support
+#if defined(__gfx950__) || defined(__gfx1250__)  // TODO: Add NAVI support
   // This version targets big A[] cases, where it is much larger than LDS
   // capacity
   #define WVSPLITKRC_1KPASS
