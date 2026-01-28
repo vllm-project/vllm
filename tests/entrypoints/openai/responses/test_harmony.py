@@ -992,7 +992,7 @@ async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
     # First turn - make a calculation
     response1 = await client.responses.create(
         model=model_name,
-        input="Calculate 123 * 456 using python and print the result.",
+        input="Calculate 1234 * 4567 using python tool and print the result.",
         tools=tools,
         temperature=0.0,
         instructions=(
