@@ -103,7 +103,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   # NEW rlhf examples
-  - cd ../examples/offline_inference/new_weight_syncing
+  - cd new_weight_syncing
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
 
