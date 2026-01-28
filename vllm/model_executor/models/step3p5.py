@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Jurassic model."""
-import math
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -19,9 +18,8 @@ from vllm.distributed import (get_dp_group,
                               get_tensor_model_parallel_world_size,
                               get_tp_group)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul, SwigluOAIStepAndMul
+from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -58,78 +56,7 @@ def sigmoid_routing_function(hidden_states: torch.Tensor,
     if renormalize:
         expert_topk_weight = expert_topk_weight / torch.sum(
             expert_topk_weight, dim=-1, keepdim=True)
-    return expert_topk_weight, indices.to(torch.int32)
-
-def Step3p5RMSNorm(
-    hidden_size: int,
-    eps: float = 1e-6,
-    zero_centered: bool = True,
-):
-    if zero_centered:
-        return GemmaRMSNorm(hidden_size, eps)
-    else:
-        return RMSNorm(hidden_size, eps)    
-
-def pad_param(
-    weight: torch.Tensor,
-    name: str,
-    param: torch.nn.Parameter,
-    quant_config: Optional[QuantizationConfig] = None,
-) -> torch.Tensor:
-    """Pad 2D weight for groupwise quantization TP sharding.
-
-    Decide whether to pad based on `param.quant_method`:
-    - None / UnquantizedLinearMethod / UnquantizedFusedMoEMethod => no padding
-    - otherwise => treat as quantized and pad if groupwise_quant config is found
-    """
-    if weight.dim() != 2:
-        return weight
-
-    quant_method = getattr(param, "quant_method", None)
-    if not quant_config or quant_config.get_name(
-    ) != "groupwise_quant" or not quant_method:
-        return weight
-
-    world_size = get_tensor_model_parallel_world_size()
-    group_size = quant_config.group_size
-
-    if ("down_proj.scales" in name) or ("w2_weight_scale" in name):
-        group_size = 1
-
-    ic, oc = weight.shape
-    if ("down" in name) or ("w2" in name):
-        ic_pad = int(
-            math.ceil(ic / group_size / world_size) * world_size *
-            group_size) - ic
-        out = torch.nn.functional.pad(weight, (0, 0, 0, ic_pad), "constant", 0)
-    else:
-        oc_pad = int(
-            math.ceil(oc / group_size / world_size) * world_size *
-            group_size) - oc
-        out = torch.nn.functional.pad(weight, (0, oc_pad, 0, 0), "constant", 0)
-
-    logger.debug(
-        f"padding {name} ,quant_config={quant_config},original weight.shape: {weight.shape}, padded weight.shape: {out.shape}"
-    )
-    return out
-
-
-def _pad_size_for_groupwise_quant(
-    size: int,
-    quant_config: Optional[QuantizationConfig],
-) -> int:
-    """Pad `size` to be a multiple of (group_size * tensor_parallel_world_size).
-
-    This is needed for groupwise quantization TP sharding.
-    """
-    if quant_config is None or quant_config.get_name() != "groupwise_quant":
-        return size
-    world_size = get_tensor_model_parallel_world_size()
-
-    group_size = quant_config.group_size
-    multiple = world_size * group_size
-    return math.ceil(size / multiple) * multiple
-
+    return expert_topk_weight, indices.to(torch.int32) 
 
 class Step3p5MLP(nn.Module):
 
@@ -144,10 +71,6 @@ class Step3p5MLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-
-        intermediate_size = _pad_size_for_groupwise_quant(
-            intermediate_size, quant_config)
-
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size, [intermediate_size] * 2,
             bias=False,
@@ -173,7 +96,7 @@ class Step3p5MLP(nn.Module):
                 layer_idx] is not None and config.swiglu_limits_shared[
                     layer_idx] != 0:
             self.limit = config.swiglu_limits_shared[layer_idx]
-            self.act_fn = SwigluOAIStepAndMul(limit=self.limit)
+            self.act_fn = SwigluStepAndMul(limit=self.limit)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(hidden_states)
@@ -198,17 +121,14 @@ class Step3p5Attention(nn.Module):
         rope_scaling: Optional[tuple] = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: Optional[dict[str, Any]] = None,
         # Step3p5 specific args
         sliding_window: Optional[int] = None,
-        enable_sink: bool = False,
         use_head_wise_attn_gate: bool = False,
         layer_types: list = None,
         use_rope_layers: list = None,
         yarn_only_types: list = None,
         swa_num_attention_heads: Optional[int] = None,
         partial_rotary_factor: float = 1.0,
-        zero_centered: bool = True,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -229,14 +149,7 @@ class Step3p5Attention(nn.Module):
             if swa_num_attention_heads is not None:
                 num_heads = swa_num_attention_heads
                 self.total_num_heads = swa_num_attention_heads
-            if enable_sink:
-                self.sinks = torch.nn.Parameter(torch.empty(
-                    self.total_num_heads // tp_size, dtype=torch.bfloat16),
-                                                requires_grad=False)
-            else:
-                self.sinks = None
         else:
-            self.sinks = None
             sliding_window = None
 
         if isinstance(rope_theta, list):
@@ -261,7 +174,6 @@ class Step3p5Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-        self.dual_chunk_attention_config = dual_chunk_attention_config
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -279,34 +191,16 @@ class Step3p5Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # vLLM >= 0.7 uses `rope_parameters` for all RoPE scaling variants.
-        # `rope_scaling` (HF-style) is mapped into `rope_parameters` here to
-        # preserve the behavior of older Step3p5 implementations.
         rope_parameters: dict[str, Any] = {
             "rope_type": "default",
             "partial_rotary_factor": partial_rotary_factor,
         }
         if rope_scaling is not None:
-            if isinstance(rope_scaling, dict):
-                rope_parameters.update(rope_scaling)
-            elif isinstance(rope_scaling, (tuple, list)) and rope_scaling and isinstance(
-                    rope_scaling[0], dict):
-                # Per-layer rope scaling configs.
-                if self.layer_idx < len(rope_scaling):
-                    rope_parameters.update(rope_scaling[self.layer_idx])
-            elif isinstance(rope_scaling,
-                            (tuple, list)) and len(rope_scaling) == 2 and isinstance(
-                                rope_scaling[0], str):
-                # Legacy tuple format: (type, factor)
-                rope_parameters.update({
-                    "rope_type": rope_scaling[0],
-                    "factor": rope_scaling[1],
-                })
-        if "type" in rope_parameters:
-            rope_parameters.setdefault("rope_type", rope_parameters["type"])
-            rope_parameters.pop("type", None)
-        # Always take the per-layer resolved rope theta, instead of trusting
-        # any potentially list-valued rope_theta coming from rope_scaling.
+            if not isinstance(rope_scaling, dict):
+                raise ValueError(
+                    "rope_scaling must be a dict for Step3p5Attention."
+                )
+            rope_parameters.update(rope_scaling)
         rope_parameters["rope_theta"] = self.rope_theta
         rope_parameters["partial_rotary_factor"] = partial_rotary_factor
 
@@ -314,16 +208,10 @@ class Step3p5Attention(nn.Module):
             head_size=self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
 
-        self.q_norm = Step3p5RMSNorm(self.head_dim,
-                                     eps=rms_norm_eps,
-                                     zero_centered=zero_centered)
-        self.k_norm = Step3p5RMSNorm(self.head_dim,
-                                     eps=rms_norm_eps,
-                                     zero_centered=zero_centered)
-        self.zero_centered = zero_centered
+        self.q_norm = GemmaRMSNorm(self.head_dim, rms_norm_eps)
+        self.k_norm = GemmaRMSNorm(self.head_dim, rms_norm_eps)
         self.use_head_wise_attn_gate = use_head_wise_attn_gate
         if use_head_wise_attn_gate:
             self.g_proj = ColumnParallelLinear(
@@ -337,7 +225,6 @@ class Step3p5Attention(nn.Module):
         if use_rope_layers:
             self.use_rope = use_rope_layers[self.layer_idx]
 
-        # TODO: Add sink attention
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -348,10 +235,6 @@ class Step3p5Attention(nn.Module):
             prefix=f"{prefix}.attn",
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            } if dual_chunk_attention_config else {},
         )
 
         self.max_position_embeddings = max_position
@@ -359,7 +242,6 @@ class Step3p5Attention(nn.Module):
         self.rotary_dim = self.head_dim if self.partial_rotary_factor == 1 else self.head_dim // 2
 
     def qk_norm_rope(self, q, k, positions):
-        # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
                            self.head_dim)
         q_by_head = self.q_norm(q_by_head.contiguous())
@@ -443,20 +325,16 @@ class FusedMoEBlock(nn.Module):
         if config.swiglu_limits and config.swiglu_limits[
                 layer_idx] is not None and config.swiglu_limits[layer_idx] != 0:
             swigluoai_step_limit = config.swiglu_limits[layer_idx]
-            activation = "swigluoai-step"
+            activation = "swiglustep"
             logger.info(
-                f"step3p5 layer_idx: {layer_idx}, activation limit: {config.swiglu_limits[layer_idx]}, will use swigluoai-step"
+                f"step3p5 layer_idx: {layer_idx}, activation limit: {config.swiglu_limits[layer_idx]}, will use swiglustep"
             )
-        moe_intermediate_size = _pad_size_for_groupwise_quant(
-            config.moe_intermediate_size,
-            quant_config,
-        )
         self.experts = SharedFusedMoE(
             shared_experts=shared_experts,
             num_experts=config.moe_num_experts,
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,
-            intermediate_size=moe_intermediate_size,
+            intermediate_size=config.moe_intermediate_size,
             reduce_results=reduce_results,
             renormalize=config.norm_expert_weight,
             quant_config=quant_config,
@@ -497,7 +375,6 @@ class FusedMoEBlock(nn.Module):
             router_logits = hidden_states.to(
                 torch.float32) @ self.gate.weight.to(torch.float32).t()
         else:
-            # router_logits: (num_tokens, n_experts)
             router_logits, _ = self.gate(hidden_states)
         shared_out, final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits)
@@ -512,7 +389,6 @@ class Step3p5DecoderLayer(nn.Module):
                  parallel_config: ParallelConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 use_fused_moe: bool = False,
                  prefix: str = "") -> None:
         super().__init__()
         config = config.hf_config
@@ -553,7 +429,6 @@ class Step3p5DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 rope_scaling=rope_scaling,
                 sliding_window=getattr(config, 'sliding_window', None),
-                enable_sink=getattr(config, "sink", False),
                 use_head_wise_attn_gate=getattr(config,
                                                 "use_head_wise_attn_gate",
                                                 False),
@@ -562,7 +437,6 @@ class Step3p5DecoderLayer(nn.Module):
                 yarn_only_types=getattr(config, "yarn_only_types", []),
                 partial_rotary_factor=partial_rotary_factors[layer_idx]
                 if partial_rotary_factors else 1.0,
-                zero_centered=getattr(config, "zero_centered", False),
                 prefix=f"{prefix}.self_attn",
             )
         else:
@@ -584,19 +458,16 @@ class Step3p5DecoderLayer(nn.Module):
                 int(i) for i in moe_layers_enum.strip().split(',')
             ]
         else:
-            # Default to 1dense.
             moe_layers_idx = [i for i in range(1, config.num_hidden_layers)]
         if layer_idx in moe_layers_idx:
             reduce_results = True
             if self.use_fused_all_reduce or self.tp_group.world_size == 1 and get_ep_group(
             ).world_size == 1:
                 reduce_results = False
-            moe_intermediate_size = _pad_size_for_groupwise_quant(
-                config.share_expert_dim, quant_config)
             self.share_expert = Step3p5MLP(
                 config=config,
                 hidden_size=self.hidden_size,
-                intermediate_size=moe_intermediate_size,
+                intermediate_size=config.share_expert_dim,
                 hidden_act="silu",
                 reduce_results=reduce_results,
                 quant_config=quant_config,
@@ -616,15 +487,8 @@ class Step3p5DecoderLayer(nn.Module):
                                   quant_config=quant_config,
                                   reduce_results=True,
                                   prefix=f"{prefix}.mlp")
-        self.use_fused_moe = use_fused_moe
-        self.input_layernorm = Step3p5RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
-            zero_centered=config.zero_centered)
-        self.post_attention_layernorm = Step3p5RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
-            zero_centered=config.zero_centered)
+        self.input_layernorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.post_attention_layernorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.prefix = prefix
 
     def add_and_maybe_inplace_all_reduce(self, in1: torch.Tensor,
@@ -656,22 +520,18 @@ class Step3p5DecoderLayer(nn.Module):
         hidden_states = ffn_output + residual
         return hidden_states
 
-
-# Note: max-num-batched-tokens 开到64k 编译会不通过，小于64k没啥问题
 @support_torch_compile
 class Step3p5Model(nn.Module):
 
     def __init__(self,
                  vllm_config: VllmConfig,
-                 prefix: str = "",
-                 use_fused_moe: bool = False) -> None:
+                 prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.vocab_size = config.vocab_size
         self.config = config
-        self.use_fused_moe = use_fused_moe
 
         self.moe_num_experts = config.moe_num_experts
 
@@ -691,14 +551,11 @@ class Step3p5Model(nn.Module):
                 parallel_config=vllm_config.parallel_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                use_fused_moe=self.use_fused_moe,
                 prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:
-            self.norm = Step3p5RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps,
-                                       zero_centered=config.zero_centered)
+            self.norm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
 
@@ -751,8 +608,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         self.vllm_config = vllm_config
 
         self.model = Step3p5Model(vllm_config=vllm_config,
-                                  prefix=maybe_prefix(prefix, "model"),
-                                  use_fused_moe=True)
+                                  prefix=maybe_prefix(prefix, "model"))
 
         self.moe_layers: list[FusedMoEBlock] = []
         for layer in self.model.layers:
@@ -818,7 +674,6 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         logical_replica_count: torch.Tensor,
     ) -> None:
         for layer_idx, layer in enumerate(self.moe_layers):
-            # layer_idx = layer.layer_idx
             experts = layer.experts
             assert isinstance(experts, FusedMoE)
             # Register the expert weights.
@@ -851,7 +706,6 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         vllm_config = self.vllm_config
         config = vllm_config.model_config.hf_config
         assert config.num_attention_groups > 1, "Only support GQA"
-        #GQA
         qkv_params_mapping = []
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -865,30 +719,11 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         params_dict = dict(self.named_parameters())
         loaded_params = set()
 
-        if self.model.use_fused_moe:
-            is_groupwise_quant = self.vllm_config.quant_config is not None and self.vllm_config.quant_config.get_name(
-            ) == "groupwise_quant"
-            if is_groupwise_quant:
-                expert_params_mapping = [
-                    (".moe.experts.w13_weight", ".moe.gate_proj.qweight",
-                     "w1"),
-                    (".moe.experts.w13_weight", ".moe.up_proj.qweight", "w3"),
-                    (".moe.experts.w2_weight", ".moe.down_proj.qweight", "w2"),
-                    (".moe.experts.w13_weight_scale", ".moe.gate_proj.scales",
-                     "w1"),
-                    (".moe.experts.w13_weight_scale", ".moe.up_proj.scales",
-                     "w3"),
-                    (".moe.experts.w2_weight_scale", ".moe.down_proj.scales",
-                     "w2"),
-                ]
-            else:
-                expert_params_mapping = [
-                    (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-                    (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-                    (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2")
-                ]
-        else:
-            expert_params_mapping = []
+        expert_params_mapping = [
+            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
+            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
+            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2")
+        ]
 
         disable_moe_stacked_params = [data[1] for data in expert_params_mapping]
 
@@ -909,8 +744,6 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                loaded_weight = pad_param(loaded_weight, name, param,
-                                          self.vllm_config.quant_config)
                 weight_loader(param, loaded_weight, shard_id)
                 loaded_params.add(name)
                 break
@@ -933,9 +766,6 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                     assert loaded_weight.shape[0] == moe_expert_num
                     for expert_id in range(moe_expert_num):
                         loaded_weight_expert = loaded_weight[expert_id]
-                        loaded_weight_expert = pad_param(
-                            loaded_weight_expert, name, param,
-                            self.vllm_config.quant_config)
                         weight_loader(param,
                                       loaded_weight_expert,
                                       name,
@@ -967,9 +797,6 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                             logger.warning_once("ignore expert_bias")
                             continue
                         param = params_dict[name]
-                        loaded_weight = pad_param(
-                            loaded_weight, name, param,
-                            self.vllm_config.quant_config)
                         weight_loader = getattr(param, "weight_loader",
                                                 default_weight_loader)
                         weight_loader(param, loaded_weight)

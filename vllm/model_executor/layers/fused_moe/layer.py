@@ -521,9 +521,9 @@ class FusedMoE(CustomOp):
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
         self.activation_limit = activation_limit
-        if self.activation == "swigluoai-step" and self.activation_limit is None:
+        if self.activation == "swiglustep" and self.activation_limit is None:
             raise ValueError(
-                "activation='swigluoai-step' requires activation_limit to be set."
+                "activation='swiglustep' requires activation_limit to be set."
             )
 
         self.router = create_fused_moe_router(

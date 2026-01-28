@@ -9,15 +9,14 @@ from transformers import PretrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-# from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
-
-from .step3p5 import Step3p5RMSNorm, Step3p5DecoderLayer, get_spec_layer_idx_from_weight_name
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from .step3p5 import Step3p5DecoderLayer, get_spec_layer_idx_from_weight_name
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -31,9 +30,7 @@ class SharedHead(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.norm = Step3p5RMSNorm(config.hidden_size,
-                                   eps=config.rms_norm_eps,
-                                   zero_centered=config.zero_centered)
+        self.norm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.head = ParallelLMHead(config.vocab_size,
                                    config.hidden_size,
                                    quant_config=quant_config)
@@ -55,12 +52,8 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.enorm = Step3p5RMSNorm(config.hidden_size,
-                                    eps=config.rms_norm_eps,
-                                    zero_centered=config.zero_centered)
-        self.hnorm = Step3p5RMSNorm(config.hidden_size,
-                                    eps=config.rms_norm_eps,
-                                    zero_centered=config.zero_centered)
+        self.enorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.hnorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2,
                                  config.hidden_size,
                                  bias=False)
@@ -69,7 +62,6 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
                                              parallel_config=parallel_config,
                                              cache_config=cache_config,
                                              quant_config=quant_config,
-                                             use_fused_moe=True,
                                              prefix=f"{prefix}.mtp_block")
 
     def forward(
@@ -121,7 +113,6 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         })
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.use_fused_moe = True
 
     def forward(
         self,
@@ -196,55 +187,20 @@ class Step3p5MTP(nn.Module):
         vllm_config = self.vllm_config
         config = vllm_config.model_config.hf_config
 
-        if config.num_attention_groups > 1:
-            #GQA
-            # qkv_params_mapping=[]
-            stacked_params_mapping = [
-                # (param_name, shard_name, shard_id)
-                ("qkv_proj", "q_proj", "q"),
-                ("qkv_proj", "k_proj", "k"),
-                ("qkv_proj", "v_proj", "v"),
-                ("gate_up_proj", "gate_proj", 0),
-                ("gate_up_proj", "up_proj", 1),
-            ]
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
 
-        elif config.att_impl_type == "MLA":
-            # qkv_params_mapping = []
-            stacked_params_mapping = [
-                # (param_name, shard_name, shard_id)
-                ("gate_up_proj", "gate_proj", 0),
-                ("gate_up_proj", "up_proj", 1),
-            ]
-        else:
-            stacked_params_mapping = [
-                # (param_name, shard_name, shard_id)
-                (".gate_up_proj", ".gate_proj", 0),
-                (".gate_up_proj", ".up_proj", 1),
-            ]
-
-        if self.model.use_fused_moe:
-            if self.vllm_config.quant_config is not None and self.vllm_config.quant_config.get_name(
-            ) == "groupwise_quant":
-                expert_params_mapping = [
-                    (".moe.experts.w13_weight", ".moe.gate_proj.qweight",
-                     "w1"),
-                    (".moe.experts.w13_weight", ".moe.up_proj.qweight", "w3"),
-                    (".moe.experts.w2_weight", ".moe.down_proj.qweight", "w2"),
-                    (".moe.experts.w13_weight_scale", ".moe.gate_proj.scales",
-                     "w1"),
-                    (".moe.experts.w13_weight_scale", ".moe.up_proj.scales",
-                     "w3"),
-                    (".moe.experts.w2_weight_scale", ".moe.down_proj.scales",
-                     "w2"),
-                ]
-            else:
-                expert_params_mapping = [
-                    (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-                    (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-                    (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2")
-                ]
-        else:
-            expert_params_mapping = []
+        expert_params_mapping = [
+            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
+            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
+            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2")
+        ]
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()

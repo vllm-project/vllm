@@ -336,7 +336,7 @@ def apply_moe_activation(
     """
     Apply MoE activation function.
 
-    For *_and_mul activations (silu, gelu, swigluoai, swigluoai-step):
+    For *_and_mul activations (silu, gelu, swigluoai, swiglustep):
         - Expects output.size(-1) * 2 == input.size(-1)
 
     For *_no_mul activations (silu_no_mul, gelu_no_mul, relu2_no_mul):
@@ -359,14 +359,14 @@ def apply_moe_activation(
         torch.ops._C.gelu_and_mul(output, input)
     elif activation == "swigluoai":
         torch.ops._C.swigluoai_and_mul(output, input)
-    elif activation == "swigluoai-step":
+    elif activation == "swiglustep":
         if activation_limit is None:
             raise ValueError(
-                "activation='swigluoai-step' requires activation_limit to be set."
+                "activation='swiglustep' requires activation_limit to be set."
             )
-        from vllm.model_executor.layers.activation import swigluoai_step_and_mul_out
+        from vllm.model_executor.layers.activation import swiglustep_and_mul_out
 
-        swigluoai_step_and_mul_out(output, input, activation_limit)
+        swiglustep_and_mul_out(output, input, activation_limit)
     # Activations without gated multiplication
     elif activation == SILU_NO_MUL:
         output.copy_(F.silu(input))
