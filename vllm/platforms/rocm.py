@@ -334,9 +334,9 @@ class RocmPlatform(Platform):
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
-            # Default: Triton Unified Attention
-            logger.info("Using Triton Attention backend.")
-            return AttentionBackendEnum.TRITON_ATTN.get_path()
+            # Default: ROCm split Attention
+            logger.info("Using ROCm Attention backend.")
+            return AttentionBackendEnum.ROCM_ATTN.get_path()
 
         raise RuntimeError(
             f"Attention backend {selected_backend.name} is not supported on "

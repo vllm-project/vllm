@@ -281,6 +281,14 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     return bool(int(value))
 
 
+def use_aiter() -> bool:
+    from vllm._aiter_ops import is_aiter_found_and_supported
+
+    return is_aiter_found_and_supported() and os.getenv(
+        "VLLM_ROCM_USE_AITER", "True"
+    ).lower() in ("true", "1")
+
+
 def disable_compile_cache() -> bool:
     return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
 
@@ -951,9 +959,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
-    "VLLM_ROCM_USE_AITER": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
-    ),
+    "VLLM_ROCM_USE_AITER": use_aiter,
     # Whether to use aiter paged attention.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_PAGED_ATTN": lambda: (
@@ -982,7 +988,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use aiter mha ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_MHA", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter fp4 gemm asm.
     # By default is disabled.
