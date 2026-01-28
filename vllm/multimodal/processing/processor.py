@@ -989,7 +989,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.dummy_inputs = dummy_inputs
         self.cache = cache
 
-        self.data_parser = self.info.get_data_parser()
+        if hasattr(self, "_get_data_parser"):
+            logger.warning_once(
+                "BaseMultiModalProcessor._get_data_parser is deprecated "
+                "and will be removed in v0.16."
+                "You should override `info.build_data_parser` instead."
+            )
+
+            self.data_parser = self._get_data_parser()  # type: ignore
+        else:
+            self.data_parser = self.info.get_data_parser()
 
         # Avoid unnecessary recomputation
         self._supported_mm_limits = self.info.get_supported_mm_limits()

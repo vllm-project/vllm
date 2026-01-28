@@ -239,12 +239,6 @@ class MultiModalRegistry:
                     self,
                 )
 
-            if hasattr(processor, "_get_data_parser"):
-                raise ValueError(
-                    "BaseMultiModalProcessor._get_data_parser has been removed. "
-                    "You should override `info.build_data_parser` instead."
-                )
-
             model_cls._processor_factory = _ProcessorFactories(
                 info=info,
                 dummy_inputs=dummy_inputs,
