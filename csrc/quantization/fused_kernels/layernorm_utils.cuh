@@ -45,9 +45,9 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   *rms = s_rms;
 }
 
-__device__ float warpReduceMaxSpecialized(volatile float* val, int64_t tid,
-                                          int64_t thread_in_warp,
-                                          int64_t reduced_elems) {
+__device__ __forceinline__ float warpReduceMaxSpecialized(
+    volatile float* val, int64_t tid, int64_t thread_in_warp,
+    int64_t reduced_elems) {
   static_assert(WARP_SIZE == 32 || WARP_SIZE == 64);
   if constexpr (WARP_SIZE == 64) {
     if (thread_in_warp + 64 < reduced_elems)
