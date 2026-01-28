@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
-
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.allspark import (  # noqa: E501
     AllSparkLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.bitblas import (  # noqa: E501
-    BitBLASLinearKernel,
-)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.conch import (  # noqa: E501
     ConchLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.cpu import (  # noqa: E501
+    CPUWNA16LinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.cutlass import (  # noqa: E501
     CutlassW4A8LinearKernel,
@@ -32,6 +30,9 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision.MPLinearKer
     MPLinearKernel,
     MPLinearLayerConfig,
 )
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.xpu import (  # noqa: E501
+    XPUwNa16LinearKernel,
+)
 from vllm.platforms import current_platform
 
 # in priority/performance order (when available)
@@ -41,14 +42,15 @@ _POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
     AllSparkLinearKernel,
     MarlinLinearKernel,
     Dynamic4bitLinearKernel,
-    BitBLASLinearKernel,
     ConchLinearKernel,
     ExllamaLinearKernel,
+    XPUwNa16LinearKernel,
+    CPUWNA16LinearKernel,
 ]
 
 
 def choose_mp_linear_kernel(
-    config: MPLinearLayerConfig, compute_capability: Optional[int] = None
+    config: MPLinearLayerConfig, compute_capability: int | None = None
 ) -> type[MPLinearKernel]:
     """
     Choose an MPLinearKernel that can implement the given config for the given

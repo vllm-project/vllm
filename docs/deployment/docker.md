@@ -1,7 +1,5 @@
 # Using Docker
 
-[](){ #deployment-docker-pre-built-image }
-
 ## Use vLLM's Official Docker Image
 
 vLLM offers an official Docker image for deployment.
@@ -10,7 +8,7 @@ The image can be used to run OpenAI compatible server and is available on Docker
 ```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
+    --env "HF_TOKEN=$HF_TOKEN" \
     -p 8000:8000 \
     --ipc=host \
     vllm/vllm-openai:latest \
@@ -22,7 +20,7 @@ This image can also be used with other container engines such as [Podman](https:
 ```bash
 podman run --device nvidia.com/gpu=all \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
-  --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
+  --env "HF_TOKEN=$HF_TOKEN" \
   -p 8000:8000 \
   --ipc=host \
   docker.io/vllm/vllm-openai:latest \
@@ -37,17 +35,17 @@ You can add any other [engine-args](../configuration/engine_args.md) you need af
     memory to share data between processes under the hood, particularly for tensor parallel inference.
 
 !!! note
-    Optional dependencies are not included in order to avoid licensing issues (e.g. <gh-issue:8030>).
+    Optional dependencies are not included in order to avoid licensing issues (e.g. <https://github.com/vllm-project/vllm/issues/8030>).
 
     If you need to use those dependencies (having accepted the license terms),
     create a custom Dockerfile on top of the base image with an extra layer that installs them:
 
     ```Dockerfile
-    FROM vllm/vllm-openai:v0.9.0
+    FROM vllm/vllm-openai:v0.11.0
 
     # e.g. install the `audio` optional dependencies
     # NOTE: Make sure the version of vLLM matches the base image!
-    RUN uv pip install --system vllm[audio]==0.9.0
+    RUN uv pip install --system vllm[audio]==0.11.0
     ```
 
 !!! tip
@@ -62,11 +60,9 @@ You can add any other [engine-args](../configuration/engine_args.md) you need af
     RUN uv pip install --system git+https://github.com/huggingface/transformers.git
     ```
 
-[](){ #deployment-docker-build-image-from-source }
-
 ## Building vLLM's Docker Image from Source
 
-You can build and run vLLM from source via the provided <gh-file:docker/Dockerfile>. To build vLLM:
+You can build and run vLLM from source via the provided [docker/Dockerfile](../../docker/Dockerfile). To build vLLM:
 
 ```bash
 # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
@@ -84,10 +80,18 @@ DOCKER_BUILDKIT=1 docker build . \
     If you are using Podman instead of Docker, you might need to disable SELinux labeling by
     adding `--security-opt label=disable` when running `podman build` command to avoid certain [existing issues](https://github.com/containers/buildah/discussions/4184).
 
+!!! note
+    If you have not changed any C++ or CUDA kernel code, you can use precompiled wheels to significantly reduce Docker build time.
+
+    *   **Enable the feature** by adding the build argument: `--build-arg VLLM_USE_PRECOMPILED="1"`.
+    *   **How it works**: By default, vLLM automatically finds the correct wheels from our [Nightly Builds](../contributing/ci/nightly_builds.md) by using the merge-base commit with the upstream `main` branch.
+    *   **Override commit**: To use wheels from a specific commit, provide the `--build-arg VLLM_PRECOMPILED_WHEEL_COMMIT=<commit_hash>` argument.
+
+    For a detailed explanation, refer to the documentation on 'Set up using Python-only build (without compilation)' part in [Build wheel from source](../contributing/ci/nightly_builds.md#precompiled-wheels-usage), these args are similar.
+
 ## Building for Arm64/aarch64
 
-A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper. At time of this writing, this requires the use
-of PyTorch Nightly and should be considered **experimental**. Using the flag `--platform "linux/arm64"` will attempt to build for arm64.
+A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper and Grace-Blackwell. Using the flag `--platform "linux/arm64"` will build for arm64.
 
 !!! note
     Multiple modules must be compiled, so this process can take a while. Recommend using `--build-arg max_jobs=` & `--build-arg nvcc_threads=`
@@ -98,7 +102,6 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
 
     ```bash
     # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
-    python3 use_existing_torch.py
     DOCKER_BUILDKIT=1 docker build . \
     --file docker/Dockerfile \
     --target vllm-openai \
@@ -106,7 +109,27 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     -t vllm/vllm-gh200-openai:latest \
     --build-arg max_jobs=66 \
     --build-arg nvcc_threads=2 \
-    --build-arg torch_cuda_arch_list="9.0 10.0+PTX"
+    --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
+    --build-arg RUN_WHEEL_CHECK=false
+    ```
+
+For (G)B300, we recommend using CUDA 13, as shown in the following command.
+
+??? console "Command"
+
+    ```bash
+    DOCKER_BUILDKIT=1 docker build \
+    --build-arg CUDA_VERSION=13.0.1 \
+    --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 \
+    --build-arg max_jobs=256 \
+    --build-arg nvcc_threads=2 \
+    --build-arg RUN_WHEEL_CHECK=false \
+    --build-arg torch_cuda_arch_list='9.0 10.0+PTX' \
+    --platform "linux/arm64" \
+    --tag vllm/vllm-gb300-openai:latest \
+    --target vllm-openai \
+    -f docker/Dockerfile \
+    .
     ```
 
 !!! note
@@ -128,7 +151,7 @@ To run vLLM with the custom-built Docker image:
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
-    --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
+    --env "HF_TOKEN=<secret>" \
     vllm/vllm-openai <args...>
 ```
 

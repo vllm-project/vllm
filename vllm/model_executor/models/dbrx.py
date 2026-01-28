@@ -3,19 +3,18 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from transformers import DbrxConfig
 
-from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -26,7 +25,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -54,7 +52,7 @@ class DbrxRouter(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        params_dtype: Optional[torch.dtype] = None,
+        params_dtype: torch.dtype | None = None,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -77,8 +75,8 @@ class DbrxExperts(FusedMoE):
     def __init__(
         self,
         config: DbrxConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        params_dtype: Optional[torch.dtype] = None,
+        quant_config: QuantizationConfig | None = None,
+        params_dtype: torch.dtype | None = None,
         prefix: str = "",
     ):
         super().__init__(
@@ -157,8 +155,8 @@ class DbrxMoE(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        params_dtype: Optional[torch.dtype] = None,
+        quant_config: QuantizationConfig | None = None,
+        params_dtype: torch.dtype | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -189,8 +187,8 @@ class DbrxAttention(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -199,7 +197,10 @@ class DbrxAttention(nn.Module):
         self.head_dim = self.d_model // self.total_num_heads
         self.total_num_kv_heads = config.attn_config.kv_n_heads
         self.clip_qkv = config.attn_config.clip_qkv
-        self.rope_theta = config.attn_config.rope_theta
+        rope_parameters = {
+            "rope_type": "default",
+            "rope_theta": int(config.attn_config.rope_theta),
+        }
         self.max_position = config.max_seq_len
 
         # pylint: disable=invalid-name
@@ -210,18 +211,19 @@ class DbrxAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.Wqkv",
         )
         self.out_proj = RowParallelLinear(
             self.d_model,
             self.d_model,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position,
-            base=int(self.rope_theta),
+            rope_parameters=rope_parameters,
             is_neox_style=True,
         )
 
@@ -270,8 +272,8 @@ class DbrxFusedNormAttention(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -303,8 +305,8 @@ class DbrxBlock(nn.Module):
     def __init__(
         self,
         config: DbrxConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -354,21 +356,21 @@ class DbrxModel(nn.Module):
             ["hidden_states"], config.d_model
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             assert intermediate_tensors
             hidden_states = intermediate_tensors["hidden_states"]
@@ -440,35 +442,31 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         if config.tie_word_embeddings:
             raise ValueError("tie_word_embeddings is not supported for Dbrx models.")
         self.quant_config = quant_config
-        self.unpadded_vocab_size = config.vocab_size
+
         self.transformer = DbrxModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
         )
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.d_model,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.transformer(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -477,7 +475,7 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

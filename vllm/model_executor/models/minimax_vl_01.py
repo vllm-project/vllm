@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
@@ -52,11 +52,11 @@ class MiniMaxVL01ImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"] = "pixel_values"
     pixel_values: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "np", 3, "h", "w", dynamic_dims={"np", "h", "w"}),
     ]
 
-    image_sizes: Annotated[Optional[torch.Tensor], TensorShape("bn", 2)]
+    image_sizes: Annotated[torch.Tensor | None, TensorShape("bn", 2)]
     # This should be in `(height, width)` format.
 
 
@@ -72,9 +72,9 @@ class MiniMaxVL01ImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
 
 
-MiniMaxVL01ImageInputs = Union[
-    MiniMaxVL01ImagePixelInputs, MiniMaxVL01ImageEmbeddingInputs
-]
+MiniMaxVL01ImageInputs: TypeAlias = (
+    MiniMaxVL01ImagePixelInputs | MiniMaxVL01ImageEmbeddingInputs
+)
 
 
 class MiniMaxVL01MultiModalProjector(nn.Module):
@@ -84,7 +84,7 @@ class MiniMaxVL01MultiModalProjector(nn.Module):
         text_hidden_size: int,
         projector_hidden_act: str,
         multimodal_projector_bias: bool,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -127,7 +127,7 @@ class MiniMaxVL01ProcessingInfo(LlavaNextProcessingInfo):
 
         return hf_processor
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
 
@@ -179,15 +179,13 @@ class MiniMaxVL01MultiModalProcessor(
     dummy_inputs=MiniMaxVL01DummyInputsBuilder,
 )
 class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<image>"
 
@@ -203,27 +201,32 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         self.config = config
         self.multimodal_config = multimodal_config
 
-        # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = init_vision_tower_for_llava(
-            config,
-            quant_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        self.multi_modal_projector = MiniMaxVL01MultiModalProjector(
-            vision_hidden_size=config.vision_config.hidden_size,
-            text_hidden_size=config.text_config.hidden_size,
-            projector_hidden_act=config.projector_hidden_act,
-            multimodal_projector_bias=True,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"),
-        )
-        self.image_newline = nn.Parameter(torch.empty(config.text_config.hidden_size))
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = init_vision_tower_for_llava(
+                config,
+                quant_config=quant_config,
+                require_post_norm=False,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.multi_modal_projector = MiniMaxVL01MultiModalProjector(
+                vision_hidden_size=config.vision_config.hidden_size,
+                text_hidden_size=config.text_config.hidden_size,
+                projector_hidden_act=config.projector_hidden_act,
+                multimodal_projector_bias=True,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+            )
+            self.image_newline = nn.Parameter(
+                torch.empty(config.text_config.hidden_size)
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
         self.vision_feature_layer = config.vision_feature_layer
         self.vocab_size = config.text_config.vocab_size
         self.pad_token_id = -1
@@ -234,14 +237,11 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def _image_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel, PixtralHFVisionModel],
-        pixel_values: Union[torch.Tensor, list[torch.Tensor]],
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+        vision_tower: CLIPVisionModel | SiglipVisionModel | PixtralHFVisionModel,
+        pixel_values: torch.Tensor | list[torch.Tensor],
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
         feature_select_strategy = self.config.vision_feature_select_strategy
@@ -302,20 +302,17 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def _process_image_pixels(
         self,
         inputs: MiniMaxVL01ImagePixelInputs,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
-        assert self.vision_tower is not None
-
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         pixel_values = inputs["pixel_values"]
         return self._image_pixels_to_features(self.vision_tower, pixel_values)
 
     def _process_image_input(
         self,
         image_input: MiniMaxVL01ImageInputs,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
-        assert self.vision_tower is not None
         image_features = self._process_image_pixels(image_input)
 
         if isinstance(image_features, torch.Tensor):
@@ -330,7 +327,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[MiniMaxVL01ImageInputs]:
+    ) -> MiniMaxVL01ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -353,7 +350,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
         raise AssertionError("This line should be unreachable.")
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -362,22 +359,14 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=input_ids == self.config.image_token_index,
-            )
-            input_ids = None
 
         hidden_states = self.language_model.model(
             input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
@@ -388,7 +377,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

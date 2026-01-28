@@ -9,8 +9,9 @@ from tests.entrypoints.openai.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
-from vllm.entrypoints.openai.protocol import FunctionCall
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers import ToolParser, ToolParserManager
 
 # https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#model-response-format-1
 SIMPLE_FUNCTION_OUTPUT = "get_weather(city='San Francisco', metric='celsius')"
@@ -60,10 +61,9 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
 
 
 @pytest.mark.parametrize("streaming", [True, False])
-def test_no_tool_call(streaming: bool):
-    mock_tokenizer = MagicMock()
+def test_no_tool_call(streaming: bool, default_tokenizer: TokenizerLike):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
-        mock_tokenizer
+        default_tokenizer
     )
     model_output = "How can I help you today?"
 
@@ -165,11 +165,13 @@ TEST_CASES = [
 
 @pytest.mark.parametrize("streaming, model_output, expected_tool_calls", TEST_CASES)
 def test_tool_call(
-    streaming: bool, model_output: str, expected_tool_calls: list[FunctionCall]
+    streaming: bool,
+    model_output: str,
+    expected_tool_calls: list[FunctionCall],
+    default_tokenizer: TokenizerLike,
 ):
-    mock_tokenizer = MagicMock()
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
-        mock_tokenizer
+        default_tokenizer
     )
 
     content, tool_calls = run_tool_extraction(
@@ -183,10 +185,9 @@ def test_tool_call(
         assert actual.function == expected
 
 
-def test_streaming_tool_call_with_large_steps():
-    mock_tokenizer = MagicMock()
+def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
-        mock_tokenizer
+        default_tokenizer
     )
     model_output_deltas = [
         "[get_weather(city='San",
@@ -207,11 +208,10 @@ def test_streaming_tool_call_with_large_steps():
 
 
 @pytest.mark.parametrize("streaming", [False])
-def test_regex_timeout_handling(streaming: bool):
+def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLike):
     """test regex timeout is handled gracefully"""
-    mock_tokenizer = MagicMock()
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
-        mock_tokenizer
+        default_tokenizer
     )
 
     fake_problematic_input = "hello world[A(A=" + "\t)A(A=,\t" * 2

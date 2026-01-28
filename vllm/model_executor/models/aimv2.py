@@ -4,15 +4,15 @@
 # A modified implementation of the AIMv2 Transformer
 # inserted here also the image tokenizer used by Ovis2
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.utils import divide
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -59,7 +59,7 @@ class AIMv2SwiGLUFFN(nn.Module):
 class AIMv2PatchEmbed(nn.Module):
     def __init__(self, config: AIMv2Config):
         super().__init__()
-        self.proj = nn.Conv2d(
+        self.proj = Conv2dLayer(
             config.num_channels,
             config.hidden_size,
             kernel_size=(config.patch_size, config.patch_size),
@@ -126,7 +126,7 @@ class AIMv2Attention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_heads_per_partition, self.head_dim, self.scale
         )
 
@@ -165,7 +165,7 @@ class AIMv2Transformer(nn.Module):
         config: AIMv2Config,
         quant_config: QuantizationConfig,
         *,
-        require_post_norm: Optional[bool] = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -196,7 +196,7 @@ class AIMv2Model(torch.nn.Module):
         config: AIMv2Config,
         quant_config: QuantizationConfig,
         *,
-        require_post_norm: Optional[bool] = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ):
         super().__init__()

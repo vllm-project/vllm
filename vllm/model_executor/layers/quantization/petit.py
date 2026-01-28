@@ -9,6 +9,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -41,9 +42,9 @@ class PetitNvFp4Config(QuantizationConfig):
     def __init__(
         self,
         is_checkpoint_nvfp4_serialized: bool = False,
-        kv_cache_quant_algo: Optional[str] = None,
-        group_size: Optional[int] = None,
-        exclude_modules: Optional[list[str]] = None,
+        kv_cache_quant_algo: str | None = None,
+        group_size: int | None = None,
+        exclude_modules: list[str] | None = None,
     ) -> None:
         self._check_hardware_support()
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
@@ -133,7 +134,7 @@ class PetitNvFp4Config(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> Optional[QuantizationMethods]:
+    ) -> QuantizationMethods | None:
         if not current_platform.is_rocm():
             return None
 
@@ -159,8 +160,6 @@ class PetitNvFp4Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         exclude = self.require_exclude_modules()
 
         if isinstance(layer, LinearBase):
@@ -307,7 +306,7 @@ class PetitNvFp4LinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return apply_petit_nvfp4_linear(
             input=x,

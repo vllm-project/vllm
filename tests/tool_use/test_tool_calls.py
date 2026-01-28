@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from typing import Optional
 
 import openai
 import pytest
@@ -58,10 +57,10 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
 
     assert stop_reason == "tool_calls"
 
-    function_name: Optional[str] = None
+    function_name: str | None = None
     function_args_str: str = ""
-    tool_call_id: Optional[str] = None
-    role_name: Optional[str] = None
+    tool_call_id: str | None = None
+    role_name: str | None = None
     finish_reason_count: int = 0
 
     # make the same request, streaming

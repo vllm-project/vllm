@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import pplx_kernels as pplx
 import torch
@@ -15,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _validate_scale_shape,
     moe_kernel_quantize_input,
 )
-from vllm.utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
 
@@ -24,15 +24,15 @@ def pplx_hidden_dim_scale_bytes(
     max_num_tokens: int,
     hidden_dim: int,
     in_dtype: torch.dtype,
-    quant_dtype: Union[torch.dtype, str, None],
+    quant_dtype: torch.dtype | str | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]],
+    block_shape: list[int] | None,
 ):
     # All pplx byte sizes must be 16-byte aligned.
     align = 16
 
     # For blocked per token: set to
-    #   ceil_div(hidden_dim, block_size) * sizeof(float32)
+    #   cdiv(hidden_dim, block_size) * sizeof(float32)
     # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
     if quant_dtype is not None:
         assert isinstance(quant_dtype, torch.dtype)
@@ -82,10 +82,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
 
-    def max_num_tokens_per_rank(self) -> Optional[int]:
+    def max_num_tokens_per_rank(self) -> int | None:
         return self.max_num_tokens
 
-    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+    def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.uint32
 
     def num_dispatchers(self) -> int:
@@ -103,10 +103,17 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> tuple[Callable, mk.ReceiverType]:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
+
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
 
@@ -148,7 +155,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1q, a1q_scale, quant_config.per_act_token_quant, quant_config.block_shape
         )
 
-        orig_a_scale_block_shape: Optional[int] = None
+        orig_a_scale_block_shape: int | None = None
 
         if a1q_scale is not None:
             scalar_scales = a1q_scale.numel() == 1
@@ -184,7 +191,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             device=device,
         )
 
-        expert_x_scale: Optional[torch.Tensor] = None
+        expert_x_scale: torch.Tensor | None = None
         if a1q.dtype.itemsize == 1:
             if quant_config.is_per_act_token:
                 # (M x 1) -> (E x M x K)
@@ -212,7 +219,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # This argument is optional, defaults to indices.size(0)
         # There's not much point setting this unless it is != indices.size(0)
-        bound_m: Optional[torch.Tensor] = None
+        bound_m: torch.Tensor | None = None
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -252,8 +259,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self,
         expert_num_tokens: torch.Tensor,
         expert_x: torch.Tensor,
-        expert_x_scale: Optional[torch.Tensor],
-        orig_a_scale_block_shape: Optional[int],
+        expert_x_scale: torch.Tensor | None,
+        orig_a_scale_block_shape: int | None,
     ) -> mk.PrepareResultType:
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
@@ -271,9 +278,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         hook, receiver = self.prepare_async(
             a1,
@@ -283,6 +291,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_map,
             apply_router_weight_on_input,
             quant_config,
+            defer_input_quant=defer_input_quant,
         )
         hook()
         return receiver()
@@ -302,7 +311,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
-        bound_m: Optional[torch.Tensor] = None
+        bound_m: torch.Tensor | None = None
 
         # TODO (bnell): fails in test_pplx_moe.py, figure out what's going on
         # num_tokens = output.size(0)  # M

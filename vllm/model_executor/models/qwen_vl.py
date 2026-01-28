@@ -9,9 +9,9 @@
 import copy
 import math
 import unicodedata
-from collections.abc import Collection, Mapping, Sequence, Set
+from collections.abc import Callable, Collection, Mapping, Sequence, Set
 from functools import lru_cache, partial
-from typing import Annotated, Callable, Literal, Optional, Union
+from typing import Annotated, Literal, TypeAlias
 
 import regex as re
 import torch
@@ -25,6 +25,7 @@ from transformers.tokenization_utils_base import TextInput
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -41,13 +42,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -57,8 +58,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .qwen import QWenBaseModel, QWenModel
-from .utils import flatten_bn
+from .qwen import QWenBaseModel, QWenBlock, QWenModel
 
 
 class QwenImagePixelInputs(TensorSchema):
@@ -93,7 +93,7 @@ class QwenImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", 256, "hs")]
 
 
-QwenImageInputs = Union[QwenImagePixelInputs, QwenImageEmbeddingInputs]
+QwenImageInputs: TypeAlias = QwenImagePixelInputs | QwenImageEmbeddingInputs
 
 
 class VisualAttention(nn.Module):
@@ -107,8 +107,9 @@ class VisualAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         bias: bool = True,
-        kdim: Optional[int] = None,
-        vdim: Optional[int] = None,
+        kdim: int | None = None,
+        vdim: int | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -128,14 +129,18 @@ class VisualAttention(nn.Module):
         assert self._qkv_same_embed_dim, (
             "Visual Attention implementation only supports self-attention"
         )
-        self.in_proj = ReplicatedLinear(embed_dim, 3 * embed_dim)
-        self.out_proj = ReplicatedLinear(embed_dim, embed_dim)
+        self.in_proj = ReplicatedLinear(
+            embed_dim, 3 * embed_dim, prefix=f"{prefix}.in_proj"
+        )
+        self.out_proj = ReplicatedLinear(
+            embed_dim, embed_dim, prefix=f"{prefix}.out_proj"
+        )
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # query/key/value: [sq, b, h]
         sq, b, _ = x.size()
@@ -213,11 +218,16 @@ class QwenVLMLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.c_fc = ColumnParallelLinear(
-            hidden_size, intermediate_size, bias=True, quant_config=quant_config
+            hidden_size,
+            intermediate_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.c_fc",
         )
         self.act_fn = get_act_fn("gelu")
         self.c_proj = RowParallelLinear(
@@ -225,6 +235,7 @@ class QwenVLMLP(nn.Module):
             hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_proj",
         )
 
     def forward(self, x):
@@ -241,24 +252,26 @@ class VisualAttentionBlock(nn.Module):
         n_head: int,
         mlp_ratio: float = 4.0,
         norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
         self.ln_1 = norm_layer(d_model)
         self.ln_2 = norm_layer(d_model)
         mlp_width = int(d_model * mlp_ratio)
-        self.attn = VisualAttention(d_model, n_head)
+        self.attn = VisualAttention(d_model, n_head, prefix=f"{prefix}.attn")
         self.mlp = QwenVLMLP(
             hidden_size=d_model,
             intermediate_size=mlp_width,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
 
     def attention(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         attn_mask = attn_mask.to(x.dtype) if attn_mask is not None else None
         return self.attn(x, attn_mask=attn_mask)
@@ -266,7 +279,7 @@ class VisualAttentionBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: Optional[torch.Tensor] = None,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = x + self.attention(self.ln_1(x), attn_mask=attn_mask)
         x = x + self.mlp(self.ln_2(x))
@@ -281,7 +294,8 @@ class TransformerBlock(nn.Module):
         heads: int,
         mlp_ratio: float = 4.0,
         norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.width = width
@@ -295,8 +309,9 @@ class TransformerBlock(nn.Module):
                     mlp_ratio,
                     norm_layer=norm_layer,
                     quant_config=quant_config,
+                    prefix=f"{prefix}.resblocks.{i}",
                 )
-                for _ in range(layers)
+                for i in range(layers)
             ]
         )
 
@@ -307,7 +322,7 @@ class TransformerBlock(nn.Module):
         return self.resblocks[0].mlp.c_fc.weight.device
 
     def forward(
-        self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, attn_mask: torch.Tensor | None = None
     ) -> torch.Tensor:
         for r in self.resblocks:
             x = r(x, attn_mask=attn_mask)
@@ -326,7 +341,8 @@ class VisionTransformer(nn.Module):
         n_queries: int = 256,
         output_dim: int = 512,
         image_start_id: int = 151857,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
         **kwargs,
     ):
         super().__init__()
@@ -334,7 +350,7 @@ class VisionTransformer(nn.Module):
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
         self.grid_size = (image_height // patch_height, image_width // patch_width)
         self.output_dim = output_dim
-        self.conv1 = nn.Conv2d(
+        self.conv1 = Conv2dLayer(
             in_channels=3,
             out_channels=width,
             kernel_size=patch_size,
@@ -356,6 +372,7 @@ class VisionTransformer(nn.Module):
             mlp_ratio,
             norm_layer=norm_layer,
             quant_config=quant_config,
+            prefix=f"{prefix}.transformer",
         )
 
         self.attn_pool = Resampler2(
@@ -366,6 +383,7 @@ class VisionTransformer(nn.Module):
             norm_layer=norm_layer,
             adaptive=False,
             do_post_projection=False,
+            prefix=f"{prefix}.attn_pool",
         ).to(
             device=self.positional_embedding.device,
             dtype=self.positional_embedding.dtype,
@@ -413,7 +431,9 @@ class QwenVLModel(QWenModel):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.visual = VisionTransformer(**config.visual, quant_config=quant_config)
+        self.visual = VisionTransformer(
+            **config.visual, quant_config=quant_config, prefix=f"{prefix}.visual"
+        )
 
 
 @lru_cache(maxsize=1)
@@ -434,10 +454,10 @@ def _get_tokenizer_without_image_pad(
         def tokenize(
             self,
             text: str,
-            allowed_special: Union[Set[str], str] = "all",
-            disallowed_special: Union[Collection[str], str] = (),
+            allowed_special: Set[str] | str = "all",
+            disallowed_special: Collection[str] | str = (),
             **kwargs,
-        ) -> list[Union[bytes, str]]:
+        ) -> list[bytes | str]:
             text = unicodedata.normalize("NFC", text)
 
             return [
@@ -451,9 +471,9 @@ def _get_tokenizer_without_image_pad(
 
         def _decode(
             self,
-            token_ids: Union[int, list[int]],
+            token_ids: int | list[int],
             skip_special_tokens: bool = False,
-            errors: Optional[str] = None,
+            errors: str | None = None,
             **kwargs,
         ) -> str:
             if isinstance(token_ids, int):
@@ -523,9 +543,9 @@ class QwenVLProcessor:
 
     def __call__(
         self,
-        text: Optional[Union[TextInput, list[TextInput]]] = None,
-        images: Optional[Union[ImageInput, list[ImageInput]]] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
+        text: TextInput | list[TextInput] | None = None,
+        images: ImageInput | list[ImageInput] | None = None,
+        return_tensors: str | TensorType | None = None,
     ) -> BatchFeature:
         if text is None:
             text = []
@@ -555,7 +575,7 @@ class QwenVLProcessor:
 
 class QwenVLProcessingInfo(BaseProcessingInfo):
     def get_tokenizer(self) -> PreTrainedTokenizer:
-        tokenizer = self.ctx.tokenizer
+        tokenizer = self.ctx.get_tokenizer()
         assert isinstance(tokenizer, PreTrainedTokenizer)
 
         return _get_tokenizer_without_image_pad(tokenizer)
@@ -568,7 +588,7 @@ class QwenVLProcessingInfo(BaseProcessingInfo):
             **kwargs,
         )
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_num_image_tokens(self) -> int:
@@ -597,7 +617,7 @@ class QwenVLDummyInputsBuilder(BaseDummyInputsBuilder[QwenVLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.visual
@@ -711,6 +731,8 @@ class QwenVLForConditionalGeneration(
         ],
     }
 
+    embed_input_ids = SupportsMultiModal.embed_input_ids
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """
         Get the module prefix in multimodal models
@@ -722,7 +744,7 @@ class QwenVLForConditionalGeneration(
         )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return f"Picture {i}: <img></img>"
 
@@ -735,45 +757,39 @@ class QwenVLForConditionalGeneration(
         prefix: str = "",
         transformer_type: type[QwenVLModel] = QwenVLModel,
     ) -> None:
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            transformer_type=transformer_type,
-        )
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=QWenBlock,
+            tower_targets={"image": VisionTransformer},
+        ):
+            super().__init__(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                transformer_type=transformer_type,
+            )
 
         self.transformer: QwenVLModel
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[QwenImageInputs]:
+    ) -> QwenImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-                )
-
             expected_h = expected_w = self.config.visual["image_size"]
             resolve_bindings = {"h": expected_h, "w": expected_w}
 
             return QwenImagePixelInputs(
                 type="pixel_values",
-                data=flatten_bn(pixel_values, concat=True),
+                data=pixel_values,
                 resolve_bindings=resolve_bindings,
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
-
             return QwenImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
+                data=image_embeds,
             )
 
         return None
@@ -784,10 +800,7 @@ class QwenVLForConditionalGeneration(
 
         return self.transformer.visual(image_input["data"])
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.transformer
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -797,12 +810,12 @@ class QwenVLForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 

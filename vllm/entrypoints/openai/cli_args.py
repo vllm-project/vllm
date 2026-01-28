@@ -11,7 +11,7 @@ import json
 import ssl
 from collections.abc import Sequence
 from dataclasses import field
-from typing import Literal, Optional, Union
+from typing import Any, Literal
 
 from pydantic.dataclasses import dataclass
 
@@ -26,10 +26,10 @@ from vllm.entrypoints.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from vllm.entrypoints.openai.serving_models import LoRAModulePath
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.logger import init_logger
-from vllm.utils import FlexibleArgumentParser
+from vllm.tool_parsers import ToolParserManager
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -39,8 +39,8 @@ class LoRAParserAction(argparse.Action):
         self,
         parser: argparse.ArgumentParser,
         namespace: argparse.Namespace,
-        values: Optional[Union[str, Sequence[str]]],
-        option_string: Optional[str] = None,
+        values: str | Sequence[str] | None,
+        option_string: str | None = None,
     ):
         if values is None:
             values = []
@@ -73,18 +73,24 @@ class LoRAParserAction(argparse.Action):
 class FrontendArgs:
     """Arguments for the OpenAI-compatible frontend server."""
 
-    host: Optional[str] = None
+    host: str | None = None
     """Host name."""
     port: int = 8000
     """Port number."""
-    uds: Optional[str] = None
+    uds: str | None = None
     """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal[
-        "debug", "info", "warning", "error", "critical", "trace"
+        "critical", "error", "warning", "info", "debug", "trace"
     ] = "info"
     """Log level for uvicorn."""
     disable_uvicorn_access_log: bool = False
     """Disable uvicorn access log."""
+    disable_access_log_for_endpoints: str | None = None
+    """Comma-separated list of endpoint paths to exclude from uvicorn access
+    logs. This is useful to reduce log noise from high-frequency endpoints
+    like health checks. Example: "/health,/metrics,/ping".
+    When set, access logs for requests to these paths will be suppressed
+    while keeping logs for other endpoints."""
     allow_credentials: bool = False
     """Allow credentials."""
     allowed_origins: list[str] = field(default_factory=lambda: ["*"])
@@ -93,15 +99,15 @@ class FrontendArgs:
     """Allowed methods."""
     allowed_headers: list[str] = field(default_factory=lambda: ["*"])
     """Allowed headers."""
-    api_key: Optional[list[str]] = None
+    api_key: list[str] | None = None
     """If provided, the server will require one of these keys to be presented in
     the header."""
-    lora_modules: Optional[list[LoRAModulePath]] = None
+    lora_modules: list[LoRAModulePath] | None = None
     """LoRA modules configurations in either 'name=path' format or JSON format
     or JSON list format. Example (old format): `'name=path'` Example (new
     format): `{\"name\": \"name\", \"path\": \"lora_path\",
     \"base_model_name\": \"id\"}`"""
-    chat_template: Optional[str] = None
+    chat_template: str | None = None
     """The file path to the chat template, or the template in single-line form
     for the specified model."""
     chat_template_content_format: ChatTemplateContentFormatOption = "auto"
@@ -114,19 +120,28 @@ class FrontendArgs:
     """Whether to trust the chat template provided in the request. If False,
     the server will always use the chat template specified by `--chat-template`
     or the ones from tokenizer."""
+    default_chat_template_kwargs: dict[str, Any] | None = None
+    """Default keyword arguments to pass to the chat template renderer.
+    These will be merged with request-level chat_template_kwargs,
+    with request values taking precedence. Useful for setting default
+    behavior for reasoning models. Example: '{"enable_thinking": false}'
+    to disable thinking mode by default for Qwen3/DeepSeek models."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
-    ssl_keyfile: Optional[str] = None
+    ssl_keyfile: str | None = None
     """The file path to the SSL key file."""
-    ssl_certfile: Optional[str] = None
+    ssl_certfile: str | None = None
     """The file path to the SSL cert file."""
-    ssl_ca_certs: Optional[str] = None
+    ssl_ca_certs: str | None = None
     """The CA certificates file."""
     enable_ssl_refresh: bool = False
     """Refresh SSL Context when SSL certificate files change"""
     ssl_cert_reqs: int = int(ssl.CERT_NONE)
     """Whether client certificate is required (see stdlib ssl module's)."""
-    root_path: Optional[str] = None
+    ssl_ciphers: str | None = None
+    """SSL cipher suites for HTTPS (TLS 1.2 and below only).
+    Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305'"""
+    root_path: str | None = None
     """FastAPI root_path when app is behind a path based routing proxy."""
     middleware: list[str] = field(default_factory=lambda: [])
     """Additional ASGI middleware to apply to the app. We accept multiple
@@ -149,7 +164,7 @@ class FrontendArgs:
     exclude_tools_when_tool_choice_none: bool = False
     """If specified, exclude tool definitions in prompts when
     tool_choice='none'."""
-    tool_call_parser: Optional[str] = None
+    tool_call_parser: str | None = None
     """Select the tool call parser depending on the model that you're using.
     This is used to parse the model-generated tool call into OpenAI API format.
     Required for `--enable-auto-tool-choice`. You can choose any option from
@@ -158,13 +173,13 @@ class FrontendArgs:
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
-    tool_server: Optional[str] = None
+    tool_server: str | None = None
     """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
     Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for demo
     purpose."""
-    log_config_file: Optional[str] = envs.VLLM_LOGGING_CONFIG_PATH
+    log_config_file: str | None = envs.VLLM_LOGGING_CONFIG_PATH
     """Path to logging config JSON file for both vllm and uvicorn"""
-    max_log_len: Optional[int] = None
+    max_log_len: int | None = None
     """Max number of prompt characters or prompt ID numbers being printed in
     log. The default of None means unlimited."""
     disable_fastapi_docs: bool = False
@@ -176,11 +191,15 @@ class FrontendArgs:
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
     enable_tokenizer_info_endpoint: bool = False
-    """Enable the /get_tokenizer_info endpoint. May expose chat
+    """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
-    """If True, log model outputs (generations).
+    """If set to True, log model outputs (generations).
     Requires --enable-log-requests."""
+    enable_log_deltas: bool = True
+    """If set to False, output deltas will not be logged. Relevant only if 
+    --enable-log-outputs is set.
+    """
     h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
     """Maximum size (bytes) of an incomplete HTTP event (header or body) for
     h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB)."""
@@ -189,6 +208,16 @@ class FrontendArgs:
     Helps mitigate header abuse. Default: 256."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
+    tokens_only: bool = False
+    """
+    If set to True, only enable the Tokens In<>Out endpoint. 
+    This is intended for use in a Disaggregated Everything setup.
+    """
+    enable_offline_docs: bool = False
+    """
+    Enable offline FastAPI documentation for air-gapped environments.
+    Uses vendored static assets bundled with vLLM.
+    """
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -206,6 +235,9 @@ class FrontendArgs:
         del frontend_kwargs["allowed_methods"]["nargs"]
         del frontend_kwargs["allowed_headers"]["nargs"]
 
+        # Special case: default_chat_template_kwargs needs json.loads type
+        frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
+
         # Special case: LoRA modules need custom parser action and
         # optional_type(str)
         frontend_kwargs["lora_modules"]["type"] = optional_type(str)
@@ -218,8 +250,13 @@ class FrontendArgs:
             del frontend_kwargs["middleware"]["nargs"]
         frontend_kwargs["middleware"]["default"] = []
 
+        # Special case: disable_access_log_for_endpoints is a single
+        # comma-separated string, not a list
+        if "nargs" in frontend_kwargs["disable_access_log_for_endpoints"]:
+            del frontend_kwargs["disable_access_log_for_endpoints"]["nargs"]
+
         # Special case: Tool call parser shows built-in options.
-        valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
+        valid_tool_parsers = list(ToolParserManager.list_registered())
         parsers_str = ",".join(valid_tool_parsers)
         frontend_kwargs["tool_call_parser"]["metavar"] = (
             f"{{{parsers_str}}} or name registered in --tool-parser-plugin"
@@ -260,8 +297,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "--api-server-count",
         "-asc",
         type=int,
-        default=1,
-        help="How many API server processes to run.",
+        default=None,
+        help="How many API server processes to run. "
+        "Defaults to data_parallel_size if not specified.",
     )
     parser.add_argument(
         "--config",

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from importlib.util import find_spec
-from typing import Final, Optional
+from typing import Final
 
 import torch
 
@@ -26,7 +26,7 @@ class ConchLinearKernel(MPLinearKernel):
         return 80
 
     @classmethod
-    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if c.weight_type not in _CONCH_SUPPORTED_WEIGHT_TYPES:
             error_msg = (
                 f"Weight type ({c.weight_type}) not supported by "
@@ -76,7 +76,7 @@ class ConchLinearKernel(MPLinearKernel):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         from conch.ops.quantization.gemm import mixed_precision_gemm
 

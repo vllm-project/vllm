@@ -2,44 +2,59 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import ClassVar
 
 import torch
 
-from vllm import envs
-from vllm.attention.backends.abstract import (
-    AttentionLayer,
-    AttentionType,
-    is_quantized_kv_cache,
-)
-from vllm.attention.utils.fa_utils import (
-    flash_attn_supports_mla,
-    get_flash_attn_version,
-)
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.mla.common import (
+from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
+from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionLayer,
+    AttentionType,
+    MultipleOf,
+    is_quantized_kv_cache,
+)
+from vllm.v1.attention.backends.fa_utils import (
+    flash_attn_supports_mla,
+    get_flash_attn_version,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
+from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+    flash_attn_varlen_func,
+    get_scheduler_metadata,
+)
 
 logger = init_logger(__name__)
 
 
 class FlashAttnMLABackend(MLACommonBackend):
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+    ]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
+
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN_MLA"
-
-    @staticmethod
-    def get_metadata_cls() -> type["FlashAttnMLAMetadata"]:
-        return FlashAttnMLAMetadata
 
     @staticmethod
     def get_builder_cls() -> type["FlashAttnMLAMetadataBuilder"]:
@@ -49,13 +64,33 @@ class FlashAttnMLABackend(MLACommonBackend):
     def get_impl_cls() -> type["FlashAttnMLAImpl"]:
         return FlashAttnMLAImpl
 
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major == 9
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if not flash_attn_supports_mla():
+            return "FlashAttention MLA not supported on this device"
+        return None
+
 
 @dataclass
 class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
     query_start_loc: torch.Tensor
     max_query_len: int
     max_seq_len: int
-    scheduler_metadata: Optional[torch.Tensor] = None
+    scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
 
 
@@ -65,9 +100,9 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-
-    reorder_batch_threshold: int = 512
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
+    reorder_batch_threshold: int = 512  # process small prefills with decode pathway
 
     def __init__(
         self,
@@ -76,8 +111,14 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        interleave_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         super().__init__(
-            kv_cache_spec, layer_names, vllm_config, device, FlashAttnMLAMetadata
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            FlashAttnMLAMetadata,
+            supports_dcp_with_varlen=(interleave_size == 1),
         )
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.fa_aot_schedule = get_flash_attn_version() == 3
@@ -85,17 +126,9 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
+        self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.fa_aot_schedule:
-            self.max_cudagraph_size = self.compilation_config.max_capture_size
-
-            if self.max_cudagraph_size > 992:
-                # This condition derives from FA3's internal heuristic.
-                # TODO(woosuk): Support larger cudagraph sizes.
-                raise ValueError(
-                    "Capture size larger than 992 is not supported for full cuda graph."
-                )
-
             self.scheduler_metadata = torch.zeros(
                 vllm_config.scheduler_config.max_num_seqs + 1,
                 dtype=torch.int32,
@@ -104,10 +137,22 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # When using cuda graph, we need to set the upper bound of the
             # number of splits so that large enough intermediate buffers are
             # pre-allocated during capture.
-            self.max_num_splits = envs.VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH
+            self.max_num_splits = (
+                vllm_config.attention_config.flash_attn_max_num_splits_for_cuda_graph
+            )
+
+        if vllm_is_batch_invariant():
+            self.max_num_splits = 1
 
     def _schedule_decode(
-        self, num_reqs, cu_query_lens, max_query_len, seqlens, max_seq_len, causal
+        self,
+        num_reqs,
+        cu_query_lens,
+        max_query_len,
+        seqlens,
+        max_seq_len,
+        causal,
+        max_num_splits,
     ):
         if self.fa_aot_schedule:
             return get_scheduler_metadata(
@@ -123,41 +168,55 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
                 page_size=self.page_size,
                 cu_seqlens_q=cu_query_lens,
                 causal=causal,
-                num_splits=self.max_num_splits,
+                num_splits=max_num_splits,
             )
         return None
 
     def _build_decode(
         self,
         block_table_tensor: torch.Tensor,
-        seq_lens_cpu: torch.Tensor,
         seq_lens_device: torch.Tensor,
+        max_seq_len: int,
         query_start_loc_cpu: torch.Tensor,
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
-        dcp_tot_seq_lens_device: Optional[torch.Tensor],
+        dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         max_query_len = query_lens_cpu.max().item()
-        max_seq_len = seq_lens_device.max().item()
+
+        # For Flash Attention MLA + full cudagraph
+        max_num_splits = 0
+        if (
+            self.use_full_cuda_graph
+            and self.max_cudagraph_size is not None
+            and num_decode_tokens <= self.max_cudagraph_size
+        ):
+            # NOTE(woosuk): Setting num_splits > 1 may increase the memory
+            # usage, because the intermediate buffers of size [num_splits,
+            # num_heads, num_tokens, head_size] are allocated. Therefore,
+            # we only set num_splits when using cuda graphs.
+            max_num_splits = self.max_num_splits
+
+        if vllm_is_batch_invariant():
+            max_num_splits = 1
 
         scheduler_metadata = self._schedule_decode(
-            num_reqs=seq_lens_cpu.numel(),
+            num_reqs=seq_lens_device.shape[0],
             cu_query_lens=query_start_loc_device,
             max_query_len=max_query_len,
             seqlens=seq_lens_device,
             max_seq_len=max_seq_len,
             causal=True,
+            max_num_splits=max_num_splits,
         )
 
-        # For FA3 + full cudagraph
-        max_num_splits = 0
         if self.use_full_cuda_graph and scheduler_metadata is not None:
             n = scheduler_metadata.shape[0]
             # Ensure the persistent buffer is large enough
             assert n <= self.scheduler_metadata.shape[0], (
                 f"Scheduler metadata size {n} exceeds buffer size "
-                + f"{self.scheduler_metadata.shape[0]}"
+                f"{self.scheduler_metadata.shape[0]}"
             )
             self.scheduler_metadata[:n] = scheduler_metadata
             # NOTE(woosuk): We should zero out the rest of the scheduler
@@ -167,14 +226,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             self.scheduler_metadata[n:] = 0
             scheduler_metadata = self.scheduler_metadata[:n]
 
-            if num_decode_tokens <= self.max_cudagraph_size:
-                # NOTE(woosuk): Setting num_splits > 1 may increase the memory
-                # usage, because the intermediate buffers of size [num_splits,
-                # num_heads, num_tokens, head_size] are allocated. Therefore,
-                # we only set num_splits when using cuda graphs.
-                max_num_splits = self.max_num_splits
-
-        return FlashAttnMLADecodeMetadata(
+        metadata = FlashAttnMLADecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
             query_start_loc=query_start_loc_device,
@@ -184,6 +236,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             max_num_splits=max_num_splits,
             dcp_tot_seq_lens=dcp_tot_seq_lens_device,
         )
+        return metadata
 
 
 class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
@@ -195,12 +248,12 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float],
+        logits_soft_cap: float | None,
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str],
+        kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
@@ -242,11 +295,11 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
     def _forward_decode(
         self,
-        q: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashAttnMLAMetadata,
         layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 

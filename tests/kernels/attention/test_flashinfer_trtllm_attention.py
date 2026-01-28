@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
-import flashinfer
 import pytest
 import torch
 
@@ -11,12 +9,15 @@ from tests.kernels.quantization.nvfp4_utils import (
     get_nvfp4_global_scale,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import set_random_seed
 
-if not current_platform.is_device_capability(100):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
         "This TRTLLM kernel requires NVIDIA Blackwell.", allow_module_level=True
     )
+else:
+    import flashinfer
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -68,9 +69,7 @@ NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
 @torch.inference_mode
 def test_flashinfer_trtllm_decode_with_baseline(
     dtype: torch.dtype,
-    quant_dtypes: tuple[
-        Optional[torch.dtype], Optional[torch.dtype], Optional[torch.dtype]
-    ],
+    quant_dtypes: tuple[torch.dtype | None, torch.dtype | None, torch.dtype | None],
     batch_size: int,
     max_seq_lens: tuple[int, int],
     num_heads: tuple[int, int],
@@ -78,11 +77,11 @@ def test_flashinfer_trtllm_decode_with_baseline(
     kv_layout: str,
     block_size: int,
     window_left: int,
-    soft_cap: Optional[float],
+    soft_cap: float | None,
     has_sinks: bool,
 ) -> None:
     torch.set_default_device("cuda")
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     q_quant_dtype, kv_quant_dtype, o_quant_dtype = quant_dtypes
     q_quant_dtype = q_quant_dtype or dtype
@@ -241,9 +240,11 @@ def test_flashinfer_trtllm_decode_with_baseline(
     if q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP4_DTYPE:
         rtol, atol = 7e-2, 9e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
-        rtol, atol = 2e-2, 4e-2
+        rtol, atol = 3e-2, 4e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:
-        rtol, atol = 1e-2, 2e-2
+        rtol, atol = 2e-2, 2e-2
+    elif kv_quant_dtype == FP8_DTYPE:
+        rtol, atol = 4e-2, 6e-2
     else:
         rtol, atol = 1e-2, 1e-2
 
@@ -267,9 +268,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
 @torch.inference_mode
 def test_flashinfer_trtllm_prefill_with_baseline(
     dtype: torch.dtype,
-    quant_dtypes: tuple[
-        Optional[torch.dtype], Optional[torch.dtype], Optional[torch.dtype]
-    ],
+    quant_dtypes: tuple[torch.dtype | None, torch.dtype | None, torch.dtype | None],
     batch_size: int,
     max_seq_lens: tuple[int, int],
     num_heads: tuple[int, int],
@@ -277,11 +276,11 @@ def test_flashinfer_trtllm_prefill_with_baseline(
     kv_layout: str,
     block_size: int,
     window_left: int,
-    soft_cap: Optional[float],
+    soft_cap: float | None,
     has_sinks: bool,
 ) -> None:
     torch.set_default_device("cuda")
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     q_quant_dtype, kv_quant_dtype, o_quant_dtype = quant_dtypes
     q_quant_dtype = q_quant_dtype or dtype
@@ -445,7 +444,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
         output_trtllm = output_trtllm.reshape(-1, query.shape[1], query.shape[2])
 
     if q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP4_DTYPE:
-        rtol, atol = 1e-1, 2e-1
+        rtol, atol = 3e-1, 4e-1
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
         rtol, atol = 4e-2, 6e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:

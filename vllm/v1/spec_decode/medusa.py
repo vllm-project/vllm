@@ -8,6 +8,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.v1.sample.metadata import SamplingMetadata
 
 # Initialize logger
@@ -37,16 +38,19 @@ class MedusaProposer:
         self,
         target_hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> list[list[int]]:
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,  # unused
+    ) -> torch.Tensor:
         # Generate blocks and compute logits
         blocks = self.model(target_hidden_states)
         logits = self.model.compute_logits(blocks)
 
-        # Get draft tokens and transpose the result
-        # TODO(woosuk): OPTIMIZATION: Return GPU tensor without GPU-CPU
-        # synchronization.
-        draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
-        return [list(row) for row in zip(*draft_tokens)]
+        # Compute argmax for each Medusa head and stack into a single tensor
+        # Shape: [batch_size, num_heads]
+        draft_tokens = torch.stack([logit.argmax(dim=-1) for logit in logits], dim=1)
+
+        return draft_tokens
 
     def load_model(self, target_model: nn.Module) -> None:
         from vllm.compilation.backends import set_model_tag
@@ -56,6 +60,10 @@ class MedusaProposer:
                 vllm_config=self.vllm_config,
                 model_config=self.vllm_config.speculative_config.draft_model_config,
             )
+        assert not (
+            is_mixture_of_experts(self.model)
+            and self.vllm_config.parallel_config.enable_eplb
+        ), "EPLB for Medusa is not supported"
 
     @torch.inference_mode()
     def dummy_run(self, num_tokens: int) -> None:

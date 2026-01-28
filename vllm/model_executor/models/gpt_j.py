@@ -21,17 +21,16 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
 from transformers import GPTJConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -64,8 +63,8 @@ class GPTJAttention(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -79,12 +78,14 @@ class GPTJAttention(nn.Module):
             self.total_num_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.out_proj = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -94,13 +95,13 @@ class GPTJAttention(nn.Module):
         scaling = self.head_size**-0.5
         assert getattr(config, "rotary", True)
         assert config.rotary_dim % 2 == 0
-        rope_theta = getattr(config, "rope_theta", 10000)
+        rope_parameters = getattr(config, "rope_parameters", {})
+        rope_parameters["partial_rotary_factor"] = config.rotary_dim / self.head_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             self.head_size,
-            rotary_dim=config.rotary_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
+            rope_parameters=rope_parameters,
             is_neox_style=False,
         )
         self.attn = Attention(
@@ -130,7 +131,8 @@ class GPTJMLP(nn.Module):
         self,
         intermediate_size: int,
         config: GPTJConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.n_embd
@@ -138,11 +140,13 @@ class GPTJMLP(nn.Module):
             hidden_size,
             intermediate_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc_in",
         )
         self.fc_out = RowParallelLinear(
             intermediate_size,
             hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc_out",
         )
         self.act = get_act_fn(config.activation_function)
 
@@ -157,8 +161,8 @@ class GPTJBlock(nn.Module):
     def __init__(
         self,
         config: GPTJConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -167,7 +171,7 @@ class GPTJBlock(nn.Module):
         self.attn = GPTJAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.attn"
         )
-        self.mlp = GPTJMLP(inner_dim, config, quant_config)
+        self.mlp = GPTJMLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -211,21 +215,21 @@ class GPTJModel(nn.Module):
             ["hidden_states"], config.n_embd
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             hidden_states = intermediate_tensors["hidden_states"]
         for layer in islice(self.h, self.start_layer, self.end_layer):
@@ -315,16 +319,16 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
             self.transformer.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.transformer(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -333,7 +337,7 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         return logits
 

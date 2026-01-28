@@ -4,13 +4,14 @@
 import enum
 from enum import Enum
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.linear import LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
@@ -28,12 +29,15 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.transformers_utils.config import get_safetensors_params_metadata
-from vllm.utils import is_list_of
+from vllm.utils.collection_utils import is_list_of
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.models.utils import WeightsMapper
 else:
     QuantizationMethods = str
+
+logger = init_logger(__name__)
 
 
 class GPTQConfig(QuantizationConfig):
@@ -48,9 +52,10 @@ class GPTQConfig(QuantizationConfig):
         group_size: int,
         desc_act: bool,
         lm_head_quantized: bool,
-        dynamic: dict[str, dict[str, Union[int, bool]]],
+        dynamic: dict[str, dict[str, int | bool]],
         autoround_version: str = "",
-        modules_in_block_to_quantize: Optional[list[str]] = None,
+        modules_in_block_to_quantize: list[str] | None = None,
+        checkpoint_format: str = "",
     ) -> None:
         # GPTQModel use `dynamic` config property to allow per module
         # quantization config so each module can be individually optimized.
@@ -88,11 +93,23 @@ class GPTQConfig(QuantizationConfig):
                 "Currently, only 2/3/4/8-bit weight quantization is "
                 f"supported for GPTQ, but got {self.weight_bits} bits."
             )
+        # Somehow gptq_gemm 4-bit is buggy, maybe fix it in the future.
+        # For now, show a warning, since gptq_marlin will be used by default.
+        if self.weight_bits == 4:
+            logger.warning_once(
+                "Currently, the 4-bit gptq_gemm kernel for GPTQ is buggy. "
+                "Please switch to gptq_marlin."
+            )
 
         self.modules_in_block_to_quantize = modules_in_block_to_quantize or []
 
         # used to identify GPTQ model quantized by autoround
         self.autoround_version = autoround_version
+
+        # GPTQ v1 and v2 format deals with zero points differently.
+        # Currently GPTQModel stores v1 format checkpoints by default,
+        # but provides the option to set `format="gptq_v2"` in `QuantizeConfig`.
+        self.checkpoint_format = checkpoint_format
 
     def __repr__(self) -> str:
         return (
@@ -101,7 +118,8 @@ class GPTQConfig(QuantizationConfig):
             f"desc_act={self.desc_act}), "
             f"lm_head_quantized={self.lm_head_quantized}, "
             f"dynamic={self.dynamic}, "
-            f"modules_in_block_to_quantize={self.modules_in_block_to_quantize})"
+            f"modules_in_block_to_quantize={self.modules_in_block_to_quantize}), "
+            f"checkpoint_format={self.checkpoint_format})"
         )
 
     @classmethod
@@ -136,6 +154,9 @@ class GPTQConfig(QuantizationConfig):
         modules_in_block_to_quantize = cls.get_from_keys_or(
             config, ["modules_in_block_to_quantize"], default=None
         )
+        checkpoint_format = cls.get_from_keys_or(
+            config, ["checkpoint_format"], default=""
+        )
         return cls(
             weight_bits,
             group_size,
@@ -144,15 +165,17 @@ class GPTQConfig(QuantizationConfig):
             dynamic,
             autoround_version,
             modules_in_block_to_quantize,
+            checkpoint_format,
         )
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["GPTQLinearMethod", "QuantizeMethodBase"]]:
+    ) -> Union["GPTQLinearMethod", "QuantizeMethodBase"] | None:
         if isinstance(layer, FusedMoE):
             # GPTQ MoE support: fall back to MoeWNA16 for broad compatibility
             from .moe_wna16 import MoeWNA16Config
 
+            # TODO: maybe update this for GPTQv2 format checkpoints
             config = {
                 "quant_method": "gptq",
                 "bits": self.weight_bits,
@@ -164,13 +187,13 @@ class GPTQConfig(QuantizationConfig):
 
         return get_linear_quant_method(self, layer, prefix, GPTQLinearMethod)
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if self.modules_in_block_to_quantize is not None:
             self.modules_in_block_to_quantize = hf_to_vllm_mapper.apply_list(
                 self.modules_in_block_to_quantize
             )
 
-    def maybe_update_config(self, model_name: str, revision: Optional[str] = None):
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
         if self.modules_in_block_to_quantize:
             if is_list_of(self.modules_in_block_to_quantize, list):
                 # original modules_in_block_to_quantize: list[list[str]]
@@ -208,6 +231,9 @@ class GPTQLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: GPTQConfig):
         self.quant_config = quant_config
+
+        # GPTQ v1 and v2 format deals with zero points differently
+        self.use_v2_format = quant_config.checkpoint_format == "gptq_v2"
 
     def create_weights(
         self,
@@ -345,11 +371,13 @@ class GPTQLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         out_shape = x.shape[:-1] + (layer.qweight.shape[-1],)
         reshaped_x = x.reshape(-1, x.shape[-1])
 
+        # GPTQ v1 and v2 format checkpoints deals with zero points differently,
+        # and require different gemm kernels.
         output = ops.gptq_gemm(
             reshaped_x,
             layer.qweight,
@@ -357,6 +385,7 @@ class GPTQLinearMethod(LinearMethodBase):
             layer.scales,
             layer.g_idx,
             layer.exllama_state == ExllamaState.READY,
+            self.use_v2_format,
             self.quant_config.weight_bits,
         )
         if bias is not None:

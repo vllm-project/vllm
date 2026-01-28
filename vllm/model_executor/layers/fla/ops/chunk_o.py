@@ -9,7 +9,6 @@
 
 # ruff: noqa: E501
 
-from typing import Optional
 
 import torch
 
@@ -144,9 +143,9 @@ def chunk_fwd_o(
     k: torch.Tensor,
     v: torch.Tensor,
     h: torch.Tensor,
-    g: Optional[torch.Tensor] = None,  # cumsum of log decay
-    scale: Optional[float] = None,
-    cu_seqlens: Optional[torch.LongTensor] = None,
+    g: torch.Tensor | None = None,  # cumsum of log decay
+    scale: float | None = None,
+    cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]

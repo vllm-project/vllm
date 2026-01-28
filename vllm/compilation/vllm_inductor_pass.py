@@ -3,7 +3,9 @@
 import functools
 import operator
 import time
-from typing import ClassVar, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import ClassVar
 
 import regex as re
 import torch
@@ -18,25 +20,41 @@ from .inductor_pass import InductorPass
 logger = init_logger(__name__)
 
 
+@dataclass
+class InductorCompilationConfig:
+    splitting_ops: list[str] | None = None
+    use_inductor_graph_partition: bool = False
+
+
 class VllmInductorPass(InductorPass):
     """
     An inductor pass with access to vLLM PassConfig.
     It provides timing, logging, and dumping utilities.
     """
 
-    dump_prefix: ClassVar[Optional[int]] = None
+    dump_prefix: ClassVar[int | None] = None
     """Keep track of pass index for debug dump ordering."""
 
     def __init__(self, config: VllmConfig):
+        # Get only the necessary CompilationConfig for the inductor pass, since
+        # full `CompilationConfig` contains pointer to model which is unsafe.
+        self.compilation_config = InductorCompilationConfig(
+            splitting_ops=config.compilation_config.splitting_ops,
+            use_inductor_graph_partition=config.compilation_config.use_inductor_graph_partition,
+        )
         self.pass_config = config.compilation_config.pass_config
         self.model_dtype = config.model_config.dtype if config.model_config else None
-        self.device = config.device_config.device if config.device_config else None
+        self.device: str | None = (
+            config.device_config.device if config.device_config else None
+        )
         self.pass_name = self.__class__.__name__
 
     @staticmethod
-    def time_and_log(call_fn):
+    def time_and_log(
+        call_fn: Callable[["VllmInductorPass", torch.fx.Graph], None],
+    ) -> Callable[["VllmInductorPass", torch.fx.Graph], None]:
         @functools.wraps(call_fn)
-        def wrapped(self: VllmInductorPass, graph: torch.fx.Graph):
+        def wrapped(self: VllmInductorPass, graph: torch.fx.Graph) -> None:
             self.begin()
             self.dump_graph(graph, "before")
             call_fn(self, graph)
@@ -45,17 +63,17 @@ class VllmInductorPass(InductorPass):
 
         return wrapped
 
-    def dump_graph(self, graph: torch.fx.Graph, stage: str):
+    def dump_graph(self, graph: torch.fx.Graph, stage: str) -> None:
         i = VllmInductorPass.dump_prefix
         i_str = "" if i is None else f".{i}"
         lazy_format_graph_code(
             f"post_grad{i_str}.{self.pass_name}.{stage}", graph.owning_module
         )
 
-    def begin(self):
+    def begin(self) -> None:
         self._start_time = time.perf_counter_ns()
 
-    def end_and_log(self):
+    def end_and_log(self) -> None:
         self._end_time = time.perf_counter_ns()
         duration_ms = float(self._end_time - self._start_time) / 1.0e6
         logger.debug("%s completed in %.1f ms", self.pass_name, duration_ms)
@@ -79,12 +97,14 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
     def _replace_op_overloads(self, string: str) -> str:
         """Replace <OpOverload(..., ...)> with nicer formulations"""
-        return self._OP_OVERLOAD_PATTERN.sub(
-            lambda m: f"torch.ops.{m.group(1)}.{m.group(2)}",
-            string,
+        return str(
+            self._OP_OVERLOAD_PATTERN.sub(
+                lambda m: f"torch.ops.{m.group(1)}.{m.group(2)}",
+                string,
+            )
         )
 
-    def dump_patterns(self, config: VllmConfig, pm_pass: PatternMatcherPass):
+    def dump_patterns(self, config: VllmConfig, pm_pass: PatternMatcherPass) -> None:
         """
         If debug dumping is enabled, dump the Inductor pattern-matcher patterns
         into the debug_dump_path folder next to the dumped fx graphs.
@@ -101,7 +121,7 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
         debug_dump_path.mkdir(parents=True, exist_ok=True)
 
-        from vllm.utils import unique_filepath
+        from vllm.utils.system_utils import unique_filepath
 
         file_path = unique_filepath(
             lambda i: debug_dump_path / f"patterns.{self.pass_name}.{i}.py"
@@ -115,7 +135,8 @@ class VllmPatternMatcherPass(VllmInductorPass):
                 f" please add to dump_patterns if there are any errors.\n\n"
                 f"from torch._higher_order_ops.auto_functionalize import "
                 f"auto_functionalized as auto_functionalized\n"
-                f"from torch._inductor.pattern_matcher import *",
+                f"from torch._inductor.pattern_matcher import *\n"
+                f"vllm = torch.ops.vllm",
                 file=f,
             )
 
@@ -151,9 +172,9 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
 
 class PrinterInductorPass(VllmInductorPass):
-    def __init__(self, name: str, config: VllmConfig):
+    def __init__(self, name: str, config: VllmConfig) -> None:
         super().__init__(config)
         self.name = name
 
-    def __call__(self, graph: torch.fx.Graph):
+    def __call__(self, graph: torch.fx.Graph) -> None:
         self.dump_graph(graph, self.name)

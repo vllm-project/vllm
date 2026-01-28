@@ -2,29 +2,34 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import Any, ParamSpec
 
 import torch
 import torch._inductor.pattern_matcher as pm
+from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
-from vllm.attention import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
+from .fx_utils import is_func
 from .inductor_pass import enable_fake_mode
+from .matcher_utils import MatcherQuantFP8
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
-
+P = ParamSpec("P")
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
@@ -43,7 +48,7 @@ class AttentionQuantPattern(ABC):
         layer: Attention,
         quant_key: QuantKey,
         dtype: torch.dtype,
-    ):
+    ) -> None:
         self.layer = layer
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
@@ -57,34 +62,54 @@ class AttentionQuantPattern(ABC):
         )
         self.QUANT_OP = QUANT_OPS[self.quant_key]
 
-    def empty(self, *args, **kwargs):
+    def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         kwargs = {"dtype": self.dtype, "device": "cuda", **kwargs}
         return torch.empty(*args, **kwargs)
 
-    def empty_quant(self, *args, **kwargs):
+    def empty_quant(self, *args: Any, **kwargs: Any) -> torch.Tensor:
         kwargs = {"dtype": self.quant_dtype, "device": "cuda", **kwargs}
         return torch.empty(*args, **kwargs)
 
     @staticmethod
-    def wrap_trace_fn(process_fx, trace_fn):
-        def wrapped(*args, **kwargs):
-            return process_fx(trace_fn(*args, **kwargs))
+    def wrap_trace_fn(
+        trace_fn: Callable[P, fx.GraphModule],
+        *process_fx_fns: Callable[[fx.GraphModule], None],
+    ) -> Callable[P, fx.GraphModule]:
+        def wrapped(*args: P.args, **kwargs: P.kwargs) -> fx.GraphModule:
+            gm = trace_fn(*args, **kwargs)
+            for process_fx in process_fx_fns:
+                process_fx(gm)
+
+            return gm
 
         return wrapped
 
     @staticmethod
-    def fx_view_to_reshape(gm: torch.fx.GraphModule):
+    def fx_view_to_reshape(gm: torch.fx.GraphModule) -> None:
         from torch._inductor.fx_passes.post_grad import view_to_reshape
 
         view_to_reshape(gm)
-        return gm
 
-    def register_if_supported(self, pm_pass: PatternMatcherPass):
+    @staticmethod
+    def remove_noop_permutes(gm: torch.fx.GraphModule) -> None:
+        for node in gm.graph.nodes:
+            if not is_func(node, torch.ops.aten.permute.default):
+                continue
+
+            dims = node.args[1]
+            if any(dim != i for i, dim in enumerate(dims)):
+                continue
+
+            # this is now an identity op, remove
+            node.replace_all_uses_with(node.args[0])
+            gm.graph.erase_node(node)
+
+    def register_if_supported(self, pm_pass: PatternMatcherPass) -> None:
         if self.layer.impl.fused_output_quant_supported(self.quant_key):
             self._register(pm_pass)
 
     @abstractmethod
-    def _register(self, pm_pass: PatternMatcherPass):
+    def _register(self, pm_pass: PatternMatcherPass) -> None:
         raise NotImplementedError
 
 
@@ -103,21 +128,21 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
         layer: Attention,
         dtype: torch.dtype,
         symmetric: bool = True,
-    ):
+    ) -> None:
         quant_key = QuantKey(
             dtype=FP8_DTYPE, scale=kStaticTensorScale, symmetric=symmetric
         )
         super().__init__(layer, quant_key, dtype)
+        self.quant_matcher = MatcherQuantFP8(quant_key)
 
-    def _register(self, pm_pass: PatternMatcherPass):
+    def _register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
             output_attn: torch.Tensor,
-            output_quant: torch.Tensor,
             scale: torch.Tensor,
-        ):
+        ) -> torch.Tensor:
             at1 = auto_functionalized(
                 ATTN_OP,
                 query=q,
@@ -131,19 +156,16 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             attn_out_view = RESHAPE_OP(
                 at1[1], [q.shape[0], self.num_heads * self.head_size]
             )
-            at2 = auto_functionalized(
-                self.QUANT_OP, result=output_quant, input=attn_out_view, scale=scale
-            )
-            return at2[1]
+
+            return self.quant_matcher(attn_out_view, scale)[0]
 
         def replacement(
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
             output_attn: torch.Tensor,
-            output_quant: torch.Tensor,
             scale: torch.Tensor,
-        ):
+        ) -> torch.Tensor:
             # attn output in quant_dtype
             output_attn = torch.ops.aten.full.default(
                 [q.shape[0], self.num_heads, self.head_size],
@@ -164,13 +186,10 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
         inputs = [
-            self.empty(5, self.num_heads, self.head_size, dtype=self.dtype),  # q
-            self.empty(5, self.num_heads, self.head_size, dtype=self.dtype),  # k
-            self.empty(5, self.num_heads, self.head_size, dtype=self.dtype),  # v
-            self.empty(
-                5, self.num_heads, self.head_size, dtype=self.dtype
-            ),  # attn_output
-            self.empty_quant(5, self.num_heads * self.head_size),  # quant_output
+            self.empty(5, self.num_heads, self.head_size),  # q
+            self.empty(5, self.num_heads, self.head_size),  # k
+            self.empty(5, self.num_heads, self.head_size),  # v
+            self.empty(5, self.num_heads, self.head_size),  # attn_output
             empty_fp32(1, 1),  # scale
         ]
 
@@ -179,7 +198,9 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
             replacement,
             inputs,
             AttentionQuantPattern.wrap_trace_fn(
-                AttentionQuantPattern.fx_view_to_reshape, pm.fwd_only
+                pm.fwd_only,
+                AttentionQuantPattern.fx_view_to_reshape,
+                AttentionQuantPattern.remove_noop_permutes,
             ),
             pm_pass,
         )
@@ -195,10 +216,10 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
     will be passed into Attention op as the `output_scale` argument.
     """
 
-    def __init__(self, layer: Attention, dtype: torch.dtype):
-        super().__init__(layer, kNvfp4Quant, dtype)
+    def __init__(self, layer: Attention, dtype: torch.dtype) -> None:
+        super().__init__(layer, kNvfp4Dynamic, dtype)
 
-    def _register(self, pm_pass: PatternMatcherPass):
+    def _register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
             q: torch.Tensor,
             k: torch.Tensor,
@@ -207,7 +228,7 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             output_quant: torch.Tensor,
             output_scale: torch.Tensor,
             input_scale: torch.Tensor,
-        ):
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             at1 = auto_functionalized(
                 ATTN_OP,
                 query=q,
@@ -227,6 +248,7 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
                 input=attn_out_view,
                 output_scale=output_scale,
                 input_scale=input_scale,
+                is_sf_swizzled_layout=True,
             )
             output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
             return at2[1], output_scale_view
@@ -239,7 +261,7 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             output_quant: torch.Tensor,
             output_scale: torch.Tensor,
             input_scale: torch.Tensor,
-        ):
+        ) -> tuple[torch.Tensor, torch.Tensor]:
             # attention output in quant_dtype
             output_attn = torch.ops.aten.full.default(
                 [q.shape[0], self.num_heads, self.head_size // 2],
@@ -279,7 +301,9 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             replacement,
             inputs,
             AttentionQuantPattern.wrap_trace_fn(
-                AttentionQuantPattern.fx_view_to_reshape, pm.fwd_only
+                pm.fwd_only,
+                AttentionQuantPattern.fx_view_to_reshape,
+                AttentionQuantPattern.remove_noop_permutes,
             ),
             pm_pass,
         )
@@ -299,7 +323,7 @@ class AttnFusionPass(VllmPatternMatcherPass):
     """
 
     @enable_fake_mode
-    def __init__(self, config: VllmConfig):
+    def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
         self.patterns = PatternMatcherPass(pass_name="attn_fusion_pass")
@@ -331,7 +355,7 @@ class AttnFusionPass(VllmPatternMatcherPass):
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Fused quant onto %s attention nodes", self.matched_count)
 
-    def uuid(self):
+    def uuid(self) -> str:
         return VllmInductorPass.hash_source(
             self,
             AttentionQuantPattern,

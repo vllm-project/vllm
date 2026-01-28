@@ -11,7 +11,7 @@ from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     ParallelConfig,
     SchedulerConfig,
@@ -34,43 +34,72 @@ class SimpleMLP(nn.Module):
 
 
 def _create_vllm_config(
-    compilation_config: CompilationConfig, max_num_seqs: int = 8
+    compilation_config: CompilationConfig,
+    max_num_seqs: int = 8,
+    lora_config: bool = False,
 ) -> MagicMock:
     mock_config = MagicMock(spec=VllmConfig)
     mock_config.compilation_config = compilation_config
-    mock_config.scheduler_config = SchedulerConfig(max_num_seqs=max_num_seqs)
+    mock_config.scheduler_config = SchedulerConfig.default_factory(
+        max_num_seqs=max_num_seqs,
+    )
     mock_config.parallel_config = ParallelConfig()
-
+    mock_config.speculative_config = None  # No speculative decoding
+    if not lora_config:
+        mock_config.lora_config = None
     # Mimic the behavior of VllmConfig.__post_init__()
-    if compilation_config.level == CompilationLevel.PIECEWISE:
-        compilation_config.set_splitting_ops_for_v1()
+    if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+        compilation_config.set_splitting_ops_for_v1(
+            all2all_backend=mock_config.parallel_config.all2all_backend,
+            data_parallel_size=mock_config.parallel_config.data_parallel_size,
+        )
+
+    # mimic VllmConfig.__post_init__
+    if compilation_config.cudagraph_capture_sizes:
+        compilation_config.max_cudagraph_capture_size = (
+            compilation_config.cudagraph_capture_sizes[-1]
+        )
+
+        compilation_config.post_init_cudagraph_sizes()
 
     return mock_config
 
 
 class TestCudagraphDispatcher:
     @pytest.mark.parametrize(
-        "case_id,cudagraph_mode_str,compilation_level",
+        "cudagraph_mode_str,compilation_mode,lora_config",
         [
             # Test case 0: Full CG for mixed batches, no separate routine
-            (0, "FULL", CompilationLevel.NO_COMPILATION),
+            ("FULL", CompilationMode.NONE, False),
             # Test case 1: Full CG for uniform batches, piecewise for mixed
-            (1, "FULL_AND_PIECEWISE", CompilationLevel.NO_COMPILATION),
+            ("FULL_AND_PIECEWISE", CompilationMode.NONE, False),
             # Test case 2: Full CG for uniform batches, no CG for mixed
-            (2, "FULL_DECODE_ONLY", CompilationLevel.NO_COMPILATION),
-            # Test case 3: Piecewise for all
-            (3, "PIECEWISE", CompilationLevel.PIECEWISE),
+            ("FULL_DECODE_ONLY", CompilationMode.NONE, False),
+            # Test case 3: PIECEWISE for all
+            ("PIECEWISE", CompilationMode.VLLM_COMPILE, False),
+            # Test case 4: PIECEWISE for all, specialize LoRA cases
+            ("PIECEWISE", CompilationMode.VLLM_COMPILE, True),
         ],
     )
-    def test_dispatcher(self, cudagraph_mode_str, compilation_level):
+    def test_dispatcher(self, cudagraph_mode_str, compilation_mode, lora_config):
         # Setup dispatcher
         comp_config = CompilationConfig(
             cudagraph_mode=cudagraph_mode_str,
-            level=compilation_level,
+            mode=compilation_mode,
             cudagraph_capture_sizes=[1, 8],
         )
 
-        config = _create_vllm_config(comp_config, max_num_seqs=8)
+        config = _create_vllm_config(
+            comp_config, max_num_seqs=8, lora_config=lora_config
+        )
+        if (
+            cudagraph_mode_str == "FULL_AND_PIECEWISE"
+            and compilation_mode == CompilationMode.NONE
+        ):
+            with pytest.raises(AssertionError):
+                dispatcher = CudagraphDispatcher(config)
+            return
+
         dispatcher = CudagraphDispatcher(config)
         dispatcher.initialize_cudagraph_keys(
             cudagraph_mode=comp_config.cudagraph_mode, uniform_decode_query_len=1
@@ -78,18 +107,27 @@ class TestCudagraphDispatcher:
 
         # Verify the key is initialized correctly
         if cudagraph_mode_str in ["FULL_AND_PIECEWISE", "PIECEWISE"]:
-            assert len(dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]) == 2
+            assert len(dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]) == (
+                4 if lora_config else 2
+            )
         else:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.PIECEWISE]) == 0
         if cudagraph_mode_str not in ["NONE", "PIECEWISE"]:
-            assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) == 2
+            assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) == (
+                4 if lora_config else 2
+            )
         else:
             assert len(dispatcher.cudagraph_keys[CUDAGraphMode.FULL]) == 0
 
         # Test dispatch logic
         # 1. non-uniform batch, size in cudagraph size list
-        desc_full_exact = BatchDescriptor(num_tokens=8, uniform_decode=False)
-        rt_mode, key = dispatcher.dispatch(desc_full_exact)
+        desc_full_exact = BatchDescriptor(
+            num_tokens=8,
+            uniform=False,
+        )
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=8, uniform_decode=False, has_lora=False
+        )
         if cudagraph_mode_str == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_full_exact
@@ -100,34 +138,102 @@ class TestCudagraphDispatcher:
             assert rt_mode == CUDAGraphMode.NONE
 
         # 2. uniform decode batch, size in cudagraph size list
-        desc_uniform_exact = BatchDescriptor(num_tokens=8, uniform_decode=True)
-        rt_mode, key = dispatcher.dispatch(desc_uniform_exact)
+        desc_uniform_exact = BatchDescriptor(num_tokens=8, num_reqs=8, uniform=True)
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=8, uniform_decode=True, has_lora=False
+        )
         if cudagraph_mode_str == "FULL":
             assert rt_mode == CUDAGraphMode.FULL
-            assert key == desc_uniform_exact.non_uniform
+            assert key == desc_uniform_exact.relax_for_mixed_batch_cudagraphs()
         elif cudagraph_mode_str in ["FULL_DECODE_ONLY", "FULL_AND_PIECEWISE"]:
             assert rt_mode == CUDAGraphMode.FULL
             assert key == desc_uniform_exact
         elif cudagraph_mode_str == "PIECEWISE":
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_uniform_exact.non_uniform
+            assert key == desc_uniform_exact.relax_for_mixed_batch_cudagraphs()
         else:
             assert rt_mode == CUDAGraphMode.NONE
 
         # 3. No key match
-        desc_no_match = BatchDescriptor(num_tokens=15, uniform_decode=False)
-        rt_mode, key = dispatcher.dispatch(desc_no_match)
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=15, uniform_decode=False, has_lora=False
+        )
         assert rt_mode == CUDAGraphMode.NONE
-        assert key is None
+        assert key == BatchDescriptor(num_tokens=15)
 
-        # 4. Cascade attention should have a fall back mode
-        desc_full_exact = BatchDescriptor(num_tokens=8, uniform_decode=False)
-        rt_mode, key = dispatcher.dispatch(desc_full_exact, use_cascade_attn=True)
+        # 4. disable_full should have a fall back mode (e.g., cascade attention)
+        desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=8, uniform_decode=False, has_lora=False, disable_full=True
+        )
+
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
             assert rt_mode == CUDAGraphMode.PIECEWISE
-            assert key == desc_full_exact.non_uniform
+            assert key == desc_full_exact.relax_for_mixed_batch_cudagraphs()
         else:
             assert rt_mode == CUDAGraphMode.NONE
+
+    @pytest.mark.parametrize(
+        "cudagraph_mode_str,compilation_mode,expected_modes",
+        [
+            # FULL mode: only FULL keys, no PIECEWISE
+            ("FULL", CompilationMode.NONE, [CUDAGraphMode.FULL]),
+            # PIECEWISE mode: only PIECEWISE keys
+            ("PIECEWISE", CompilationMode.VLLM_COMPILE, [CUDAGraphMode.PIECEWISE]),
+            # FULL_DECODE_ONLY: only FULL keys for uniform decode
+            ("FULL_DECODE_ONLY", CompilationMode.NONE, [CUDAGraphMode.FULL]),
+            # NONE mode: no keys
+            ("NONE", CompilationMode.NONE, []),
+        ],
+    )
+    def test_get_capture_descs(
+        self, cudagraph_mode_str, compilation_mode, expected_modes
+    ):
+        """Test get_capture_descs returns correctly grouped and ordered descs."""
+        comp_config = CompilationConfig(
+            cudagraph_mode=cudagraph_mode_str,
+            mode=compilation_mode,
+            cudagraph_capture_sizes=[1, 4, 8, 16],
+        )
+
+        config = _create_vllm_config(comp_config, max_num_seqs=16)
+        dispatcher = CudagraphDispatcher(config)
+        dispatcher.initialize_cudagraph_keys(
+            cudagraph_mode=comp_config.cudagraph_mode, uniform_decode_query_len=1
+        )
+
+        capture_descs = dispatcher.get_capture_descs()
+
+        # Verify we get the expected modes
+        actual_modes = [mode for mode, _ in capture_descs]
+        assert actual_modes == expected_modes
+
+        # Verify each group is sorted largest-first
+        for mode, descs in capture_descs:
+            assert len(descs) > 0, "Each group should have at least one descriptor"
+            num_tokens_list = [d.num_tokens for d in descs]
+            assert num_tokens_list == sorted(num_tokens_list, reverse=True), (
+                f"Descriptors for {mode} should be sorted largest-first"
+            )
+
+            # All descriptors in a group should have same uniform value
+            uniform_values = [d.uniform for d in descs]
+            assert len(set(uniform_values)) == 1, (
+                "All descriptors in a group should have the same uniform value"
+            )
+
+    def test_get_capture_descs_empty_when_not_initialized(self):
+        """Test that get_capture_descs returns empty list when keys not initialized."""
+        comp_config = CompilationConfig(
+            cudagraph_mode="FULL",
+            mode=CompilationMode.NONE,
+            cudagraph_capture_sizes=[1, 8],
+        )
+        config = _create_vllm_config(comp_config, max_num_seqs=8)
+        dispatcher = CudagraphDispatcher(config)
+        # Don't initialize keys
+
+        assert dispatcher.get_capture_descs() == []
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
@@ -138,7 +244,6 @@ class TestCUDAGraphWrapper:
         self.persistent_input_buffer = torch.zeros(1, 10, device="cuda")
         self.input_tensor = torch.randn(1, 10, device="cuda")
 
-    @create_new_process_for_each_test("spawn")
     def test_capture_and_replay(self):
         wrapper = CUDAGraphWrapper(
             self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
@@ -192,7 +297,6 @@ class TestCUDAGraphWrapper:
         eager_output = self.model(self.input_tensor)
         torch.testing.assert_close(eager_output, output2)
 
-    @create_new_process_for_each_test("spawn")
     def test_bypass_on_mode_mismatch(self):
         wrapper = CUDAGraphWrapper(
             self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
@@ -216,7 +320,6 @@ class TestCUDAGraphWrapper:
             mock_forward.assert_called_once()
         assert not wrapper.concrete_cudagraph_entries
 
-    @create_new_process_for_each_test("spawn")
     def test_bypass_on_mode_none(self):
         wrapper = CUDAGraphWrapper(
             self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
@@ -242,7 +345,7 @@ class TestCudagraphIntegration:
     def setup_method(self):
         # only FULL mode for non-uniform batches
         self.comp_config = CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
+            mode=CompilationMode.VLLM_COMPILE,
             cudagraph_mode="FULL",
             cudagraph_capture_sizes=[10, 20],
         )
@@ -317,7 +420,7 @@ class TestCudagraphIntegration:
         ):
             full_wrapper(input_1)
 
-        rt_mode, key = self.dispatcher.dispatch(desc_1)
+        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_1.num_tokens)
         # 1. Capture first shape
         action = self._run_and_monitor_call(full_wrapper, input_1, rt_mode, key)
         assert action == "capture_global"
@@ -326,7 +429,7 @@ class TestCudagraphIntegration:
         action = self._run_and_monitor_call(full_wrapper, input_1, rt_mode, key)
         assert action == "replay"
 
-        rt_mode, key = self.dispatcher.dispatch(desc_2)
+        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_2.num_tokens)
         # 3. Capture second shape
         action = self._run_and_monitor_call(full_wrapper, input_2, rt_mode, key)
         assert action == "capture_global"
@@ -338,7 +441,7 @@ class TestCudagraphIntegration:
         assert action == "replay"
 
         # 5. Bypass if no key match
-        rt_mode, key = self.dispatcher.dispatch(desc_3_unseen)
+        rt_mode, key = self.dispatcher.dispatch(num_tokens=desc_3_unseen.num_tokens)
         assert rt_mode == CUDAGraphMode.NONE
         action = self._run_and_monitor_call(full_wrapper, input_3, rt_mode, key)
         assert action == "bypass"

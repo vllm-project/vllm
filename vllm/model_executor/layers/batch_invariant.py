@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import os
-from collections import namedtuple
 from collections.abc import Callable
-from typing import Any, Union
+from typing import Any
 
 import torch
 
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+logger = init_logger(__name__)
 
 
 def _matmul_launch_metadata(
@@ -130,15 +134,12 @@ def matmul_kernel_persistent(
             bias_ptrs = bias_ptr + offs_cn
             bias = tl.load(bias_ptrs, mask=offs_cn < N, other=0.0).to(tl.float32)
             accumulator += bias
-        if c_ptr.dtype.element_ty == tl.float8e4nv:
-            c = accumulator.to(tl.float8e4nv)
-        else:
-            c = accumulator.to(tl.float16)
+        c = accumulator.to(c_ptr.dtype.element_ty)
         tl.store(c_ptrs, c, mask=c_mask)
 
 
 def matmul_persistent(
-    a: torch.Tensor, b: torch.Tensor, bias: Union[torch.Tensor, None] = None
+    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
 ):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -212,6 +213,139 @@ def matmul_persistent(
         **configs[dtype],
     )
     return c
+
+
+@triton.jit
+def bmm_kernel(
+    a_ptr,  # (*, ) pointer to A, (B, M, K)
+    b_ptr,  # (*, ) pointer to B, (B, K, N)
+    c_ptr,  # (*, ) pointer to C, (B, M, N)
+    B,  # int, batch size
+    M,  # int, output rows
+    N,  # int, output cols
+    K,  # int, reduction dim
+    stride_ab,
+    stride_am,
+    stride_ak,
+    stride_bb,
+    stride_bk,
+    stride_bn,
+    stride_cb,
+    stride_cm,
+    stride_cn,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    A_LARGE: tl.constexpr,
+    B_LARGE: tl.constexpr,
+    C_LARGE: tl.constexpr,
+):
+    """Batched GEMM: (B, M, K) x (B, K, N) -> (B, M, N)
+
+    Each program computes one (batch_idx, tile_m, tile_n) tile, accumulating
+    along K in a fixed order to preserve batch invariance.
+    """
+    pid_b = tl.program_id(0)
+    pid = tl.program_id(1)
+
+    if pid_b >= B:
+        return
+
+    # number of tiles along M / N
+    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+
+    if pid_m >= num_pid_m or pid_n >= num_pid_n:
+        return
+
+    # offs_m / offs_n: raw global row/col indices for this tile
+    offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    # masks for valid logical rows/cols within (M, N)
+    mask_m = offs_m < M  # [BLOCK_SIZE_M]
+    mask_n = offs_n < N  # [BLOCK_SIZE_N]
+
+    if A_LARGE or B_LARGE or C_LARGE:
+        offs_m = offs_m.to(tl.int64)
+        offs_n = offs_n.to(tl.int64)
+
+    offs_m = tl.where(mask_m, offs_m, 0)
+    offs_n = tl.where(mask_n, offs_n, 0)
+
+    # hint for triton contiguous memory
+    offs_m = tl.max_contiguous(tl.multiple_of(offs_m, BLOCK_SIZE_M), BLOCK_SIZE_M)
+    offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_SIZE_N), BLOCK_SIZE_N)
+
+    # base pointers for current batch, shape-wise:
+    #   a_batch_ptr points to A[pid_b, 0, 0]
+    #   b_batch_ptr points to B[pid_b, 0, 0]
+    #   c_batch_ptr points to C[pid_b, 0, 0]
+    a_batch_ptr = a_ptr + pid_b * stride_ab
+    b_batch_ptr = b_ptr + pid_b * stride_bb
+    c_batch_ptr = c_ptr + pid_b * stride_cb
+
+    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    # number of K-blocks this tile iterates over
+    k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
+    offs_k_mask = tl.arange(0, BLOCK_SIZE_K)
+
+    for ki in range(k_tiles):
+        if A_LARGE or B_LARGE:
+            # offs_k: [BLOCK_SIZE_K], global K indices
+            offs_k = ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K).to(tl.int64)
+        else:
+            offs_k = ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
+
+        # a_ptrs: [BLOCK_SIZE_M, BLOCK_SIZE_K]
+        #   element (i, j) points to A[pid_b, offs_m[i], offs_k[j]]
+        a_ptrs = a_batch_ptr + (
+            offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
+        )
+        # b_ptrs: [BLOCK_SIZE_K, BLOCK_SIZE_N]
+        #   element (i, j) points to B[pid_b, offs_k[i], offs_n[j]]
+        b_ptrs = b_batch_ptr + (
+            offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
+        )
+
+        # valid K lanes for this block
+        k_valid = offs_k_mask < (K - ki * BLOCK_SIZE_K)
+        # A mask within (M, K): [BLOCK_SIZE_M, BLOCK_SIZE_K]
+        a_mask = mask_m[:, None] & k_valid[None, :]
+        # B mask within (K, N): [BLOCK_SIZE_K, BLOCK_SIZE_N]
+        b_mask = k_valid[:, None] & mask_n[None, :]
+
+        # a: [BLOCK_SIZE_M, BLOCK_SIZE_K] from A[offs_m, offs_k]
+        a = tl.load(
+            a_ptrs,
+            mask=a_mask,
+            other=0.0,
+        )
+        # b: [BLOCK_SIZE_K, BLOCK_SIZE_N] from B[offs_k, offs_n]
+        b = tl.load(
+            b_ptrs,
+            mask=b_mask,
+            other=0.0,
+        )
+        accumulator = tl.dot(a, b, accumulator)
+
+    # c_m / c_n: [BLOCK_SIZE_M] / [BLOCK_SIZE_N], row/col indices for C
+    c_m = offs_m
+    c_n = offs_n
+    if C_LARGE:
+        c_m = c_m.to(tl.int64)
+        c_n = c_n.to(tl.int64)
+
+    # c_ptrs: [BLOCK_SIZE_M, BLOCK_SIZE_N]
+    #   element (i, j) points to C[pid_b, c_m[i], c_n[j]]
+    c_ptrs = c_batch_ptr + stride_cm * c_m[:, None] + stride_cn * c_n[None, :]
+    # mask out elements that fall outside logical (M, N) range
+    c_mask = mask_m[:, None] & mask_n[None, :]
+    # cast FP32 accumulator back to original dtype of C
+    c = accumulator.to(c_ptr.dtype.element_ty)
+    tl.store(c_ptrs, c, mask=c_mask)
 
 
 @triton.jit
@@ -375,7 +509,7 @@ def mean_dim(
     input: torch.Tensor,
     dim: int,
     keepdim: bool = False,
-    dtype: Union[torch.dtype, None] = None,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
     Triton implementation of torch.mean with single dimension reduction.
@@ -391,7 +525,6 @@ def mean_dim(
         Tensor with mean values along specified dimension
     """
     # Validate inputs
-    assert input.is_cuda, "Input must be a CUDA tensor"
     assert -input.ndim <= dim < input.ndim, (
         f"Invalid dimension {dim} for tensor with {input.ndim} dimensions"
     )
@@ -466,6 +599,152 @@ def mm_batch_invariant(a, b):
     return matmul_persistent(a, b)
 
 
+def matmul_batch_invariant(a, b, *, out=None):
+    # torch.matmul can handle various dimensions
+    # For 2D x 2D, it's the same as mm
+    if a.ndim == 2 and b.ndim == 2:
+        result = matmul_persistent(a, b)
+        if out is not None:
+            out.copy_(result)
+            return out
+        return result
+    elif a.ndim == 3 and b.ndim == 3:
+        # Handle batched case like bmm
+        return bmm_batch_invariant(a, b, out=out)
+    elif a.ndim == 3 and b.ndim == 2:
+        # Handle 3D x 2D: common for linear layers
+        # (batch, seq, hidden) @ (hidden, out) -> (batch, seq, out)
+        # Reshape to 2D, do mm, reshape back
+        batch, seq, hidden = a.shape
+        a_2d = a.reshape(-1, hidden)
+        result_2d = matmul_persistent(a_2d, b)
+        result = result_2d.reshape(batch, seq, -1)
+        if out is not None:
+            out.copy_(result)
+            return out
+        return result
+    elif a.ndim == 2 and b.ndim == 3:
+        # Handle 2D x 3D: (M, K) @ (B, K, N) -> (B, M, N)
+        # By broadcasting `a` to 3D, we can reuse the batched matrix
+        # multiplication logic.
+        a_expanded = a.unsqueeze(0).expand(b.shape[0], -1, -1)
+        return bmm_batch_invariant(a_expanded, b, out=out)
+    elif a.ndim == 4 and b.ndim == 4:
+        # Handle 4D attention tensors: [batch, heads, seq, dim]
+        # Reshape to 3D, process, reshape back
+        batch, heads, seq_a, dim_a = a.shape
+        _, _, dim_b, seq_b = b.shape
+
+        # Reshape to [batch*heads, seq_a, dim_a]
+        a_3d = a.reshape(batch * heads, seq_a, dim_a)
+        b_3d = b.reshape(batch * heads, dim_b, seq_b)
+
+        # Do batched matmul
+        result_3d = bmm_batch_invariant(a_3d, b_3d)
+
+        # Reshape back to [batch, heads, seq_a, seq_b]
+        result = result_3d.reshape(batch, heads, seq_a, seq_b)
+
+        if out is not None:
+            out.copy_(result)
+            return out
+        return result
+    else:
+        raise ValueError(
+            f"matmul_batch_invariant currently only supports 2D x 2D, 3D x 3D, "
+            f"3D x 2D, 2D x 3D, and 4D x 4D, "
+            f"got shapes {a.shape} and {b.shape}"
+        )
+
+
+def bmm_batch_invariant(a, b, *, out=None):
+    # Batched matrix multiply: (B, M, K) x (B, K, N) -> (B, M, N)
+    if not (a.ndim == 3 and b.ndim == 3):
+        raise ValueError(
+            f"bmm_batch_invariant expects 3D tensors, "
+            f"got shapes {a.shape} and {b.shape}"
+        )
+
+    if a.shape[0] != b.shape[0]:
+        raise ValueError(
+            f"Batch dimensions of tensors must match, "
+            f"but got {a.shape[0]} and {b.shape[0]}."
+        )
+    if a.shape[2] != b.shape[1]:
+        raise ValueError(
+            f"Incompatible inner dimensions for matmul: got {a.shape} and {b.shape}."
+        )
+    if a.dtype != b.dtype:
+        raise ValueError(f"Incompatible dtypes: got {a.dtype} and {b.dtype}.")
+
+    B, M, K = a.shape
+    _, _, N = b.shape
+    dtype = a.dtype
+
+    if out is None:
+        c = torch.empty((B, M, N), device=a.device, dtype=dtype)
+    else:
+        assert out.shape == (B, M, N), "out tensor has incorrect shape"
+        assert out.dtype == dtype and out.device == a.device, "out tensor mismatch"
+        c = out
+
+    configs = {
+        torch.bfloat16: {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 64,
+            "num_stages": 3,
+            "num_warps": 8,
+        },
+        torch.float16: {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 256,
+            "BLOCK_SIZE_K": 64,
+            "num_stages": 3,
+            "num_warps": 8,
+        },
+        torch.float32: {
+            "BLOCK_SIZE_M": 128,
+            "BLOCK_SIZE_N": 128,
+            "BLOCK_SIZE_K": 32,
+            "num_stages": 3,
+            "num_warps": 8,
+        },
+    }
+
+    cfg = configs[dtype]
+    # grid = (B, num_tiles_per_matrix)
+    grid = (
+        B,
+        triton.cdiv(M, cfg["BLOCK_SIZE_M"]) * triton.cdiv(N, cfg["BLOCK_SIZE_N"]),
+    )
+
+    bmm_kernel[grid](
+        a,
+        b,
+        c,
+        B,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        a.stride(2),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        c.stride(0),
+        c.stride(1),
+        c.stride(2),
+        A_LARGE=a.numel() > 2**31,
+        B_LARGE=b.numel() > 2**31,
+        C_LARGE=c.numel() > 2**31,
+        **cfg,
+    )
+
+    return c
+
+
 def addmm_batch_invariant(bias, a, b):
     return matmul_persistent(a, b, bias=bias)
 
@@ -475,12 +754,23 @@ def _log_softmax_batch_invariant(input, dim, _half_to_float):
     return log_softmax(input, dim=dim)
 
 
-def mean_batch_invariant(
-    input, dim, keepdim=False, dtype: Union[torch.dtype, None] = None
-):
+def softmax_batch_invariant(input, dim, dtype=None):
+    # Compute softmax in a deterministic way
+    # First subtract max for numerical stability (standard practice)
+    input_max = torch.amax(input, dim=dim, keepdim=True)
+    input = input - input_max
+    exp_x = torch.exp(input)
+    sum_exp_x = torch.sum(exp_x, dim=dim, keepdim=True)
+    return exp_x / sum_exp_x
+
+
+def mean_batch_invariant(input, dim, keepdim=False, dtype: torch.dtype | None = None):
     assert dtype is None or dtype == torch.float32, f"unsupported dtype: {dtype}"
 
     result = input.to(torch.float32)
+
+    if len(dim) == 0:
+        dim = [i for i in range(len(input.shape))]
 
     # Sort dimensions to reduce from largest to smallest to handle shifting dims
     # during iterative reduction.
@@ -498,71 +788,276 @@ def mean_batch_invariant(
     return result
 
 
+@triton.jit
+def _rms_norm_kernel(
+    input_ptr,
+    weight_ptr,
+    output_ptr,
+    input_row_stride,
+    output_row_stride,
+    n_cols,
+    eps,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Compute RMS normalization along the last dimension of a 2D tensor.
+    RMS Norm: y = x / sqrt(mean(x^2) + eps) * weight
+    Each block handles one row of the input tensor.
+    """
+    row_idx = tl.program_id(0).to(tl.int64)
+    row_start_ptr = input_ptr + row_idx * input_row_stride
+    output_row_start_ptr = output_ptr + row_idx * output_row_stride
+
+    # Step 1: Compute sum of squares in float32 to avoid overflow
+    sum_sq = tl.zeros([1], dtype=tl.float32)
+    for col_offset in range(0, n_cols, BLOCK_SIZE):
+        col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
+        mask = col_idx < n_cols
+
+        vals = tl.load(row_start_ptr + col_idx, mask=mask, other=0.0)
+        # Convert to float32 for accumulation to prevent overflow
+        vals_f32 = vals.to(tl.float32)
+        sq_vals = vals_f32 * vals_f32
+        sum_sq += tl.sum(tl.where(mask, sq_vals, 0.0))
+
+    # Step 2: Compute RMS (root mean square) in float32
+    mean_sq = sum_sq / n_cols
+    rms = tl.sqrt(mean_sq + eps)
+    inv_rms = 1.0 / rms
+
+    # Step 3: Normalize and apply weight
+    for col_offset in range(0, n_cols, BLOCK_SIZE):
+        col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
+        mask = col_idx < n_cols
+        vals = tl.load(row_start_ptr + col_idx, mask=mask, other=0.0)
+        weight = tl.load(weight_ptr + col_idx, mask=mask, other=1.0)
+        # Compute in float32 then convert back to input dtype
+        vals_f32 = vals.to(tl.float32)
+        weight_f32 = weight.to(tl.float32)
+        output_f32 = vals_f32 * inv_rms * weight_f32
+        output = output_f32.to(vals.dtype)
+        tl.store(output_row_start_ptr + col_idx, output, mask=mask)
+
+
+def rms_norm(
+    input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
+) -> torch.Tensor:
+    """
+    Compute RMS normalization using Triton kernel.
+
+    RMS Norm normalizes the input by the root mean square and scales by weight:
+    output = input / sqrt(mean(input^2) + eps) * weight
+
+    Args:
+        input: Input tensor of shape (..., hidden_size)
+        weight: Weight tensor of shape (hidden_size,)
+        eps: Small constant for numerical stability
+
+    Returns:
+        Tensor with RMS normalization applied along the last dimension
+    """
+    assert weight.dim() == 1, "Weight must be 1-dimensional"
+    assert input.shape[-1] == weight.shape[0], (
+        f"Input last dimension ({input.shape[-1]}) must match "
+        f"weight dimension ({weight.shape[0]})"
+    )
+
+    # Flatten all dimensions except the last one
+    original_shape = input.shape
+    input_2d = input.reshape(-1, input.shape[-1])
+    input_2d = input_2d.contiguous()
+    weight = weight.contiguous()
+
+    n_rows, n_cols = input_2d.shape
+
+    output = torch.empty_like(input_2d)
+    BLOCK_SIZE = 1024
+    grid = (n_rows,)
+    _rms_norm_kernel[grid](
+        input_2d,
+        weight,
+        output,
+        input_2d.stride(0),
+        output.stride(0),
+        n_cols,
+        eps,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+    return output.reshape(original_shape)
+
+
+def rms_norm_batch_invariant(
+    input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
+) -> torch.Tensor:
+    """
+    Batch-invariant wrapper for RMS normalization.
+
+    This function provides a deterministic, batch-invariant implementation
+    of RMS normalization for use with the batch_invariant mode.
+
+    Args:
+        input: Input tensor of shape (..., hidden_size)
+        weight: Weight tensor of shape (hidden_size,)
+        eps: Small constant for numerical stability
+
+    Returns:
+        RMS normalized tensor
+    """
+    return rms_norm(input, weight, eps=eps)
+
+
+def linear_batch_invariant(input, weight, bias=None):
+    output = matmul_batch_invariant(input, weight.t())
+
+    if bias is not None:
+        output = output + bias
+    return output
+
+
 _batch_invariant_MODE = False
 _batch_invariant_LIB = None
-
-
-def is_batch_invariant_mode_enabled():
-    return _batch_invariant_MODE
+_original_torch_bmm = None
+_original_fp16_reduction_precision = None
+_original_bf16_reduction_precision = None
+_original_cublas_workspace_cfg = None
+_original_cublaslt_workspace_size = None
 
 
 def enable_batch_invariant_mode():
-    global _batch_invariant_MODE, _batch_invariant_LIB
+    global _batch_invariant_MODE, _batch_invariant_LIB, _original_torch_bmm
+    global _original_fp16_reduction_precision, _original_bf16_reduction_precision
+    global _original_cublas_workspace_cfg, _original_cublaslt_workspace_size
     if _batch_invariant_MODE:
         return
 
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
-    _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
-    _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
+
+    if (
+        current_platform.is_device_capability_family(100)
+        or current_platform.is_device_capability(80)
+        or current_platform.is_device_capability(89)
+    ):
+        # For PyTorch 2.9, B200 uses GEMV for bs=1
+        # Requires https://github.com/pytorch/pytorch/pull/166735
+        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
+        _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
+        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "CUDA")
+        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "CUDA")
+    else:
+        # Only source of batch invariance for Hopper is split-k, can disable through
+        # cuBLAS workspace config
+        _original_cublas_workspace_cfg = os.environ.get("CUBLAS_WORKSPACE_CONFIG", None)
+        _original_cublaslt_workspace_size = os.environ.get(
+            "CUBLASLT_WORKSPACE_SIZE", None
+        )
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+        os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+
     _batch_invariant_LIB.impl(
         "aten::_log_softmax", _log_softmax_batch_invariant, "CUDA"
     )
+    _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "CUDA")
+    _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "CUDA")
     _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, "CUDA")
 
+    # Also monkeypatch torch.bmm directly as a fallback
+    _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "CUDA")
+    _original_torch_bmm = torch.bmm
+    torch.bmm = bmm_batch_invariant
 
-def disable_batch_invariant_mode():
-    global _batch_invariant_MODE, _batch_invariant_LIB
-    if _batch_invariant_LIB is not None:
-        _batch_invariant_LIB._destroy()
-    _batch_invariant_MODE = False
-    _batch_invariant_LIB = None
+    _original_bf16_reduction_precision = (
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+    )
+    _original_fp16_reduction_precision = (
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+    )
 
-
-@contextlib.contextmanager
-def set_batch_invariant_mode(enabled: bool = True):
-    global _batch_invariant_MODE, _batch_invariant_LIB
-    old_data = (_batch_invariant_MODE, _batch_invariant_LIB)
-    if enabled:
-        enable_batch_invariant_mode()
-    else:
-        disable_batch_invariant_mode()
-    yield
-    if _batch_invariant_LIB is not None:
-        _batch_invariant_LIB._destroy()
-    _batch_invariant_MODE, _batch_invariant_LIB = old_data
-
-
-AttentionBlockSize = namedtuple("AttentionBlockSize", ["block_m", "block_n"])
+    reduced_precision_val = (
+        (False, False) if is_torch_equal_or_newer("2.10.0.dev") else False
+    )
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
+        reduced_precision_val
+    )
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
+        reduced_precision_val
+    )
+    torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 
-def get_batch_invariant_attention_block_size() -> AttentionBlockSize:
-    return AttentionBlockSize(block_m=16, block_n=16)
-
-
-def vllm_kernel_override_batch_invariant():
-    env_key = "VLLM_KERNEL_OVERRIDE_BATCH_INVARIANT"
-    is_overridden = False
-    val = os.getenv(env_key, "0")
+def _read_vllm_batch_invariant() -> bool:
+    val = os.getenv("VLLM_BATCH_INVARIANT", "0")
     try:
-        is_overridden = int(val) != 0
+        return int(val) != 0
     except ValueError:
-        is_overridden = False
-    return is_overridden
+        return False
 
 
-def init_batch_invariance():
+VLLM_BATCH_INVARIANT: bool = _read_vllm_batch_invariant()
+
+
+def vllm_is_batch_invariant() -> bool:
+    return VLLM_BATCH_INVARIANT
+
+
+def override_envs_for_invariance(
+    attention_backend: AttentionBackendEnum | None,
+):
+    supported_backends = [
+        AttentionBackendEnum.FLASH_ATTN,  # best supported backend
+        AttentionBackendEnum.FLASHINFER,
+        AttentionBackendEnum.FLASH_ATTN_MLA,
+        AttentionBackendEnum.TRITON_MLA,
+        # Not yet supported MLA backends
+        # AttentionBackendEnum.FLASHMLA,
+        # AttentionBackendEnum.FLEX_ATTENTION,  # IMA issue
+        # AttentionBackendEnum.FLASHINFER_MLA,  # PR #28967
+    ]
+    if attention_backend not in supported_backends:
+        supported_names = [b.name for b in supported_backends]
+        backend_name = attention_backend.name if attention_backend else None
+        error = (
+            "VLLM batch_invariant mode requires an attention backend in "
+            f"{supported_names}, but got '{backend_name}'. "
+            "Please use --attention-backend or attention_config to set "
+            "one of the supported backends before enabling batch_invariant."
+        )
+        raise RuntimeError(error)
+    if attention_backend != supported_backends[0]:
+        warning = (
+            "You are using a decode-invariant form of batch invariance. "
+            "This will not be invariant between prefill and decode."
+        )
+        logger.warning_once(warning, scope="local")
+    os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
+    # NCCL determinism settings
+    os.environ["NCCL_LAUNCH_MODE"] = "GROUP"
+    os.environ["NCCL_COLLNET_ENABLE"] = "0"
+    os.environ["NCCL_NVLS_ENABLE"] = "0"
+    os.environ["NCCL_P2P_NET_DISABLE"] = "1"
+    os.environ["NCCL_MIN_NCHANNELS"] = "1"
+    os.environ["NCCL_MAX_NCHANNELS"] = "1"
+    os.environ["NCCL_PROTO"] = "Simple"
+    os.environ["NCCL_ALGO"] = "allreduce:tree"
+    os.environ["NCCL_NTHREADS"] = "1"
+    os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+
+    # torch.compile settings
+    os.environ["VLLM_USE_AOT_COMPILE"] = "0"
+
+
+def init_batch_invariance(
+    attention_backend: AttentionBackendEnum | None,
+):
     # this will hit all the csrc overrides as well
-    if vllm_kernel_override_batch_invariant():
-        os.environ["VLLM_ATTENTION_BACKEND"] = "FLEX_ATTENTION"
+    if vllm_is_batch_invariant():
+        override_envs_for_invariance(attention_backend)
         enable_batch_invariant_mode()
+
+        # Disable TF32 for batch invariance - it causes non-deterministic rounding
+        torch.backends.cuda.matmul.fp32_precision = "ieee"
+        torch.backends.cudnn.conv.fp32_precision = "ieee"
+        torch.backends.cudnn.rnn.fp32_precision = "ieee"

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 
@@ -15,27 +15,40 @@ from tests.kernels.quantization.nvfp4_utils import (
 )
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig
-from vllm.distributed import get_dp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_dp_group,
+    get_pcp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.import_utils import (
+    has_aiter,
+    has_deep_ep,
+    has_deep_gemm,
+    has_mori,
+    has_pplx,
+)
 
 from .mk_objects import (
     TestMoEQuantConfig,
     expert_info,
     make_fused_experts,
-    make_prepare_finalize,
     prepare_finalize_info,
 )
 from .parallel_utils import ProcessGroupInfo
 
 
-def _describe_tensor(t: Optional[torch.Tensor], name: str) -> str:
+def _describe_tensor(t: torch.Tensor | None, name: str) -> str:
     if t is None:
         return f"{name} : None"
     else:
@@ -44,21 +57,21 @@ def _describe_tensor(t: Optional[torch.Tensor], name: str) -> str:
 
 @dataclass
 class Config:
-    Ms: Union[list[int], int]
+    Ms: list[int] | int
     K: int
     N: int
     E: int
-    topks: Union[list[int], int]
+    topks: list[int] | int
     dtype: torch.dtype
-    quant_config: Optional[TestMoEQuantConfig]
+    quant_config: TestMoEQuantConfig | None
 
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute
 
-    fused_moe_chunk_size: Optional[int]
+    fused_moe_chunk_size: int | None
     world_size: int
 
-    torch_trace_dir_path: Optional[str] = None
+    torch_trace_dir_path: str | None = None
 
     def __post_init__(self):
         if self.quant_config is None:
@@ -93,7 +106,7 @@ class Config:
         return self.Ms
 
     @property
-    def quant_dtype(self) -> Union[torch.dtype, str, None]:
+    def quant_dtype(self) -> torch.dtype | str | None:
         assert self.quant_config is not None
         return self.quant_config.quant_dtype
 
@@ -112,7 +125,7 @@ class Config:
         return self.quant_config.per_out_ch_quant
 
     @property
-    def quant_block_shape(self) -> Optional[list[int]]:
+    def quant_block_shape(self) -> list[int] | None:
         assert self.quant_config is not None
         return self.quant_config.block_shape
 
@@ -138,6 +151,7 @@ class Config:
         }
 
         backend = self.all2all_backend()
+        vllm_config.parallel_config.all2all_backend = backend
         if backend is not None:
             env_dict.update({"VLLM_ALL2ALL_BACKEND": backend})
 
@@ -205,11 +219,19 @@ class Config:
             or info.backend == "deepep_low_latency"
         )
 
+    def needs_aiter(self):
+        info = expert_info(self.fused_experts_type)
+        return info.needs_aiter
+
+    def needs_mori(self):
+        info = prepare_finalize_info(self.prepare_finalize_type)
+        return info.backend == "mori"
+
     def all2all_backend(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.backend
 
-    def is_valid(self) -> tuple[bool, Optional[str]]:
+    def is_valid(self) -> tuple[bool, str | None]:
         # Check prepare-finalize and fused-experts compatibility
         if self.is_batched_prepare_finalize():
             if not self.is_batched_fused_experts():
@@ -253,16 +275,16 @@ class Config:
                     f"{self.fe_supported_types()}."
                 )
 
-        # Check block quanization support
-        is_block_quatized = self.quant_block_shape is not None
-        if is_block_quatized and self.quant_dtype is None:
+        # Check block quantization support
+        is_block_quantized = self.quant_block_shape is not None
+        if is_block_quantized and self.quant_dtype is None:
             return False, "No block quantization support."
 
-        if is_block_quatized and not self.is_block_quant_supported():
+        if is_block_quantized and not self.is_block_quant_supported():
             return False, "Mismatched block quantization support."
 
         # deep_gemm only works with block-quantized
-        if self.needs_deep_gemm() and not is_block_quatized:
+        if self.needs_deep_gemm() and not is_block_quantized:
             return False, "Needs DeepGEMM but not block quantized."
 
         # Check dependencies (turn into asserts?)
@@ -272,6 +294,10 @@ class Config:
             return False, "Needs DeepGEMM, but DeepGEMM not available."
         if self.needs_pplx() and not has_pplx():  # noqa: SIM103
             return False, "Needs PPLX, but PPLX not available."
+        if self.needs_aiter() and not has_aiter():  # noqa: SIM103
+            return False, "Needs Aiter, but Aiter not available."
+        if self.needs_mori() and not has_mori():  # noqa: SIM103
+            return False, "Needs MoRI, but MoRI not available."
 
         return True, None
 
@@ -280,10 +306,10 @@ class Config:
 class WeightTensors:
     w1: torch.Tensor
     w2: torch.Tensor
-    w1_scale: Optional[torch.Tensor]
-    w2_scale: Optional[torch.Tensor]
-    w1_gs: Optional[torch.Tensor] = None
-    w2_gs: Optional[torch.Tensor] = None
+    w1_scale: torch.Tensor | None
+    w2_scale: torch.Tensor | None
+    w1_gs: torch.Tensor | None = None
+    w2_gs: torch.Tensor | None = None
 
     def describe(self):
         s = ""
@@ -351,11 +377,11 @@ class WeightTensors:
 @dataclass
 class RankTensors:
     hidden_states: torch.Tensor
-    hidden_states_scale: Optional[torch.Tensor]
+    hidden_states_scale: torch.Tensor | None
 
     topk_weights: torch.Tensor
     topk_ids: torch.Tensor
-    expert_map: Optional[torch.Tensor]
+    expert_map: torch.Tensor | None
 
     def describe(self):
         s = ""
@@ -370,7 +396,7 @@ class RankTensors:
     @staticmethod
     def make_hidden_states(
         config: Config,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """
         Return hidden_states
         """
@@ -560,6 +586,7 @@ def make_modular_kernel(
     # make moe config
     moe_parallel_config: FusedMoEParallelConfig = FusedMoEParallelConfig.make(
         tp_size_=get_tensor_model_parallel_world_size(),
+        pcp_size_=get_pcp_group().world_size,
         dp_size_=get_dp_group().world_size,
         vllm_parallel_config=vllm_config.parallel_config,
     )
@@ -568,16 +595,22 @@ def make_modular_kernel(
         num_experts=config.E,
         experts_per_token=config.topk,
         hidden_dim=config.K,
+        intermediate_size_per_partition=config.N,
         num_local_experts=config.num_local_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
+        activation="silu",
+        device=vllm_config.device_config.device,
+        routing_method=RoutingMethodType.DeepSeekV3,
     )
 
-    # make modular kernel
-    prepare_finalize = make_prepare_finalize(
-        config.prepare_finalize_type, config.all2all_backend(), moe, quant_config
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe,
+        quant_config=quant_config,
+        allow_new_interface=True,
     )
+    assert prepare_finalize is not None
 
     fused_experts = make_fused_experts(
         config.fused_experts_type,
@@ -588,7 +621,8 @@ def make_modular_kernel(
     )
 
     modular_kernel = mk.FusedMoEModularKernel(
-        prepare_finalize=prepare_finalize, fused_experts=fused_experts
+        prepare_finalize=prepare_finalize,
+        fused_experts=fused_experts,
     )
 
     return modular_kernel

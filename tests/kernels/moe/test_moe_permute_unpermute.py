@@ -5,13 +5,11 @@
 Run `pytest tests/kernels/test_moe_permute_unpermute.py`.
 """
 
-from typing import Optional
-
 import numpy as np
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.layer import determine_expert_map
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute,
@@ -19,11 +17,18 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_unpermute,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 NUM_EXPERTS = [16, 64, 256]
 TOP_KS = [2, 6, 8]
 EP_SIZE = [1, 4, 16]
-current_platform.seed_everything(0)
+set_random_seed(0)
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "moe_permute_unpermute_supported is not defined for ROCm",
+        allow_module_level=True,
+    )
 
 
 def torch_permute(
@@ -34,8 +39,8 @@ def torch_permute(
     n_expert: int,
     n_local_expert: int,
     start_expert: int,
-    expert_map: Optional[torch.Tensor] = None,
-    align_block_size: Optional[int] = None,
+    expert_map: torch.Tensor | None = None,
+    align_block_size: int | None = None,
     fill_invalid_expert: int = -1,
 ) -> list[torch.Tensor]:
     n_token, n_hidden = hidden_states.shape[0], hidden_states.shape[1]
@@ -210,7 +215,7 @@ def test_moe_permute_unpermute(
     n_expert: int,
     ep_size: int,
     dtype: torch.dtype,
-    align_block_size: Optional[int],
+    align_block_size: int | None,
 ):
     if not moe_permute_unpermute_supported():
         pytest.skip("moe_permute_unpermute is not supported on this platform.")
@@ -219,10 +224,10 @@ def test_moe_permute_unpermute(
     expert_map = None
     n_local_expert = n_expert
     if ep_size != 1:
-        n_local_expert, expert_map = determine_expert_map(ep_size, ep_rank, n_expert)
+        n_local_expert, expert_map, _ = determine_expert_map(ep_size, ep_rank, n_expert)
         expert_map = expert_map.cuda()
     start_expert = n_local_expert * ep_rank
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     hidden_states = torch.randn((n_token, n_hidden), device="cuda").to(dtype)
     gating_output = torch.randn((n_token, n_expert), device="cuda").to(dtype)
     topk_weights, topk_ids, token_expert_indices = fused_topk(

@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import torch
 
 # Fused experts and PrepareFinalize imports
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
-)
-from vllm.model_executor.layers.fused_moe.batched_triton_or_deep_gemm_moe import (
-    BatchedTritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -22,7 +19,6 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
-from vllm.model_executor.layers.fused_moe.layer import FusedMoEMethodBase, TritonExperts
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
@@ -36,37 +32,44 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
 )
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.import_utils import (
+    has_aiter,
+    has_deep_ep,
+    has_deep_gemm,
+    has_mori,
+    has_pplx,
+)
 
 
 @dataclass
 class TestMoEQuantConfig:
-    quant_dtype: Union[torch.dtype, str, None]
+    quant_dtype: torch.dtype | str | None
     per_out_ch_quant: bool
     per_act_token_quant: bool
-    block_shape: Optional[list[int]]
+    block_shape: list[int] | None
 
 
 @dataclass
 class PrepareFinalizeInfo:
     activation_format: mk.FusedMoEActivationFormat
-    supported_dtypes: list[Union[torch.dtype, str]]
+    supported_dtypes: list[torch.dtype | str]
     blocked_quantization_support: bool
-    backend: Optional[str]
+    backend: str | None
     supports_apply_weight_on_input: bool = True
 
 
 @dataclass
 class ExpertInfo:
     activation_format: mk.FusedMoEActivationFormat
-    supported_dtypes: list[Union[torch.dtype, str]]
+    supported_dtypes: list[torch.dtype | str]
     blocked_quantization_support: bool
     supports_chunking: bool
     supports_expert_map: bool
     needs_matching_quant: bool = False
     needs_deep_gemm: bool = False
+    needs_aiter: bool = False
 
 
 PREPARE_FINALIZE_INFO: dict[mk.FusedMoEPrepareAndFinalize, PrepareFinalizeInfo] = {}
@@ -78,7 +81,7 @@ MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEPermuteExpertsUnpermute] = []
 
 standard_format = mk.FusedMoEActivationFormat.Standard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
-common_float_types: list[Union[torch.dtype, str]] = [
+common_float_types: list[torch.dtype | str] = [
     torch.float8_e4m3fn,
     torch.bfloat16,
     torch.float16,
@@ -92,9 +95,9 @@ fp8_types = [torch.float8_e4m3fn]
 def register_prepare_and_finalize(
     kind,
     activation_format: mk.FusedMoEActivationFormat,
-    supported_dtypes: list[Union[torch.dtype, str]],
+    supported_dtypes: list[torch.dtype | str],
     blocked_quantization_support: bool,
-    backend: Optional[str],
+    backend: str | None,
     force_multigpu: bool = False,
     supports_apply_weight_on_input: bool = True,
 ):
@@ -121,12 +124,13 @@ def register_prepare_and_finalize(
 def register_experts(
     kind,
     activation_format: mk.FusedMoEActivationFormat,
-    supported_dtypes: list[Union[torch.dtype, str]],
+    supported_dtypes: list[torch.dtype | str],
     blocked_quantization_support: bool,
     supports_chunking: bool,
     supports_expert_map: bool,
     needs_matching_quant: bool = False,
     needs_deep_gemm: bool = False,
+    needs_aiter: bool = False,
 ):
     global EXPERT_INFO
     global MK_FUSED_EXPERT_TYPES
@@ -140,6 +144,7 @@ def register_experts(
         supports_expert_map,
         needs_matching_quant,
         needs_deep_gemm,
+        needs_aiter,
     )
 
     MK_FUSED_EXPERT_TYPES.append(kind)
@@ -219,6 +224,20 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
         backend="deepep_low_latency",
     )
 
+if has_mori():
+    from vllm.model_executor.layers.fused_moe.mori_prepare_finalize import (
+        MoriPrepareAndFinalize,
+    )
+
+    register_prepare_and_finalize(
+        MoriPrepareAndFinalize,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
+        backend="mori",
+        supports_apply_weight_on_input=False,
+    )
+
 if has_pplx():
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
@@ -233,12 +252,11 @@ if has_pplx():
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (  # noqa: E501
+        FlashInferCutlassMoEPrepareAndFinalize,
+    )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-        FlashInferCutlassMoEPrepareAndFinalize,
-        create_flashinfer_prepare_finalize,
     )
 
     register_prepare_and_finalize(
@@ -262,6 +280,25 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     )
 else:
     FlashInferCutlassMoEPrepareAndFinalize = None
+    FlashInferExperts = None
+
+
+if has_aiter():
+    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        AiterExperts,
+    )
+
+    register_experts(
+        AiterExperts,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
+        supports_chunking=True,
+        supports_expert_map=True,
+        needs_aiter=True,
+    )
+else:
+    AiterExperts = None
 
 if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
@@ -282,16 +319,6 @@ if has_deep_gemm() and is_deep_gemm_supported():
         supports_chunking=True,
         supports_expert_map=True,
         needs_matching_quant=False,
-        needs_deep_gemm=True,
-    )
-    register_experts(
-        BatchedTritonOrDeepGemmExperts,
-        batched_format,
-        common_float_and_int_types,
-        blocked_quantization_support=True,
-        supports_chunking=False,
-        supports_expert_map=False,
-        needs_matching_quant=True,
         needs_deep_gemm=True,
     )
     register_experts(
@@ -327,6 +354,9 @@ if cutlass_fp8_supported():
         supports_chunking=False,
         supports_expert_map=False,
     )
+else:
+    CutlassBatchedExpertsFp8 = None
+    CutlassExpertsFp8 = None
 
 if cutlass_fp4_supported():
     from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
@@ -339,8 +369,10 @@ if cutlass_fp4_supported():
         supports_chunking=True,
         supports_expert_map=False,
     )
+else:
+    CutlassExpertsFp4 = None
 
-MK_QUANT_CONFIGS: list[Optional[TestMoEQuantConfig]] = [
+MK_QUANT_CONFIGS: list[TestMoEQuantConfig | None] = [
     None,
     # per-channel / per-column weights and per-tensor activations
     TestMoEQuantConfig(
@@ -393,26 +425,6 @@ if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
     ]
 
 
-def make_prepare_finalize(
-    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-    backend: Optional[str],
-    moe: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig,
-) -> mk.FusedMoEPrepareAndFinalize:
-    if backend != "naive" and backend is not None:
-        prepare_finalize = FusedMoEMethodBase._maybe_make_prepare_finalize(
-            moe, quant_config
-        )
-        assert prepare_finalize is not None
-        return prepare_finalize
-    elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
-        return create_flashinfer_prepare_finalize(
-            use_dp=moe.moe_parallel_config.dp_size > 1
-        )
-    else:
-        return MoEPrepareAndFinalizeNoEP()
-
-
 def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:
     s = rank * num_local_experts
     e = s + num_local_experts
@@ -438,88 +450,26 @@ def make_fused_experts(
     num_dispatchers: int,
     N: int,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
-    batch_kwargs = {
-        "max_num_tokens": moe.max_num_tokens,
-        "num_dispatchers": num_dispatchers,
-    }
-    quant_kwargs = {
-        "quant_config": quant_config,
-    }
-    deepgemm_kwargs = {"allow_deep_gemm": has_deep_gemm()}
+    if (
+        fused_experts_type.activation_format()
+        == mk.FusedMoEActivationFormat.BatchedExperts
+    ):
+        kwargs = {
+            "moe_config": moe,
+            "quant_config": quant_config,
+            "max_num_tokens": moe.max_num_tokens,
+            "num_dispatchers": num_dispatchers,
+        }
+    else:
+        kwargs = {
+            "moe_config": moe,
+            "quant_config": quant_config,
+        }
 
     torch.set_printoptions(threshold=0, edgeitems=0, linewidth=10000)
 
-    if fused_experts_type == BatchedDeepGemmExperts:
-        kwargs = batch_kwargs | quant_kwargs
-        print(f"Making BatchedDeepGemmExperts {kwargs} ...")
-        experts = BatchedDeepGemmExperts(**kwargs)
-    elif fused_experts_type == BatchedTritonExperts:
-        kwargs = batch_kwargs | quant_kwargs
-        print(f"Making BatchedTritonExperts {kwargs} ...")
-        experts = BatchedTritonExperts(**kwargs)
-    elif fused_experts_type == BatchedTritonOrDeepGemmExperts:
-        kwargs = batch_kwargs | quant_kwargs | deepgemm_kwargs
-        print(f"Making BatchedTritonOrDeepGemmExperts {kwargs} ...")
-        experts = BatchedTritonOrDeepGemmExperts(**kwargs)
-    elif fused_experts_type == DeepGemmExperts:
-        print(f"Making DeepGemmExperts {quant_config} ...")
-        experts = DeepGemmExperts(quant_config)
-    elif fused_experts_type == TritonExperts:
-        kwargs = quant_kwargs
-        print(f"Making TritonExperts {kwargs} ...")
-        experts = TritonExperts(**kwargs)
-    elif fused_experts_type == TritonOrDeepGemmExperts:
-        kwargs = quant_kwargs | deepgemm_kwargs
-        print(f"Making TritonOrDeepGemmExperts {kwargs} ...")
-        experts = TritonOrDeepGemmExperts(**kwargs)
-    elif fused_experts_type == NaiveBatchedExperts:
-        kwargs = batch_kwargs | quant_kwargs
-        print(f"Making NaiveBatchedExperts {kwargs} ...")
-        experts = NaiveBatchedExperts(**kwargs)
-    elif fused_experts_type == CutlassExpertsFp8:
-        strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
-        kwargs = {
-            "out_dtype": moe.in_dtype,
-            "ab_strides1": strides[0],
-            "ab_strides2": strides[1],
-            "c_strides1": strides[2],
-            "c_strides2": strides[3],
-        } | quant_kwargs
-        print(f"Making CutlassExpertsFp8 {kwargs} ...")
-        experts = CutlassExpertsFp8(**kwargs)
-    elif fused_experts_type == CutlassBatchedExpertsFp8:
-        strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
-        kwargs = {
-            "max_experts_per_worker": moe.num_local_experts,
-            "num_dispatchers": num_dispatchers,
-            "out_dtype": moe.in_dtype,
-            "ab_strides1": strides[0],
-            "ab_strides2": strides[1],
-            "c_strides1": strides[2],
-            "c_strides2": strides[3],
-        } | quant_kwargs
-        print(f"Making CutlassBatchedExpertsFp8 {kwargs} ...")
-        experts = CutlassBatchedExpertsFp8(**kwargs)
-    elif fused_experts_type == CutlassExpertsFp4:
-        kwargs = {
-            "max_experts_per_worker": moe.num_local_experts,
-            "num_dispatchers": num_dispatchers,
-            "out_dtype": moe.in_dtype,
-        } | quant_kwargs
-        print(f"Making CutlassExpertsFp4 {kwargs} ...")
-        experts = CutlassExpertsFp4(**kwargs)
-    elif fused_experts_type == FlashInferExperts:
-        kwargs = {
-            "out_dtype": moe.in_dtype,
-            "ep_rank": moe.ep_rank,
-            "ep_size": moe.ep_size,
-            "tp_rank": moe.tp_rank,
-            "tp_size": moe.tp_size,
-        } | quant_kwargs
-        print(f"Making FlashInferExperts {kwargs} ...")
-        experts = FlashInferExperts(**kwargs)
-    else:
-        raise RuntimeError(f"Unknown fused experts type: {fused_experts_type}")
+    print(f"Making {fused_experts_type.__class__.__name__} {kwargs} ...")
+    experts = fused_experts_type(**kwargs)
 
     torch.set_printoptions(threshold=1000, edgeitems=5, linewidth=80)
 

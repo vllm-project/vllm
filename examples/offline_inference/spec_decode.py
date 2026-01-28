@@ -9,25 +9,25 @@ from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
 
 try:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
 
 QUESTION = "What is the content of each image?"
 IMAGE_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/2/26/Ultramarine_Flycatcher_%28Ficedula_superciliaris%29_Naggar%2C_Himachal_Pradesh%2C_2013_%28cropped%29.JPG",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/e/e5/Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg/2560px-Anim1754_-_Flickr_-_NOAA_Photo_Library_%281%29.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/d/d4/Starfish%2C_Caswell_Bay_-_geograph.org.uk_-_409413.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/6/69/Grapevinesnail_01.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0b/Texas_invasive_Musk_Thistle_1.jpg/1920px-Texas_invasive_Musk_Thistle_1.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/7/7a/Huskiesatrest.jpg/2880px-Huskiesatrest.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/6/68/Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg/1920px-Orange_tabby_cat_sitting_on_fallen_leaves-Hisashi-01A.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/3/30/George_the_amazing_guinea_pig.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1f/Oryctolagus_cuniculus_Rcdo.jpg/1920px-Oryctolagus_cuniculus_Rcdo.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/9/98/Horse-and-pony.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/lion.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/flycatcher.jpeg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/somefish.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/starfish.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/snail.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/thistle.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/husky.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/orangetabbycat.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/guineapig.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/rabbit.jpg",
+    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/horsepony.jpg",
 ]
 
 
@@ -54,7 +54,7 @@ def parse_args():
         "--method",
         type=str,
         default="eagle",
-        choices=["ngram", "eagle", "eagle3", "mtp"],
+        choices=["ngram", "eagle", "eagle3", "mtp", "draft_model"],
     )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
@@ -70,7 +70,11 @@ def parse_args():
     parser.add_argument("--output-len", type=int, default=256)
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
+    parser.add_argument("--draft-model", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument("--disable-padded-drafter-batch", action="store_true")
+    parser.add_argument("--max-num-seqs", type=int, default=None)
     return parser.parse_args()
 
 
@@ -111,6 +115,7 @@ def main(args):
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
+            "disable_padded_drafter_batch": args.disable_padded_drafter_batch,
         }
     elif args.method == "ngram":
         speculative_config = {
@@ -118,6 +123,15 @@ def main(args):
             "num_speculative_tokens": args.num_spec_tokens,
             "prompt_lookup_max": args.prompt_lookup_max,
             "prompt_lookup_min": args.prompt_lookup_min,
+        }
+    elif args.method == "draft_model":
+        assert args.draft_model is not None and args.draft_model != ""
+        speculative_config = {
+            "method": args.method,
+            "model": args.draft_model,
+            "num_speculative_tokens": args.num_spec_tokens,
+            "enforce_eager": args.enforce_eager,
+            "max_model_len": args.max_model_len,
         }
     elif args.method == "mtp":
         speculative_config = {
@@ -133,12 +147,13 @@ def main(args):
         tensor_parallel_size=args.tp,
         enable_chunked_prefill=args.enable_chunked_prefill,
         enforce_eager=args.enforce_eager,
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         speculative_config=speculative_config,
         disable_log_stats=False,
         max_model_len=args.max_model_len,
         limit_mm_per_prompt={"image": 5},
         disable_chunked_mm_input=True,
+        max_num_seqs=args.max_num_seqs,
     )
 
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
@@ -152,17 +167,16 @@ def main(args):
 
     # print the generated text
     if args.print_output:
-        for output in outputs:
+        for i, output in enumerate(outputs):
             print("-" * 50)
-            print(f"prompt: {output.prompt}")
+            if not args.custom_mm_prompts:
+                print(f"prompt: {prompts[i].prompt}")
+            else:
+                print(f"prompt: {prompts[i]}")
             print(f"generated text: {output.outputs[0].text}")
             print("-" * 50)
 
-    try:
-        metrics = llm.get_metrics()
-    except AssertionError:
-        print("Metrics are not supported in the V0 engine.")
-        return
+    metrics = llm.get_metrics()
 
     total_num_output_tokens = sum(
         len(output.outputs[0].token_ids) for output in outputs

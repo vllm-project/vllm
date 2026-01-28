@@ -1,17 +1,17 @@
 # Common dependencies
 -r common.txt
 
---extra-index-url https://download.pytorch.org/whl/rocm6.3
-torch==2.8.0
-torchvision==0.23.0
-torchaudio==2.8.0
+--extra-index-url https://download.pytorch.org/whl/rocm6.4
+torch==2.9.1
+torchvision==0.24.1
+torchaudio==2.9.1
 
-triton==3.3.0
+triton==3.5.1
 cmake>=3.26.1,<4
 packaging>=24.2
 setuptools>=77.0.3,<80.0.0
 setuptools-scm>=8
 wheel
 jinja2>=3.1.6
-amdsmi==6.2.4
+amdsmi==6.4.3
 timm>=1.0.17

@@ -5,24 +5,27 @@ Test deepep dispatch-combine logic
 """
 
 import dataclasses
-from typing import Optional, Union
 
 import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
 
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.platforms import current_platform
-from vllm.utils import has_deep_ep
+from vllm.utils.import_utils import has_deep_ep
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
@@ -90,7 +93,7 @@ class TestConfig:
 @dataclasses.dataclass
 class TestTensors:
     rank_tokens: torch.Tensor  # all ranks make this many tokens
-    rank_token_scales: Optional[torch.Tensor]
+    rank_token_scales: torch.Tensor | None
     topk: torch.Tensor
     topk_weights: torch.Tensor
     config: TestConfig
@@ -128,12 +131,12 @@ def make_modular_kernel(
     dp_size: int,
     num_experts: int,
     num_local_experts: int,
-    q_dtype: Optional[torch.dtype],
+    q_dtype: torch.dtype | None,
     use_fp8_dispatch: bool,
     quant_config: FusedMoEQuantConfig,
 ) -> FusedMoEModularKernel:
-    ht_args: Optional[DeepEPHTArgs] = None
-    ll_args: Optional[DeepEPLLArgs] = None
+    ht_args: DeepEPHTArgs | None = None
+    ll_args: DeepEPLLArgs | None = None
 
     if low_latency_mode:
         ll_args = DeepEPLLArgs(
@@ -148,29 +151,33 @@ def make_modular_kernel(
         )
         ht_args = DeepEPHTArgs(num_local_experts=num_local_experts)
 
-    a2a: Union[DeepEPHTPrepareAndFinalize, DeepEPLLPrepareAndFinalize] = (
-        make_deepep_a2a(
-            pg=pg,
-            pgi=pgi,
-            dp_size=dp_size,
-            q_dtype=q_dtype,
-            block_shape=None,
-            deepep_ht_args=ht_args,
-            deepep_ll_args=ll_args,
-        )
+    a2a: DeepEPHTPrepareAndFinalize | DeepEPLLPrepareAndFinalize = make_deepep_a2a(
+        pg=pg,
+        pgi=pgi,
+        dp_size=dp_size,
+        q_dtype=q_dtype,
+        block_shape=None,
+        deepep_ht_args=ht_args,
+        deepep_ll_args=ll_args,
     )
 
     num_dispatchers = pgi.world_size // dp_size
+
+    moe_config = make_dummy_moe_config()
 
     if low_latency_mode:
         assert not quant_config.per_act_token_quant, "not supported in ll mode"
         fused_experts = BatchedTritonExperts(
             max_num_tokens=MAX_TOKENS_PER_RANK,
             num_dispatchers=num_dispatchers,
+            moe_config=moe_config,
             quant_config=quant_config,
         )
     else:
-        fused_experts = TritonExperts(quant_config=quant_config)
+        fused_experts = TritonExperts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        )
 
     mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
     return mk
@@ -184,8 +191,8 @@ def deep_ep_moe_impl(
     test_tensors: TestTensors,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    w1_scale: Optional[torch.Tensor],
-    w2_scale: Optional[torch.Tensor],
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
     num_experts: int,
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
@@ -281,8 +288,8 @@ def torch_moe_impl(
     test_tensors: TestTensors,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    w1_scale: Optional[torch.Tensor],
-    w2_scale: Optional[torch.Tensor],
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
     using_fp8_dispatch: bool,
     per_act_token_quant: bool,
 ):
@@ -297,7 +304,7 @@ def torch_moe_impl(
         # blockwise quant and de-quant.
         assert not per_act_token_quant
         a = test_tensors.rank_tokens
-        aq, aq_scale = per_token_group_quant_fp8(a, 128)
+        aq, aq_scale = per_token_group_quant_fp8(a, 128, use_ue8m0=False)
         a = (
             (aq.view(-1, 128).to(torch.float32) * aq_scale.view(-1, 1))
             .view(a.shape)
@@ -340,11 +347,14 @@ def _deep_ep_moe(
     config: TestConfig,
     w1: torch.Tensor,
     w2: torch.Tensor,
-    w1_scale: Optional[torch.Tensor],
-    w2_scale: Optional[torch.Tensor],
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
 ):
+    device = torch.device(f"cuda:{pgi.local_rank}")
+    init_workspace_manager(device)
+
     if not low_latency_mode:
         assert not use_fp8_dispatch, (
             "FP8 dispatch interface is available only in low-latency mode"
@@ -440,11 +450,12 @@ def test_deep_ep_moe(
     topk: int,
     world_dp_size: tuple[int, int],
     per_act_token_quant: bool,
+    workspace_init,
 ):
     low_latency_mode = False
     use_fp8_dispatch = False
 
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(dtype=dtype, topk=topk, m=m, k=k, n=n, num_experts=num_experts)
 
@@ -495,6 +506,7 @@ def test_low_latency_deep_ep_moe(
     topk: int,
     world_dp_size: tuple[int, int],
     use_fp8_dispatch: bool,
+    workspace_init,
 ):
     low_latency_mode = True
 
@@ -504,7 +516,7 @@ def test_low_latency_deep_ep_moe(
             f"hidden sizes {DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES}"
         )
 
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     world_size, dp_size = world_dp_size
     config = TestConfig(dtype=dtype, topk=topk, m=m, k=k, n=n, num_experts=num_experts)
 

@@ -6,6 +6,7 @@ import torch
 from transformers import AutoTokenizer
 
 from tests.v1.engine.utils import (
+    FULL_STRINGS,
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
     NUM_SAMPLE_LOGPROBS_UNDER_TEST,
     PROMPT_LEN,
@@ -17,8 +18,6 @@ from tests.v1.engine.utils import (
 from vllm.engine.arg_utils import EngineArgs
 
 from ...distributed.conftest import publisher_config, random_port  # noqa: F401
-
-from tests.v1.engine.utils import FULL_STRINGS  # isort: skip
 
 EngineCoreSampleLogprobsType = list[tuple[torch.Tensor, torch.Tensor]]
 EngineCorePromptLogprobsType = tuple[torch.Tensor, torch.Tensor]

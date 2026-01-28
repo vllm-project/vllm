@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import torch
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -13,12 +14,17 @@ from vllm.model_executor.layers.linear import (
     LinearMethodBase,
     UnquantizedLinearMethod,
 )
-from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
+from vllm.transformers_utils.config import get_safetensors_params_metadata
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
 
@@ -34,7 +40,7 @@ class AWQConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
         zero_point: bool,
-        modules_to_not_convert: Optional[list[str]] = None,
+        modules_to_not_convert: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.weight_bits = weight_bits
@@ -57,7 +63,7 @@ class AWQConfig(QuantizationConfig):
             f"modules_to_not_convert={self.modules_to_not_convert})"
         )
 
-    def get_name(self) -> QuantizationMethods:
+    def get_name(self) -> "QuantizationMethods":
         return "awq"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
@@ -88,14 +94,19 @@ class AWQConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[Union["LinearMethodBase", "QuantizeMethodBase"]]:
+    ) -> Union["LinearMethodBase", "QuantizeMethodBase"] | None:
         if isinstance(layer, LinearBase):
-            if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+            if is_layer_skipped(
+                prefix,
+                self.modules_to_not_convert,
+                self.packed_modules_mapping,
+                skip_with_substr=True,
+            ):
                 return UnquantizedLinearMethod()
             return AWQLinearMethod(self)
         elif isinstance(layer, FusedMoE):
             # Lazy import to avoid circular import.
-            from .awq_marlin import AWQMarlinConfig, AWQMoEMethod
+            from .awq_marlin import AWQMarlinConfig
             from .moe_wna16 import MoeWNA16Config
             from .utils.marlin_utils import check_moe_marlin_supports_layer
 
@@ -110,6 +121,7 @@ class AWQConfig(QuantizationConfig):
                     "group_size": self.group_size,
                     "zero_point": self.zero_point,
                     "lm_head": False,
+                    "modules_to_not_convert": self.modules_to_not_convert,
                 }
                 return MoeWNA16Config.from_config(config).get_quant_method(
                     layer, prefix
@@ -125,12 +137,29 @@ class AWQConfig(QuantizationConfig):
             awq_marlin_config = AWQMarlinConfig.from_config(
                 marlin_compatible_config_dict
             )
-            return AWQMoEMethod(awq_marlin_config, layer.moe_config)
+            return awq_marlin_config.get_quant_method(layer, prefix)
         return None
 
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        if self.modules_to_not_convert:
+            self.modules_to_not_convert = hf_to_vllm_mapper.apply_list(
+                self.modules_to_not_convert
+            )
 
-def is_layer_skipped_awq(prefix: str, modules_to_not_convert: list[str]):
-    return any(module_name in prefix for module_name in modules_to_not_convert)
+    def maybe_update_config(self, model_name: str, revision: str | None = None):
+        if self.modules_to_not_convert:
+            return
+
+        unquant_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+        metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        layers = {param_name.rsplit(".", 1)[0] for param_name in metadata}
+        quant_layers: set[str] = {
+            param_name.rsplit(".", 1)[0]
+            for param_name, info in metadata.items()
+            if (dtype := info.get("dtype", None))
+            and _SAFETENSORS_TO_TORCH_DTYPE[dtype] not in unquant_dtypes
+        }
+        self.modules_to_not_convert = list(layers - quant_layers)
 
 
 class AWQLinearMethod(LinearMethodBase):
@@ -227,7 +256,7 @@ class AWQLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qweight = layer.qweight
         scales = layer.scales

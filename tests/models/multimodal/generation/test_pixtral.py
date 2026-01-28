@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from mistral_common.multimodal import download_image
@@ -15,6 +15,7 @@ from transformers import AutoProcessor
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.logprobs import Logprob, SampleLogprobs
 from vllm.multimodal import MultiModalDataBuiltins
+from vllm.platforms import current_platform
 
 from ....utils import VLLM_PATH, large_gpu_test
 from ...utils import check_logprobs_close
@@ -117,7 +118,7 @@ FIXTURE_LOGPROBS_CHAT = {
     MISTRAL_SMALL_3_1_ID: FIXTURES_PATH / "mistral_small_3_chat.json",
 }
 
-OutputsLogprobs = list[tuple[list[int], str, Optional[SampleLogprobs]]]
+OutputsLogprobs = list[tuple[list[int], str, SampleLogprobs | None]]
 
 
 # For the test author to store golden output in JSON
@@ -165,6 +166,15 @@ def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
 def test_chat(
     vllm_runner, max_model_len: int, model: str, dtype: str, local_asset_server
 ) -> None:
+    if (
+        model == MISTRAL_SMALL_3_1_ID
+        and max_model_len == 65536
+        and current_platform.is_rocm()
+    ):
+        pytest.skip(
+            "OOM on ROCm: 24B model with 65536 context length exceeds GPU memory"
+        )
+
     EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(FIXTURE_LOGPROBS_CHAT[model])
     with vllm_runner(
         model,

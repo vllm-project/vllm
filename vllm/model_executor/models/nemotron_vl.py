@@ -9,7 +9,6 @@
 # --------------------------------------------------------
 from abc import ABC
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -35,8 +34,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.processing import PromptUpdateDetails
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_image_processor_from_config
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -204,12 +203,12 @@ class NemotronVLProcessor(InternVLProcessor):
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         image_processor: BaseImageProcessorFast,
         *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
     ) -> None:
         ABC.__init__(self)
         self.config = config
@@ -266,9 +265,9 @@ class NemotronVLProcessor(InternVLProcessor):
     def _images_to_pixel_values_lst(
         self,
         images: list[Image.Image],
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
     ) -> list[torch.Tensor]:
         min_num, max_num = self.resolve_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
@@ -292,9 +291,9 @@ class NemotronVLProcessor(InternVLProcessor):
         self,
         text: list[str],
         images: list[Image.Image],
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
     ) -> tuple[list[str], dict[str, torch.Tensor]]:
         if len(images) == 0:
             image_inputs = {}
@@ -326,7 +325,7 @@ class NemotronVLProcessor(InternVLProcessor):
     def get_image_repl(
         self,
         feature_size: int,
-        num_patches: Optional[int],
+        num_patches: int | None,
     ) -> PromptUpdateDetails[str]:
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
@@ -359,10 +358,8 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     dummy_inputs=BaseInternVLDummyInputsBuilder[NemotronVLProcessingInfo],
 )
 class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
-    merge_by_field_config = True
-
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<image>"
 
@@ -388,20 +385,20 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version
 
-        self.llm_arch_name = config.text_config.architectures[0]
-        self.vision_model = self._init_vision_model(
-            config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_model = self._init_vision_model(
+                config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.mlp1 = self._init_mlp1(config)
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.mlp1 = self._init_mlp1(config)
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.img_context_token_id = None
 
@@ -426,7 +423,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         *,
         prefix: str,
     ):
@@ -482,7 +479,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[InternVLImageInputs]:
+    ) -> InternVLImageInputs | None:
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
         image_num_patches = kwargs.pop("image_num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -497,8 +494,11 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
             )
 
         image_token_id = kwargs["image_token_id"]
-        assert isinstance(image_token_id, torch.Tensor)
-        self.img_context_token_id = image_token_id.flatten().unique().item()
+        if isinstance(image_token_id, torch.Tensor):
+            image_token_id = image_token_id.flatten().unique().item()
+
+        assert isinstance(image_token_id, int)
+        self.img_context_token_id = image_token_id
 
         if pixel_values_flat is not None:
             return InternVLImagePixelInputs(
@@ -519,8 +519,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
     ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
-
-        assert self.vision_model is not None
 
         image_embeds = self.extract_feature(image_input["pixel_values_flat"])
 
@@ -556,10 +554,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
         self.visual_token_mask = None
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []
@@ -573,17 +568,17 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
-        is_multimodal: Optional[torch.Tensor] = None,
+        is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
@@ -591,9 +586,9 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
@@ -602,14 +597,13 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
 
         forward_kwargs = {
@@ -630,7 +624,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

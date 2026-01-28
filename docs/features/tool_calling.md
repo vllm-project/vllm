@@ -27,27 +27,29 @@ Next, make a request that triggers the model to use the available tools:
         return f"Getting the weather for {location} in {unit}..."
     tool_functions = {"get_weather": get_weather}
 
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+                    },
+                    "required": ["location", "unit"],
                 },
-                "required": ["location", "unit"]
-            }
-        }
-    }]
+            },
+        },
+    ]
 
     response = client.chat.completions.create(
         model=client.models.list().data[0].id,
         messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
         tools=tools,
-        tool_choice="auto"
+        tool_choice="auto",
     )
 
     tool_call = response.choices[0].message.tool_calls[0].function
@@ -140,7 +142,7 @@ Flags: `--tool-call-parser hermes`
 Supported models:
 
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
-* Additional mistral function-calling models are compatible as well.
+* Additional Mistral function-calling models are compatible as well.
 
 Known issues:
 
@@ -149,19 +151,32 @@ Known issues:
    much shorter than what vLLM generates. Since an exception is thrown when this condition
    is not met, the following additional chat templates are provided:
 
-    * <gh-file:examples/tool_chat_template_mistral.jinja> - this is the "official" Mistral chat template, but tweaked so that
+    * [examples/tool_chat_template_mistral.jinja](../../examples/tool_chat_template_mistral.jinja) - this is the "official" Mistral chat template, but tweaked so that
       it works with vLLM's tool call IDs (provided `tool_call_id` fields are truncated to the last 9 digits)
-    * <gh-file:examples/tool_chat_template_mistral_parallel.jinja> - this is a "better" version that adds a tool-use system prompt
+    * [examples/tool_chat_template_mistral_parallel.jinja](../../examples/tool_chat_template_mistral_parallel.jinja) - this is a "better" version that adds a tool-use system prompt
       when tools are provided, that results in much better reliability when working with parallel tool calling.
 
 Recommended flags:
 
-1. To use [mistral-common](https://github.com/mistralai/mistral-common) the official Mistral tokenization backend:
+1. To use the official Mistral AI's format:
 
-    `--tokenizer_mode mistral --config_format mistral --load_format mistral --tool-call-parser mistral`
+    `--tool-call-parser mistral`
 
-2. To use the default Transformers tokenization backend:
-    `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+2. To use the Transformers format when available:
+
+    `--tokenizer_mode hf --config_format hf --load_format hf --tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
+
+!!! note
+    Models officially released by Mistral AI have two possible formats:
+
+    1. The official format that is used by default with `auto` or `mistral` arguments:
+
+        `--tokenizer_mode mistral --config_format mistral --load_format mistral`
+        This format uses [mistral-common](https://github.com/mistralai/mistral-common), the Mistral AI's tokenizer backend.
+
+    2. The Transformers format, when available, that is used with `hf` arguments:
+
+        `--tokenizer_mode hf --config_format hf --load_format hf --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 ### Llama Models (`llama3_json`)
 
@@ -185,16 +200,16 @@ Known issues:
 
 VLLM provides two JSON-based chat templates for Llama 3.1 and 3.2:
 
-* <gh-file:examples/tool_chat_template_llama3.1_json.jinja> - this is the "official" chat template for the Llama 3.1
+* [examples/tool_chat_template_llama3.1_json.jinja](../../examples/tool_chat_template_llama3.1_json.jinja) - this is the "official" chat template for the Llama 3.1
 models, but tweaked so that it works better with vLLM.
-* <gh-file:examples/tool_chat_template_llama3.2_json.jinja> - this extends upon the Llama 3.1 chat template by adding support for
+* [examples/tool_chat_template_llama3.2_json.jinja](../../examples/tool_chat_template_llama3.2_json.jinja) - this extends upon the Llama 3.1 chat template by adding support for
 images.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template {see_above}`
 
 VLLM also provides a pythonic and JSON-based chat template for Llama 4, but pythonic tool calling is recommended:
 
-* <gh-file:examples/tool_chat_template_llama4_pythonic.jinja> - this is based on the [official chat template](https://www.llama.com/docs/model-cards-and-prompt-formats/llama4/) for the Llama 4 models.
+* [examples/tool_chat_template_llama4_pythonic.jinja](../../examples/tool_chat_template_llama4_pythonic.jinja) - this is based on the [official chat template](https://www.llama.com/docs/model-cards-and-prompt-formats/llama4/) for the Llama 4 models.
 
 For Llama 4 model, use `--tool-call-parser llama4_pythonic --chat-template examples/tool_chat_template_llama4_pythonic.jinja`.
 
@@ -210,7 +225,7 @@ Supported models:
 
     Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
 
-    <gh-file:examples/tool_chat_template_granite.jinja>: this is a modified chat template from the original on Hugging Face. Parallel function calls are supported.
+    [examples/tool_chat_template_granite.jinja](../../examples/tool_chat_template_granite.jinja): this is a modified chat template from the original on Hugging Face. Parallel function calls are supported.
 
 * `ibm-granite/granite-3.1-8b-instruct`
 
@@ -222,7 +237,7 @@ Supported models:
 
     Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
 
-    <gh-file:examples/tool_chat_template_granite_20b_fc.jinja>: this is a modified chat template from the original on Hugging Face, which is not vLLM-compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
+    [examples/tool_chat_template_granite_20b_fc.jinja](../../examples/tool_chat_template_granite_20b_fc.jinja): this is a modified chat template from the original on Hugging Face, which is not vLLM-compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
 ### InternLM Models (`internlm`)
 
@@ -280,8 +295,8 @@ Flags: `--tool-call-parser hermes`
 
 Supported models:
 
-* `MiniMaxAi/MiniMax-M1-40k` (use with <gh-file:examples/tool_chat_template_minimax_m1.jinja>)
-* `MiniMaxAi/MiniMax-M1-80k` (use with <gh-file:examples/tool_chat_template_minimax_m1.jinja>)
+* `MiniMaxAi/MiniMax-M1-40k` (use with [examples/tool_chat_template_minimax_m1.jinja](../../examples/tool_chat_template_minimax_m1.jinja))
+* `MiniMaxAi/MiniMax-M1-80k` (use with [examples/tool_chat_template_minimax_m1.jinja](../../examples/tool_chat_template_minimax_m1.jinja))
 
 Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax_m1.jinja`
 
@@ -289,8 +304,8 @@ Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_m
 
 Supported models:
 
-* `deepseek-ai/DeepSeek-V3-0324` (use with <gh-file:examples/tool_chat_template_deepseekv3.jinja>)
-* `deepseek-ai/DeepSeek-R1-0528` (use with <gh-file:examples/tool_chat_template_deepseekr1.jinja>)
+* `deepseek-ai/DeepSeek-V3-0324` (use with [examples/tool_chat_template_deepseekv3.jinja](../../examples/tool_chat_template_deepseekv3.jinja))
+* `deepseek-ai/DeepSeek-R1-0528` (use with [examples/tool_chat_template_deepseekr1.jinja](../../examples/tool_chat_template_deepseekr1.jinja))
 
 Flags: `--tool-call-parser deepseek_v3 --chat-template {see_above}`
 
@@ -298,9 +313,18 @@ Flags: `--tool-call-parser deepseek_v3 --chat-template {see_above}`
 
 Supported models:
 
-* `deepseek-ai/DeepSeek-V3.1` (use with <gh-file:examples/tool_chat_template_deepseekv31.jinja>)
+* `deepseek-ai/DeepSeek-V3.1` (use with [examples/tool_chat_template_deepseekv31.jinja](../../examples/tool_chat_template_deepseekv31.jinja))
 
 Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
+
+### OpenAI OSS Models ('openai`)
+
+Supported models:
+
+* `openai/gpt-oss-20b`
+* `openai/gpt-oss-120b`
+
+Flags: `--tool-call-parser openai`
 
 ### Kimi-K2 Models (`kimi_k2`)
 
@@ -319,7 +343,7 @@ Supported models:
 Flags:
 
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
-* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
+* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b`
 
 ### LongCat-Flash-Chat Models (`longcat`)
 
@@ -337,18 +361,74 @@ Supported models:
 * `zai-org/GLM-4.5`
 * `zai-org/GLM-4.5-Air`
 * `zai-org/GLM-4.6`
-* `zai-org/GLM-4.6-Air`
 
 Flags: `--tool-call-parser glm45`
+
+### GLM-4.7 Models (`glm47`)
+
+Supported models:
+
+* `zai-org/GLM-4.7`
+* `zai-org/GLM-4.7-Flash`
+
+Flags: `--tool-call-parser glm47`
+
+### FunctionGemma Models (`functiongemma`)
+
+Google's FunctionGemma is a lightweight (270M parameter) model specifically designed for function calling.
+It's built on Gemma 3 and optimized for edge deployment on devices like laptops and phones.
+
+Supported models:
+
+* `google/functiongemma-270m-it`
+
+FunctionGemma uses a unique output format with `<start_function_call>` and `<end_function_call>` tags:
+
+```text
+<start_function_call>call:get_weather{location:<escape>London<escape>}<end_function_call>
+```
+
+The model is designed to be fine-tuned for specific function-calling tasks for best results.
+
+Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_template_functiongemma.jinja`
+
+!!! note
+    FunctionGemma is intended to be fine-tuned for your specific function-calling task.
+    The base model provides general function calling capabilities, but best results
+    are achieved with task-specific fine-tuning. See Google's [FunctionGemma documentation](https://ai.google.dev/gemma/docs/functiongemma) for fine-tuning guides.
 
 ### Qwen3-Coder Models (`qwen3_xml`)
 
 Supported models:
 
-* `Qwen/Qwen3-480B-A35B-Instruct`
+* `Qwen/Qwen3-Coder-480B-A35B-Instruct`
 * `Qwen/Qwen3-Coder-30B-A3B-Instruct`
 
 Flags: `--tool-call-parser qwen3_xml`
+
+### Olmo 3 Models (`olmo3`)
+
+Olmo 3 models output tool calls in a format that is very similar to the one expected by the `pythonic` parser (see below), with a few differences. Each tool call is a pythonic string, but the parallel tool calls are newline-delimited, and the calls are wrapped within XML tags as `<function_calls>..</function_calls>`. In addition, the parser also allows JSON boolean and null literals (`true`, `false`, and `null`) in addition to the pythonic ones (`True`, `False`, and `None`).
+
+Supported models:
+
+* `allenai/Olmo-3-7B-Instruct`
+* `allenai/Olmo-3-32B-Think`
+
+Flags: `--tool-call-parser olmo3`
+
+### Gigachat 3 Models (`gigachat3`)
+
+Use chat template from the Hugging Face model files.
+
+Supported models:
+
+* `ai-sage/GigaChat3-702B-A36B-preview`
+* `ai-sage/GigaChat3-702B-A36B-preview-bf16`
+* `ai-sage/GigaChat3-10B-A1.8B`
+* `ai-sage/GigaChat3-10B-A1.8B-bf16`
+
+Flags: `--tool-call-parser gigachat3`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
@@ -367,12 +447,12 @@ Limitations:
 
 Example supported models:
 
-* `meta-llama/Llama-3.2-1B-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
-* `meta-llama/Llama-3.2-3B-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama3.2_pythonic.jinja>)
-* `Team-ACE/ToolACE-8B` (use with <gh-file:examples/tool_chat_template_toolace.jinja>)
-* `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with <gh-file:examples/tool_chat_template_toolace.jinja>)
-* `meta-llama/Llama-4-Scout-17B-16E-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
-* `meta-llama/Llama-4-Maverick-17B-128E-Instruct` ⚠️ (use with <gh-file:examples/tool_chat_template_llama4_pythonic.jinja>)
+* `meta-llama/Llama-3.2-1B-Instruct` ⚠️ (use with [examples/tool_chat_template_llama3.2_pythonic.jinja](../../examples/tool_chat_template_llama3.2_pythonic.jinja))
+* `meta-llama/Llama-3.2-3B-Instruct` ⚠️ (use with [examples/tool_chat_template_llama3.2_pythonic.jinja](../../examples/tool_chat_template_llama3.2_pythonic.jinja))
+* `Team-ACE/ToolACE-8B` (use with [examples/tool_chat_template_toolace.jinja](../../examples/tool_chat_template_toolace.jinja))
+* `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with [examples/tool_chat_template_toolace.jinja](../../examples/tool_chat_template_toolace.jinja))
+* `meta-llama/Llama-4-Scout-17B-16E-Instruct` ⚠️ (use with [examples/tool_chat_template_llama4_pythonic.jinja](../../examples/tool_chat_template_llama4_pythonic.jinja))
+* `meta-llama/Llama-4-Maverick-17B-128E-Instruct` ⚠️ (use with [examples/tool_chat_template_llama4_pythonic.jinja](../../examples/tool_chat_template_llama4_pythonic.jinja))
 
 Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
@@ -381,7 +461,7 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
 ## How to Write a Tool Parser Plugin
 
-A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in <gh-file:vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py>.
+A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/tool_parsers/hermes_tool_parser.py](../../vllm/tool_parsers/hermes_tool_parser.py).
 
 Here is a summary of a plugin file:
 
@@ -395,15 +475,13 @@ Here is a summary of a plugin file:
     # the name list in register_module can be used
     # in --tool-call-parser. you can define as many
     # tool parsers as you want here.
-    @ToolParserManager.register_module(["example"])
     class ExampleToolParser(ToolParser):
-        def __init__(self, tokenizer: AnyTokenizer):
+        def __init__(self, tokenizer: TokenizerLike):
             super().__init__(tokenizer)
 
         # adjust request. e.g.: set skip special tokens
         # to False for tool call output.
-        def adjust_request(
-                self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
             return request
 
         # implement the tool call parse for stream call
@@ -416,7 +494,7 @@ Here is a summary of a plugin file:
             current_token_ids: Sequence[int],
             delta_token_ids: Sequence[int],
             request: ChatCompletionRequest,
-        ) -> Union[DeltaMessage, None]:
+        ) -> DeltaMessage | None:
             return delta
 
         # implement the tool parse for non-stream call
@@ -428,6 +506,12 @@ Here is a summary of a plugin file:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=text)
+    # register the tool parser to ToolParserManager
+    ToolParserManager.register_lazy_module(
+        name="example",
+        module_path="vllm.tool_parsers.example",
+        class_name="ExampleToolParser",
+    )
 
     ```
 

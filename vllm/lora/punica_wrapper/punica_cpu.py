@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import torch
 
@@ -30,7 +30,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         self,
         max_num_batched_tokens: int,
         max_batches: int,
-        device: Union[torch.device, str],
+        device: torch.device | str,
         **kwargs,
     ):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
@@ -165,7 +165,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
 
     def add_shrink(
         self,
-        y: Union[tuple[torch.Tensor, ...], torch.Tensor],
+        y: tuple[torch.Tensor, ...] | torch.Tensor,
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         scale: float,
@@ -197,7 +197,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
     def add_expand(
         self,
         y: torch.Tensor,
-        x: Union[tuple[torch.Tensor, ...], torch.Tensor],
+        x: tuple[torch.Tensor, ...] | torch.Tensor,
         lora_b_stacked: tuple[torch.Tensor, ...],
         output_slices: tuple[int, ...],
         offset_start: int = 0,
@@ -271,7 +271,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         scale: float,
         output_slices: tuple[int, ...],
         *,
-        buffer: Optional[tuple[torch.Tensor, ...]] = None,
+        buffer: tuple[torch.Tensor, ...] | None = None,
         **kwargs,
     ) -> None:
         """
@@ -319,7 +319,7 @@ class PunicaWrapperCPU(PunicaWrapperBase):
         lora_b_stacked: torch.Tensor,
         scale,
         *,
-        buffer: Optional[torch.Tensor] = None,
+        buffer: torch.Tensor | None = None,
         **kwargs,
     ) -> None:
         """

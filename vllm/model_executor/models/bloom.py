@@ -22,13 +22,11 @@
 import math
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
 from transformers import BloomConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -37,6 +35,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -89,8 +88,8 @@ class BloomAttention(nn.Module):
     def __init__(
         self,
         config: BloomConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -109,12 +108,14 @@ class BloomAttention(nn.Module):
             self.total_num_heads,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.dense = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
 
         # Create the alibi slopes and slice them.
@@ -152,7 +153,8 @@ class BloomMLP(nn.Module):
     def __init__(
         self,
         config: BloomConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -160,12 +162,14 @@ class BloomMLP(nn.Module):
             hidden_size,
             4 * hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_h_to_4h",
         )
         self.gelu_impl = get_act_fn("gelu")
         self.dense_4h_to_h = RowParallelLinear(
             4 * hidden_size,
             hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h",
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -179,8 +183,8 @@ class BloomBlock(nn.Module):
     def __init__(
         self,
         config: BloomConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -193,7 +197,7 @@ class BloomBlock(nn.Module):
         self.post_attention_layernorm = nn.LayerNorm(
             hidden_size, eps=config.layer_norm_epsilon
         )
-        self.mlp = BloomMLP(config, quant_config)
+        self.mlp = BloomMLP(config, quant_config, prefix=f"{prefix}.mlp")
         self.apply_residual_connection_post_layernorm = (
             config.apply_residual_connection_post_layernorm
         )
@@ -267,21 +271,21 @@ class BloomModel(nn.Module):
             ["hidden_states"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.word_embeddings(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             hidden_states = self.word_embeddings_layernorm(hidden_states)
         else:
             assert intermediate_tensors is not None
@@ -349,16 +353,16 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             self.transformer.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.transformer(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -367,7 +371,7 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

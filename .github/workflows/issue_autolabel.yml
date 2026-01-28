@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Label issues based on keywords
+        id: label-step
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
         with:
           script: |
@@ -42,7 +43,6 @@ jobs:
                     searchIn: "body"
                   },
                 ],
-                
                 // Substring search - matches anywhere in text (partial matches)
                 substrings: [
                   {
@@ -89,14 +89,12 @@ jobs:
                     term: "hip_",
                     searchIn: "both"
                   },
-                  
                   // ROCm tools and libraries
                   {
                     term: "hipify",
                     searchIn: "both"
                   },
                 ],
-                
                 // Regex patterns - for complex pattern matching
                 regexPatterns: [
                   {
@@ -107,13 +105,42 @@ jobs:
                   }
                 ],
               },
+              cpu: {
+                // Keyword search - matches whole words only (with word boundaries)
+                keywords: [
+                  {
+                    term: "CPU Backend",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "x86",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "ARM",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "Apple Silicon",
+                    searchIn: "title"
+                  },
+                  {
+                    term: "IBM Z",
+                    searchIn: "title"
+                  },
+                ],
+              },
+              // Add more label configurations here as needed
+              // example: {
+              //   keywords: [...],
+              //   substrings: [...],
+              //   regexPatterns: [...]
+              // },
             };
-            
             // Helper function to create regex based on search type
             function createSearchRegex(term, type) {
               // Escape special regex characters in the term
               const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              
               switch (type) {
                 case 'keyword':
                   // Word boundary search - matches whole words only
@@ -125,16 +152,13 @@ jobs:
                   throw new Error(`Unknown search type: ${type}`);
               }
             }
-            
             // Helper function to find matching terms in text with line information
             function findMatchingTermsWithLines(text, searchTerms = [], searchType = 'keyword', searchLocation = '') {
               const matches = [];
               const lines = text.split('\n');
-              
               for (const termConfig of searchTerms) {
                 let regex;
                 let term, searchIn, pattern, description, flags;
-                
                 // Handle different input formats (string or object)
                 if (typeof termConfig === 'string') {
                   term = termConfig;
@@ -146,21 +170,17 @@ jobs:
                   description = termConfig.description;
                   flags = termConfig.flags;
                 }
-                
                 // Skip if this term shouldn't be searched in the current location
                 if (searchIn !== 'both' && searchIn !== searchLocation) {
                   continue;
                 }
-                
                 // Create appropriate regex
                 if (searchType === 'regex') {
                   regex = new RegExp(pattern, flags || "gi");
                 } else {
                   regex = createSearchRegex(term, searchType);
                 }
-                
                 const termMatches = [];
-                
                 // Check each line for matches
                 lines.forEach((line, lineIndex) => {
                   const lineMatches = line.match(regex);
@@ -175,15 +195,14 @@ jobs:
                         originalTerm: term || pattern,
                         description: description,
                         // Show context around the match in the line
-                        context: line.length > 100 ? 
-                          line.substring(Math.max(0, line.toLowerCase().indexOf(match.toLowerCase()) - 30), 
-                                       line.toLowerCase().indexOf(match.toLowerCase()) + match.length + 30) + '...' 
+                        context: line.length > 100 ?
+                          line.substring(Math.max(0, line.toLowerCase().indexOf(match.toLowerCase()) - 30),
+                                       line.toLowerCase().indexOf(match.toLowerCase()) + match.length + 30) + '...'
                           : line.trim()
                       });
                     });
                   }
                 });
-                
                 if (termMatches.length > 0) {
                   matches.push({
                     term: term || (description || pattern),
@@ -196,64 +215,48 @@ jobs:
                   });
                 }
               }
-              
               return matches;
             }
-            
             // Helper function to check if label should be added
             async function processLabel(labelName, config) {
               const body = context.payload.issue.body || "";
               const title = context.payload.issue.title || "";
-              
               core.notice(`Processing label: ${labelName}`);
               core.notice(`Issue Title: "${title}"`);
               core.notice(`Issue Body length: ${body.length} characters`);
-              
               let shouldAddLabel = false;
               let allMatches = [];
               let reason = '';
-              
               const keywords = config.keywords || [];
               const substrings = config.substrings || [];
               const regexPatterns = config.regexPatterns || [];
-              
               core.notice(`Searching with ${keywords.length} keywords, ${substrings.length} substrings, and ${regexPatterns.length} regex patterns`);
-              
               // Search in title
               if (title.trim()) {
                 core.notice(`Searching in title: "${title}"`);
-                
                 const titleKeywordMatches = findMatchingTermsWithLines(title, keywords, 'keyword', 'title');
                 const titleSubstringMatches = findMatchingTermsWithLines(title, substrings, 'substring', 'title');
                 const titleRegexMatches = findMatchingTermsWithLines(title, regexPatterns, 'regex', 'title');
-                
                 allMatches.push(...titleKeywordMatches, ...titleSubstringMatches, ...titleRegexMatches);
               }
-              
               // Search in body
               if (body.trim()) {
                 core.notice(`Searching in body (${body.length} characters)`);
-                
                 const bodyKeywordMatches = findMatchingTermsWithLines(body, keywords, 'keyword', 'body');
                 const bodySubstringMatches = findMatchingTermsWithLines(body, substrings, 'substring', 'body');
                 const bodyRegexMatches = findMatchingTermsWithLines(body, regexPatterns, 'regex', 'body');
-                
                 allMatches.push(...bodyKeywordMatches, ...bodySubstringMatches, ...bodyRegexMatches);
               }
-              
               if (allMatches.length > 0) {
                 core.notice(`Found ${allMatches.length} matching term(s):`);
-                
                 for (const termMatch of allMatches) {
                   const locationText = termMatch.searchLocation === 'title' ? 'title' : 'body';
                   const searchInText = termMatch.searchIn === 'both' ? 'both' : termMatch.searchIn;
-                  
                   if (termMatch.searchType === 'regex') {
                     core.notice(`  📍 Regex: "${termMatch.term}" (pattern: ${termMatch.pattern}) found ${termMatch.count} time(s) in ${locationText} (configured to search in: ${searchInText}):`);
                   } else {
                     core.notice(`  📍 Term: "${termMatch.term}" (${termMatch.searchType} search) found ${termMatch.count} time(s) in ${locationText} (configured to search in: ${searchInText}):`);
                   }
-                  
                   // Show details for each match
                   termMatch.matches.forEach((match, index) => {
                     core.notice(`    ${index + 1}. Line ${match.lineNumber} in ${match.searchLocation}: "${match.match}" [${match.searchType}]`);
@@ -266,7 +269,6 @@ jobs:
                     }
                   });
                 }
-                
                 shouldAddLabel = true;
                 const totalMatches = allMatches.reduce((sum, t) => sum + t.count, 0);
                 const titleMatches = allMatches.filter(t => t.searchLocation === 'title').reduce((sum, t) => sum + t.count, 0);
@@ -274,13 +276,10 @@ jobs:
                 const keywordMatches = allMatches.filter(t => t.searchType === 'keyword').reduce((sum, t) => sum + t.count, 0);
                 const substringMatches = allMatches.filter(t => t.searchType === 'substring').reduce((sum, t) => sum + t.count, 0);
                 const regexMatches = allMatches.filter(t => t.searchType === 'regex').reduce((sum, t) => sum + t.count, 0);
-                
                 reason = `Found ${totalMatches} total matches (${titleMatches} in title, ${bodyMatches} in body) - ${keywordMatches} keyword matches, ${substringMatches} substring matches, ${regexMatches} regex matches`;
               }
-              
               core.notice(`Final decision: ${shouldAddLabel ? 'ADD LABEL' : 'DO NOT ADD LABEL'}`);
               core.notice(`Reason: ${reason || 'No matching terms found'}`);
-              
               if (shouldAddLabel) {
                 const existingLabels = context.payload.issue.labels.map(l => l.name);
                 if (!existingLabels.includes(labelName)) {
@@ -296,14 +295,92 @@ jobs:
                 core.notice(`Label "${labelName}" already present.`);
                 return false;
               }
-              
               core.notice(`No matching terms found for label "${labelName}".`);
               return false;
             }
-            
             // Process all configured labels
-            const processLabels = Object.entries(labelConfig)
-              .map(([labelName, config]) => processLabel(labelName, config));
-            const labelsAdded = await Promise.all(processLabels);
-            const numLabelsAdded = labelsAdded.reduce((x, y) => x + y, 0);
+            const labelsAddedResults = await Promise.all(
+              Object.entries(labelConfig).map(([labelName, config]) => 
+                processLabel(labelName, config).then(added => ({ labelName, added }))
+              )
+            );
+            
+            const numLabelsAdded = labelsAddedResults.filter(r => r.added).length;
             core.notice(`Processing complete. ${numLabelsAdded} label(s) added.`);
+            
+            // Return which labels were added for the next step
+            const addedLabels = labelsAddedResults.filter(r => r.added).map(r => r.labelName);
+            core.setOutput('labels_added', JSON.stringify(addedLabels));
+            return addedLabels;
+
+      - name: CC users for labeled issues
+        if: steps.label-step.outputs.labels_added != '[]'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
+        with:
+          script: |
+            // Configuration: Map labels to GitHub users to CC
+            // You can add multiple users per label, and multiple label configurations
+            const ccConfig = {
+              rocm: {
+                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],  // Add more users as needed: ['user1', 'user2', 'user3']
+                message: 'CC {users} for ROCm-related issue'  // {users} will be replaced with @mentions
+              },
+              // Add more label -> user mappings here
+              // Example:
+              // cuda: {
+              //   users: ['user1', 'user2'],
+              //   message: 'CC {users} for CUDA-related issue'
+              // },
+              // performance: {
+              //   users: ['perfexpert'],
+              //   message: 'CC {users} for performance issue'
+              // },
+            };
+            
+            const labelsAdded = JSON.parse('${{ steps.label-step.outputs.labels_added }}');
+            core.notice(`Labels added: ${labelsAdded.join(', ')}`);
+            
+            // Get existing comments to check for already mentioned users
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const issueBody = context.payload.issue.body || '';
+            const allExistingText = issueBody + '\n' + comments.data.map(c => c.body).join('\n');
+            
+            // Process each label that was added
+            for (const label of labelsAdded) {
+              if (ccConfig[label]) {
+                const config = ccConfig[label];
+                const usersToMention = [];
+                
+                // Check which users haven't been mentioned yet
+                for (const user of config.users) {
+                  const mentionPattern = new RegExp(`@${user}\\b`, 'i');
+                  if (!mentionPattern.test(allExistingText)) {
+                    usersToMention.push(user);
+                  } else {
+                    core.notice(`@${user} already mentioned for label "${label}", skipping`);
+                  }
+                }
+                
+                // Post comment if there are users to mention
+                if (usersToMention.length > 0) {
+                  const mentions = usersToMention.map(u => `@${u}`).join(' ');
+                  const message = config.message.replace('{users}', mentions);
+                  
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: context.issue.number,
+                    body: message
+                  });
+                  
+                  core.notice(`CC comment added for label "${label}": ${mentions}`);
+                } else {
+                  core.notice(`All users for label "${label}" already mentioned, skipping comment`);
+                }
+              }
+            }

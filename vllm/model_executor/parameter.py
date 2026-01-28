@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable
 from fractions import Fraction
-from typing import Callable, Optional, Union
 from weakref import WeakValueDictionary
 
 import torch
@@ -36,7 +35,7 @@ class BasevLLMParameter(Parameter):
     into the parameter when the provided weight loader is called.
     """
 
-    def __new__(cls, data: Optional[torch.Tensor], **kwargs):
+    def __new__(cls, data: torch.Tensor | None, **kwargs):
         return super().__new__(cls, data=data, requires_grad=False)
 
     def __init__(self, data: torch.Tensor, weight_loader: Callable):
@@ -71,7 +70,7 @@ class BasevLLMParameter(Parameter):
         # NOTE(@ksayers) some models such as mamba_mixer2 override the
         # weight loader to support custom loading. In the future, model-specific
         # weight loading should be implemented via Model.load_weights. In the
-        # meantime, support deleting and overriding `weight_loader`` attribute
+        # meantime, support deleting and overriding `weight_loader` attribute
         if self._weight_loader is None:
             raise AttributeError(
                 f"{self.__class__.__name__} weight_loader attribute has been deleted"
@@ -109,7 +108,7 @@ class BasevLLMParameter(Parameter):
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         self._assert_and_load(loaded_weight)
 
-    def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
+    def _shard_id_as_int(self, shard_id: str | int) -> int:
         if isinstance(shard_id, int):
             return shard_id
 
@@ -290,7 +289,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
         super().load_row_parallel_weight(*args, **kwargs)
 
     def _load_into_shard_id(
-        self, loaded_weight: torch.Tensor, shard_id: Union[str, int], **kwargs
+        self, loaded_weight: torch.Tensor, shard_id: str | int, **kwargs
     ):
         """
         Slice the parameter data based on the shard id for
@@ -320,16 +319,14 @@ class PackedColumnParameter(_ColumnvLLMParameter):
 
     def __init__(
         self,
-        packed_factor: Union[int, Fraction],
+        packed_factor: int | Fraction,
         packed_dim: int,
-        marlin_tile_size: Optional[int] = None,
-        bitblas_tile_size: Optional[int] = None,
+        marlin_tile_size: int | None = None,
         **kwargs,
     ):
         self._packed_factor = packed_factor
         self._packed_dim = packed_dim
         self._marlin_tile_size = marlin_tile_size
-        self._bitblas_tile_size = bitblas_tile_size
         super().__init__(**kwargs)
 
     @property
@@ -344,17 +341,12 @@ class PackedColumnParameter(_ColumnvLLMParameter):
     def marlin_tile_size(self):
         return self._marlin_tile_size
 
-    @property
-    def bitblas_tile_size(self):
-        return self._bitblas_tile_size
-
     def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
         return _adjust_shard_indexes_for_packing(
             shard_size=shard_size,
             shard_offset=shard_offset,
             packed_factor=self.packed_factor,
             marlin_tile_size=self.marlin_tile_size,
-            bitblas_tile_size=self.bitblas_tile_size,
         )
 
 
@@ -371,16 +363,14 @@ class PackedvLLMParameter(ModelWeightParameter):
 
     def __init__(
         self,
-        packed_factor: Union[int, Fraction],
+        packed_factor: int | Fraction,
         packed_dim: int,
-        marlin_tile_size: Optional[int] = None,
-        bitblas_tile_size: Optional[int] = None,
+        marlin_tile_size: int | None = None,
         **kwargs,
     ):
         self._packed_factor = packed_factor
         self._packed_dim = packed_dim
         self._marlin_tile_size = marlin_tile_size
-        self._bitblas_tile_size = bitblas_tile_size
         super().__init__(**kwargs)
 
     @property
@@ -395,17 +385,12 @@ class PackedvLLMParameter(ModelWeightParameter):
     def marlin_tile_size(self):
         return self._marlin_tile_size
 
-    @property
-    def bitblas_tile_size(self):
-        return self._bitblas_tile_size
-
     def adjust_shard_indexes_for_packing(self, shard_size, shard_offset):
         return _adjust_shard_indexes_for_packing(
             shard_size=shard_size,
             shard_offset=shard_offset,
             packed_factor=self.packed_factor,
             marlin_tile_size=self.marlin_tile_size,
-            bitblas_tile_size=self.bitblas_tile_size,
         )
 
 
@@ -437,7 +422,7 @@ class SharedWeightParameter(BasevLLMParameter):
     local_tensors: set[torch.Tensor]
 
     # dictionary mapping partition indices to associated parameters
-    partitions: dict[int, Union[ModelWeightParameter, Parameter]]
+    partitions: dict[int, ModelWeightParameter | Parameter]
 
     def __new__(cls, **kwargs):
         return super().__new__(cls, data=None, **kwargs)
@@ -547,7 +532,7 @@ class SharedWeightParameter(BasevLLMParameter):
         self,
         param: BasevLLMParameter,
         loaded_weight: torch.Tensor,
-        loaded_weight_shard_id: Optional[Union[str, int]],
+        loaded_weight_shard_id: str | int | None,
     ):
         raise ValueError(
             "When loading partition weights of "
@@ -618,12 +603,8 @@ def _adjust_shard_indexes_for_marlin(shard_size, shard_offset, marlin_tile_size)
     return shard_size * marlin_tile_size, shard_offset * marlin_tile_size
 
 
-def _adjust_shard_indexes_for_bitblas(shard_size, shard_offset, bitblas_tile_size):
-    return shard_size // bitblas_tile_size, shard_offset // bitblas_tile_size
-
-
 def _adjust_shard_indexes_for_packing(
-    shard_size, shard_offset, packed_factor, marlin_tile_size, bitblas_tile_size
+    shard_size, shard_offset, packed_factor, marlin_tile_size
 ):
     shard_size = shard_size // packed_factor
     shard_offset = shard_offset // packed_factor
@@ -632,12 +613,6 @@ def _adjust_shard_indexes_for_packing(
             shard_size=shard_size,
             shard_offset=shard_offset,
             marlin_tile_size=marlin_tile_size,
-        )
-    elif bitblas_tile_size is not None:
-        return _adjust_shard_indexes_for_bitblas(
-            shard_size=shard_size,
-            shard_offset=shard_offset,
-            bitblas_tile_size=bitblas_tile_size,
         )
 
     return shard_size, shard_offset

@@ -3,7 +3,7 @@
 import itertools
 from collections.abc import Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Literal, Optional, Union
+from typing import Annotated, Any, Literal, TypeAlias
 
 import numpy as np
 import torch
@@ -21,6 +21,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
@@ -38,7 +39,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .interfaces import SupportsLoRA, SupportsMRoPE, SupportsMultiModal, SupportsPP
 from .keye import (
     BaseKeyeModule,
     BaseMultiModalProcessor,
@@ -73,7 +74,7 @@ def split_thw(grid_thw: torch.Tensor) -> torch.Tensor:
 
 
 def get_num_patches(
-    grid_thw: torch.Tensor, num_frames: Union[list[int], torch.Tensor]
+    grid_thw: torch.Tensor, num_frames: list[int] | torch.Tensor
 ) -> list[int]:
     """
     Return num_patches per video.
@@ -153,7 +154,9 @@ class KeyeVL1_5ImageEmbeddingInputs(TensorSchema):
     image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
-KeyeVL1_5ImageInputs = Union[KeyeVL1_5ImagePixelInputs, KeyeVL1_5ImageEmbeddingInputs]
+KeyeVL1_5ImageInputs: TypeAlias = (
+    KeyeVL1_5ImagePixelInputs | KeyeVL1_5ImageEmbeddingInputs
+)
 
 
 class KeyeVL1_5VideoPixelInputs(TensorSchema):
@@ -191,7 +194,9 @@ class KeyeVL1_5VideoEmbeddingInputs(TensorSchema):
     num_frames: torch.Tensor
 
 
-KeyeVL1_5VideoInputs = Union[KeyeVL1_5VideoPixelInputs, KeyeVL1_5VideoEmbeddingInputs]
+KeyeVL1_5VideoInputs: TypeAlias = (
+    KeyeVL1_5VideoPixelInputs | KeyeVL1_5VideoEmbeddingInputs
+)
 
 
 class KeyeVL1_5Projector(nn.Module):
@@ -199,7 +204,7 @@ class KeyeVL1_5Projector(nn.Module):
         self,
         text_config: PretrainedConfig,
         vision_config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -233,9 +238,9 @@ class KeyeVL1_5Projector(nn.Module):
 
     def forward(
         self,
-        image_features: Union[torch.Tensor, tuple[torch.Tensor], list[torch.Tensor]],
+        image_features: torch.Tensor | tuple[torch.Tensor] | list[torch.Tensor],
         image_grid_thw: list[tuple[int, int, int]],
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         m1, m2 = self.merge_kernel_size
         if isinstance(image_features, (list, tuple)):
             processed_features = list()
@@ -275,7 +280,7 @@ class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
 
     def get_supported_mm_limits(
         self,
-    ) -> Mapping[str, Optional[int]]:
+    ) -> Mapping[str, int | None]:
         return {"image": None, "video": 1}
 
 
@@ -327,8 +332,8 @@ def _keye_field_config(
 class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
     def _parse_image_data(
         self,
-        data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
-    ) -> ModalityDataItems[Any, Any]:
+        data: dict[str, torch.Tensor] | ModalityData[ImageItem],
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -344,8 +349,8 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
 
     def _parse_video_data(
         self,
-        data: Union[dict[str, torch.Tensor], ModalityData[VideoItem]],
-    ) -> ModalityDataItems[Any, Any]:
+        data: dict[str, torch.Tensor] | ModalityData[VideoItem],
+    ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
             return DictEmbeddingItems(
                 data,
@@ -493,13 +498,13 @@ class KeyeVL1_5DummyInputsBuilder(
     dummy_inputs=KeyeVL1_5DummyInputsBuilder,
 )
 class KeyeVL1_5ForConditionalGeneration(
-    BaseKeyeModule, SupportsMultiModal, SupportsLoRA, SupportsPP
+    BaseKeyeModule, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
     def _build_projector(
         self,
         text_config: PretrainedConfig,
         vision_config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> nn.Module:
         return KeyeVL1_5Projector(text_config, vision_config, quant_config, prefix)
@@ -511,7 +516,7 @@ class KeyeVL1_5ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[KeyeVL1_5ImageInputs]:
+    ) -> KeyeVL1_5ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
@@ -535,7 +540,7 @@ class KeyeVL1_5ForConditionalGeneration(
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> Optional[KeyeVL1_5VideoInputs]:
+    ) -> KeyeVL1_5VideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
@@ -589,3 +594,133 @@ class KeyeVL1_5ForConditionalGeneration(
             end = patch_cu_seqlens[idx + 1]
             new_video_embeds.append(video_embeds[start:end])
         return tuple(new_video_embeds)
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> tuple[torch.Tensor, int]:
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
+
+        if isinstance(video_grid_thw, list) and len(video_grid_thw) > 0:
+            video_grid_thw = video_grid_thw[0]
+
+        def split_thw(grid_thw: torch.Tensor | list[int]) -> list[list[int]]:
+            """
+            Split grid_thw along the t dimension.
+
+            Args:
+                grid_thw: shape [N, 3] tensor or nested list of [t, h, w].
+
+            Returns:
+                List of [1, h, w] rows, repeated t times for each original row.
+            """
+
+            if isinstance(grid_thw, list):
+                grid_thw = torch.tensor(grid_thw, dtype=torch.long)
+
+            if grid_thw.numel() == 0:
+                return []
+
+            t, hw = grid_thw[:, 0], grid_thw[:, 1:]
+            ones = torch.ones_like(hw[:, :1])  # [N,1]
+            out = torch.cat([ones, hw], dim=1).repeat_interleave(t, dim=0)
+            return out.tolist()
+
+        video_grid_thw = split_thw(video_grid_thw)
+
+        hf_config = self.config
+        image_token_id = hf_config.image_token_id
+        video_token_id = hf_config.video_token_id
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+
+        image_nums = len(image_grid_thw)
+        frame_nums = len(video_grid_thw)
+        llm_pos_ids_list: list = []
+
+        st = 0
+        remain_images, remain_frames = image_nums, frame_nums
+
+        image_index, video_index = 0, 0
+        for _ in range(image_nums + frame_nums):
+            if remain_images > 0:
+                try:
+                    ed_image = input_tokens.index(image_token_id, st)
+                except ValueError:
+                    ed_image = len(input_tokens) + 1
+            else:
+                ed_image = len(input_tokens) + 1
+            if remain_frames > 0:
+                try:
+                    ed_video = input_tokens.index(video_token_id, st)
+                except ValueError:
+                    ed_video = len(input_tokens) + 1
+            else:
+                ed_video = len(input_tokens) + 1
+
+            if ed_image < ed_video:
+                t, h, w = image_grid_thw[image_index]
+                image_index += 1
+                remain_images -= 1
+                ed = ed_image
+            else:
+                t, h, w = video_grid_thw[video_index]
+                video_index += 1
+                remain_frames -= 1
+                ed = ed_video
+
+            llm_grid_t, llm_grid_h, llm_grid_w = (
+                t,
+                h // spatial_merge_size,
+                w // spatial_merge_size,
+            )
+            text_len = ed - st
+
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            )
+
+            t_index = (
+                (
+                    torch.arange(llm_grid_t)
+                    .view(-1, 1)
+                    .expand(-1, llm_grid_h * llm_grid_w)
+                )
+                .long()
+                .flatten()
+            )
+
+            h_index = (
+                torch.arange(llm_grid_h)
+                .view(1, -1, 1)
+                .expand(llm_grid_t, -1, llm_grid_w)
+                .flatten()
+            )
+            w_index = (
+                torch.arange(llm_grid_w)
+                .view(1, 1, -1)
+                .expand(llm_grid_t, llm_grid_h, -1)
+                .flatten()
+            )
+            llm_pos_ids_list.append(
+                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+            )
+            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+
+        if st < len(input_tokens):
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            text_len = len(input_tokens) - st
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            )
+
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+
+        return llm_positions, mrope_position_delta

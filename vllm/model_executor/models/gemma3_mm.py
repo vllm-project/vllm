@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal
 
 import torch
 from torch import nn
 from transformers import BatchFeature, Gemma3Config, Gemma3Processor
 from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
@@ -22,7 +21,8 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalPromptUpdates,
@@ -33,7 +33,6 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     replace_token_matches,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -82,7 +81,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(Gemma3Processor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def _resolve_image_kwargs(
@@ -112,7 +111,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Gemma3Processor],
+        processor: Gemma3Processor | None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -137,11 +136,10 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         if not do_pan_and_scan:
             return 0
 
-        if envs.VLLM_USE_V1:
-            logger.warning_once(
-                "`do_pan_and_scan=True` has suboptimal results on V1 "
-                "because of the simplified attention pattern being used."
-            )
+        logger.warning_once(
+            "`do_pan_and_scan=True` has suboptimal results on V1 "
+            "because of the simplified attention pattern being used."
+        )
 
         # Based on Gemma3ImageProcessor.pan_and_scan
         if image_width >= image_height:
@@ -182,7 +180,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Gemma3Processor],
+        processor: Gemma3Processor | None,
     ) -> PromptUpdateDetails[str]:
         if processor is None:
             processor = self.get_hf_processor()
@@ -217,7 +215,7 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[Gemma3Processor],
+        processor: Gemma3Processor | None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -239,8 +237,9 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         )
         max_num_crops = images_kwargs["pan_and_scan_max_num_crops"]
 
-        # Result in the max possible feature size (h:w = max_num_crops:1)
-        return ImageSize(height=50 * max_num_crops, width=50)
+        vision_config = self.get_hf_config().vision_config
+        native_size = vision_config.image_size
+        return ImageSize(height=native_size * max_num_crops, width=native_size)
 
 
 class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
@@ -256,7 +255,7 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -485,8 +484,6 @@ class Gemma3MultiModalProjector(nn.Module):
 class Gemma3ForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -510,7 +507,7 @@ class Gemma3ForConditionalGeneration(
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<start_of_image>"
 
@@ -525,24 +522,23 @@ class Gemma3ForConditionalGeneration(
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = SiglipVisionModel(
-            config.vision_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        self.multi_modal_projector = Gemma3MultiModalProjector(config)
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = SiglipVisionModel(
+                config.vision_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Gemma3ForCausalLM"],
-        )
-        logit_scale = getattr(config, "logit_scale", 1.0)
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Gemma3ForCausalLM"],
+            )
 
-        if hasattr(self.language_model, "logits_processor"):
-            # The logits processor can be unset if we're using
-            # automatic conversion to pooling model.
+            logit_scale = getattr(config, "logit_scale", 1.0)
             self.language_model.logits_processor.scale *= logit_scale
 
         self.make_empty_intermediate_tensors = (
@@ -555,7 +551,7 @@ class Gemma3ForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Gemma3ImageInputs]:
+    ) -> Gemma3ImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         num_patches = kwargs.pop("num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -582,8 +578,6 @@ class Gemma3ForConditionalGeneration(
         self,
         image_input: Gemma3ImageInputs,
     ) -> list[torch.Tensor]:
-        assert self.vision_tower is not None
-
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
 
@@ -595,22 +589,39 @@ class Gemma3ForConditionalGeneration(
 
         return [e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())]
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
 
         return self._process_image_input(image_input)
 
-    def forward(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+        handle_oov_mm_token: bool = True,
+    ) -> torch.Tensor:
+        # Early return for text-only inference (no multimodal data)
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().embed_input_ids(input_ids)
+
+        # Use interface default with OOV handling enabled
+        return super().embed_input_ids(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
@@ -626,73 +637,10 @@ class Gemma3ForConditionalGeneration(
 
         return hidden_states
 
-    def prepare_attn_masks(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        mask_dtype: torch.dtype,
-        **kwargs,
-    ):
-        kwargs["has_images"] = True
-        # NOTE(woosuk): Here, we distinguish the sequences by the position id 0.
-        # This is a HACK. Fix this.
-        start_indices = (positions == 0).cpu().nonzero()
-        num_seqs = len(start_indices)
-        seq_lens = []
-        for i in range(num_seqs):
-            start_idx = start_indices[i].item()
-            if i < num_seqs - 1:
-                end_idx = start_indices[i + 1].item()
-            else:
-                end_idx = len(input_ids)
-            seq_lens.append(end_idx - start_idx)
-        kwargs["seq_lens"] = seq_lens
-
-        global_attn_masks = []
-        local_attn_masks = []
-        start_idx = 0
-        for seq_len in seq_lens:
-            end_idx = start_idx + seq_len
-            input_token_ids = input_ids[start_idx:end_idx]
-            start_idx = end_idx
-            # Create a global causal mask.
-            global_attn_mask = torch.empty(
-                1,
-                1,
-                seq_len,
-                seq_len,
-                dtype=mask_dtype,
-                device=input_ids.device,
-            )
-            global_attn_mask.fill_(float("-inf"))
-            # Fill the lower triangle with 0.
-            global_attn_mask = global_attn_mask.triu(diagonal=1)
-
-            # Consider the bidirectional attention between image tokens.
-            img_mask = torch.zeros_like(global_attn_mask)
-            img_pos = input_token_ids == self.config.image_token_index
-            img_mask[:, :, :, img_pos] += 1
-            img_mask[:, :, img_pos, :] += 1
-            global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
-            global_attn_masks.append(global_attn_mask)
-
-            sliding_window = self.config.text_config.sliding_window
-            if sliding_window is not None:
-                # Create a local causal mask with sliding window (1024).
-                local_attn_mask = torch.ones_like(global_attn_mask)
-                local_attn_mask = torch.tril(local_attn_mask, diagonal=-sliding_window)
-                local_attn_mask = torch.where(
-                    local_attn_mask == 0, global_attn_mask, float("-inf")
-                )
-                local_attn_masks.append(local_attn_mask)
-        kwargs["global_attn_masks"] = global_attn_masks
-        kwargs["local_attn_masks"] = local_attn_masks
-        return kwargs
-
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -708,3 +656,41 @@ class Gemma3ForConditionalGeneration(
             connector="multi_modal_projector",
             tower_model="vision_tower",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        """
+        Calculate the number of tokens output by the vision encoder.
+
+        The vision encoder processes images into patch embeddings. For Gemma3,
+        the relationship between prompt placeholder tokens and actual vision
+        encoder output tokens depends on the patch grid size.
+
+        Args:
+            num_image_tokens: Number of image placeholder tokens in the prompt
+                              (typically mm_tokens_per_image per image)
+
+        Returns:
+            Number of tokens output by the vision encoder
+        """
+        # For Gemma3, the vision encoder outputs tokens_per_side x tokens_per_side
+        # tokens per image. Since num_image_tokens represents the number of
+        # connector output tokens (mm_tokens_per_image = 256), and tokens_per_side
+        # is sqrt(256) = 16, we need to account for the token expansion.
+        # Based on empirical testing, the multiplier of 16 works correctly.
+        return num_image_tokens * 16
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        """
+        Calculate the number of tokens output by the multimodal connector.
+
+        The connector applies projection and normalization but maintains the
+        token count for Gemma3.
+
+        Args:
+            num_vision_tokens: Number of tokens from vision encoder
+
+        Returns:
+            Number of tokens after connector processing
+        """
+        # The Gemma3 connector maintains a 1:1 token mapping
+        return num_vision_tokens

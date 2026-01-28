@@ -8,15 +8,15 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 from transformers.utils import torch_int
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -44,7 +44,7 @@ class InternS1VisionPatchEmbeddings(nn.Module):
         self.num_patches = num_patches
         self.patch_shape = patch_shape
 
-        self.projection = nn.Conv2d(
+        self.projection = Conv2dLayer(
             num_channels, hidden_size, kernel_size=patch_size, stride=patch_size
         )
 
@@ -139,7 +139,7 @@ class InternS1VisionEmbeddings(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
-        bool_masked_pos: Optional[torch.BoolTensor] = None,
+        bool_masked_pos: torch.BoolTensor | None = None,
     ) -> torch.Tensor:
         _, _, height, width = pixel_values.shape
         embeddings, (patch_height, patch_width) = self.patch_embeddings(pixel_values)
@@ -214,22 +214,21 @@ class InternSdpaAttention(nn.Module):
 
         self.projection_layer = nn.Linear(self.dummy_dim, self.embed_dim)
 
-        # Use unified MultiHeadAttention with automatic backend selection
-        self.attn = MultiHeadAttention(self.num_heads, self.head_dim, self.scale)
+        # Use unified MMEncoderAttention with automatic backend selection
+        self.attn = MMEncoderAttention(self.num_heads, self.head_dim, self.scale)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, N, C = x.shape
+        """x shape: (B, N, C)"""
 
         q = self.q_proj(x)
         k = self.k_proj(x)
         v = self.v_proj(x)
 
         if self.qk_normalization:
-            B_, N_, H_, D_ = q.shape
-            q = self.q_norm(q.flatten(-2, -1)).view(B_, N_, H_, D_)
-            k = self.k_norm(k.flatten(-2, -1)).view(B_, N_, H_, D_)
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
-        # Use unified MultiHeadAttention with automatic backend selection
+        # Use unified MMEncoderAttention with automatic backend selection
         x = self.attn(q, k, v)
 
         x = self.projection_layer(x)
@@ -240,7 +239,7 @@ class InternS1VisionMLP(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -274,7 +273,7 @@ class InternS1VisionLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
         num_dummy_heads: int = 0,
         prefix: str = "",
@@ -309,7 +308,7 @@ class InternS1VisionLayer(nn.Module):
     def _init_attn(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         *,
         num_dummy_heads: int,
         prefix: str = "",
@@ -337,9 +336,9 @@ class InternS1VisionEncoder(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
     ):
@@ -376,9 +375,9 @@ class InternS1VisionModel(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         num_dummy_heads: int = 0,
         prefix: str = "",
     ) -> None:
@@ -404,8 +403,8 @@ class InternS1VisionModel(nn.Module):
 
     def forward(
         self,
-        pixel_values: Optional[torch.Tensor] = None,
-        pixel_embeds: Optional[torch.Tensor] = None,
+        pixel_values: torch.Tensor | None = None,
+        pixel_embeds: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
         if pixel_values is None and pixel_embeds is None:
             raise ValueError("You have to specify pixel_values or pixel_embeds")

@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
-from typing import Union
+import json
 
+import jsonschema
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
@@ -124,7 +125,7 @@ messages = [
 
 
 @pytest.fixture(scope="module")
-def server():  # noqa: F811
+def server():
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -166,7 +167,7 @@ async def test_function_tool_use(
     client: openai.AsyncOpenAI,
     model_name: str,
     stream: bool,
-    tool_choice: Union[str, dict],
+    tool_choice: str | dict,
     enable_thinking: bool,
 ):
     if not stream:
@@ -179,8 +180,8 @@ async def test_function_tool_use(
             extra_body={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
         )
         if enable_thinking:
-            assert chat_completion.choices[0].message.reasoning_content is not None
-            assert chat_completion.choices[0].message.reasoning_content != ""
+            assert chat_completion.choices[0].message.reasoning is not None
+            assert chat_completion.choices[0].message.reasoning != ""
         assert chat_completion.choices[0].message.tool_calls is not None
         assert len(chat_completion.choices[0].message.tool_calls) > 0
     else:
@@ -195,15 +196,23 @@ async def test_function_tool_use(
         )
 
         output = []
+        reasoning = []
         async for chunk in output_stream:
-            if chunk.choices and chunk.choices[0].delta.tool_calls:
-                output.extend(chunk.choices[0].delta.tool_calls)
+            if chunk.choices:
+                if enable_thinking and getattr(
+                    chunk.choices[0].delta, "reasoning", None
+                ):
+                    reasoning.append(chunk.choices[0].delta.reasoning)
+                if chunk.choices[0].delta.tool_calls:
+                    output.extend(chunk.choices[0].delta.tool_calls)
 
         assert len(output) > 0
+        if enable_thinking:
+            assert len(reasoning) > 0
 
 
 @pytest.fixture(scope="module")
-def k2_server():  # noqa: F811
+def k2_server():
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -248,10 +257,10 @@ async def test_tool_id_kimi_k2(
         )
         assert chat_completion.choices[0].message.tool_calls is not None
         assert len(chat_completion.choices[0].message.tool_calls) > 0
-        assert (
-            chat_completion.choices[0].message.tool_calls[0].id
-            == "functions.get_current_weather:0"
-        )
+        assert chat_completion.choices[0].message.tool_calls[0].id in [
+            "functions.get_current_weather:0",
+            "functions.get_forecast:1",
+        ]
     else:
         # Streaming test
         output_stream = await k2_client.chat.completions.create(
@@ -267,7 +276,10 @@ async def test_tool_id_kimi_k2(
             if chunk.choices and chunk.choices[0].delta.tool_calls:
                 output.extend(chunk.choices[0].delta.tool_calls)
         for o in output:
-            assert o.id is None or o.id == "functions.get_current_weather:0"
+            assert o.id is None or o.id in [
+                "functions.get_current_weather:0",
+                "functions.get_forecast:1",
+            ]
 
 
 @pytest.mark.asyncio
@@ -331,3 +343,144 @@ async def test_no_args_tool_call(
     else:
         # No tool called — just print model's direct reply
         assert message.content is not None
+
+
+@pytest.mark.asyncio
+async def test_named_tool_use(
+    client: openai.AsyncOpenAI,
+    sample_json_schema,
+):
+    messages = [
+        {"role": "system", "content": "you are a helpful assistant"},
+        {
+            "role": "user",
+            "content": (
+                "Give an example JSON for an employee profile using the specified tool."
+            ),
+        },
+    ]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "dummy_function_name",
+                "description": "This is a dummy function",
+                "parameters": sample_json_schema,
+            },
+        }
+    ]
+    tool_choice = {"type": "function", "function": {"name": "dummy_function_name"}}
+
+    # non-streaming
+
+    chat_completion = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_completion_tokens=1000,
+        tools=tools,
+        temperature=0.0,
+        tool_choice=tool_choice,
+    )
+    message = chat_completion.choices[0].message
+    assert len(message.content) == 0
+    json_string = message.tool_calls[0].function.arguments
+    json1 = json.loads(json_string)
+    jsonschema.validate(instance=json1, schema=sample_json_schema)
+
+    messages.append({"role": "assistant", "content": json_string})
+    messages.append(
+        {"role": "user", "content": "Give me another one with a different name and age"}
+    )
+
+    # streaming
+
+    stream = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=messages,
+        max_completion_tokens=1000,
+        tools=tools,
+        tool_choice=tool_choice,
+        temperature=0.0,
+        stream=True,
+    )
+
+    output = []
+    finish_reason_count = 0
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.role:
+            assert delta.role == "assistant"
+        assert delta.content is None or len(delta.content) == 0
+        if delta.tool_calls:
+            output.append(delta.tool_calls[0].function.arguments)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    # finish reason should only return in last block
+    assert finish_reason_count == 1
+    json2 = json.loads("".join(output))
+    jsonschema.validate(instance=json2, schema=sample_json_schema)
+    assert json1["name"] != json2["name"]
+    assert json1["age"] != json2["age"]
+
+
+@pytest.mark.asyncio
+async def test_inconsistent_tool_choice_and_tools(
+    client: openai.AsyncOpenAI, sample_json_schema
+):
+    messages = [
+        {"role": "system", "content": "you are a helpful assistant"},
+        {
+            "role": "user",
+            "content": f"Give an example JSON for an employee profile that "
+            f"fits this schema: {sample_json_schema}",
+        },
+    ]
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_completion_tokens=1000,
+            tool_choice={
+                "type": "function",
+                "function": {"name": "dummy_function_name"},
+            },
+        )
+
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_completion_tokens=1000,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "dummy_function_name",
+                        "description": "This is a dummy function",
+                        "parameters": sample_json_schema,
+                    },
+                }
+            ],
+            tool_choice={
+                "type": "function",
+                "function": {"name": "nondefined_function_name"},
+            },
+        )
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_completion_tokens=1000,
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "dummy_function_name",
+                        "description": "This is a dummy function",
+                        "parameters": sample_json_schema,
+                    },
+                }
+            ],
+            tool_choice={},
+        )

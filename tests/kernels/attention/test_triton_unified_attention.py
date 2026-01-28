@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import pytest
 import torch
 
-from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
 NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]
@@ -23,6 +24,10 @@ QDTYPES = (
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
 
+# 0: use 2D kernel for decode
+# 8: use 3D kernel for decode
+SEQ_THRESHOLD_3D_VALUES = [0, 8]
+
 
 def ref_paged_attn(
     query: torch.Tensor,
@@ -32,8 +37,8 @@ def ref_paged_attn(
     kv_lens: list[int],
     block_tables: torch.Tensor,
     scale: float,
-    sliding_window: Optional[int] = None,
-    soft_cap: Optional[float] = None,
+    sliding_window: int | None = None,
+    soft_cap: float | None = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -93,21 +98,23 @@ def ref_paged_attn(
 @pytest.mark.parametrize("soft_cap", [None, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("q_dtype", QDTYPES)
+@pytest.mark.parametrize("seq_threshold_3D", SEQ_THRESHOLD_3D_VALUES)
 @torch.inference_mode()
 def test_triton_unified_attn(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
-    sliding_window: Optional[int],
+    sliding_window: int | None,
     dtype: torch.dtype,
     block_size: int,
-    soft_cap: Optional[float],
+    soft_cap: float | None,
     num_blocks: int,
-    q_dtype: Optional[torch.dtype],
+    q_dtype: torch.dtype | None,
+    seq_threshold_3D: int,
 ) -> None:
     torch.set_default_device("cuda")
 
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
@@ -153,6 +160,21 @@ def test_triton_unified_attn(
         k_descale = torch.rand(scale_shape, dtype=torch.float32)
         v_descale = torch.rand(scale_shape, dtype=torch.float32)
 
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    softmax_segm_output = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
+        dtype=torch.float32,
+    )
+    softmax_segm_max = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+    softmax_segm_expsum = torch.empty(
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+
     unified_attention(
         q=maybe_quantized_query,
         k=maybe_quantized_key_cache,
@@ -170,6 +192,11 @@ def test_triton_unified_attn(
         q_descale=q_descale,
         k_descale=k_descale,
         v_descale=v_descale,
+        seq_threshold_3D=seq_threshold_3D,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
     )
 
     ref_output = ref_paged_attn(

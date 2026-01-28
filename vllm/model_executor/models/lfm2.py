@@ -2,17 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any, Optional
 
 import torch
 import torch.nn as nn
 from transformers import Lfm2Config
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -21,6 +20,8 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -28,7 +29,6 @@ from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -54,8 +54,8 @@ class Lfm2MLP(nn.Module):
         ff_dim: int,
         multiple_of: int,
         auto_adjust_ff_dim: bool,
-        ffn_dim_multiplier: Optional[float],
-        quant_config: Optional[QuantizationConfig] = None,
+        ffn_dim_multiplier: float | None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -97,11 +97,9 @@ class Lfm2Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -127,7 +125,6 @@ class Lfm2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -148,10 +145,8 @@ class Lfm2Attention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -190,9 +185,9 @@ class Lfm2AttentionDecoderLayer(nn.Module):
         self,
         config: Lfm2Config,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -200,14 +195,6 @@ class Lfm2AttentionDecoderLayer(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
 
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None
-        ):
-            rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings
-            )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
 
         self.self_attn = Lfm2Attention(
@@ -216,8 +203,6 @@ class Lfm2AttentionDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
@@ -240,7 +225,7 @@ class Lfm2AttentionDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
@@ -258,14 +243,14 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         self,
         config: Lfm2Config,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        self.conv = ShortConv(
+        self.short_conv = ShortConv(
             config=config,
             dim=config.conv_dim,
             layer_idx=layer_idx,
@@ -289,7 +274,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -298,7 +283,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.operator_norm(hidden_states, residual)
         output = torch.empty_like(hidden_states)
-        self.conv(
+        self.short_conv(
             hidden_states,
             output,
         )
@@ -316,16 +301,10 @@ class Lfm2Model(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size, config.hidden_size, org_num_embeddings=config.vocab_size
@@ -358,21 +337,21 @@ class Lfm2Model(nn.Module):
         else:
             self.embedding_norm = PPMissingLayer()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -403,6 +382,9 @@ class Lfm2Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            if ".conv." in name:
+                name = name.replace(".conv.", ".short_conv.", 1)
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -437,6 +419,7 @@ class Lfm2ForCausalLM(
             "w1",
             "w3",
         ],
+        "in_proj": ["in_proj"],
     }
 
     # LoRA specific attributes
@@ -444,7 +427,6 @@ class Lfm2ForCausalLM(
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     @classmethod
     def get_mamba_state_dtype_from_config(
@@ -479,14 +461,19 @@ class Lfm2ForCausalLM(
             conv_kernel=hf_config.conv_L_cache,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.short_conv_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
-        lora_config = vllm_config.lora_config
-        assert not cache_config.enable_prefix_caching, (
-            "Lfm2 currently does not support prefix caching"
-        )
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Lfm2 currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
 
         super().__init__()
         self.config = config
@@ -495,21 +482,9 @@ class Lfm2ForCausalLM(
         )
 
         if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = self.config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=(
-                    DEFAULT_VOCAB_PADDING_SIZE
-                    # We need bigger padding if using lora for kernel
-                    # compatibility
-                    if not lora_config
-                    else lora_config.lora_vocab_padding_size
-                ),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
@@ -517,23 +492,21 @@ class Lfm2ForCausalLM(
         else:
             self.lm_head = PPMissingLayer()
 
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         hidden_states = self.model(

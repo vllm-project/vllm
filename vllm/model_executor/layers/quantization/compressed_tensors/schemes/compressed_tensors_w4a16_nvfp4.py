@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 from torch.nn.parameter import Parameter
@@ -28,8 +28,8 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # dont restrict as emulations
-        return 80
+        # don't restrict as emulations
+        return 75
 
     def create_weights(
         self,
@@ -110,7 +110,7 @@ class CompressedTensorsW4A16Fp4(CompressedTensorsScheme):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return apply_fp4_marlin_linear(
             input=x,

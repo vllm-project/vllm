@@ -7,9 +7,9 @@ import tempfile
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import BatchRequestOutput
+from vllm.entrypoints.openai.run_batch import BatchRequestOutput
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 # ruff: noqa: E501
 INPUT_BATCH = (
@@ -32,12 +32,15 @@ INPUT_EMBEDDING_BATCH = (
     '{"custom_id": "request-4", "method": "POST", "url": "/v1/embeddings", "body": {"model": "NonExistModel", "input": "Hello world!"}}'
 )
 
-INPUT_SCORE_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "text_1": "What is the capital of France?", "text_2": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
-{"custom_id": "request-2", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "text_1": "What is the capital of France?", "text_2": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}"""
+INPUT_SCORE_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "queries": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
+{"custom_id": "request-2", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "queries": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}"""
 
 INPUT_RERANK_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "/rerank", "body": {"model": "BAAI/bge-reranker-v2-m3", "query": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
 {"custom_id": "request-2", "method": "POST", "url": "/v1/rerank", "body": {"model": "BAAI/bge-reranker-v2-m3", "query": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
 {"custom_id": "request-2", "method": "POST", "url": "/v2/rerank", "body": {"model": "BAAI/bge-reranker-v2-m3", "query": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}"""
+
+INPUT_REASONING_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "Solve this math problem: 2+2=?"}]}}
+{"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {"model": "Qwen/Qwen3-0.6B", "messages": [{"role": "system", "content": "You are a helpful assistant."},{"role": "user", "content": "What is the capital of France?"}]}}"""
 
 
 def test_empty_file():
@@ -188,3 +191,50 @@ def test_score(input_batch):
             line_dict = json.loads(line)
             assert isinstance(line_dict, dict)
             assert line_dict["error"] is None
+
+
+def test_reasoning_parser():
+    """
+    Test that reasoning_parser parameter works correctly in run_batch.
+    """
+    with (
+        tempfile.NamedTemporaryFile("w") as input_file,
+        tempfile.NamedTemporaryFile("r") as output_file,
+    ):
+        input_file.write(INPUT_REASONING_BATCH)
+        input_file.flush()
+        proc = subprocess.Popen(
+            [
+                "vllm",
+                "run-batch",
+                "-i",
+                input_file.name,
+                "-o",
+                output_file.name,
+                "--model",
+                "Qwen/Qwen3-0.6B",
+                "--reasoning-parser",
+                "qwen3",
+            ],
+        )
+        proc.communicate()
+        proc.wait()
+        assert proc.returncode == 0, f"{proc=}"
+
+        contents = output_file.read()
+        for line in contents.strip().split("\n"):
+            # Ensure that the output format conforms to the openai api.
+            # Validation should throw if the schema is wrong.
+            BatchRequestOutput.model_validate_json(line)
+
+            # Ensure that there is no error in the response.
+            line_dict = json.loads(line)
+            assert isinstance(line_dict, dict)
+            assert line_dict["error"] is None
+
+            # Check that reasoning is present and not empty
+            reasoning = line_dict["response"]["body"]["choices"][0]["message"][
+                "reasoning"
+            ]
+            assert reasoning is not None
+            assert len(reasoning) > 0

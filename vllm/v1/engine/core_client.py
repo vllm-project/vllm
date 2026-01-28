@@ -9,25 +9,26 @@ import uuid
 import weakref
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
-from collections.abc import Awaitable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, Callable, Optional, TypeVar, Union
+from typing import Any, TypeAlias, TypeVar
 
 import msgspec.msgpack
 import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
+from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
-from vllm.utils import (
+from vllm.utils.async_utils import in_loop
+from vllm.utils.network_utils import (
     close_sockets,
     get_open_port,
     get_open_zmq_inproc_path,
-    in_loop,
     make_zmq_socket,
 )
 from vllm.v1.engine import (
@@ -46,12 +47,12 @@ from vllm.v1.engine.utils import (
     CoreEngineProcManager,
     launch_core_engines,
 )
-from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor import Executor
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
 
-AnyFuture = Union[asyncio.Future[Any], Future[Any]]
+AnyFuture: TypeAlias = asyncio.Future[Any] | Future[Any]
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -99,7 +100,7 @@ class EngineCoreClient(ABC):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: Optional[dict[str, str]] = None,
+        client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> "MPClient":
@@ -138,13 +139,15 @@ class EngineCoreClient(ABC):
     def reset_mm_cache(self) -> None:
         raise NotImplementedError
 
-    def reset_prefix_cache(self) -> None:
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
         raise NotImplementedError
 
     def sleep(self, level: int = 1) -> None:
         raise NotImplementedError
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         raise NotImplementedError
 
     def is_sleeping(self) -> bool:
@@ -172,16 +175,16 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def save_sharded_state(
-        self, path: str, pattern: Optional[str] = None, max_size: Optional[int] = None
+        self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         raise NotImplementedError
 
     def collective_rpc(
         self,
-        method: Union[str, Callable[..., _R]],
-        timeout: Optional[float] = None,
+        method: str | Callable[..., _R],
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         raise NotImplementedError
 
@@ -208,13 +211,15 @@ class EngineCoreClient(ABC):
     async def reset_mm_cache_async(self) -> None:
         raise NotImplementedError
 
-    async def reset_prefix_cache_async(self) -> None:
+    async def reset_prefix_cache_async(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
         raise NotImplementedError
 
     async def sleep_async(self, level: int = 1) -> None:
         raise NotImplementedError
 
-    async def wake_up_async(self, tags: Optional[list[str]] = None) -> None:
+    async def wake_up_async(self, tags: list[str] | None = None) -> None:
         raise NotImplementedError
 
     async def is_sleeping_async(self) -> bool:
@@ -236,16 +241,16 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     async def save_sharded_state_async(
-        self, path: str, pattern: Optional[str] = None, max_size: Optional[int] = None
+        self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         raise NotImplementedError
 
     async def collective_rpc_async(
         self,
-        method: Union[str, Callable[..., _R]],
-        timeout: Optional[float] = None,
+        method: str | Callable[..., _R],
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         raise NotImplementedError
 
@@ -264,7 +269,8 @@ class InprocClient(EngineCoreClient):
         self.engine_core = EngineCore(*args, **kwargs)
 
     def get_output(self) -> EngineCoreOutputs:
-        outputs, _ = self.engine_core.step_fn()
+        outputs, model_executed = self.engine_core.step_fn()
+        self.engine_core.post_step(model_executed=model_executed)
         return outputs and outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -287,13 +293,17 @@ class InprocClient(EngineCoreClient):
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self) -> None:
-        self.engine_core.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.engine_core.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
 
     def sleep(self, level: int = 1) -> None:
         self.engine_core.sleep(level)
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         self.engine_core.wake_up(tags)
 
     def is_sleeping(self) -> bool:
@@ -315,16 +325,16 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.pin_lora(lora_id)
 
     def save_sharded_state(
-        self, path: str, pattern: Optional[str] = None, max_size: Optional[int] = None
+        self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         self.engine_core.save_sharded_state(path, pattern, max_size)
 
     def collective_rpc(
         self,
-        method: Union[str, Callable[..., _R]],
-        timeout: Optional[float] = None,
+        method: str | Callable[..., _R],
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
@@ -340,18 +350,16 @@ class BackgroundResources:
     ctx: zmq.Context
     # If CoreEngineProcManager, it manages local engines;
     # if CoreEngineActorManager, it manages all engines.
-    engine_manager: Optional[Union[CoreEngineProcManager, CoreEngineActorManager]] = (
-        None
-    )
-    coordinator: Optional[DPCoordinator] = None
-    output_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
-    input_socket: Optional[Union[zmq.Socket, zmq.asyncio.Socket]] = None
-    first_req_send_socket: Optional[zmq.asyncio.Socket] = None
-    first_req_rcv_socket: Optional[zmq.asyncio.Socket] = None
-    stats_update_socket: Optional[zmq.asyncio.Socket] = None
-    output_queue_task: Optional[asyncio.Task] = None
-    stats_update_task: Optional[asyncio.Task] = None
-    shutdown_path: Optional[str] = None
+    engine_manager: CoreEngineProcManager | CoreEngineActorManager | None = None
+    coordinator: DPCoordinator | None = None
+    output_socket: zmq.Socket | zmq.asyncio.Socket | None = None
+    input_socket: zmq.Socket | zmq.asyncio.Socket | None = None
+    first_req_send_socket: zmq.asyncio.Socket | None = None
+    first_req_rcv_socket: zmq.asyncio.Socket | None = None
+    stats_update_socket: zmq.asyncio.Socket | None = None
+    output_queue_task: asyncio.Task | None = None
+    stats_update_task: asyncio.Task | None = None
+    shutdown_path: str | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -387,10 +395,11 @@ class BackgroundResources:
                         with contextlib.suppress(Exception):
                             task.cancel()
 
-            if in_loop(loop):
-                close_sockets_and_tasks()
-            elif loop and not loop.is_closed():
-                loop.call_soon_threadsafe(close_sockets_and_tasks)
+            if loop is not None:
+                if in_loop(loop):
+                    close_sockets_and_tasks()
+                elif not loop.is_closed():
+                    loop.call_soon_threadsafe(close_sockets_and_tasks)
             else:
                 # Loop has been closed, try to clean up directly.
                 del tasks
@@ -438,7 +447,7 @@ class MPClient(EngineCoreClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: Optional[dict[str, str]] = None,
+        client_addresses: dict[str, str] | None = None,
     ):
         self.vllm_config = vllm_config
         # Serialization setup.
@@ -459,7 +468,7 @@ class MPClient(EngineCoreClient):
             # State used for data parallel.
             self.engines_running = False
 
-            self.stats_update_address: Optional[str] = None
+            self.stats_update_address: str | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
@@ -493,17 +502,12 @@ class MPClient(EngineCoreClient):
 
             parallel_config = vllm_config.parallel_config
             dp_size = parallel_config.data_parallel_size
-            dp_rank = parallel_config.data_parallel_rank
+            dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local
             offline_mode = parallel_config.data_parallel_rank_local is not None
             # Client manages local+remote EngineCores in pure internal LB case.
             # Client manages local EngineCores in hybrid and external LB case.
-            local_engines_only = (
-                parallel_config.data_parallel_hybrid_lb
-                or parallel_config.data_parallel_external_lb
-            )
-
-            num_ranks = dp_local_size if local_engines_only else dp_size
+            num_ranks = dp_local_size if parallel_config.local_engines_only else dp_size
             self.engine_ranks_managed = (
                 [dp_rank] if offline_mode else list(range(dp_rank, dp_rank + num_ranks))
             )
@@ -520,9 +524,11 @@ class MPClient(EngineCoreClient):
             identities = set(self.core_engines)
             sync_input_socket = zmq.Socket.shadow(self.input_socket)
             while identities:
-                if not sync_input_socket.poll(timeout=600_000):
+                if not sync_input_socket.poll(
+                    timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+                ):
                     raise TimeoutError(
-                        "Timed out waiting for engines to send"
+                        "Timed out waiting for engines to send "
                         "initial message on input socket."
                     )
                 identity, _ = sync_input_socket.recv_multipart()
@@ -646,7 +652,7 @@ class SyncMPClient(MPClient):
         )
 
         self.is_dp = self.vllm_config.parallel_config.data_parallel_size > 1
-        self.outputs_queue = queue.Queue[Union[EngineCoreOutputs, Exception]]()
+        self.outputs_queue = queue.Queue[EngineCoreOutputs | Exception]()
 
         # Ensure that the outputs socket processing thread does not have
         # a ref to the client which prevents gc.
@@ -752,8 +758,12 @@ class SyncMPClient(MPClient):
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
 
-    def reset_prefix_cache(self) -> None:
-        self.call_utility("reset_prefix_cache")
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.call_utility(
+            "reset_prefix_cache", reset_running_requests, reset_connector
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.call_utility("add_lora", lora_request)
@@ -770,7 +780,7 @@ class SyncMPClient(MPClient):
     def sleep(self, level: int = 1) -> None:
         self.call_utility("sleep", level)
 
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+    def wake_up(self, tags: list[str] | None = None) -> None:
         self.call_utility("wake_up", tags)
 
     def is_sleeping(self) -> bool:
@@ -781,15 +791,15 @@ class SyncMPClient(MPClient):
 
     def collective_rpc(
         self,
-        method: Union[str, Callable[..., _R]],
-        timeout: Optional[float] = None,
+        method: str | Callable[..., _R],
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return self.call_utility("collective_rpc", method, timeout, args, kwargs)
 
     def save_sharded_state(
-        self, path: str, pattern: Optional[str] = None, max_size: Optional[int] = None
+        self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         self.call_utility("save_sharded_state", path, pattern, max_size)
 
@@ -802,7 +812,7 @@ class AsyncMPClient(MPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: Optional[dict[str, str]] = None,
+        client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
@@ -816,7 +826,7 @@ class AsyncMPClient(MPClient):
 
         self.client_count = client_count
         self.client_index = client_index
-        self.outputs_queue = asyncio.Queue[Union[EngineCoreOutputs, Exception]]()
+        self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
         try:
             # If we are running in an asyncio event loop, start the queue task.
             # Otherwise, it will be started lazily. If it is not started here,
@@ -837,9 +847,9 @@ class AsyncMPClient(MPClient):
         decoder = self.decoder
         utility_results = self.utility_results
         outputs_queue = self.outputs_queue
-        output_handler: Optional[
-            Callable[[AsyncMPClient, EngineCoreOutputs], Awaitable[None]]
-        ] = getattr(self.__class__, "process_engine_outputs", None)
+        output_handler: (
+            Callable[[AsyncMPClient, EngineCoreOutputs], Awaitable[None]] | None
+        ) = getattr(self.__class__, "process_engine_outputs", None)
         _self_ref = weakref.ref(self) if output_handler else None
         output_socket = resources.output_socket
         assert output_socket is not None
@@ -888,7 +898,7 @@ class AsyncMPClient(MPClient):
         self,
         request_type: EngineCoreRequestType,
         request: Any,
-        engine: Optional[EngineIdentity] = None,
+        engine: EngineIdentity | None = None,
     ) -> Awaitable[Any]:
         if engine is None:
             engine = self.core_engine
@@ -956,13 +966,17 @@ class AsyncMPClient(MPClient):
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
 
-    async def reset_prefix_cache_async(self) -> None:
-        await self.call_utility_async("reset_prefix_cache")
+    async def reset_prefix_cache_async(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return await self.call_utility_async(
+            "reset_prefix_cache", reset_running_requests, reset_connector
+        )
 
     async def sleep_async(self, level: int = 1) -> None:
         await self.call_utility_async("sleep", level)
 
-    async def wake_up_async(self, tags: Optional[list[str]] = None) -> None:
+    async def wake_up_async(self, tags: list[str] | None = None) -> None:
         await self.call_utility_async("wake_up", tags)
 
     async def is_sleeping_async(self) -> bool:
@@ -984,16 +998,16 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async("pin_lora", lora_id)
 
     async def save_sharded_state_async(
-        self, path: str, pattern: Optional[str] = None, max_size: Optional[int] = None
+        self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
         await self.call_utility_async("save_sharded_state", path, pattern, max_size)
 
     async def collective_rpc_async(
         self,
-        method: Union[str, Callable[..., _R]],
-        timeout: Optional[float] = None,
+        method: str | Callable[..., _R],
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
+        kwargs: dict[str, Any] | None = None,
     ) -> list[_R]:
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
@@ -1009,7 +1023,7 @@ class DPAsyncMPClient(AsyncMPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: Optional[dict[str, str]] = None,
+        client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
@@ -1046,6 +1060,7 @@ class DPAsyncMPClient(AsyncMPClient):
             return
 
         assert self.stats_update_address is not None
+        stats_addr: str = self.stats_update_address
         assert len(self.engine_ranks_managed) > 0
         # NOTE: running and waiting counts are all global from
         # the Coordinator include all global EngineCores. This
@@ -1056,9 +1071,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         async def run_engine_stats_update_task():
             with (
-                make_zmq_socket(
-                    self.ctx, self.stats_update_address, zmq.XSUB, linger=0
-                ) as socket,
+                make_zmq_socket(self.ctx, stats_addr, zmq.XSUB, linger=0) as socket,
                 make_zmq_socket(
                     self.ctx, self.first_req_sock_addr, zmq.PAIR, bind=False, linger=0
                 ) as first_req_rcv_socket,
@@ -1166,7 +1179,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: Optional[dict[str, str]] = None,
+        client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
@@ -1325,7 +1338,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Wait for ready messages from new engines on the input socket
         sync_input_socket = zmq.Socket.shadow(self.input_socket)
         while new_engine_identities:
-            if not sync_input_socket.poll(timeout=600_000):
+            if not sync_input_socket.poll(
+                timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
+            ):
                 raise TimeoutError(
                     "Timed out waiting for new engines to send initial "
                     "message on input socket."

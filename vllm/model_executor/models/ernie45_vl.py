@@ -21,31 +21,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only Erine VL model compatible with HuggingFace weights."""
+"""Inference-only Ernie VL model compatible with HuggingFace weights."""
 
+import itertools
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Callable, Literal, Optional, Union
+from typing import Annotated, Any, Literal
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, repeat
+from einops import rearrange
 from transformers import BatchFeature
 
-from vllm.attention.backends.registry import _Backend
-from vllm.attention.layer import (
-    check_upstream_fa_availability,
-    maybe_get_vit_flash_attn_backend,
-)
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
+from vllm.model_executor.layers.attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -53,29 +52,34 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import (
+    ApplyRotaryEmb,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -85,52 +89,6 @@ from .vision import get_vit_attn_backend
 logger = init_logger(__name__)
 
 # === Vision Transformer === #
-
-
-def rotate_half(x: torch.Tensor, interleaved: bool = False) -> torch.Tensor:
-    if not interleaved:
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
-    else:
-        x1, x2 = x[..., ::2], x[..., 1::2]
-        return rearrange(
-            torch.stack((-x2, x1), dim=-1), "... d two -> ... (d two)", two=2
-        )
-
-
-def apply_rotary_emb_torch(
-    x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, interleaved: bool = False
-) -> torch.Tensor:
-    """
-    x: (batch_size, seqlen, nheads, headdim)
-    cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
-    """
-    ro_dim = cos.shape[-1] * 2
-    assert ro_dim <= x.shape[-1]
-    cos = repeat(
-        cos, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)"
-    )
-    sin = repeat(
-        sin, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)"
-    )
-    return torch.cat(
-        [
-            x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin,
-            x[..., ro_dim:],
-        ],
-        dim=-1,
-    )
-
-
-def apply_rotary_pos_emb_vision(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-    t_ = t.float()
-    cos = freqs.cos()
-    sin = freqs.sin()
-    apply_rotary_emb = apply_rotary_emb_torch
-    if current_platform.is_cuda():
-        from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
-    output = apply_rotary_emb(t_, cos, sin).type_as(t)
-    return output
 
 
 def all_gather_interleave(local_tensor, hidden_size: int, tp_size: int):
@@ -160,7 +118,7 @@ class Ernie4_5_VisionAttention(nn.Module):
         embed_dim: int,
         num_heads: int,
         projection_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -190,34 +148,17 @@ class Ernie4_5_VisionAttention(nn.Module):
             prefix=f"{prefix}.proj",
         )
 
-        # Detect attention implementation.
-        self.attn_backend = get_vit_attn_backend(
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
-            dtype=torch.get_default_dtype(),
+            scale=self.hidden_size_per_attention_head**-0.5,
+            prefix=f"{prefix}.attn",
         )
 
-        self.use_upstream_fa = False
-
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                self.use_upstream_fa,
-            )
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            enable_fp32_compute=True,
         )
-
-        if self.attn_backend not in {
-            _Backend.FLASH_ATTN,
-            _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
-            _Backend.ROCM_AITER_FA,
-        }:
-            raise RuntimeError(
-                f"Ernie45-VL does not support {self.attn_backend} backend now."
-            )
-        self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
-        }
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
@@ -252,73 +193,32 @@ class Ernie4_5_VisionAttention(nn.Module):
         x: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-        seqlens: Optional[list[int]] = None,  # Only used for xFormers
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
 
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
         q, k, v = self.split_qkv(x)
-        batch_size = q.shape[1]
 
         q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v))
         if rotary_pos_emb is not None:
             qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
+            qk_rotated = self.apply_rotary_emb(
+                qk_concat,
+                rotary_pos_emb.cos(),
+                rotary_pos_emb.sin(),
+            )
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
-        if self.is_flash_attn_backend:
-            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
-
-            output = self.flash_attn_varlen_func(
-                q,
-                k,
-                v,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-                dropout_p=0.0,
-                causal=False,
-            )
-
-            context_layer = rearrange(
-                output, "(b s) h d -> s b (h d)", b=batch_size
-            ).contiguous()
-        elif self.attn_backend == _Backend.TORCH_SDPA:
-            # Execute attention entry by entry for speed & less VRAM.
-            outputs = []
-            for i in range(1, len(cu_seqlens)):
-                start_idx = cu_seqlens[i - 1]
-                end_idx = cu_seqlens[i]
-                q_i = q[:, start_idx:end_idx]
-                k_i = k[:, start_idx:end_idx]
-                v_i = v[:, start_idx:end_idx]
-                q_i, k_i, v_i = (
-                    rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
-                )
-                output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-                output_i = rearrange(output_i, "b h s d -> b s h d ")
-                outputs.append(output_i)
-            context_layer = torch.cat(outputs, dim=1)
-            context_layer = rearrange(
-                context_layer, "b s h d -> s b (h d)"
-            ).contiguous()
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-            attn_bias = BlockDiagonalMask.from_seqlens(
-                q_seqlen=seqlens, kv_seqlen=None, device=q.device
-            )
-
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None
-            )
-            context_layer = rearrange(
-                context_layer, "b s h d -> s b (h d)"
-            ).contiguous()
+        output = self.attn(
+            query=q,
+            key=k,
+            value=v,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        context_layer = rearrange(output, "b s h d -> s b (h d)").contiguous()
 
         output, _ = self.proj(context_layer)
         return output
@@ -330,7 +230,7 @@ class Ernie4_5_VisionMLP(nn.Module):
         in_features: int,
         hidden_features: int,
         act_layer: type[nn.Module] = QuickGELU,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -362,8 +262,8 @@ class Ernie4_5_VisionBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float,
         act_layer: type[nn.Module] = QuickGELU,
-        norm_layer: Optional[Callable[[int], nn.Module]] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        norm_layer: Callable[[int], nn.Module] | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -395,15 +295,13 @@ class Ernie4_5_VisionBlock(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: Optional[int] = None,  # Only used for Flash Attention
-        seqlens: Optional[list[int]] = None,  # Only used for xFormers
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             max_seqlen=max_seqlen,
-            seqlens=seqlens,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
@@ -454,7 +352,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         self,
         vision_config,
         norm_eps: float = 1e-6,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -502,12 +400,9 @@ class Ernie4_5_VisionTransformer(nn.Module):
         self.ln = nn.LayerNorm(hidden_size, eps=1e-6)
 
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype()
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
         )
-        if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
-            torch.get_default_dtype()
-        ):
-            self.attn_backend = _Backend.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
@@ -549,18 +444,14 @@ class Ernie4_5_VisionTransformer(nn.Module):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
-    def compute_attn_mask_seqlen(
-        self, cu_seqlens: torch.Tensor
-    ) -> tuple[Optional[int], Optional[list[int]]]:
-        max_seqlen, seqlens = None, None
+    def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> torch.Tensor | None:
+        max_seqlen = None
         if (
-            self.attn_backend == _Backend.FLASH_ATTN
-            or self.attn_backend == _Backend.ROCM_AITER_FA
+            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
         ):
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        return max_seqlen, seqlens
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        return max_seqlen
 
     def forward(
         self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, num_pad=0
@@ -585,8 +476,8 @@ class Ernie4_5_VisionTransformer(nn.Module):
         if hidden_states.ndim == 2:
             hidden_states = hidden_states.unsqueeze(dim=1)
 
-        # pre-compute seqlens for attn mask to reduce cuMemcpy operations
-        max_seqlen, seqlens = self.compute_attn_mask_seqlen(cu_seqlens)
+        # pre-compute max_seqlen for attn mask to reduce cuMemcpy operations
+        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
         for i, blk in enumerate(self.blocks):
             hidden_states = blk(
@@ -594,7 +485,6 @@ class Ernie4_5_VisionTransformer(nn.Module):
                 cu_seqlens=cu_seqlens,
                 rotary_pos_emb=rotary_pos_emb,
                 max_seqlen=max_seqlen,
-                seqlens=seqlens,
             )
 
         final_output = self.ln(hidden_states)
@@ -657,15 +547,15 @@ Ernie4_5_VLVideoInputs = Ernie4_5_VLVideoPixelInputs
 # === Vision Processor === #
 
 
-def round_by_factor(number: Union[int, float], factor: int) -> int:
+def round_by_factor(number: int | float, factor: int) -> int:
     return round(number / factor) * factor
 
 
-def ceil_by_factor(number: Union[int, float], factor: int) -> int:
+def ceil_by_factor(number: int | float, factor: int) -> int:
     return math.ceil(number / factor) * factor
 
 
-def floor_by_factor(number: Union[int, float], factor: int) -> int:
+def floor_by_factor(number: int | float, factor: int) -> int:
     return math.floor(number / factor) * factor
 
 
@@ -700,7 +590,11 @@ def smart_resize(
         w_bar = ceil_by_factor(width * beta, factor)
 
     if min_pixels > h_bar * w_bar or h_bar * w_bar > max_pixels:
-        raise ValueError(f"encounter invalid h_bar: {h_bar}, w_bar: {w_bar}")
+        raise ValueError(
+            f"Invalid h_bar={h_bar}, w_bar={w_bar}: "
+            f"h_bar * w_bar must be >= min_pixels ({min_pixels}) "
+            f"and <= max_pixels ({max_pixels})."
+        )
 
     return h_bar, w_bar
 
@@ -899,7 +793,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
     def get_mm_max_tokens_per_item(
@@ -918,7 +812,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: Optional[Any],
+        image_processor: Any | None,
     ) -> tuple[ImageSize, int]:
         if image_processor is None:
             image_processor = self.get_image_processor()
@@ -955,7 +849,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: Optional[Any],
+        image_processor: Any | None,
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
@@ -970,7 +864,7 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: Optional[Any],
+        image_processor: Any | None,
     ) -> int:
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
@@ -1053,6 +947,11 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
 
 
 class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessingInfo]):
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+        )
+
     def _pixel_values_norm(
         self,
         pixel_values: torch.Tensor,
@@ -1087,7 +986,7 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
         pixel_values = (
             rescale_factor * pixel_values.to(torch.float32) - image_mean_tensor
         ) / image_std_tensor
-        pixel_values = pixel_values.to(hf_config.torch_dtype)
+        pixel_values = pixel_values.to(hf_config.dtype)
         return pixel_values
 
     def _call_hf_processor(
@@ -1111,8 +1010,25 @@ class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessin
             mm_data["images"] = []
         if "videos" not in mm_data:
             mm_data["videos"] = []
+
+        # Check if HF processor supports video metadata
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        supports_video_metadata = getattr(
+            hf_processor, "supports_video_metadata", False
+        )
+
+        if mm_data["videos"] and not supports_video_metadata:
+            # Old HF processor, unwrap tuple to pure frames
+            logger.warning_once(
+                "HF processor doesn't support video metadata. "
+                "Timestamps will NOT be rendered. Please upgrade the model."
+            )
+            mm_data["videos"] = [
+                v[0] if isinstance(v, tuple) else v for v in mm_data["videos"]
+            ]
+
         processor_output = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
+            hf_processor,
             dict(text=[prompt], images=mm_data["images"], videos=mm_data["videos"]),
             dict(**mm_kwargs, **tok_kwargs),
         )
@@ -1235,7 +1151,7 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1264,6 +1180,60 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
             ),
         }
 
+    def _get_dummy_videos(
+        self,
+        *,
+        width: int,
+        height: int,
+        num_frames: int,
+        num_videos: int,
+        overrides: VideoDummyOptions | None = None,
+    ):
+        if overrides:
+            if overrides.num_frames:
+                if overrides.num_frames > num_frames:
+                    logger.warning(
+                        "video.num_frames override (%d) exceeds model's "
+                        "maximum number of frames (%d), will be ignored",
+                        overrides.num_frames,
+                        num_frames,
+                    )
+                num_frames = min(num_frames, overrides.num_frames)
+            if overrides.width:
+                if overrides.width > width:
+                    logger.warning(
+                        "video.width override (%d) exceeds model's "
+                        "maximum width (%d), will be ignored",
+                        overrides.width,
+                        width,
+                    )
+                width = min(width, overrides.width)
+            if overrides.height:
+                if overrides.height > height:
+                    logger.warning(
+                        "video.height override (%d) exceeds model's "
+                        "maximum height (%d), will be ignored",
+                        overrides.height,
+                        height,
+                    )
+                height = min(height, overrides.height)
+        num_frames = max(num_frames, 2)  # ernie4.5-vl requires at least 2 frames
+
+        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        video_items = []
+        for i in range(num_videos):
+            video_metadata = {
+                "fps": 2.0,
+                "duration": num_frames / 2.0,
+                "total_num_frames": num_frames,
+                "frames_indices": [i for i in range(num_frames)],
+                "video_backend": "opencv",
+                "do_sample_frames": False,
+            }
+            video_item = (video.copy(), video_metadata)
+            video_items.append(video_item)
+        return video_items
+
 
 @MULTIMODAL_REGISTRY.register_processor(
     Ernie4_5VLMultiModalProcessor,
@@ -1271,10 +1241,8 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
     dummy_inputs=Ernie4_5_VLDummyInputsBuilder,
 )
 class Ernie4_5_VLMoeForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP
+    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1308,7 +1276,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>"
         if modality.startswith("video"):
@@ -1325,36 +1293,54 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_model = Ernie4_5_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision_model = Ernie4_5_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.resampler_model = VariableResolutionResamplerModel(
+                self.config.pixel_hidden_size,
+                self.config.hidden_size,
+                self.config.spatial_conv_size,
+                self.config.temporal_conv_size,
+                config=self.config,
+                prefix=maybe_prefix(prefix, "resampler_model"),
+            )
 
-        self.language_model = Ernie4_5_VLMoeForCausalLM(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.resampler_model = VariableResolutionResamplerModel(
-            self.config.pixel_hidden_size,
-            self.config.hidden_size,
-            self.config.spatial_conv_size,
-            self.config.temporal_conv_size,
-            config=self.config,
-            prefix=maybe_prefix(prefix, "resampler_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = Ernie4_5_VLMoeForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+        if getattr(self.config, "im_patch_id", None):
+            visual_token_ids = [
+                token_id
+                for token_id in [
+                    self.config.im_patch_id,
+                    getattr(self.config, "image_start_token_id", None),
+                    getattr(self.config, "image_end_token_id", None),
+                    getattr(self.config, "video_start_token_id", None),
+                    getattr(self.config, "video_end_token_id", None),
+                ]
+                if token_id is not None
+            ]
+            self._visual_token_ids_tensor_cache = torch.tensor(
+                visual_token_ids, dtype=torch.long
+            )
+        else:
+            self._visual_token_ids_tensor_cache = None
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         """compute logits"""
         return self.language_model.compute_logits(hidden_states)
 
@@ -1381,19 +1367,154 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         return image_features
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
-        if getattr(self.config, "im_patch_id", None) is not None:
-            self.visual_token_mask = (input_ids == self.config.im_patch_id).reshape(
-                -1, 1
-            )
-        else:
+        """Set mask for visual tokens (image/video patches and delimiters)."""
+        if self._visual_token_ids_tensor_cache is None:
             self.visual_token_mask = None
+            return
+        # Create tensor on the correct device
+        visual_token_ids_tensor = self._visual_token_ids_tensor_cache.to(
+            device=input_ids.device,
+            dtype=input_ids.dtype,
+        )
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
+        self.visual_token_mask = torch.isin(input_ids, visual_token_ids_tensor).reshape(
+            -1, 1
+        )
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> tuple[torch.Tensor, int]:
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
+
+        hf_config = self.config
+        image_token_id = hf_config.im_patch_id
+        video_start_token_id = hf_config.video_start_token_id
+        video_end_token_id = hf_config.video_end_token_id
+        spatial_conv_size = hf_config.spatial_conv_size
+        temporal_conv_size = hf_config.temporal_conv_size
+        llm_pos_ids_list: list = []
+
+        if image_grid_thw or video_grid_thw:
+            input_token_type: list[str] = []
+            video_check_flg = False
+            for token in input_tokens:
+                if token == video_start_token_id:
+                    video_check_flg = True
+                elif token == video_end_token_id:
+                    video_check_flg = False
+
+                if (token == image_token_id) and (video_check_flg is False):
+                    input_token_type.append("image")
+                elif (token == image_token_id) and (video_check_flg is True):
+                    input_token_type.append("video")
+                else:
+                    input_token_type.append("text")
+
+            input_type_group: list[tuple[str, int, int]] = []
+            for key, group_iter in itertools.groupby(
+                enumerate(input_token_type), lambda x: x[1]
+            ):
+                group_list = list(group_iter)
+                start_index = group_list[0][0]
+                end_index = group_list[-1][0] + 1
+                input_type_group.append((key, start_index, end_index))
+
+            video_frame_num = 1
+            mm_data_idx = 0
+            for modality_type, start_idx, end_idx in input_type_group:
+                st_idx = (
+                    llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+                )
+                if modality_type == "image":
+                    t, h, w = image_grid_thw[mm_data_idx]
+                    llm_grid_t, llm_grid_h, llm_grid_w = (
+                        t,
+                        h // spatial_conv_size,
+                        w // spatial_conv_size,
+                    )
+
+                    t_index = (
+                        torch.arange(llm_grid_t)
+                        .view(-1, 1)
+                        .expand(-1, llm_grid_h * llm_grid_w)
+                        .flatten()
+                    )
+                    h_index = (
+                        torch.arange(llm_grid_h)
+                        .view(1, -1, 1)
+                        .expand(llm_grid_t, -1, llm_grid_w)
+                        .flatten()
+                    )
+                    w_index = (
+                        torch.arange(llm_grid_w)
+                        .view(1, 1, -1)
+                        .expand(llm_grid_t, llm_grid_h, -1)
+                        .flatten()
+                    )
+                    llm_pos_ids_list.append(
+                        torch.stack([t_index, h_index, w_index]) + st_idx
+                    )
+                    mm_data_idx += 1
+
+                elif modality_type == "video":
+                    t, h, w = video_grid_thw[mm_data_idx]
+                    llm_grid_t, llm_grid_h, llm_grid_w = (
+                        t // temporal_conv_size,
+                        h // spatial_conv_size,
+                        w // spatial_conv_size,
+                    )
+
+                    for t_idx in range(llm_grid_t):
+                        t_index = (
+                            torch.tensor(t_idx)
+                            .view(-1, 1)
+                            .expand(-1, llm_grid_h * llm_grid_w)
+                            .flatten()
+                        )
+                        h_index = (
+                            torch.arange(llm_grid_h)
+                            .view(1, -1, 1)
+                            .expand(1, -1, llm_grid_w)
+                            .flatten()
+                        )
+                        w_index = (
+                            torch.arange(llm_grid_w)
+                            .view(1, 1, -1)
+                            .expand(1, llm_grid_h, -1)
+                            .flatten()
+                        )
+                        llm_pos_ids_list.append(
+                            torch.stack([t_index, h_index, w_index]) + st_idx
+                        )
+
+                    mm_data_idx += 1
+                    video_frame_num += 1
+
+                else:
+                    text_len = end_idx - start_idx
+                    llm_pos_ids_list.append(
+                        torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                    )
+                    video_frame_num = 1
+
+        else:
+            text_len = len(input_tokens)
+            llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1))
+
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+        return llm_positions, mrope_position_delta
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Ernie4_5_VLImageInputs]:
+    ) -> Ernie4_5_VLImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
 
@@ -1409,7 +1530,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> Optional[Ernie4_5_VLVideoInputs]:
+    ) -> Ernie4_5_VLVideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
 
@@ -1482,9 +1603,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         return modalities
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> Optional[MultiModalEmbeddings]:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return None
@@ -1498,21 +1617,21 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_embeddings = self._process_video_input(video_input)
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
-        is_multimodal: Optional[torch.Tensor] = None,
+        is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
@@ -1520,9 +1639,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
@@ -1531,10 +1650,10 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
         forward_kwargs = {

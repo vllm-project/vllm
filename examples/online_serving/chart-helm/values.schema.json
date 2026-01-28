@@ -136,6 +136,70 @@
         "extraInit": {
             "type": "object",
             "properties": {
+                "modelDownload": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean"
+                        },
+                        "image": {
+                            "type": "object",
+                            "properties": {
+                                "repository": {
+                                    "type": "string"
+                                },
+                                "tag": {
+                                    "type": "string"
+                                },
+                                "pullPolicy": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": ["repository", "tag", "pullPolicy"]
+                        },
+                        "waitContainer": {
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                },
+                                "args": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                },
+                                "env": {
+                                    "type": "array",
+                                    "items": {"type": "object"}
+                                }
+                            },
+                            "required": ["command", "args"]
+                        },
+                        "downloadJob": {
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                },
+                                "args": {
+                                    "type": "array",
+                                    "items": {"type": "string"}
+                                },
+                                "env": {
+                                    "type": "array",
+                                    "items": {"type": "object"}
+                                }
+                            },
+                            "required": ["command", "args"]
+                        }
+                    },
+                    "required": ["enabled", "image", "waitContainer", "downloadJob"]
+                },
+                "initContainers": {
+                    "type": "array",
+                    "items": {"type": "object"}
+                },
                 "s3modelpath": {
                     "type": "string"
                 },
@@ -147,9 +211,9 @@
                 }
             },
             "required": [
-                "pvcStorage",
-                "s3modelpath",
-                "awsEc2MetadataDisabled"
+                "modelDownload",
+                "initContainers",
+                "pvcStorage"
             ]
         },
         "extraContainers": {

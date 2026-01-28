@@ -5,7 +5,7 @@ Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
-from typing import Optional, Union
+from typing import TypeAlias
 
 import numpy as np
 import torch
@@ -14,14 +14,14 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
-from vllm.lora.layers import LoRAMapping
+from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
-from vllm.model_executor.models import supports_lora, supports_multimodal
+from vllm.model_executor.models import supports_lora
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
-InputBatch = Union[TPUInputBatch, GPUInputBatch]
+InputBatch: TypeAlias = TPUInputBatch | GPUInputBatch
 
 logger = init_logger(__name__)
 
@@ -29,31 +29,28 @@ logger = init_logger(__name__)
 # Defined as a mixin for GPUModelRunner
 class LoRAModelRunnerMixin:
     def load_lora_model(
-        self, model: nn.Module, vllm_config: VllmConfig, device: torch.device
+        self,
+        model: nn.Module,
+        vllm_config: VllmConfig,
+        device: torch.device,
     ) -> nn.Module:
         if not supports_lora(model):
             raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
-
-        if supports_multimodal(model):
-            logger.warning(
-                "Regarding multimodal models, vLLM currently "
-                "only supports adding LoRA to language model."
-            )
 
         # Add LoRA Manager to the Model Runner
         self.lora_manager = LRUCacheWorkerLoRAManager(
             vllm_config,
             device,
             model.embedding_modules,
-            model.embedding_padding_modules,
         )
-        return self.lora_manager.create_lora_manager(model)
+        return self.lora_manager.create_lora_manager(model, vllm_config)
 
     def _set_active_loras(
         self,
         prompt_lora_mapping: tuple[int, ...],
         token_lora_mapping: tuple[int, ...],
         lora_requests: set[LoRARequest],
+        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
         self._ensure_lora_enabled()
 
@@ -62,7 +59,10 @@ class LoRAModelRunnerMixin:
         # On cuda platforms we use the same kernels for prefill and
         # decode and this flag is generally ignored.
         lora_mapping = LoRAMapping(
-            token_lora_mapping, prompt_lora_mapping, is_prefill=True
+            token_lora_mapping,
+            prompt_lora_mapping,
+            is_prefill=True,
+            type=mapping_type,
         )
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
 
@@ -71,21 +71,28 @@ class LoRAModelRunnerMixin:
             raise RuntimeError("LoRA is not enabled. Use --enable-lora to enable LoRA.")
 
     def set_active_loras(
-        self, input_batch: InputBatch, num_scheduled_tokens: np.ndarray
+        self,
+        input_batch: InputBatch,
+        num_scheduled_tokens: np.ndarray,
+        num_sampled_tokens: np.ndarray | None = None,
+        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
-        prompt_lora_mapping: tuple[int, ...]  # of size input_batch.num_reqs
+        if num_sampled_tokens is None:
+            num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
+
+        prompt_lora_mapping: tuple[int, ...]  # of size np.sum(num_sampled_tokens)
         token_lora_mapping: tuple[int, ...]  # of size np.sum(num_scheduled_tokens)
         lora_requests: set[LoRARequest]
         prompt_lora_mapping, token_lora_mapping, lora_requests = (
-            input_batch.make_lora_inputs(num_scheduled_tokens)
+            input_batch.make_lora_inputs(num_scheduled_tokens, num_sampled_tokens)
         )
         return self._set_active_loras(
-            prompt_lora_mapping, token_lora_mapping, lora_requests
+            prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
         )
 
     @contextmanager
     def maybe_setup_dummy_loras(
-        self, lora_config: Optional[LoRAConfig], remove_lora: bool = True
+        self, lora_config: LoRAConfig | None, remove_lora: bool = True
     ):
         if lora_config is None:
             yield
@@ -121,8 +128,16 @@ class LoRAModelRunnerMixin:
 
     @contextmanager
     def maybe_select_dummy_loras(
-        self, lora_config: Optional[LoRAConfig], num_scheduled_tokens: np.ndarray
+        self,
+        lora_config: LoRAConfig | None,
+        num_scheduled_tokens: np.ndarray,
+        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
+        num_sampled_tokens: np.ndarray | None = None,
+        activate_lora: bool = True,
     ):
+        if num_sampled_tokens is None:
+            num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
+
         if lora_config is None:
             yield
         else:
@@ -134,7 +149,15 @@ class LoRAModelRunnerMixin:
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
-            prompt_lora_mapping = (np.arange(num_reqs, dtype=np.int32) % num_loras) + 1
+            if activate_lora:
+                prompt_lora_mapping = (
+                    np.arange(num_reqs, dtype=np.int32) % num_loras
+                ) + 1
+            else:
+                prompt_lora_mapping = np.zeros(num_reqs, dtype=np.int32)
+
+            # Make sample lora mapping
+            sample_lora_mapping = np.repeat(prompt_lora_mapping, num_sampled_tokens)
 
             # Make token lora mapping
             token_lora_mapping = np.repeat(prompt_lora_mapping, num_scheduled_tokens)
@@ -150,7 +173,10 @@ class LoRAModelRunnerMixin:
             }
 
             self._set_active_loras(
-                tuple(prompt_lora_mapping), tuple(token_lora_mapping), lora_requests
+                tuple(sample_lora_mapping),
+                tuple(token_lora_mapping),
+                lora_requests,
+                mapping_type,
             )
 
             yield
@@ -158,17 +184,26 @@ class LoRAModelRunnerMixin:
     @contextmanager
     def maybe_dummy_run_with_lora(
         self,
-        lora_config: Optional[LoRAConfig],
+        lora_config: LoRAConfig | None,
         num_scheduled_tokens: np.ndarray,
+        num_sampled_tokens: np.ndarray,
+        activate_lora: bool = True,
         remove_lora: bool = True,
+        mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ):
         with (
             self.maybe_setup_dummy_loras(lora_config, remove_lora),
-            self.maybe_select_dummy_loras(lora_config, num_scheduled_tokens),
+            self.maybe_select_dummy_loras(
+                lora_config,
+                num_scheduled_tokens,
+                mapping_type,
+                num_sampled_tokens,
+                activate_lora,
+            ),
         ):
             yield
 
-    def maybe_remove_all_loras(self, lora_config: Optional[LoRAConfig]):
+    def maybe_remove_all_loras(self, lora_config: LoRAConfig | None):
         if lora_config is None:
             return
         self.lora_manager.remove_all_adapters()

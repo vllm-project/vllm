@@ -123,7 +123,6 @@ class MLPSpeculator(nn.Module):
                     VocabParallelEmbedding(
                         config.vocab_size,
                         self.inner_dim,
-                        org_num_embeddings=config.vocab_size,
                     )
                     for _ in range(self.max_speculative_tokens)
                 ]

@@ -17,18 +17,21 @@ import regex as re
 #  add to this list if absolutely necessary and after careful security review.
 ALLOWED_FILES = {
     # pickle
-    "vllm/v1/serial_utils.py",
-    "vllm/v1/executor/multiproc_executor.py",
     "vllm/multimodal/hasher.py",
     "vllm/transformers_utils/config.py",
     "vllm/model_executor/models/registry.py",
-    "tests/utils_/test_utils.py",
-    "tests/tokenization/test_cached_tokenizer.py",
+    "vllm/compilation/caching.py",
+    "vllm/compilation/piecewise_backend.py",
     "vllm/distributed/utils.py",
     "vllm/distributed/parallel_state.py",
     "vllm/distributed/device_communicators/all_reduce_utils.py",
     "vllm/distributed/device_communicators/shm_broadcast.py",
     "vllm/distributed/device_communicators/shm_object_storage.py",
+    "vllm/utils/hashing.py",
+    "tests/multimodal/media/test_base.py",
+    "tests/tokenizers_/test_hf.py",
+    "tests/utils_/test_hashing.py",
+    "tests/compile/test_aot_compile.py",
     "benchmarks/kernels/graph_machete_bench.py",
     "benchmarks/kernels/benchmark_lora.py",
     "benchmarks/kernels/benchmark_machete.py",
@@ -36,12 +39,12 @@ ALLOWED_FILES = {
     "benchmarks/cutlass_benchmarks/w8a8_benchmarks.py",
     "benchmarks/cutlass_benchmarks/sparse_benchmarks.py",
     # cloudpickle
-    "vllm/executor/mp_distributed_executor.py",
-    "vllm/executor/ray_distributed_executor.py",
+    "vllm/v1/executor/multiproc_executor.py",
+    "vllm/v1/executor/ray_executor.py",
     "vllm/entrypoints/llm.py",
     "tests/utils.py",
     # pickle and cloudpickle
-    "vllm/utils/__init__.py",
+    "vllm/v1/serial_utils.py",
 }
 
 PICKLE_RE = re.compile(

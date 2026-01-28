@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -28,7 +27,7 @@ class SwinSelfAttention(nn.Module):
         dim: int,
         num_heads: int,
         window_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -102,9 +101,8 @@ class SwinSelfAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = False,
+        attention_mask: torch.FloatTensor | None = None,
+        output_attentions: bool | None = False,
     ) -> tuple[torch.Tensor, ...]:
         batch_size, dim, num_channels = hidden_states.shape
 
@@ -155,7 +153,7 @@ class SwinSelfOutput(nn.Module):
         self,
         config: SwinConfig,
         dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -181,7 +179,7 @@ class SwinAttention(nn.Module):
         dim: int,
         num_heads: int,
         window_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -201,13 +199,10 @@ class SwinAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = False,
+        attention_mask: torch.FloatTensor | None = None,
+        output_attentions: bool | None = False,
     ) -> tuple[torch.Tensor]:
-        self_outputs = self.self(
-            hidden_states, attention_mask, head_mask, output_attentions
-        )
+        self_outputs = self.self(hidden_states, attention_mask, output_attentions)
         attention_output = self.output(self_outputs[0], hidden_states)
         outputs = (attention_output,) + self_outputs[1:]
         return outputs
@@ -218,7 +213,7 @@ class SwinIntermediate(nn.Module):
         self,
         config: SwinConfig,
         dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -241,7 +236,7 @@ class SwinOutput(nn.Module):
         self,
         config: SwinConfig,
         dim: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -266,7 +261,7 @@ class SwinLayer(HFSwinLayer):
         num_heads: int,
         drop_path_rate: float = 0.0,
         shift_size: int = 0,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__(
@@ -303,8 +298,8 @@ class SwinStage(nn.Module):
         depth: int,
         num_heads: int,
         drop_path: list[float],
-        downsample: Optional[SwinPatchMerging] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        downsample: SwinPatchMerging | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -340,18 +335,14 @@ class SwinStage(nn.Module):
         self,
         hidden_states: torch.Tensor,
         input_dimensions: tuple[int, int],
-        head_mask: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = False,
-        always_partition: Optional[bool] = False,
+        output_attentions: bool | None = False,
+        always_partition: bool | None = False,
     ) -> tuple[torch.Tensor]:
         height, width = input_dimensions
         for i, layer_module in enumerate(self.blocks):
-            layer_head_mask = head_mask[i] if head_mask is not None else None
-
             layer_outputs = layer_module(
                 hidden_states,
                 input_dimensions,
-                layer_head_mask,
                 output_attentions,
                 always_partition,
             )
@@ -384,7 +375,7 @@ class SwinEncoder(nn.Module):
         self,
         config: SwinConfig,
         grid_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -426,17 +417,13 @@ class SwinEncoder(nn.Module):
         self,
         hidden_states: torch.Tensor,
         input_dimensions: tuple[int, int],
-        head_mask: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = False,
-        always_partition: Optional[bool] = False,
+        output_attentions: bool | None = False,
+        always_partition: bool | None = False,
     ) -> tuple[torch.Tensor]:
         for i, layer_module in enumerate(self.layers):
-            layer_head_mask = head_mask[i] if head_mask is not None else None
-
             layer_outputs = layer_module(
                 hidden_states,
                 input_dimensions,
-                layer_head_mask,
                 output_attentions,
                 always_partition,
             )
@@ -455,7 +442,7 @@ class SwinModel(nn.Module):
     def __init__(
         self,
         config: SwinConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -473,16 +460,14 @@ class SwinModel(nn.Module):
 
     def forward(
         self,
-        pixel_values: Optional[torch.FloatTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = None,
+        pixel_values: torch.FloatTensor | None = None,
+        output_attentions: bool | None = None,
     ) -> tuple[torch.Tensor]:
         embedding_output, input_dimensions = self.embeddings(pixel_values)
 
         encoder_outputs = self.encoder(
             embedding_output,
             input_dimensions,
-            head_mask=head_mask,
             output_attentions=output_attentions,
         )
 

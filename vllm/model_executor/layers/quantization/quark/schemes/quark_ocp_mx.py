@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from fractions import Fraction
 from functools import cache, partial
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import torch
 import torch.nn.functional as F
 
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4,
@@ -30,6 +32,13 @@ from .quark_scheme import QuarkScheme
 logger = init_logger(__name__)
 
 
+# TODO: move registration of custom op to aiter_ops.py
+# `from vllm._aiter_ops import rocm_aiter_ops`
+# use `rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()`
+# for envs checks which does not require @cache anymore.
+# triton kernel is torch compile compatible.
+# does not require direct registration.
+# use `rocm_aiter_ops.triton_fp4_gemm_dynamic_qaunt`.
 @cache
 def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
     return (
@@ -41,10 +50,13 @@ def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
 
 try:
     from aiter.ops.shuffle import shuffle_weight
-    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+    from aiter.ops.triton.gemm_afp4wfp4 import (
+        gemm_afp4wfp4,
+        gemm_afp4wfp4_preshuffled_weight_scales,
+    )
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
-    from vllm.utils import direct_register_custom_op
+    from vllm.utils.torch_utils import direct_register_custom_op
 
     if is_rocm_aiter_fp4_asm_gemm_enabled():
         from aiter import gemm_a4w4, per_1x32_f4_quant_hip
@@ -54,27 +66,60 @@ try:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: Optional[torch.dtype] = torch.bfloat16,
-        x_scales: Optional[torch.Tensor] = None,
+        out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
         M = x.shape[0]
+        N = weight.shape[0]
+        K = weight.shape[1]
         if rocm_use_aiter_fp4_asm_gemm:
-            if x_scales is None:
-                # use hip quant kernel for performance
-                x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+            if M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K):
+                if x_scales is None:
+                    # use hip quant kernel for performance
+                    if M >= 32:
+                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+                    else:
+                        x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=False)
+                else:
+                    x_q = x
+                    x_s = x_scales
+
+                if M >= 32:
+                    x_s = x_s.view(torch.uint8).view(x_s.shape[0] // 32, -1)
+                else:
+                    x_s = x_s[:M, ...].view(torch.uint8)
+
+                y = torch.empty(M, N, device=x_q.device, dtype=out_dtype)
+                gemm_afp4wfp4_preshuffled_weight_scales(
+                    x_q.view(torch.uint8),
+                    weight.view(torch.uint8).view(weight.shape[0] // 16, -1),
+                    x_s,
+                    weight_scale.view(torch.uint8).view(
+                        weight_scale.shape[0] // 32, -1
+                    ),
+                    out_dtype,
+                    y,
+                )
             else:
-                x_q = x
-                x_s = x_scales
+                if x_scales is None:
+                    # use hip quant kernel for performance
+                    x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
+                else:
+                    x_q = x
+                    x_s = x_scales
 
-            # 32 alignment is enough for dim0 padding of output for
-            # gemm_a4w4 kernel
-            y = torch.empty(
-                (M + 31) // 32 * 32, weight.shape[0], device=x_q.device, dtype=out_dtype
-            )
+                # 32 alignment is enough for dim0 padding of output for
+                # gemm_a4w4 kernel
+                y = torch.empty(
+                    (M + 31) // 32 * 32,
+                    weight.shape[0],
+                    device=x_q.device,
+                    dtype=out_dtype,
+                )
 
-            gemm_a4w4(
-                x_q, weight, x_s, weight_scale.view(x_s.dtype), y, bpreshuffle=True
-            )
+                gemm_a4w4(
+                    x_q, weight, x_s, weight_scale.view(x_s.dtype), y, bpreshuffle=True
+                )
             return y[:M]
         else:
             if x_scales is None:
@@ -95,7 +140,7 @@ try:
         weight_scale: torch.Tensor,
         x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: Optional[torch.dtype] = torch.bfloat16,
+        out_dtype: torch.dtype | None = torch.bfloat16,
     ) -> torch.Tensor:
         return torch.empty(
             (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
@@ -108,7 +153,12 @@ try:
         fake_impl=gemm_with_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
-except (ImportError, AttributeError):
+except (ImportError, AttributeError, RuntimeError):
+    if current_platform.is_rocm():
+        logger.warning(
+            "AITER is not found or QuarkOCP_MX is not supported on the current "
+            "platform. QuarkOCP_MX quantization will not be available."
+        )
     dynamic_mxfp4_quant = gemm_afp4wfp4 = None
 
 
@@ -129,7 +179,7 @@ class QuarkOCP_MX(QuarkScheme):
         )
 
         if self.weight_dtype == "mxfp4":
-            self.packed_factor: Union[int, Fraction] = 2
+            self.packed_factor: int | Fraction = 2
             self.dequant_func = dequant_mxfp4
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
@@ -282,7 +332,7 @@ class QuarkOCP_MX(QuarkScheme):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.emulate:
             dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)

@@ -3,13 +3,13 @@
 
 import pickle
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
-from contextlib import contextmanager
+from collections.abc import Callable, Iterable
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from itertools import chain
 from multiprocessing import shared_memory
 from multiprocessing.synchronize import Lock as LockType
-from typing import Any, Callable, Optional, Union
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -109,7 +109,7 @@ class SingleWriterShmRingBuffer:
     def __init__(
         self,
         data_buffer_size: int,
-        name: Optional[str] = None,
+        name: str | None = None,
         create: bool = False,
     ):
         self.data_buffer_size = data_buffer_size
@@ -126,10 +126,9 @@ class SingleWriterShmRingBuffer:
         self.data_buffer_end = 0
 
         if create:
+            logger.debug("Creating new shared memory buffer: %s", name)
             # we are creating a buffer
-            self.metadata = {
-                self.monotonic_id_end: self.data_buffer_end
-            }  # monotonic_id -> start address
+            self.metadata: dict[int, int] = {}  # monotonic_id -> start address
             self.shared_memory = shared_memory.SharedMemory(
                 create=True, size=self.data_buffer_size, name=name
             )
@@ -171,11 +170,16 @@ class SingleWriterShmRingBuffer:
         self.data_buffer_start = 0
         self.data_buffer_end = 0
 
-    def __del__(self):
+    def close(self) -> None:
+        """Close the shared memory."""
         if hasattr(self, "shared_memory"):
             self.shared_memory.close()
             if self.is_writer:
-                self.shared_memory.unlink()
+                with suppress(FileNotFoundError):
+                    self.shared_memory.unlink()
+
+    def __del__(self):
+        self.close()
 
     def int2byte(self, integer: int) -> bytes:
         """Convert an integer to bytes."""
@@ -252,7 +256,7 @@ class SingleWriterShmRingBuffer:
     def free_buf(
         self,
         is_free_fn: Callable[[int, memoryview], bool],
-        nbytes: Optional[int] = None,
+        nbytes: int | None = None,
     ) -> Iterable[int]:
         """
         Free a buffer of the given size. This is a no-op in shared memory,
@@ -288,7 +292,15 @@ class SingleWriterShmRingBuffer:
                     self.monotonic_id_start = (
                         self.monotonic_id_start + 1
                     ) % self.ID_MAX
-                    self.data_buffer_start = address
+                    if self.monotonic_id_start in self.metadata:
+                        # pointing to the start addr of next allocation
+                        self.data_buffer_start += (
+                            self.metadata[self.monotonic_id_start]
+                            - self.data_buffer_start
+                        ) % self.data_buffer_size
+                    else:
+                        # no remaining allocation, reset to zero
+                        self.data_buffer_start = self.data_buffer_end = 0
                     freed_bytes += metadata[1]
                 else:
                     # there are still readers, we cannot free the buffer
@@ -336,13 +348,11 @@ class MsgpackSerde(ObjectSerde):
         from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
         self.encoder = MsgpackEncoder()
-        self.tensor_decoder = MsgpackDecoder(torch.Tensor)
-        self.mm_decoder = MsgpackDecoder(MultiModalKwargsItem)
+        self.tensor_decoder = MsgpackDecoder(torch.Tensor, share_mem=False)
+        self.mm_decoder = MsgpackDecoder(MultiModalKwargsItem, share_mem=False)
         self._mm_kwargs_item_cls = MultiModalKwargsItem
 
-    def serialize(
-        self, value: Any
-    ) -> tuple[Union[bytes, list[bytes]], int, bytes, int]:
+    def serialize(self, value: Any) -> tuple[bytes | list[bytes], int, bytes, int]:
         len_arr = None
         if isinstance(value, (torch.Tensor, self._mm_kwargs_item_cls)):
             type_name = type(value).__name__
@@ -364,7 +374,7 @@ class MsgpackSerde(ObjectSerde):
         # pickle.loads do not read past the end of a pickled object
         # within a large buffer, so we can skip storing the metadata size
         type_name, nbytes, len_arr = pickle.loads(data_view)
-        serialized_data = bytearray(data_view[-nbytes:])
+        serialized_data = data_view[-nbytes:]
 
         if type_name == torch.Tensor.__name__:
             obj = []
@@ -396,7 +406,7 @@ class ShmObjectStorageHandle:
     n_readers: int
     ring_buffer_handle: tuple[int, str]
     serde_class: type[ObjectSerde]
-    reader_lock: Optional[LockType]
+    reader_lock: LockType | None
 
 
 class SingleWriterShmObjectStorage:
@@ -444,7 +454,7 @@ class SingleWriterShmObjectStorage:
         n_readers: int,
         ring_buffer: SingleWriterShmRingBuffer,
         serde_class: type[ObjectSerde] = MsgpackSerde,
-        reader_lock: Optional[LockType] = None,
+        reader_lock: LockType | None = None,
     ):
         """
         Initialize the object storage.
@@ -492,7 +502,7 @@ class SingleWriterShmObjectStorage:
 
     def copy_to_buffer(
         self,
-        data: Union[bytes, list[bytes]],
+        data: bytes | list[bytes],
         data_bytes: int,
         metadata: bytes,
         md_bytes: int,
@@ -570,7 +580,6 @@ class SingleWriterShmObjectStorage:
             value
         )
         buffer_size = self.flag_bytes + data_bytes + md_bytes
-
         # Sanity checks
         if buffer_size > self.max_object_size:
             raise ValueError(
@@ -621,6 +630,48 @@ class SingleWriterShmObjectStorage:
                 assert self.is_writer
 
         return obj
+
+    def touch(
+        self,
+        key: str,
+        address: int = 0,
+        monotonic_id: int = 0,
+    ) -> None:
+        """
+        Touch an existing cached item to update its eviction status.
+
+        For writers (ShmObjectStoreSenderCache): Increment writer_flag
+        For readers (ShmObjectStoreReceiverCache): Increment reader_count
+
+        Args:
+            key: String key of the object to touch
+            address: Address of the object (only for readers)
+            monotonic_id: Monotonic ID of the object (only for readers)
+
+        """
+        if self._reader_lock is None:
+            if key not in self.key_index:
+                return None
+            address, monotonic_id = self.key_index[key]
+            # Writer side: increment writer_flag to raise eviction threshold
+            self.increment_writer_flag(monotonic_id)
+        else:
+            with (
+                self._reader_lock,
+                self.ring_buffer.access_buf(address) as (data_view, _),
+            ):
+                reader_count = self.ring_buffer.byte2int(data_view[: self.flag_bytes])
+
+                # NOTE(Long):
+                # Avoid increasing flag on newly added item (sync with sender)
+                # Since when a new item is added
+                # pre-touch has no effect on writer side
+                if reader_count >= self.n_readers:
+                    self.increment_reader_flag(data_view[: self.flag_bytes])
+
+    def close(self) -> None:
+        """Close the shared memory."""
+        self.ring_buffer.close()
 
     def handle(self):
         """Get handle for sharing across processes."""

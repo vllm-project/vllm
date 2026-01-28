@@ -1,0 +1,14 @@
+model_name: "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+tasks:
+  - name: "mmlu_pro"
+    metrics:
+      - name: "exact_match,custom-extract"
+        value: 0.82
+limit: 250 # will run on 250 * 14 subjects = 3500 samples
+num_fewshot: 5
+enforce_eager: false # we use false to speed up the eval process
+kv_cache_dtype: fp8 # we use fp8 to speed up the eval process
+max_model_len: 40960
+apply_chat_template: true
+fewshot_as_multiturn: true
+gen_kwargs: "temperature=0,top_p=1,top_k=0,max_gen_toks=5632,until=<|ENDANSWER|>"

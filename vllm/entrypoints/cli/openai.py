@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import argparse
 import os
 import signal
@@ -15,7 +13,9 @@ from openai.types.chat import ChatCompletionMessageParam
 from vllm.entrypoints.cli.types import CLISubcommand
 
 if TYPE_CHECKING:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 
 def _register_signal_handlers():
@@ -108,6 +108,10 @@ def _add_query_options(parser: FlexibleArgumentParser) -> FlexibleArgumentParser
         help=(
             "API key for OpenAI services. If provided, this api key "
             "will overwrite the api key obtained through environment variables."
+            " It is important to note that this option only applies to the "
+            "OpenAI-compatible API endpoints and NOT other endpoints that may "
+            "be present in the server. See the security guide in the vLLM docs "
+            "for more details."
         ),
     )
     return parser
@@ -194,10 +198,15 @@ class CompleteCommand(CLISubcommand):
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
 
+        kwargs = {
+            "model": model_name,
+            "stream": True,
+        }
+        if args.max_tokens:
+            kwargs["max_tokens"] = args.max_tokens
+
         if args.quick:
-            stream = client.completions.create(
-                model=model_name, prompt=args.quick, stream=True
-            )
+            stream = client.completions.create(prompt=args.quick, **kwargs)
             _print_completion_stream(stream)
             return
 
@@ -207,15 +216,18 @@ class CompleteCommand(CLISubcommand):
                 input_prompt = input("> ")
             except EOFError:
                 break
-            stream = client.completions.create(
-                model=model_name, prompt=input_prompt, stream=True
-            )
+            stream = client.completions.create(prompt=input_prompt, **kwargs)
             _print_completion_stream(stream)
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Add CLI arguments for the complete command."""
         _add_query_options(parser)
+        parser.add_argument(
+            "--max-tokens",
+            type=int,
+            help="Maximum number of tokens to generate per output sequence.",
+        )
         parser.add_argument(
             "-q",
             "--quick",

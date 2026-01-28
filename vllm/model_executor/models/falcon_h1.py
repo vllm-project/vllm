@@ -4,18 +4,17 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional
 
 import torch
 from torch import nn
 from transformers import FalconH1Config
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -25,20 +24,28 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
+from .interfaces import (
+    HasInnerState,
+    IsHybrid,
+    SupportsLoRA,
+    SupportsMambaPrefixCaching,
+    SupportsPP,
+)
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -52,8 +59,9 @@ class FalconH1MLP(nn.Module):
     def __init__(
         self,
         config: FalconH1Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -61,12 +69,14 @@ class FalconH1MLP(nn.Module):
             output_sizes=[config.intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             input_size=config.intermediate_size,
             output_size=config.hidden_size,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.intermediate_size = config.intermediate_size
@@ -91,9 +101,9 @@ class FalconH1SSMDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconH1Config,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -188,13 +198,11 @@ class FalconH1SSMDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
-        output = torch.empty_like(hidden_states)
-        self.mamba(
+        output = self.mamba(
             hidden_states,
-            output,
             mup_vector=self.mup_vector,
         )
         return output, residual
@@ -204,13 +212,12 @@ class FalconH1AttentionDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconH1Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        rope_theta = getattr(config, "rope_theta", 1e11)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        set_default_rope_theta(config, default_theta=1e11)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -235,22 +242,15 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        if hasattr(config, "partial_rotary_factor"):
-            rotary_dim = self.head_dim * config.partial_rotary_factor
-        elif hasattr(config, "attn_rotary_emb"):
-            rotary_dim = config.attn_rotary_emb  # for backward compatibility
-        else:
-            rotary_dim = self.head_dim  # default
+        rotary_dim = getattr(config, "attn_rotary_emb", self.head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
-            rope_scaling=rope_scaling,
-            base=rope_theta,
+            rope_parameters=config.rope_parameters,
             is_neox_style=True,
             dtype=None,  # see impl of get_rope
         )
@@ -301,7 +301,7 @@ class FalconH1AttentionDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         hidden_states = self.self_attention(
@@ -326,9 +326,9 @@ class FalconH1ParallelHybrid(nn.Module):
         self,
         config: FalconH1Config,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -360,7 +360,7 @@ class FalconH1ParallelHybrid(nn.Module):
         self.attention_in_multiplier = config.attention_in_multiplier
         self.attn_out_multiplier = config.attention_out_multiplier
 
-        self.feed_forward = FalconH1MLP(config)
+        self.feed_forward = FalconH1MLP(config, prefix=f"{prefix}.feed_forward")
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -416,21 +416,15 @@ class FalconH1Model(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
+
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
             )
             self.embedding_multiplier = config.embedding_multiplier
         else:
@@ -460,22 +454,22 @@ class FalconH1Model(nn.Module):
         else:
             self.final_layernorm = PPMissingLayer()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds * self.embedding_multiplier
             else:
                 hidden_states = (
-                    self.get_input_embeddings(input_ids) * self.embedding_multiplier
+                    self.embed_input_ids(input_ids) * self.embedding_multiplier
                 )
         else:
             assert intermediate_tensors is not None
@@ -496,7 +490,14 @@ class FalconH1Model(nn.Module):
         return hidden_states
 
 
-class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid):
+class FalconH1ForCausalLM(
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsMambaPrefixCaching,
+):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -506,7 +507,6 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, Is
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     @classmethod
     def get_mamba_state_dtype_from_config(
@@ -553,11 +553,15 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, Is
             conv_kernel=hf_config.mamba_d_conv,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        lora_config = vllm_config.lora_config
+
         scheduler_config = vllm_config.scheduler_config
 
         self.quant_config = vllm_config.quant_config
@@ -569,21 +573,11 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, Is
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.tie_word_embeddings = config.tie_word_embeddings
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=(
-                    DEFAULT_VOCAB_PADDING_SIZE
-                    # We need bigger padding if using lora for kernel
-                    # compatibility
-                    if not lora_config
-                    else lora_config.lora_vocab_padding_size
-                ),
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.lm_head_multiplier = config.lm_head_multiplier
@@ -592,7 +586,7 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, Is
             # Used to track and store by the Mamba cache between steps.
 
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.vocab_size,
                 scale=config.lm_head_multiplier,
             )
@@ -603,15 +597,15 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, Is
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
         hidden_states = self.model(
@@ -626,7 +620,7 @@ class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, Is
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
 
         return logits

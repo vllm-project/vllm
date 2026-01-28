@@ -4,15 +4,15 @@
 within a vision language model."""
 
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from transformers import Blip2VisionConfig, BlipVisionConfig
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -38,7 +38,7 @@ def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa
 class BlipVisionEmbeddings(nn.Module):
-    def __init__(self, config: Union[BlipVisionConfig, Blip2VisionConfig]):
+    def __init__(self, config: BlipVisionConfig | Blip2VisionConfig):
         super().__init__()
 
         self.config = config
@@ -48,7 +48,7 @@ class BlipVisionEmbeddings(nn.Module):
 
         self.class_embedding = nn.Parameter(torch.randn(1, 1, self.embed_dim))
 
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=3,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -86,8 +86,8 @@ class BlipAttention(nn.Module):
 
     def __init__(
         self,
-        config: Union[BlipVisionConfig, Blip2VisionConfig],
-        quant_config: Optional[QuantizationConfig] = None,
+        config: BlipVisionConfig | Blip2VisionConfig,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -122,7 +122,7 @@ class BlipAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_heads_per_partition, self.head_dim, self.scale
         )
 
@@ -151,7 +151,7 @@ class BlipMLP(nn.Module):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -186,7 +186,7 @@ class BlipEncoderLayer(nn.Module):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -228,8 +228,8 @@ class BlipEncoder(nn.Module):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        num_hidden_layers_override: Optional[int] = None,
+        quant_config: QuantizationConfig | None = None,
+        num_hidden_layers_override: int | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -268,10 +268,10 @@ class BlipVisionModel(nn.Module, SupportsQuant):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
-        require_post_norm: Optional[bool] = None,
+        num_hidden_layers_override: int | None = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()

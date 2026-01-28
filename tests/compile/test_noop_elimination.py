@@ -6,7 +6,7 @@ import torch
 
 import vllm
 from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.config import CompilationConfig, CompilationLevel, PassConfig, VllmConfig
+from vllm.config import CompilationConfig, CompilationMode, PassConfig, VllmConfig
 
 from .backend import TestBackend
 
@@ -25,10 +25,13 @@ def test_noop_elimination(dtype, num_tokens, hidden_size, buffer_size):
     class Model(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.pos_embed = torch.empty(buffer_size, hidden_size, dtype=dtype)
+            # Avoid using empty, since on rocm torch.empty
+            # does not initialize the memory.
+            self.pos_embed = torch.randn(buffer_size, hidden_size, dtype=dtype)
 
         def forward(self, x):
-            x += self.pos_embed[: x.shape[0]]
+            # Avoid += to prevent inplace addition.
+            x = x + self.pos_embed[: x.shape[0]]
             # Chain of reshapes
             y = x.reshape(-1, 128, 32)
             z = y.reshape(-1, 4096)
@@ -50,8 +53,8 @@ def test_noop_elimination(dtype, num_tokens, hidden_size, buffer_size):
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
-            pass_config=PassConfig(enable_noop=True),
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(eliminate_noops=True),
         )
     )
     with vllm.config.set_current_vllm_config(vllm_config):
@@ -98,8 +101,8 @@ def test_non_noop_slice_preserved():
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationLevel.PIECEWISE,
-            pass_config=PassConfig(enable_noop=True),
+            mode=CompilationMode.VLLM_COMPILE,
+            pass_config=PassConfig(eliminate_noops=True),
         )
     )
     with vllm.config.set_current_vllm_config(vllm_config):

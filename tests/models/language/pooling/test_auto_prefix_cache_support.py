@@ -19,14 +19,25 @@ def test_classify_models(
     model: str,
     dtype: str,
 ) -> None:
-    example_prompts = example_prompts * 2
+    # example_prompts is too short for testing prefix_caching
+    example_prompts = [s * 10 for s in example_prompts]
 
     with vllm_runner(
         model, max_model_len=512, dtype=dtype, enable_prefix_caching=True
     ) as vllm_model:
         cache_config = vllm_model.llm.llm_engine.cache_config
         assert cache_config.enable_prefix_caching
-        vllm_outputs = vllm_model.classify(example_prompts)
+
+        # First Run
+        vllm_model.classify(example_prompts)
+
+        # assert prefix_caching works
+        pooling_outputs = vllm_model.llm.encode(
+            example_prompts, pooling_task="classify"
+        )
+        for output in pooling_outputs:
+            assert output.num_cached_tokens > 0
+        vllm_outputs = [req_output.outputs.data for req_output in pooling_outputs]
 
     with hf_runner(
         model, dtype=dtype, auto_cls=AutoModelForSequenceClassification
@@ -54,7 +65,8 @@ def test_embed_models(
     model: str,
     dtype: str,
 ):
-    example_prompts = [str(s).strip() for s in example_prompts] * 2
+    # example_prompts is too short for testing prefix_caching
+    example_prompts = [str(s).strip() * 10 for s in example_prompts]
 
     with vllm_runner(
         model,
@@ -64,7 +76,15 @@ def test_embed_models(
     ) as vllm_model:
         cache_config = vllm_model.llm.llm_engine.cache_config
         assert cache_config.enable_prefix_caching
-        vllm_outputs = vllm_model.embed(example_prompts)
+
+        # First Run
+        vllm_model.embed(example_prompts)
+
+        # assert prefix_caching works
+        pooling_outputs = vllm_model.llm.encode(example_prompts, pooling_task="embed")
+        for output in pooling_outputs:
+            assert output.num_cached_tokens > 0
+        vllm_outputs = [req_output.outputs.data for req_output in pooling_outputs]
 
     with hf_runner(
         model,
@@ -85,8 +105,6 @@ def test_embed_models(
 def test_non_causal_models(
     hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
-    with vllm_runner(
-        model, max_model_len=512, dtype=dtype, enable_prefix_caching=True
-    ) as vllm_model:
+    with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
         cache_config = vllm_model.llm.llm_engine.cache_config
         assert not cache_config.enable_prefix_caching

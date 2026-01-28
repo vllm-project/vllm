@@ -4,38 +4,126 @@
 import asyncio
 import tempfile
 from argparse import Namespace
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from io import StringIO
-from typing import Callable, Optional
+from typing import Any, TypeAlias
 
 import aiohttp
 import torch
 from prometheus_client import start_http_server
+from pydantic import TypeAdapter, field_validator
+from pydantic_core.core_schema import ValidationInfo
 from tqdm import tqdm
 
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
-    BatchRequestInput,
-    BatchRequestOutput,
-    BatchResponseData,
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
     ChatCompletionResponse,
-    EmbeddingResponse,
+)
+from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+    OpenAIBaseModel,
+)
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.pooling.embed.protocol import EmbeddingRequest, EmbeddingResponse
+from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+from vllm.entrypoints.pooling.score.protocol import (
+    RerankRequest,
     RerankResponse,
+    ScoreRequest,
     ScoreResponse,
 )
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
-from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
-from vllm.entrypoints.openai.serving_score import ServingScores
+from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.logger import init_logger
-from vllm.utils import FlexibleArgumentParser, random_uuid
+from vllm.reasoning import ReasoningParserManager
+from vllm.utils import random_uuid
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+BatchRequestInputBody: TypeAlias = (
+    ChatCompletionRequest | EmbeddingRequest | ScoreRequest | RerankRequest
+)
+
+
+class BatchRequestInput(OpenAIBaseModel):
+    """
+    The per-line object of the batch input file.
+
+    NOTE: Currently only the `/v1/chat/completions` endpoint is supported.
+    """
+
+    # A developer-provided per-request id that will be used to match outputs to
+    # inputs. Must be unique for each request in a batch.
+    custom_id: str
+
+    # The HTTP method to be used for the request. Currently only POST is
+    # supported.
+    method: str
+
+    # The OpenAI API relative URL to be used for the request. Currently
+    # /v1/chat/completions is supported.
+    url: str
+
+    # The parameters of the request.
+    body: BatchRequestInputBody
+
+    @field_validator("body", mode="plain")
+    @classmethod
+    def check_type_for_url(cls, value: Any, info: ValidationInfo):
+        # Use url to disambiguate models
+        url: str = info.data["url"]
+        if url == "/v1/chat/completions":
+            return ChatCompletionRequest.model_validate(value)
+        if url == "/v1/embeddings":
+            return TypeAdapter(EmbeddingRequest).validate_python(value)
+        if url.endswith("/score"):
+            return TypeAdapter(ScoreRequest).validate_python(value)
+        if url.endswith("/rerank"):
+            return RerankRequest.model_validate(value)
+        return TypeAdapter(BatchRequestInputBody).validate_python(value)
+
+
+class BatchResponseData(OpenAIBaseModel):
+    # HTTP status code of the response.
+    status_code: int = 200
+
+    # An unique identifier for the API request.
+    request_id: str
+
+    # The body of the response.
+    body: (
+        ChatCompletionResponse
+        | EmbeddingResponse
+        | ScoreResponse
+        | RerankResponse
+        | None
+    ) = None
+
+
+class BatchRequestOutput(OpenAIBaseModel):
+    """
+    The per-line object of the batch output and error files
+    """
+
+    id: str
+
+    # A developer-provided per-request id that will be used to match outputs to
+    # inputs.
+    custom_id: str
+
+    response: BatchResponseData | None
+
+    # For requests that failed with a non-HTTP error, this will contain more
+    # information on the cause of the failure.
+    error: Any | None
 
 
 def make_arg_parser(parser: FlexibleArgumentParser):
@@ -105,6 +193,13 @@ def make_arg_parser(parser: FlexibleArgumentParser):
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.",
     )
+    parser.add_argument(
+        "--enable-force-include-usage",
+        action="store_true",
+        default=False,
+        help="If set to True, include usage on every request "
+        "(even when stream_options is not specified)",
+    )
 
     return parser
 
@@ -124,7 +219,7 @@ _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elap
 class BatchProgressTracker:
     def __init__(self):
         self._total = 0
-        self._pbar: Optional[tqdm] = None
+        self._pbar: tqdm | None = None
 
     def submitted(self):
         self._total += 1
@@ -325,6 +420,17 @@ async def run_request(
     return batch_output
 
 
+def validate_run_batch_args(args):
+    valid_reasoning_parsers = ReasoningParserManager.list_registered()
+    if (
+        reasoning_parser := args.structured_outputs_config.reasoning_parser
+    ) and reasoning_parser not in valid_reasoning_parsers:
+        raise KeyError(
+            f"invalid reasoning parser: {reasoning_parser} "
+            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
+        )
+
+
 async def run_batch(
     engine_client: EngineClient,
     args: Namespace,
@@ -353,6 +459,7 @@ async def run_batch(
         base_model_paths=base_model_paths,
         lora_modules=None,
     )
+
     openai_serving_chat = (
         OpenAIServingChat(
             engine_client,
@@ -361,11 +468,17 @@ async def run_batch(
             request_logger=request_logger,
             chat_template=None,
             chat_template_content_format="auto",
+            reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_force_include_usage=args.enable_force_include_usage,
+            default_chat_template_kwargs=getattr(
+                args, "default_chat_template_kwargs", None
+            ),
         )
         if "generate" in supported_tasks
         else None
     )
+
     openai_serving_embedding = (
         OpenAIServingEmbedding(
             engine_client,
@@ -388,6 +501,7 @@ async def run_batch(
             engine_client,
             openai_serving_models,
             request_logger=request_logger,
+            score_template=None,
         )
         if ("embed" in supported_tasks or enable_serving_reranking)
         else None
@@ -496,6 +610,8 @@ async def run_batch(
 async def main(args: Namespace):
     from vllm.entrypoints.openai.api_server import build_async_engine_client
     from vllm.usage.usage_lib import UsageContext
+
+    validate_run_batch_args(args)
 
     async with build_async_engine_client(
         args,

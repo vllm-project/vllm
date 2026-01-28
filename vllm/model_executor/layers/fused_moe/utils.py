@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from math import prod
-from typing import Optional, Union
 
 import torch
+import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -23,8 +24,8 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv, is_torch_equal_or_newer
-from vllm.utils.flashinfer import flashinfer_fp4_quantize
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 @triton.jit
@@ -60,7 +61,7 @@ def _count_expert_num_tokens(
 
 
 def count_expert_num_tokens(
-    topk_ids: torch.Tensor, num_local_experts: int, expert_map: Optional[torch.Tensor]
+    topk_ids: torch.Tensor, num_local_experts: int, expert_map: torch.Tensor | None
 ) -> torch.Tensor:
     """
     Count the number to tokens assigned to each expert.
@@ -112,19 +113,17 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
 
 def _nvfp4_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     is_sf_swizzled_layout: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return flashinfer_fp4_quantize(
-        A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout
-    )
+    return ops.scaled_fp4_quant(A, A_scale, is_sf_swizzled_layout=is_sf_swizzled_layout)
 
 
 def _fp8_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Perform fp8 quantization on the inputs.  If a block_shape
@@ -148,9 +147,9 @@ def _fp8_quantize(
 
 def _int8_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Perform int8 quantization on the inputs.  If a block_shape
@@ -175,9 +174,9 @@ def _int8_quantize(
 
 def _mxfp4_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
     # TODO: native mxfp4 is currently not integrated in vllm,
@@ -191,9 +190,9 @@ def _mxfp4_quantize(
 
 def _mxfp8_e4m3_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
@@ -203,9 +202,9 @@ def _mxfp8_e4m3_quantize(
 
 def _mxfp6_e3m2_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
 
@@ -220,9 +219,9 @@ def _mxfp6_e3m2_quantize(
 
 def _mxfp6_e2m3_quantize(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
+    A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
 
@@ -237,12 +236,12 @@ def _mxfp6_e2m3_quantize(
 
 def moe_kernel_quantize_input(
     A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    quant_dtype: Union[None, torch.dtype, str],
+    A_scale: torch.Tensor | None,
+    quant_dtype: None | torch.dtype | str,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
+    block_shape: list[int] | None = None,
     is_fp4_scale_swizzled: bool = True,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     if quant_dtype == torch.float8_e4m3fn:
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
@@ -273,7 +272,7 @@ def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
         return m[idx, ...]
 
 
-def normalize_scales_shape(scales: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+def normalize_scales_shape(scales: torch.Tensor | None) -> torch.Tensor | None:
     if scales is not None:
         if scales.numel() == 1:
             scales = scales.view(1, 1)
@@ -283,9 +282,9 @@ def normalize_scales_shape(scales: Optional[torch.Tensor]) -> Optional[torch.Ten
 
 
 def normalize_batched_scales_shape(
-    scales: Optional[torch.Tensor],
+    scales: torch.Tensor | None,
     num_experts: int,
-) -> Optional[torch.Tensor]:
+) -> torch.Tensor | None:
     if scales is not None and scales.ndim < 3:
         if scales.numel() == 1:
             scales = scales.view(1)
@@ -300,9 +299,9 @@ def normalize_batched_scales_shape(
 
 def _validate_scale_shape(
     a: torch.Tensor,
-    a_scale: Optional[torch.Tensor],
+    a_scale: torch.Tensor | None,
     per_act_token_quant: bool,
-    block_shape: Optional[list[int]],
+    block_shape: list[int] | None,
 ) -> None:
     if a_scale is None:
         return
@@ -323,8 +322,59 @@ def activation_without_mul(activation: str) -> str:
     return activation + "_no_mul"
 
 
+RELU2_NO_MUL: str = activation_without_mul("relu2")
+SILU_NO_MUL: str = activation_without_mul("silu")
+GELU_NO_MUL: str = activation_without_mul("gelu")
+
+
+def apply_moe_activation(
+    activation: str,
+    output: torch.Tensor,
+    input: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Apply MoE activation function.
+
+    For *_and_mul activations (silu, gelu, swigluoai):
+        - Expects output.size(-1) * 2 == input.size(-1)
+
+    For *_no_mul activations (silu_no_mul, gelu_no_mul, relu2_no_mul):
+        - Expects output.size(-1) == input.size(-1)
+    """
+    is_no_mul = activation.endswith("_no_mul")
+    if is_no_mul:
+        assert output.size(-1) == input.size(-1), (
+            f"{activation} expects equal sizes: {output.size(-1)} vs {input.size(-1)}"
+        )
+    else:
+        assert output.size(-1) * 2 == input.size(-1), (
+            f"{activation} expects 2x ratio: {output.size(-1) * 2} vs {input.size(-1)}"
+        )
+
+    # Activations with gated multiplication (gate × activation(up))
+    if activation == "silu":
+        torch.ops._C.silu_and_mul(output, input)
+    elif activation == "gelu":
+        torch.ops._C.gelu_and_mul(output, input)
+    elif activation == "swigluoai":
+        torch.ops._C.swigluoai_and_mul(output, input)
+    # Activations without gated multiplication
+    elif activation == SILU_NO_MUL:
+        output.copy_(F.silu(input))
+    elif activation == GELU_NO_MUL:
+        output.copy_(F.gelu(input))
+    elif activation == RELU2_NO_MUL:
+        F.relu(input, inplace=True)
+        torch.square(input, out=output)
+    else:
+        raise ValueError(f"Unsupported FusedMoe activation: {activation}")
+
+    return output
+
+
 # Torch custom ops can't deal with outputs aliasing inputs so we need to
 # disable inplace for torch >= 2.9.
 # See https://github.com/vllm-project/vllm/issues/26378
+@functools.cache
 def disable_inplace() -> bool:
     return is_torch_equal_or_newer("2.9")

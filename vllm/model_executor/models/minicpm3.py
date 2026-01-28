@@ -25,15 +25,13 @@
 # limitations under the License.
 """Inference-only MiniCPM3 model compatible with HuggingFace weights."""
 
-from typing import Any, Optional
-
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -62,11 +60,9 @@ class MiniCPM3Attention(nn.Module):
         v_head_dim: int,
         q_lora_rank: int,
         kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -84,7 +80,6 @@ class MiniCPM3Attention(nn.Module):
         self.num_local_heads = num_heads // tp_size
 
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.q_a_proj = ReplicatedLinear(
@@ -96,6 +91,7 @@ class MiniCPM3Attention(nn.Module):
             self.num_heads * self.qk_head_dim,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.q_b_proj",
         )
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
@@ -103,6 +99,7 @@ class MiniCPM3Attention(nn.Module):
             self.kv_lora_rank + self.qk_rope_head_dim,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.kv_a_proj_with_mqa",
         )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
@@ -110,6 +107,7 @@ class MiniCPM3Attention(nn.Module):
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.kv_b_proj",
         )
         # O projection.
         self.o_proj = RowParallelLinear(
@@ -117,14 +115,13 @@ class MiniCPM3Attention(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
             self.qk_rope_head_dim,
-            rotary_dim=self.qk_rope_head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
         )
         self.attn = Attention(
             self.num_local_heads,
@@ -200,8 +197,6 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
             v_head_dim=self.config.v_head_dim,
             q_lora_rank=self.config.q_lora_rank,
             kv_lora_rank=self.config.kv_lora_rank,
-            rope_theta=self.rope_theta,
-            rope_scaling=self.rope_scaling,
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,
@@ -214,8 +209,8 @@ class MiniCPM3Model(MiniCPMModel):
         self,
         prefix: str,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig],
-        quant_config: Optional[QuantizationConfig],
+        cache_config: CacheConfig | None,
+        quant_config: QuantizationConfig | None,
     ):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,

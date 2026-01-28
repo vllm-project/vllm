@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
-from typing import Any, Optional, Union, cast
+from typing import Any, cast
 
 from typing_extensions import assert_never
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, ObservabilityConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
@@ -17,7 +17,8 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.renderers import renderer_from_config
+from vllm.tokenizers import TokenizerLike
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
@@ -46,28 +47,28 @@ class InputPreprocessor:
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: Optional[AnyTokenizer],
+        observability_config: ObservabilityConfig | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        mm_processor_cache: Optional[BaseMultiModalProcessorCache] = None,
+        mm_processor_cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
         super().__init__()
 
         self.model_config = model_config
-        self.tokenizer = tokenizer
+        self.observability_config = observability_config
+        self.renderer = renderer_from_config(model_config)
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
 
         self.mm_cache_stats = MultiModalCacheStats() if mm_processor_cache else None
 
-    def get_tokenizer(self) -> AnyTokenizer:
-        if self.tokenizer is None:
-            raise ValueError(
-                "You cannot pass text prompts when `skip_tokenizer_init` is True"
-            )
+    @property
+    def tokenizer(self) -> TokenizerLike | None:
+        return self.renderer.tokenizer
 
-        return self.tokenizer
+    def get_tokenizer(self) -> TokenizerLike:
+        return self.renderer.get_tokenizer()
 
-    def get_bos_token_id(self) -> Optional[int]:
+    def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
             logger.warning_once(
                 "Using None for BOS token id because tokenizer is not initialized"
@@ -76,7 +77,7 @@ class InputPreprocessor:
 
         return self.tokenizer.bos_token_id
 
-    def get_eos_token_id(self) -> Optional[int]:
+    def get_eos_token_id(self) -> int | None:
         if self.tokenizer is None:
             logger.warning_once(
                 "Using None for EOS token id because tokenizer is not initialized"
@@ -85,7 +86,7 @@ class InputPreprocessor:
 
         return self.tokenizer.eos_token_id
 
-    def get_decoder_start_token_id(self) -> Optional[int]:
+    def get_decoder_start_token_id(self) -> int | None:
         """
         Obtain the decoder start token id employed by an encoder/decoder
         model. Returns None for non-encoder/decoder models or if the
@@ -157,7 +158,7 @@ class InputPreprocessor:
 
     def _prepare_decoder_input_ids_for_generation(
         self,
-        decoder_input_ids: Optional[list[int]],
+        decoder_input_ids: list[int] | None,
     ) -> list[int]:
         """
         Prepares `decoder_input_ids` for generation with encoder-decoder models.
@@ -194,11 +195,11 @@ class InputPreprocessor:
 
     def _get_tokenization_kw(
         self,
-        overrides: Optional[dict[str, Any]] = None,
+        overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         kwargs = dict[str, Any]()
 
-        if self.model_config.hf_config.model_type == "whisper":
+        if self.model_config.is_encoder_decoder:
             # For Whisper, special tokens should be provided by the user based
             # on the task and language of their request. Also needed to avoid
             # appending an EOS token to the prompt which disrupts generation.
@@ -212,7 +213,7 @@ class InputPreprocessor:
     def _tokenize_prompt(
         self,
         prompt: str,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         """
         Apply the model's tokenizer to a text prompt, returning the
@@ -228,22 +229,12 @@ class InputPreprocessor:
 
         return tokenizer.encode(prompt, **tokenization_kwargs)
 
-    def _get_mm_tokenizer(self) -> AnyTokenizer:
-        # PrithviGeoSpatialMAE needs to be initialized without a tokenizer
-        # while using also multi-modal input
-        if not self.tokenizer:
-            return cast(AnyTokenizer, object())  # Dummy
-
-        tokenizer = self.get_tokenizer()
-        return tokenizer
-
     def _get_mm_processor(self) -> BaseMultiModalProcessor:
         if not hasattr(self, "_mm_processor"):
-            tokenizer = self._get_mm_tokenizer()
-
             self._mm_processor = self.mm_registry.create_processor(
                 self.model_config,
-                tokenizer=tokenizer,
+                self.observability_config,
+                tokenizer=self.tokenizer,
                 cache=self.mm_processor_cache,
             )
 
@@ -251,12 +242,12 @@ class InputPreprocessor:
 
     def _process_multimodal(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data: MultiModalDataDict,
-        mm_processor_kwargs: Optional[Mapping[str, object]],
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        mm_processor_kwargs: Mapping[str, object] | None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         """
         Apply the model's multi-modal processor to a multi-modal prompt,
@@ -320,7 +311,7 @@ class InputPreprocessor:
         )
 
     def _truncate_inputs(
-        self, inputs: list[int], tokenization_kwargs: Optional[dict[str, Any]] = None
+        self, inputs: list[int], tokenization_kwargs: dict[str, Any] | None = None
     ) -> list[int]:
         if (
             not tokenization_kwargs
@@ -339,27 +330,24 @@ class InputPreprocessor:
     def _process_tokens(
         self,
         parsed_content: TokensPrompt,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
-    ) -> Union[TokenInputs, MultiModalInputs]:
+        mm_uuids: MultiModalUUIDDict | None = None,
+    ) -> TokenInputs | MultiModalInputs:
         prompt_token_ids = self._truncate_inputs(
             parsed_content["prompt_token_ids"], tokenization_kwargs
         )
 
-        inputs: Union[TokenInputs, MultiModalInputs]
-        if self.model_config.is_multimodal_model:
+        inputs: TokenInputs | MultiModalInputs
+        if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = self._process_multimodal(
                 prompt_token_ids,
-                parsed_content.get("multi_modal_data") or {},
+                multi_modal_data,
                 parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
         else:
-            if parsed_content.get("multi_modal_data"):
-                raise ValueError("This model does not support multimodal inputs")
-
             inputs = token_inputs(prompt_token_ids)
 
         if cache_salt := parsed_content.get("cache_salt"):
@@ -370,25 +358,22 @@ class InputPreprocessor:
     def _process_text(
         self,
         parsed_content: TextPrompt,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
-    ) -> Union[TokenInputs, MultiModalInputs]:
+        mm_uuids: MultiModalUUIDDict | None = None,
+    ) -> TokenInputs | MultiModalInputs:
         prompt_text = parsed_content["prompt"]
 
-        inputs: Union[TokenInputs, MultiModalInputs]
-        if self.model_config.is_multimodal_model:
+        inputs: TokenInputs | MultiModalInputs
+        if multi_modal_data := parsed_content.get("multi_modal_data"):
             inputs = self._process_multimodal(
                 prompt_text,
-                parsed_content.get("multi_modal_data") or {},
+                multi_modal_data,
                 parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=mm_uuids,
             )
         else:
-            if parsed_content.get("multi_modal_data"):
-                raise ValueError("This model does not support multimodal inputs")
-
             prompt_token_ids = self._tokenize_prompt(
                 prompt_text,
                 tokenization_kwargs=tokenization_kwargs,
@@ -403,9 +388,9 @@ class InputPreprocessor:
     def _prompt_to_llm_inputs(
         self,
         prompt: SingletonPrompt,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> SingletonInputs:
         """
         Extract the singleton inputs from a prompt.
@@ -445,7 +430,7 @@ class InputPreprocessor:
     def _build_enc_dec_llm_inputs(
         self,
         encoder_inputs: SingletonInputs,
-        decoder_inputs: Optional[SingletonInputs],
+        decoder_inputs: SingletonInputs | None,
     ) -> EncoderDecoderInputs:
         if (
             encoder_inputs["type"] == "embeds"
@@ -457,10 +442,8 @@ class InputPreprocessor:
             )
 
         # Needed for mypy
-        encoder_inputs = cast(Union[TokenInputs, MultiModalInputs], encoder_inputs)
-        decoder_inputs = cast(
-            Optional[Union[TokenInputs, MultiModalInputs]], decoder_inputs
-        )
+        encoder_inputs = cast(TokenInputs | MultiModalInputs, encoder_inputs)
+        decoder_inputs = cast(TokenInputs | MultiModalInputs | None, decoder_inputs)
 
         if decoder_inputs is None:
             if self.model_config.hf_config.model_type == "whisper":
@@ -491,8 +474,8 @@ class InputPreprocessor:
 
     def _split_enc_dec_mm_inputs(
         self,
-        inputs: Union[SingletonInputs, MultiModalEncDecInputs],
-        decoder_inputs_to_override: Optional[SingletonInputs] = None,
+        inputs: SingletonInputs | MultiModalEncDecInputs,
+        decoder_inputs_to_override: SingletonInputs | None = None,
     ) -> tuple[SingletonInputs, SingletonInputs]:
         """
         For encoder/decoder models only:
@@ -509,11 +492,11 @@ class InputPreprocessor:
 
         # Needed for mypy
         inputs = cast(
-            Union[TokenInputs, MultiModalInputs, MultiModalEncDecInputs],
+            TokenInputs | MultiModalInputs | MultiModalEncDecInputs,
             inputs,
         )
         decoder_inputs_to_override = cast(
-            Optional[Union[TokenInputs, MultiModalInputs]],
+            TokenInputs | MultiModalInputs | None,
             decoder_inputs_to_override,
         )
 
@@ -553,9 +536,9 @@ class InputPreprocessor:
     def _process_encoder_decoder_prompt(
         self,
         prompt: PromptType,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> EncoderDecoderInputs:
         """
         For encoder/decoder models only:
@@ -591,8 +574,7 @@ class InputPreprocessor:
           instance
         """
         encoder_inputs: SingletonInputs
-        decoder_inputs: Optional[SingletonInputs]
-
+        decoder_inputs: SingletonInputs | None
         if is_explicit_encoder_decoder_prompt(prompt):
             # `cast` is needed for mypy, but not pyright
             prompt_ = cast(ExplicitEncoderDecoderPrompt, prompt)
@@ -604,7 +586,9 @@ class InputPreprocessor:
             if (decoder_input := prompt_["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
-                decoder_inputs = self._prompt_to_llm_inputs(decoder_input)
+                decoder_inputs = self._prompt_to_llm_inputs(
+                    decoder_input, tokenization_kwargs=tokenization_kwargs
+                )
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:
@@ -633,7 +617,7 @@ class InputPreprocessor:
     ) -> DecoderOnlyInputs:
         if "prompt_token_ids" in prompt_inputs:
             prompt_inputs = cast(
-                Union[TokenInputs, MultiModalInputs], prompt_inputs
+                TokenInputs | MultiModalInputs, prompt_inputs
             )  # Needed for mypy
 
         return prompt_inputs
@@ -641,9 +625,9 @@ class InputPreprocessor:
     def _process_decoder_only_prompt(
         self,
         prompt: SingletonPrompt,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> DecoderOnlyInputs:
         """
         For decoder-only models:
@@ -670,9 +654,9 @@ class InputPreprocessor:
     def _preprocess(
         self,
         prompt: PromptType,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> ProcessorInputs:
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
@@ -699,16 +683,12 @@ class InputPreprocessor:
     def preprocess(
         self,
         prompt: PromptType,
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
-        res = self._preprocess(
-            prompt,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        res = self._preprocess(prompt, tokenization_kwargs, mm_uuids=mm_uuids)
 
         if self.mm_processor_cache and self.mm_cache_stats is not None:
             delta = self.mm_processor_cache.make_stats(delta=True)
@@ -718,7 +698,7 @@ class InputPreprocessor:
 
         return res
 
-    def stat_mm_cache(self) -> Optional[MultiModalCacheStats]:
+    def stat_mm_cache(self) -> MultiModalCacheStats | None:
         mm_cache_stats = self.mm_cache_stats
         if mm_cache_stats is None:
             return None

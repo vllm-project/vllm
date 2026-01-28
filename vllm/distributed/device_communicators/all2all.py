@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -9,15 +9,17 @@ import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.utils import has_deep_ep, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_all2all
+from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
 if has_flashinfer_all2all():
-    from flashinfer.comm import Mapping
-    from flashinfer.comm.mnnvl import MnnvlConfig
-    from flashinfer.comm.trtllm_alltoall import MnnvlMoe
+    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
+    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
+    from flashinfer.comm.trtllm_alltoall import (
+        MnnvlMoe,  # type: ignore[import-not-found]
+    )
 
 logger = init_logger(__name__)
 
@@ -57,14 +59,20 @@ class NaiveAll2AllManager(All2AllManagerBase):
 
         return buffer
 
-    def dispatch(
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if extra_tensors is not None:
+            raise NotImplementedError(
+                "extra_tensors is not supported for NaiveAll2AllManager"
+            )
         sp_size = self.tp_group.world_size if is_sequence_parallel else 1
         dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
         cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
 
         hidden_states = self.naive_multicast(
@@ -73,7 +81,36 @@ class NaiveAll2AllManager(All2AllManagerBase):
         router_logits = self.naive_multicast(
             router_logits, cu_tokens_across_sp_cpu, is_sequence_parallel
         )
+
         return hidden_states, router_logits
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if extra_tensors is not None:
+            raise NotImplementedError(
+                "extra_tensors is not supported for NaiveAll2AllManager"
+            )
+        sp_size = self.tp_group.world_size if is_sequence_parallel else 1
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
+
+        hidden_states = self.naive_multicast(
+            hidden_states, cu_tokens_across_sp_cpu, is_sequence_parallel
+        )
+        topk_weights = self.naive_multicast(
+            topk_weights, cu_tokens_across_sp_cpu, is_sequence_parallel
+        )
+        topk_ids = self.naive_multicast(
+            topk_ids, cu_tokens_across_sp_cpu, is_sequence_parallel
+        )
+        return hidden_states, topk_weights, topk_ids
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
@@ -81,6 +118,7 @@ class NaiveAll2AllManager(All2AllManagerBase):
         ep_rank = self.rank if is_sequence_parallel else self.dp_rank
 
         dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
         sp_size = self.tp_group.world_size if is_sequence_parallel else 1
         cu_tokens_across_sp_cpu = dp_metadata.cu_tokens_across_sp(sp_size)
 
@@ -104,25 +142,79 @@ class AgRsAll2AllManager(All2AllManagerBase):
     def __init__(self, cpu_group):
         super().__init__(cpu_group)
 
-    def dispatch(
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         """
         Gather hidden_states and router_logits from all dp ranks.
         """
-        sizes = get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
-
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes is not None
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
         assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
-        hidden_states, router_logits = dist_group.all_gatherv(
-            [hidden_states, router_logits],
+
+        tensors_to_gather = [hidden_states, router_logits]
+        if extra_tensors is not None:
+            tensors_to_gather.extend(extra_tensors)
+
+        gathered_tensors = dist_group.all_gatherv(
+            tensors_to_gather,
             dim=0,
             sizes=sizes,
         )
-        return hidden_states, router_logits
+
+        if extra_tensors is not None:
+            return (gathered_tensors[0], gathered_tensors[1], gathered_tensors[2:])
+        return gathered_tensors[0], gathered_tensors[1]
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        """
+        Gather hidden_states and router_logits from all dp ranks.
+        """
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes is not None
+        dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
+        assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
+
+        tensors_to_gather = [hidden_states, topk_weights, topk_ids]
+        if extra_tensors is not None:
+            tensors_to_gather.extend(extra_tensors)
+
+        gathered_tensors = dist_group.all_gatherv(
+            tensors_to_gather,
+            dim=0,
+            sizes=sizes,
+        )
+
+        hidden_states = gathered_tensors[0]
+        topk_weights = gathered_tensors[1]
+        topk_ids = gathered_tensors[2]
+
+        if extra_tensors is None:
+            return hidden_states, topk_weights, topk_ids
+
+        return hidden_states, topk_weights, topk_ids, gathered_tensors[3:]
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
@@ -130,7 +222,10 @@ class AgRsAll2AllManager(All2AllManagerBase):
         """
         Reduce-scatter hidden_states across all dp ranks.
         """
-        sizes = get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes is not None
 
         dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
         hidden_states = dist_group.reduce_scatterv(hidden_states, dim=0, sizes=sizes)
@@ -155,7 +250,7 @@ class PPLXAll2AllManager(All2AllManagerBase):
         if self.internode:
             # inter-node communication needs nvshmem,
             # intra-node communication uses p2p mapping directly
-            from pplx_kernels.nvshmem import (
+            from pplx_kernels.nvshmem import (  # type: ignore[import-not-found]
                 nvshmem_alloc_empty_unique_id,
                 nvshmem_get_unique_id,
                 nvshmem_init,
@@ -182,19 +277,33 @@ class PPLXAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
     def get_handle(self, kwargs):
-        import pplx_kernels as pplx
+        import pplx_kernels as pplx  # type: ignore[import-not-found]
 
         return self.handle_cache.get_or_create(
             kwargs,
             pplx.AllToAll.internode if self.internode else pplx.AllToAll.intranode,
         )
 
-    def dispatch(
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         raise NotImplementedError
 
     def combine(
@@ -208,7 +317,9 @@ class PPLXAll2AllManager(All2AllManagerBase):
                 handle.destroy()
 
         if self.internode:
-            from pplx_kernels.nvshmem import nvshmem_finalize
+            from pplx_kernels.nvshmem import (
+                nvshmem_finalize,  # type: ignore[import-not-found]
+            )
 
             logger.debug("PPLX NVSHMEM finalize")
             nvshmem_finalize()
@@ -234,12 +345,26 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
     def get_handle(self, kwargs):
         raise NotImplementedError
 
-    def dispatch(
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         raise NotImplementedError
 
     def combine(
@@ -265,7 +390,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         num_rdma_bytes = None
         num_qps_per_rank = None
 
-        if self.internode:
+        if self.internode and not envs.VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE:
             num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
             num_qps_per_rank = self.num_sms // 2
         else:
@@ -288,7 +413,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             "args are computed in the Manager itself."
         )
 
-        import deep_ep
+        import deep_ep  # type: ignore[import-not-found]
 
         buffer_kwargs = self._make_all2all_kwargs()
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
@@ -298,7 +423,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         return handle
 
     def set_num_sms(self, num_sms: int):
-        import deep_ep
+        import deep_ep  # type: ignore[import-not-found]
 
         # Right now the buffers are sized for only what the kernels were
         # created with. So we can only reduce the number of SMS used
@@ -332,7 +457,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_global_experts: Number of experts in the model.
         num_local_experts: Number of experts in an EP rank.
         """
-        import deep_ep
+        import deep_ep  # type: ignore[import-not-found]
 
         # Defaults for internode and intranode are taken from DeepEP tests.
         num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
@@ -351,6 +476,8 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=True,
             num_qps_per_rank=num_qps_per_rank,
+            allow_nvlink_for_low_latency_mode=True,
+            allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
         )
 
     def get_handle(self, kwargs):
@@ -358,7 +485,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         The kwargs for DeepEPLLAll2AllManager is dictated by
         _make_all2all_kwargs.
         """
-        import deep_ep
+        import deep_ep  # type: ignore[import-not-found]
 
         buffer_kwargs = self._make_all2all_kwargs(**kwargs)
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
@@ -368,7 +495,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         return handle
 
     # DeepEP LL uses RDMA so no SMs are used for communication
-    def max_sms_used(self) -> Optional[int]:
+    def max_sms_used(self) -> int | None:
         return 0
 
 
@@ -474,3 +601,96 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 self.prepare_workspace_tensor = None
                 self.mapping = None
                 self.initialized = False
+
+
+class MoriAll2AllManager(All2AllManagerBase):
+    def __init__(self, cpu_group):
+        assert has_mori(), (
+            "MoRI kernels not found. Please follow https://github.com/ROCm/mori/blob/main/README.md"
+            " to install MoRI kernels."
+        )  # noqa
+        import mori
+
+        super().__init__(cpu_group)
+        self.handle_cache = Cache()
+
+        torch._C._distributed_c10d._register_process_group("mori", cpu_group)
+        mori.shmem.shmem_torch_process_group_init("mori")
+
+    def _make_all2all_kwargs(
+        self,
+        rank: int,
+        num_ep_ranks: int,
+        input_dtype: torch.dtype,
+        quant_dtype: torch.dtype,
+        token_hidden_size: int,
+        scale_dim: int,
+        scale_type_size: int,
+        max_num_tokens_per_dp_rank: int,
+        num_local_experts: int,
+        num_experts_per_token: int,
+    ):
+        import mori  # type: ignore[import-not-found]
+
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
+
+        assert on_gfx942() or on_gfx950(), (
+            "mori currently only support arch gfx942 and gfx950"
+        )
+
+        if not self.internode:
+            # single node
+            kernel_type = mori.ops.EpDispatchCombineKernelType.IntraNode
+            rdma_block_num = 0
+            warp_num_per_block = 16
+            block_num = 80
+        else:
+            # multi node
+            kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
+            if on_gfx942():
+                warp_num_per_block = 16
+                block_num = 32
+                rdma_block_num = 16
+            elif on_gfx950():
+                warp_num_per_block = 8
+                block_num = 64
+                rdma_block_num = 32
+            else:
+                raise NotImplementedError(
+                    "mori currently only support arch gfx942 and gfx950"
+                )
+
+        return dict(
+            rank=rank,
+            world_size=num_ep_ranks,
+            data_type=quant_dtype,
+            hidden_dim=token_hidden_size,
+            scale_dim=scale_dim,
+            scale_type_size=scale_type_size,
+            max_token_type_size=input_dtype.itemsize,
+            max_num_inp_token_per_rank=max_num_tokens_per_dp_rank,
+            num_experts_per_rank=num_local_experts,
+            num_experts_per_token=num_experts_per_token,
+            warp_num_per_block=warp_num_per_block,
+            block_num=block_num,
+            kernel_type=kernel_type,
+            rdma_block_num=rdma_block_num,
+            gpu_per_node=min(8, num_ep_ranks),
+        )
+
+    def _make_handle(self, **kwargs):
+        import mori  # type: ignore[import-not-found]
+
+        mori_config = mori.ops.EpDispatchCombineConfig(**kwargs)
+        handle = mori.ops.EpDispatchCombineOp(mori_config)
+        return handle
+
+    def get_handle(self, kwargs):
+        import mori  # type: ignore[import-not-found]
+
+        mori_kwargs = self._make_all2all_kwargs(**kwargs)
+        logger.debug("MoRI all2all args %s", mori_kwargs)
+        handle: mori.ops.EpDispatchCombineOp = self.handle_cache.get_or_create(
+            mori_kwargs, self._make_handle
+        )
+        return handle

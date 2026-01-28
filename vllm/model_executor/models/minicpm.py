@@ -27,13 +27,12 @@
 import math
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -43,6 +42,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import FatreluAndMul, SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -55,7 +55,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -89,8 +88,9 @@ class MiniCPMMoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
-        tp_size: Optional[int] = None,
+        params_dtype: torch.dtype | None = None,
+        tp_size: int | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
@@ -109,6 +109,7 @@ class MiniCPMMoE(nn.Module):
             bias=False,
             params_dtype=self.params_dtype,
             quant_config=None,
+            prefix=f"{prefix}.gate",
         )
 
         self.ws = nn.Parameter(
@@ -190,14 +191,23 @@ class MiniCPMMLP(nn.Module):
         intermediate_size: int,
         hidden_act: str,
         hidden_act_param: float,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2, bias=False, quant_config=quant_config
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
-            intermediate_size, hidden_size, bias=False, quant_config=quant_config
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         if hidden_act == "silu":
             self.act_fn = SiluAndMul()
@@ -222,11 +232,10 @@ class MiniCPMAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -249,7 +258,6 @@ class MiniCPMAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -259,20 +267,20 @@ class MiniCPMAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
 
         self.attn = Attention(
@@ -292,10 +300,7 @@ class MiniCPMAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        orig_dtype = q.dtype
-        q, k = q.float(), k.float()
         q, k = self.rotary_emb(positions, q, k)
-        q, k = q.to(orig_dtype), k.to(orig_dtype)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -305,8 +310,8 @@ class MiniCPMDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -314,8 +319,6 @@ class MiniCPMDecoderLayer(nn.Module):
         self.cache_config = cache_config
         self.quant_config = quant_config
         self.hidden_size = config.hidden_size
-        self.rope_theta = getattr(config, "rope_theta", 10000)
-        self.rope_scaling = getattr(config, "rope_scaling", None)
         self.max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.prefix = prefix
         self._init_attn_block()
@@ -329,8 +332,7 @@ class MiniCPMDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=self.config.num_attention_heads,
             num_kv_heads=self.config.num_key_value_heads,
-            rope_theta=self.rope_theta,
-            rope_scaling=self.rope_scaling,
+            rope_parameters=self.config.rope_parameters,
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,
@@ -349,6 +351,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 hidden_act=self.config.hidden_act,
                 hidden_act_param=getattr(self.config, "hidden_act_param", 0.0),
                 quant_config=self.quant_config,
+                prefix=f"{self.prefix}.mlp",
             )
         else:
             self.mlp = MiniCPMMoE(
@@ -356,13 +359,14 @@ class MiniCPMDecoderLayer(nn.Module):
                 top_k=self.config.num_experts_per_tok,
                 hidden_size=self.config.hidden_size,
                 intermediate_size=self.config.intermediate_size,
+                prefix=f"{self.prefix}.mlp",
             )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         residual = hidden_states
@@ -394,22 +398,16 @@ class MiniCPMModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         self.cache_config = cache_config
         self.quant_config = quant_config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
+
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
         self.num_experts = getattr(self.config, "num_experts", 0)
         self._init_layers(prefix, config, cache_config, quant_config)
@@ -425,8 +423,8 @@ class MiniCPMModel(nn.Module):
         self,
         prefix: str,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig],
-        quant_config: Optional[QuantizationConfig],
+        cache_config: CacheConfig | None,
+        quant_config: QuantizationConfig | None,
     ):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -436,24 +434,22 @@ class MiniCPMModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embedding = self.embed_tokens(input_ids)
         return embedding * self.config.scale_emb
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[
-        torch.Tensor, IntermediateTensors, tuple[torch.Tensor, list[torch.Tensor]]
-    ]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             hidden_states = intermediate_tensors["hidden_states"]
@@ -572,19 +568,19 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
+
+        parallel_config = vllm_config.parallel_config
 
         self.prefix = prefix
         self.vllm_config = vllm_config
         self.config = config
-        self.lora_config = lora_config
+
         self.cache_config = cache_config
         self.quant_config = quant_config
 
@@ -592,18 +588,9 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.lm_head = ParallelLMHead(
-            unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config
-            else lora_config.lora_vocab_padding_size,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -611,16 +598,18 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
 
-        self.logits_processor = LogitsProcessor(unpadded_vocab_size, config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+        if parallel_config.enable_eplb and getattr(config, "num_experts", 0) > 0:
+            raise NotImplementedError("EPLB is not supported for MiniCPM yet.")
 
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
         return MiniCPMModel(vllm_config=vllm_config, prefix=prefix)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
@@ -631,13 +620,11 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[
-        torch.Tensor, IntermediateTensors, tuple[torch.Tensor, list[torch.Tensor]]
-    ]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         model_output = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -658,7 +645,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

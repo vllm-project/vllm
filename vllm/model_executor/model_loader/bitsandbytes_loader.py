@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: SIM117
 import fnmatch
 import glob
 import itertools
 import math
 import os
-from collections.abc import Generator
-from typing import Any, Callable, Optional
+from collections.abc import Callable, Generator
+from typing import Any
 
 import numpy as np
 import torch
@@ -23,6 +22,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.lora.utils import is_moe_model
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -32,7 +32,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.utils import ParamMapping, set_default_torch_dtype
+from vllm.model_executor.model_loader.utils import ParamMapping
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -48,17 +48,13 @@ from vllm.model_executor.utils import (
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
 
-def is_moe_model(model: torch.nn.Module) -> bool:
-    """Checks if the model contains FusedMoE layers."""
-    return bool(any(isinstance(module, FusedMoE) for module in model.modules()))
-
-
 class BitsAndBytesModelLoader(BaseModelLoader):
-    """Model loader to load model weights with BitAndBytes quantization."""
+    """Model loader to load model weights with BitsAndBytes quantization."""
 
     possible_config_file_names = ["adapter_config.json"]
 
@@ -88,7 +84,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         self,
         model_name_or_path: str,
         allowed_patterns: list[str],
-        revision: Optional[str] = None,
+        revision: str | None = None,
     ) -> tuple[str, list[str], str]:
         """Retrieve weight files. Download the files if necessary.
 
@@ -122,7 +118,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         raise RuntimeError(f"No model weights found in: `{model_name_or_path}`")
 
     def _prepare_weights(
-        self, model_name_or_path: str, revision: Optional[str]
+        self, model_name_or_path: str, revision: str | None
     ) -> tuple[list[str], bool]:
         """Prepare weight files for the model."""
 
@@ -196,7 +192,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def _get_quantized_weights_iterator(
         self,
         model_name_or_path: str,
-        revision: Optional[str],
+        revision: str | None,
     ) -> tuple[Generator[tuple[str, torch.Tensor], None, None], dict[str, Any]]:
         """Get an iterator to the model weights with bitsandbytes quantization,
         as well as the quantization state dictionary."""
@@ -542,8 +538,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             )
 
         quant_config = getattr(model_config.hf_config, "quantization_config", None)
-        if quant_config is not None:
-            quant_method = quant_config.get("quant_method")
+        if quant_config and (quant_method := quant_config.get("quant_method")):
             if quant_method == "bitsandbytes":
                 self.pre_quant = True
             else:
@@ -558,7 +553,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 "Prequant BitsAndBytes models with tensor parallelism is not "
                 "supported. Please try with pipeline parallelism."
             )
-        if self.pre_quant:
+        if quant_config and self.pre_quant:
             self.load_8bit = quant_config.get("load_in_8bit", False)
 
     def _initialize_loader_state(

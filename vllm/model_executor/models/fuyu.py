@@ -20,7 +20,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
@@ -38,13 +38,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -87,7 +87,7 @@ class FuyuProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object) -> FuyuImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
     def get_image_feature_grid_size(
@@ -142,7 +142,7 @@ class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
@@ -260,8 +260,6 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
     dummy_inputs=FuyuDummyInputsBuilder,
 )
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_embed_tokens.": "vision_embed_tokens.",
@@ -271,7 +269,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return None
 
@@ -289,23 +287,27 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.image_token_id = _IMAGE_TOKEN_ID
         self.image_feature_size = config.patch_size**2 * config.num_channels
 
-        self.vision_embed_tokens = ColumnParallelLinear(
-            self.image_feature_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            gather_output=True,
-        )
-        self.language_model = PersimmonForCausalLM(
-            vllm_config=vllm_config.with_hf_config(config.text_config),
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_embed_tokens = ColumnParallelLinear(
+                self.image_feature_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                gather_output=True,
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = PersimmonForCausalLM(
+                vllm_config=vllm_config.with_hf_config(config.text_config),
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
+
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[FuyuImagePatchInputs]:
+    ) -> FuyuImagePatchInputs | None:
         image_patches = kwargs.pop("image_patches", None)
         patches_per_image = kwargs.pop("patches_per_image", None)
 
@@ -325,15 +327,11 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         image_patches_flat = image_input["image_patches_flat"]
         patches_per_image = image_input["patches_per_image"]
 
-        assert self.vision_embed_tokens is not None
         vision_embeddings_flat, _ = self.vision_embed_tokens(image_patches_flat)
 
         return vision_embeddings_flat.split(patches_per_image.tolist(), dim=0)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -342,10 +340,10 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
         if intermediate_tensors is not None:
@@ -362,11 +360,8 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
-        logits = self.language_model.logits_processor(
-            self.language_model.lm_head, hidden_states
-        )
-        return logits
+    ) -> torch.Tensor | None:
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

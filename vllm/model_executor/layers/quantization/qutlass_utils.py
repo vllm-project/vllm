@@ -14,9 +14,10 @@
 from typing import Literal
 
 import torch
-import triton
-import triton.language as tl
 from torch.library import wrap_triton
+
+from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 
 
 @triton.jit
@@ -141,10 +142,6 @@ def triton_mx_block_rearrange(scale_tensor: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def ceil_div(a, b):
-    return (a + b - 1) // b
-
-
 def to_blocked(
     input_matrix: torch.Tensor, backend: Literal["torch", "triton"] = "triton"
 ) -> torch.Tensor:
@@ -160,7 +157,7 @@ def to_blocked(
         backend: "torch" (PyTorch path) or "triton" (Triton kernel)
 
     Returns:
-        Rearranged tensor of shape (32*ceil_div(H,128), 16*ceil_div(W,4))
+        Rearranged tensor of shape (32*cdiv(H,128), 16*cdiv(W,4))
     """
     if backend == "triton":
         return triton_mx_block_rearrange(input_matrix).flatten()
@@ -168,8 +165,8 @@ def to_blocked(
         raise ValueError(f'backend must be "torch" or "triton", got {backend!r}')
 
     rows, cols = input_matrix.shape
-    n_row_blocks = ceil_div(rows, 128)
-    n_col_blocks = ceil_div(cols, 4)
+    n_row_blocks = cdiv(rows, 128)
+    n_col_blocks = cdiv(cols, 4)
 
     # Calculate the padded shape
     padded_rows = n_row_blocks * 128

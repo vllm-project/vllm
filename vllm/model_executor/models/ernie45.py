@@ -23,12 +23,22 @@
 # limitations under the License.
 """Inference-only Erine model compatible with HuggingFace weights."""
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 
 from .utils import PPMissingLayer
 
 
+@support_torch_compile(
+    # set dynamic_arg_dims to support mrope
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
 class Ernie4_5ForCausalLM(LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)

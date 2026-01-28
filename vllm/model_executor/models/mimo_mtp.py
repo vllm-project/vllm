@@ -21,7 +21,6 @@
 """Inference-only MiMo-MTP model."""
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -48,8 +47,8 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         config: PretrainedConfig,
         prefix: str,
         model_config: ModelConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
 
@@ -121,7 +120,7 @@ class MiMoMultiTokenPredictor(nn.Module):
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -129,7 +128,7 @@ class MiMoMultiTokenPredictor(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         if inputs_embeds is None:
@@ -165,16 +164,16 @@ class MiMoMTP(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         assert spec_step_idx == 0, "mimo_mtp only support predict one token now"
@@ -187,7 +186,7 @@ class MiMoMTP(nn.Module):
         self,
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, self.lm_head, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

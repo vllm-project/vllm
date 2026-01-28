@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from typing import Any
 
 import torch
 import torch.distributed
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_world_group
 from vllm.logger import init_logger
-from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
+from vllm.profiler.wrapper import TorchProfilerWrapper
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.xpu_model_runner import XPUModelRunner
 
@@ -35,37 +36,17 @@ class XPUWorker(Worker):
         assert device_config.device_type == "xpu"
         assert current_platform.is_xpu()
 
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info(
-                "Profiling enabled. Traces will be saved to: %s",
-                torch_profiler_trace_dir,
+        # Torch profiler. Enabled and configured through profiler_config.
+        self.profiler: Any | None = None
+        profiler_config = vllm_config.profiler_config
+        if profiler_config.profiler == "torch":
+            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
+            self.profiler = TorchProfilerWrapper(
+                profiler_config,
+                worker_name=worker_name,
+                local_rank=self.local_rank,
+                activities=["CPU", "XPU"],
             )
-            logger.debug(
-                "Profiler config: record_shapes=%s,"
-                "profile_memory=%s,with_stack=%s,with_flops=%s",
-                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-            )
-            self.profiler = torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.XPU,
-                ],
-                record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
-                profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
-                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
-                with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir, use_gzip=True
-                ),
-            )
-        else:
-            self.profiler = None
 
     # we provide this function due to `torch.xpu.mem_get_info()` doesn't
     # return correct free_gpu_memory on intel client GPU. We need to
@@ -126,7 +107,8 @@ class XPUWorker(Worker):
 
         torch.xpu.empty_cache()
         torch_allocated_bytes = torch.xpu.memory_stats()["allocated_bytes.all.current"]
-        total_allocated_bytes = self.xpu_get_mem_info()[1] - self.xpu_get_mem_info()[0]
+        free_mem, total_mem = self.xpu_get_mem_info()
+        total_allocated_bytes = total_mem - free_mem
 
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
@@ -147,7 +129,12 @@ class XPUWorker(Worker):
         return int(available_kv_cache_memory)
 
     def init_device(self):
-        if self.device_config.device.type == "xpu" and current_platform.is_xpu():
+        device = self.device_config.device
+        if (
+            isinstance(device, torch.device)
+            and device.type == "xpu"
+            and current_platform.is_xpu()
+        ):
             self.device = torch.device(f"xpu:{self.local_rank}")
             current_platform.set_device(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
@@ -158,12 +145,10 @@ class XPUWorker(Worker):
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
-        ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE", "pidfd")
         ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
         ENV_LOCAL_WORLD_SIZE = os.getenv(
             "LOCAL_WORLD_SIZE", str(self.parallel_config.world_size)
         )
-        os.environ["CCL_ZE_IPC_EXCHANGE"] = ENV_CCL_ZE_IPC_EXCHANGE
         os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
         os.environ["LOCAL_RANK"] = str(self.local_rank)

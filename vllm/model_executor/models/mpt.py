@@ -5,13 +5,11 @@
 import math
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
 from transformers import MptConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -20,6 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -58,8 +57,8 @@ class MPTAttention(nn.Module):
     def __init__(
         self,
         config: MptConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -84,6 +83,7 @@ class MPTAttention(nn.Module):
             self.total_num_kv_heads,
             bias=not config.no_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.Wqkv",
         )
         if self.qk_ln:
             self.q_ln = nn.LayerNorm(self.d_model)
@@ -93,6 +93,7 @@ class MPTAttention(nn.Module):
             self.d_model,
             bias=not config.no_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -152,7 +153,8 @@ class MPTMLP(nn.Module):
     def __init__(
         self,
         config: MptConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.d_model
@@ -163,6 +165,7 @@ class MPTMLP(nn.Module):
             intermediate_size,
             bias=not config.no_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.up_proj",
         )
         self.act = get_act_fn("gelu")
         self.down_proj = RowParallelLinear(
@@ -170,6 +173,7 @@ class MPTMLP(nn.Module):
             hidden_size,
             bias=not config.no_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -183,8 +187,8 @@ class MPTBlock(nn.Module):
     def __init__(
         self,
         config: MptConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -194,7 +198,7 @@ class MPTBlock(nn.Module):
             config, cache_config, quant_config, prefix=f"{prefix}.attn"
         )
         self.norm_2 = nn.LayerNorm(hidden_size)
-        self.ffn = MPTMLP(config, quant_config)
+        self.ffn = MPTMLP(config, quant_config, prefix=f"{prefix}.ffn")
 
     def forward(
         self,
@@ -244,21 +248,21 @@ class MPTModel(nn.Module):
             ["hidden_states"], config.d_model
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         position_ids: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -304,16 +308,16 @@ class MPTForCausalLM(nn.Module, SupportsPP):
             self.transformer.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.transformer.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.transformer(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -322,7 +326,7 @@ class MPTForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

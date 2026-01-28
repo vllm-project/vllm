@@ -19,7 +19,6 @@
 """PyTorch Idefics2 model."""
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 from torch import nn
@@ -28,9 +27,10 @@ from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2VisionConfig,
 )
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -61,7 +61,7 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -77,7 +77,7 @@ class Idefics2VisionEmbeddings(nn.Module):
         self,
         pixel_values: torch.FloatTensor,
         patch_attention_mask: torch.BoolTensor,
-        tgt_sizes: Optional[torch.IntTensor] = None,
+        tgt_sizes: torch.IntTensor | None = None,
     ) -> torch.Tensor:
         batch_size, _, max_im_h, max_im_w = pixel_values.shape
         target_dtype = self.patch_embedding.weight.dtype
@@ -124,7 +124,7 @@ class Idefics2VisionAttention(nn.Module):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -161,8 +161,8 @@ class Idefics2VisionAttention(nn.Module):
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
-        # Use unified MultiHeadAttention with Flash Attention support
-        self.attn = MultiHeadAttention(
+        # Use unified MMEncoderAttention with Flash Attention support
+        self.attn = MMEncoderAttention(
             self.num_heads_per_partition, self.head_dim, self.scale
         )
 
@@ -175,7 +175,7 @@ class Idefics2VisionAttention(nn.Module):
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
 
-        # Use unified MultiHeadAttention implementation
+        # Use unified MMEncoderAttention implementation
         out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
         return attn_output
@@ -185,7 +185,7 @@ class Idefics2VisionMLP(nn.Module):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -220,7 +220,7 @@ class Idefics2EncoderLayer(nn.Module):
     def __init__(
         self,
         config: Idefics2Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -275,9 +275,9 @@ class Idefics2Encoder(nn.Module):
     def __init__(
         self,
         config: Idefics2Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
@@ -326,9 +326,9 @@ class Idefics2VisionTransformer(nn.Module):
     def __init__(
         self,
         config: Idefics2VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
+        num_hidden_layers_override: int | None = None,
         require_post_norm: bool = True,
         prefix: str = "",
         use_data_parallel: bool = False,
@@ -370,8 +370,8 @@ class Idefics2VisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values,
-        patch_attention_mask: Optional[torch.BoolTensor] = None,
-        tgt_sizes: Optional[torch.IntTensor] = None,
+        patch_attention_mask: torch.BoolTensor | None = None,
+        tgt_sizes: torch.IntTensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.embeddings(
             pixel_values=pixel_values,

@@ -5,14 +5,15 @@ import inspect
 import itertools
 from abc import abstractmethod
 from collections.abc import Sequence
-from functools import partial
-from typing import TYPE_CHECKING, Optional, Union
+from functools import lru_cache, partial
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.sampling_params import SamplingParams
+from vllm.utils.torch_utils import guard_cuda_initialization
 from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
@@ -40,7 +41,7 @@ STR_POOLING_REJECTS_LOGITSPROCS = (
 # Error message when the user tries to initialize vLLM with a speculative
 # decoding enabled and custom logitsproces
 STR_SPEC_DEC_REJECTS_LOGITSPROCS = (
-    "Custom logits processors are not supportedwhen speculative decoding is enabled."
+    "Custom logits processors are not supported when speculative decoding is enabled."
 )
 
 LOGITSPROCS_GROUP = "vllm.logits_processors"
@@ -72,8 +73,10 @@ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
                 entrypoint.name,
                 entrypoint.value,
             )
-            classes.append(entrypoint.load())
+            with guard_cuda_initialization():
+                classes.append(entrypoint.load())
         except Exception as e:
+            logger.error("Failed to load LogitsProcessor plugin %s: %s", entrypoint, e)
             raise RuntimeError(
                 f"Failed to load LogitsProcessor plugin {entrypoint}"
             ) from e
@@ -81,7 +84,7 @@ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
 
 
 def _load_logitsprocs_by_fqcns(
-    logits_processors: Optional[Sequence[Union[str, type[LogitsProcessor]]]],
+    logits_processors: Sequence[str | type[LogitsProcessor]] | None,
 ) -> list[type[LogitsProcessor]]:
     """Load logit processor types, identifying them by fully-qualified class
     names (FQCNs).
@@ -126,8 +129,15 @@ def _load_logitsprocs_by_fqcns(
 
         try:
             # Load module
-            module = importlib.import_module(module_path)
+            with guard_cuda_initialization():
+                module = importlib.import_module(module_path)
         except Exception as e:
+            logger.error(
+                "Failed to load %sth LogitsProcessor plugin %s: %s",
+                ldx,
+                logitproc,
+                e,
+            )
             raise RuntimeError(
                 f"Failed to load {ldx}th LogitsProcessor plugin {logitproc}"
             ) from e
@@ -146,7 +156,7 @@ def _load_logitsprocs_by_fqcns(
 
 
 def _load_custom_logitsprocs(
-    logits_processors: Optional[Sequence[Union[str, type[LogitsProcessor]]]],
+    logits_processors: Sequence[str | type[LogitsProcessor]] | None,
 ) -> list[type[LogitsProcessor]]:
     """Load all custom logits processors.
 
@@ -176,7 +186,7 @@ def build_logitsprocs(
     device: torch.device,
     is_pin_memory: bool,
     is_pooling_model: bool,
-    custom_logitsprocs: Sequence[Union[str, type[LogitsProcessor]]] = (),
+    custom_logitsprocs: Sequence[str | type[LogitsProcessor]] = (),
 ) -> LogitsProcessors:
     if is_pooling_model:
         if custom_logitsprocs:
@@ -204,6 +214,20 @@ def build_logitsprocs(
             BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes
         )
     )
+
+
+cached_load_custom_logitsprocs = lru_cache(_load_custom_logitsprocs)
+
+
+def validate_logits_processors_parameters(
+    logits_processors: Sequence[str | type[LogitsProcessor]] | None,
+    sampling_params: SamplingParams,
+):
+    logits_processors = (
+        tuple(logits_processors) if logits_processors is not None else None
+    )
+    for logits_procs in cached_load_custom_logitsprocs(logits_processors):
+        logits_procs.validate_params(sampling_params)
 
 
 class AdapterLogitsProcessor(LogitsProcessor):
@@ -249,7 +273,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
     def new_req_logits_processor(
         self,
         params: SamplingParams,
-    ) -> Optional[RequestLogitsProcessor]:
+    ) -> RequestLogitsProcessor | None:
         """Consume request info; return a per-request logits processor.
 
         Return None if logits processor does not need to be applied to request
@@ -267,9 +291,9 @@ class AdapterLogitsProcessor(LogitsProcessor):
     def _new_state(
         self,
         params: SamplingParams,
-        prompt_ids: Optional[list[int]],
+        prompt_ids: list[int] | None,
         output_ids: list[int],
-    ) -> Optional[partial[torch.Tensor]]:
+    ) -> partial[torch.Tensor] | None:
         """Return state representation for new request
 
         Returns None if logits processor is not applicable to request
@@ -289,10 +313,10 @@ class AdapterLogitsProcessor(LogitsProcessor):
                 if (len(inspect.signature(req_lp).parameters) == 3)
                 else [output_ids]
             )
-            return partial(req_lp, *args)
+            return partial(req_lp, *args)  # type: ignore[misc]
         return None
 
-    def update_state(self, batch_update: Optional[BatchUpdate]):
+    def update_state(self, batch_update: BatchUpdate | None):
         process_dict_updates(
             self.req_info,
             batch_update,

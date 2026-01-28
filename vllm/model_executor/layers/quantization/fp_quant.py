@@ -3,7 +3,7 @@
 
 # Supports FP-Quant compression, see https://arxiv.org/abs/2509.23202
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.nn.parameter import Parameter
@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class FPQuantConfig(QuantizationConfig):
@@ -36,7 +36,7 @@ class FPQuantConfig(QuantizationConfig):
         forward_dtype: str = "mxfp4",
         forward_method: str = "abs_max",
         pseudoquantization: bool = False,
-        modules_to_not_convert: Optional[list[str]] = None,
+        modules_to_not_convert: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.hadamard_group_size = hadamard_group_size
@@ -90,7 +90,7 @@ class FPQuantConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional[LinearMethodBase]:
+    ) -> LinearMethodBase | None:
         if self.modules_to_not_convert is not None and any(
             prefix.endswith(module) for module in self.modules_to_not_convert
         ):
@@ -233,7 +233,7 @@ class FPQuantLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return quantized_forward(
             x,
@@ -246,10 +246,6 @@ class FPQuantLinearMethod(LinearMethodBase):
             self.quant_config.forward_method,
             self.quant_config.forward_dtype,
         )
-
-
-def ceil_div(a, b):
-    return (a + b - 1) // b
 
 
 def fused_quantize_mx(
@@ -381,7 +377,7 @@ def quantized_forward(
     weight_scales: torch.Tensor,
     weight_global_scale: torch.Tensor,
     act_global_scale: torch.Tensor,
-    bias: Optional[torch.Tensor],
+    bias: torch.Tensor | None,
     forward_hadamard_matrix: torch.Tensor,
     forward_method: str,
     forward_dtype: str,

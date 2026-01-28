@@ -4,13 +4,12 @@
 # Copyright (c) 2024, Tri Dao.
 # Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 
-from typing import Optional, Union
 
 import numpy as np
 import torch
 
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 @triton.jit()
@@ -469,17 +468,17 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Union[torch.Tensor, None],
+    bias: torch.Tensor | None,
     conv_states: torch.Tensor,
     query_start_loc: torch.Tensor,
-    cache_indices: Optional[torch.Tensor] = None,
-    has_initial_state: Optional[torch.Tensor] = None,
-    activation: Optional[str] = "silu",
+    cache_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
-    block_idx_first_scheduled_token: Optional[torch.Tensor] = None,
-    block_idx_last_scheduled_token: Optional[torch.Tensor] = None,
-    initial_state_idx: Optional[torch.Tensor] = None,
-    num_computed_tokens: Optional[torch.Tensor] = None,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    num_computed_tokens: torch.Tensor | None = None,
     block_size_to_align=0,
     metadata=None,
     validate_data=False,
@@ -1071,15 +1070,15 @@ def causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    activation: Union[bool, str, None] = None,
-    conv_state_indices: Optional[torch.Tensor] = None,
-    num_accepted_tokens: Optional[torch.Tensor] = None,
-    query_start_loc: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
+    activation: bool | str | None = None,
+    conv_state_indices: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
     max_query_len: int = -1,
     pad_slot_id: int = PAD_SLOT_ID,
-    block_idx_last_scheduled_token: Optional[torch.Tensor] = None,
-    initial_state_idx: Optional[torch.Tensor] = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
     validate_data=False,
 ):
     """

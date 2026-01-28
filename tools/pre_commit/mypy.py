@@ -20,47 +20,60 @@ Args:
 
 import subprocess
 import sys
-from typing import Optional
 
 import regex as re
 
 FILES = [
     "vllm/*.py",
     "vllm/assets",
+    "vllm/compilation",
+    "vllm/distributed",
+    "vllm/engine",
     "vllm/entrypoints",
+    "vllm/executor",
     "vllm/inputs",
     "vllm/logging_utils",
     "vllm/multimodal",
     "vllm/platforms",
+    "vllm/plugins",
+    "vllm/renderers",
+    "vllm/tokenizers",
     "vllm/transformers_utils",
     "vllm/triton_utils",
     "vllm/usage",
+    "vllm/utils",
+    "vllm/worker",
+    "vllm/v1/attention",
+    "vllm/v1/core",
+    "vllm/v1/engine",
+    "vllm/v1/executor",
+    "vllm/v1/metrics",
+    "vllm/v1/pool",
+    "vllm/v1/sample",
+    "vllm/v1/structured_output",
+    "vllm/v1/worker",
 ]
 
 # After fixing errors resulting from changing follow_imports
 # from "skip" to "silent", move the following directories to FILES
 SEPARATE_GROUPS = [
     "tests",
-    "vllm/attention",
-    "vllm/compilation",
-    "vllm/distributed",
-    "vllm/engine",
-    "vllm/executor",
-    "vllm/inputs",
+    # v0 related
     "vllm/lora",
     "vllm/model_executor",
-    "vllm/plugins",
-    "vllm/worker",
-    "vllm/v1",
+    # v1 related
+    "vllm/v1/kv_offload",
+    "vllm/v1/spec_decode",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
+    "vllm/engine/arg_utils.py",
     "vllm/model_executor/parallel_utils",
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
     # Ignore triton kernels in ops.
-    "vllm/attention/ops",
+    "vllm/v1/attention/ops",
 ]
 
 
@@ -96,8 +109,8 @@ def group_files(changed_files: list[str]) -> dict[str, list[str]]:
 
 def mypy(
     targets: list[str],
-    python_version: Optional[str],
-    follow_imports: Optional[str],
+    python_version: str | None,
+    follow_imports: str | None,
     file_group: str,
 ) -> int:
     """

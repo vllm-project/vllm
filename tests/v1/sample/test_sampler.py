@@ -7,7 +7,8 @@ import torch
 
 from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler

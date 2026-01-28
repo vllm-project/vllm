@@ -138,7 +138,7 @@ Note that the sampler will access the logits processors via `SamplingMetadata.lo
             # ...return sampler output data structure...
 
 
-        def sample(self, logits, sampling_metadta)
+        def sample(self, logits, sampling_metadata)
 
             ...
 
@@ -174,7 +174,7 @@ The previous sections alluded to the interfaces which vLLM logits processors mus
     from collections.abc import Sequence
     from dataclasses import dataclass
     from enum import Enum, auto
-    from typing import TYPE_CHECKING, Optional
+    from typing import TYPE_CHECKING
 
     import torch
 
@@ -244,7 +244,7 @@ The previous sections alluded to the interfaces which vLLM logits processors mus
         @abstractmethod
         def update_state(
             self,
-            batch_update: Optional["BatchUpdate"],
+            batch_update: "BatchUpdate" | None,
         ) -> None:
             """Called when there are new output tokens, prior
             to each forward pass.
@@ -254,7 +254,15 @@ The previous sections alluded to the interfaces which vLLM logits processors mus
                 changes to the batch makeup.
             """
             raise NotImplementedError
-            
+
+        @classmethod
+        def validate_params(cls, sampling_params: SamplingParams):
+            """Validate sampling params for this logits processor.
+
+            Raise ValueError for invalid ones.
+            """
+            return None
+
     ```
 
 A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) the following methods:
@@ -274,10 +282,14 @@ A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) 
     * Return `True` if the logits processor is argmax invariant (never changes what is the highest-logit-value token ID for a given request), `False` if the logits processor may modify argmax
     * `is_argmax_invariant()` is evaluated once at startup; if `True`, vLLM will skip applying this logits processor in a given step when all requests use greedy sampling
 
-* `update_state(self, batch_update: Optional["BatchUpdate"]) -> None`:
+* `update_state(self, batch_update: "BatchUpdate" | None) -> None`:
     * Consume a `BatchUpdate` data structure representing persistent batch state changes at the beginning of the current engine step
     * Use the `BatchUpdate` members to update logits processor internal state
     * **Note:** batch update data structure may be `None`, signaling no change to the batch constituents. In this case, the LogitsProcessor might still want to update its state based on the updated `output_token_ids` lists that it could have retained when they were added.
+
+* `validate_params(cls, sampling_params: SamplingParams)`:
+    * Raise `ValueError` if `SamplingParams` has invalid arguments (especially custom arguments) used by logits processor.
+    * When request is sent to entrypoint, `validate_params()` will validate `SamplingParams` and refuse request with invalid arguments.
 
 ### `BatchUpdate` data structure
 
@@ -399,7 +411,7 @@ Logits processor `update_state()` implementations should assume the following mo
 
         * **"Condense" the batch to be contiguous:** starting with the lowest-index empty slot (which was caused by a Remove), apply a Unidirectional Move from the current highest non-empty slot in the batch to fill the empty slot. Proceed with additional Unidirectional Move operations in order of increasing empty slot destination index and decreasing non-empty slot source index until the batch is contiguous
 
-        * **Shrink the batch:** a side-effect of condensing the batch is that empty slots resulting from Remove operations are grouped in a contiguous block at the end of the batch array. Thus, after condensing, update `BatchUpdate.batch_size` to reflect the number of non-empty slots
+        * **Shrink the batch:** a side effect of condensing the batch is that empty slots resulting from Remove operations are grouped in a contiguous block at the end of the batch array. Thus, after condensing, update `BatchUpdate.batch_size` to reflect the number of non-empty slots
 
 5. Reorder the batch for improved efficiency. Depending on the attention backend implementation and the current characteristics of the batch, zero or more Swap Move operations may be applied to reorder the batch
 
@@ -536,7 +548,7 @@ Built-in logits processors are always loaded when the vLLM engine starts. See th
 
 Review these logits processor implementations for guidance on writing built-in logits processors.
 
-Additionally, the following logits-processor-like functionalities are hard-coded into the sampler and do not yet utilize the programming model described above. Most of them will be refactored to use the aforemented logits processor programming model.
+Additionally, the following logits-processor-like functionalities are hard-coded into the sampler and do not yet utilize the programming model described above. Most of them will be refactored to use the aforementioned logits processor programming model.
 
 * Allowed token IDs
 
