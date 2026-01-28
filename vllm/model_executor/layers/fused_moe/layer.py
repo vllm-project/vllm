@@ -1894,12 +1894,12 @@ class FusedMoE(CustomOp):
                     # sync end point immediately after it is done. This is
                     # important to avoid excessive stream allocations by the cuda
                     # graph replay later.
-                    with torch.cuda.stream(self.shared_experts_stream):
+                    shared_experts_stream = self.shared_experts_stream or torch.Stream()
+                    with shared_experts_stream:
                         # Note that hidden_states clone() is necessary here to avoid
                         # conflict with the main stream
                         shared_output = self.shared_experts(hidden_states_clone)
-                    current_stream().wait_stream(self.shared_experts_stream)
-
+                    current_stream().wait_stream(shared_experts_stream)
                 final_hidden_states = (
                     shared_output,
                     final_hidden_states,

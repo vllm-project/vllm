@@ -333,7 +333,7 @@ def move_to_buffer(
 
     # 4. Execute the P2P operations. The real communication happens here.
     if p2p_ops and cuda_stream is not None:
-        with torch.cuda.stream(cuda_stream):
+        with cuda_stream:
             reqs = batch_isend_irecv(p2p_ops)
             for req in reqs:
                 req.wait()

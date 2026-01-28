@@ -32,7 +32,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.copy_event = copy_event
 
         default_stream = torch.cuda.current_stream()
-        with torch.cuda.stream(self.copy_stream):
+        with self.copy_stream:
             self.copy_stream.wait_stream(default_stream)
 
             self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
