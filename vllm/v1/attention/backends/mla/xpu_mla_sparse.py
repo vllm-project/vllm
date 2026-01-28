@@ -202,16 +202,6 @@ class XPUMLASparseImpl(MLACommonBaseImpl[XPUMLASparseMetadata]):
         topk_indices: torch.Tensor,  # [sq, topk]
         attn_metadata: XPUMLASparseMetadata,
     ) -> torch.Tensor:
-        # Convert per-request indices to global slots (decode) or workspace
-        # offsets (prefill).
-        topk_indices = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-        )
-
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
