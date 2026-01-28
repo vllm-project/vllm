@@ -1565,11 +1565,17 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                 continue
 
             for item in tool_calls:
-                # if arguments is None or empty string, set to {}
-                if content := item["function"].get("arguments"):
-                    if not isinstance(content, (dict, list)):
+                content = item["function"].get("arguments")
+                if isinstance(content, str):
+                    try:
+                        # This handles valid JSON. It will raise a JSONDecodeError
+                        # for empty, whitespace-only, or malformed strings.
                         item["function"]["arguments"] = json.loads(content)
-                else:
+                    except json.JSONDecodeError:
+                        # Default to an empty dict for any string that isn't valid JSON.
+                        item["function"]["arguments"] = {}
+                elif not isinstance(content, (dict, list)):
+                    # This handles None and other unexpected types.
                     item["function"]["arguments"] = {}
 
 
