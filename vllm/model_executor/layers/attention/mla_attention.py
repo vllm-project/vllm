@@ -243,6 +243,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MLAAttentionImpl,
+    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import (
@@ -546,7 +547,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if fp8_attention:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
-        if has_prefill:
+        # Sparse MLA impls only support forward_mqa (decode-style attention)
+        is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
+
+        if has_prefill and not is_sparse_impl:
             self.impl.forward_mha(
                 prefill_q,
                 prefill_k_c_normed,
@@ -557,28 +561,36 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output=output[num_decode_tokens:],
             )
 
-        if has_decode:
-            assert attn_metadata.decode is not None
+        if has_decode or (has_prefill and is_sparse_impl):
+            # For sparse impl, we always use forward_mqa for all tokens
+            # For non-sparse impl, we only use forward_mqa for decode tokens
+            if is_sparse_impl:
+                mqa_q = q
+                mqa_output_slice = output
+            else:
+                assert attn_metadata.decode is not None
+                mqa_q = decode_q
+                mqa_output_slice = output[:num_decode_tokens]
 
-            decode_q_nope, decode_q_pe = decode_q.split(
+            mqa_q_nope, mqa_q_pe = mqa_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
 
             # Convert from (B, N, P) to (N, B, P)
-            decode_q_nope = decode_q_nope.transpose(0, 1)
+            mqa_q_nope = mqa_q_nope.transpose(0, 1)
 
             if self.q_pad_num_heads is not None:
-                B, N, L = decode_q_pe.shape
-                decode_pe_padded = decode_q_pe.new_empty((B, self.q_pad_num_heads, L))
-                decode_pe_padded.resize_((B, N, L))
-                decode_pe_padded.copy_(decode_q_pe)
-                decode_q_pe = decode_pe_padded
+                B, N, L = mqa_q_pe.shape
+                mqa_pe_padded = mqa_q_pe.new_empty((B, self.q_pad_num_heads, L))
+                mqa_pe_padded.resize_((B, N, L))
+                mqa_pe_padded.copy_(mqa_q_pe)
+                mqa_q_pe = mqa_pe_padded
 
             if self.is_aiter_triton_fp4_bmm_enabled:
                 from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
 
-                decode_ql_nope = batched_gemm_a16wfp4(
-                    decode_q_nope,
+                mqa_ql_nope = batched_gemm_a16wfp4(
+                    mqa_q_nope,
                     self.W_K,
                     self.W_K_scale,
                     transpose_bm=True,
@@ -587,8 +599,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             elif self.is_aiter_triton_fp8_bmm_enabled:
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-                decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                    decode_q_nope,
+                mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                    mqa_q_nope,
                     self.W_K,
                     self.W_K_scale,
                     group_size=128,
@@ -596,42 +608,38 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
-                N, B, P = decode_q_nope.shape
+                N, B, P = mqa_q_nope.shape
                 _, _, L = self.W_UK_T.shape
 
                 if self.q_pad_num_heads is not None:
-                    decode_ql_nope = decode_q_nope.new_empty(
-                        (self.q_pad_num_heads, B, L)
-                    )
-                    decode_ql_nope.resize_((N, B, L))
+                    mqa_ql_nope = mqa_q_nope.new_empty((self.q_pad_num_heads, B, L))
+                    mqa_ql_nope.resize_((N, B, L))
                 else:
-                    decode_ql_nope = decode_q_nope.new_empty((N, B, L))
+                    mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
 
                 # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                torch.bmm(decode_q_nope, self.W_UK_T, out=decode_ql_nope)
+                torch.bmm(mqa_q_nope, self.W_UK_T, out=mqa_ql_nope)
 
                 # Convert from (N, B, L) to (B, N, L)
-                decode_ql_nope = decode_ql_nope.transpose(0, 1)
+                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
             if fp8_attention:
-                assert decode_ql_nope.shape[0] == decode_q_pe.shape[0]
-                assert decode_ql_nope.shape[1] == decode_q_pe.shape[1]
-                decode_q = self._decode_concat_quant_fp8_op(
-                    decode_ql_nope, decode_q_pe, self._q_scale
+                assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+                assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+                mqa_q = self._decode_concat_quant_fp8_op(
+                    mqa_ql_nope, mqa_q_pe, self._q_scale
                 )
             else:
-                decode_q = (decode_ql_nope, decode_q_pe)
+                mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
                 assert not fp8_attention, "DCP not support fp8 kvcache now."
-                # concatenate decode_ql_nope and decode_q_pe -> (B, N, L + P)
-                decode_q = torch.cat(decode_q, dim=-1)
-                # decode_q do allgather in head dim.
-                decode_q = get_dcp_group().all_gather(decode_q, dim=1)
+                # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
+                mqa_q = torch.cat(mqa_q, dim=-1)
+                # mqa_q do allgather in head dim.
+                mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
-            attn_out, lse = self.impl.forward_mqa(
-                decode_q, kv_cache, attn_metadata, self
-            )
+            attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
@@ -643,7 +651,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
 
             # v_up projection
-            self._v_up_proj(attn_out, out=output[:num_decode_tokens])
+            self._v_up_proj(attn_out, out=mqa_output_slice)
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):

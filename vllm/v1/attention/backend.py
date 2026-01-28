@@ -774,6 +774,51 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         raise NotImplementedError
 
 
+class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
+    """Sparse MLA attention implementation with only forward_mqa method.
+
+    Sparse MLA implementations only support decode (MQA-style) attention.
+    They do not support prefill (MHA-style) attention.
+    """
+
+    @abstractmethod
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        # MLA Specific Arguments
+        q_lora_rank: int | None,
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+        kv_b_proj: "ColumnParallelLinear",
+        indexer: object | None = None,
+        q_pad_num_heads: int | None = None,
+    ) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """MQA-style decode forward pass."""
+        raise NotImplementedError
+
+
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return kv_cache_dtype.startswith("fp8")
 
