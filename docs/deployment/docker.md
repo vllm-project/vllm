@@ -1,22 +1,37 @@
 # Using Docker
 
-## Use vLLM's Official Docker Image
+!!! tip
+    For building Docker images, see [GPU Installation](../getting_started/installation/gpu.md).
 
 === "NVIDIA CUDA"
-    --8<-- "docs/deployment/docker.cuda.inc.md:use-official-docker-image"
+    **Use Official Image**
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:pre-built-images"
+
+    **Build from Source**
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:build-image-from-source"
+
+    **Run with Custom Image**
+    --8<-- "docs/getting_started/installation/gpu.cuda.inc.md:use-custom-docker-image"
+
 === "AMD ROCm"
-    --8<-- "docs/deployment/docker.rocm.inc.md:use-official-docker-image"
+    **Use Official Image**
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:pre-built-images"
 
-## Building vLLM's Docker Image from Source
+    **Build from Source**
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:build-image-from-source"
 
-=== "NVIDIA CUDA"
-    --8<-- "docs/deployment/docker.cuda.inc.md:build-docker-image-from-source"
-=== "AMD ROCm"
-    --8<-- "docs/deployment/docker.rocm.inc.md:build-docker-image-from-source"
+    **Run with Custom Image**
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:use-custom-docker-image"
 
-## Use the custom-built vLLM Docker image
+    **Use AMD's Prebuilt Images**
+    --8<-- "docs/getting_started/installation/gpu.rocm.inc.md:amd-prebuilt-images"
 
-=== "NVIDIA CUDA"
-    --8<-- "docs/deployment/docker.cuda.inc.md:use-custom-docker-image"
-=== "AMD ROCm"
-    --8<-- "docs/deployment/docker.rocm.inc.md:use-custom-docker-image"
+=== "Intel XPU"
+    **Use Official Image**
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-images"
+
+    **Build from Source**
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-image-from-source"
+
+    **Run with Custom Image**
+    --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:use-custom-docker-image"
