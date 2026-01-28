@@ -537,7 +537,6 @@ class ModelConfig:
         # may fail to load dynamic modules in child processes
         model_info, arch = registry.inspect_model_cls(architecture, self)
         self._model_info = model_info
-        self._architecture = arch
         assert architecture == arch, (
             f"vllm inspected {arch=}, and is different from config {architecture=}"
         )
@@ -686,7 +685,9 @@ class ModelConfig:
         # Check if the architecture we're wrapping has defaults
         runner = None
         task = None
-        if defaults := try_match_architecture_defaults(self.architecture):
+        if defaults := try_match_architecture_defaults(
+            self.model_arch_config.architecture
+        ):
             _, (runner, task) = defaults
         # User specified value take precedence
         if self.runner != "auto":
@@ -716,7 +717,7 @@ class ModelConfig:
     @property
     def architecture(self) -> str:
         """The architecture vllm actually used."""
-        return self._architecture
+        return self.model_arch_config.architecture
 
     def maybe_pull_model_tokenizer_for_runai(self, model: str, tokenizer: str) -> None:
         """Pull model/tokenizer from Object Storage to temporary

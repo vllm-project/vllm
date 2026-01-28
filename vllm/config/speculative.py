@@ -451,7 +451,9 @@ class SpeculativeConfig:
                             )
                         )
                         self.draft_model_config._model_info = model_info
-                        self.draft_model_config._architecture = arch
+                        assert arch == self.draft_model_config.architecture, (
+                            f"{arch} != {self.draft_model_config.architecture}"
+                        )
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
