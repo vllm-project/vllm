@@ -628,6 +628,11 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
             response = await ws.recv()
             print(f"Session: {response}")
 
+            # Commit buffer
+            await ws.send(json.dumps({
+                "type": "input_audio_buffer.commit"
+            }))
+
             # Send audio chunks (example with file)
             with open("audio.raw", "rb") as f:
                 while chunk := f.read(4096):
@@ -636,9 +641,10 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
                         "audio": base64.b64encode(chunk).decode()
                     }))
 
-            # Commit buffer
+            # Signal all audio is sent
             await ws.send(json.dumps({
-                "type": "input_audio_buffer.commit"
+                "type": "input_audio_buffer.commit",
+                "final": True,
             }))
 
             # Receive transcription
