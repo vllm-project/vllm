@@ -73,25 +73,40 @@ void moe_permute(
       get_ptr<int64_t>(expert_first_token_offset), n_token, n_expert,
       n_local_expert, topk, sorter, get_ptr<int>(sort_workspace), stream);
 
+  // DeepGEMM: use getMIndices kernel to compute
+  // 1) align_expert_first_token_offset (aligned prefix offsets)
+  // 2) m_indices (expert id for each aligned row)
+  // eg. expert0: 3, expert1: 5, expert2: 2 tokens respectively
+  // expert_first_token_offset = [0, 3, 8, 10], align_block_size = 4
+  // expert0: 3->4, expert1: 5->8, expert2: 2->4
+  // align_expert_first_token_offset = [0, 4, 12, 16]
+  // so m_indices = [0,0,0,0, 1,1,1,1,1,1,1,1, 2,2,2,2]
+  torch::Tensor align_expert_first_token_offset;
+  const int64_t* aligned_expert_first_token_offset_ptr = nullptr;
+  if (align_block_size.has_value()) {
+    align_expert_first_token_offset =
+        torch::zeros_like(expert_first_token_offset);
+    getMIndices(get_ptr<int64_t>(expert_first_token_offset),
+                get_ptr<int64_t>(align_expert_first_token_offset),
+                get_ptr<int>(m_indices), n_local_expert, align_block_size_value,
+                stream);
+    aligned_expert_first_token_offset_ptr =
+        get_ptr<int64_t>(align_expert_first_token_offset);
+  }
+
   // dispatch expandInputRowsKernelLauncher
   MOE_DISPATCH(input.scalar_type(), [&] {
     expandInputRowsKernelLauncher<scalar_t>(
         get_ptr<scalar_t>(input), get_ptr<scalar_t>(permuted_input),
         get_ptr<int>(permuted_experts_id), get_ptr<int>(sorted_row_idx),
         get_ptr<int>(inv_permuted_idx), get_ptr<int>(permuted_idx),
-        get_ptr<int64_t>(expert_first_token_offset), n_token, valid_num_ptr,
-        n_hidden, topk, n_local_expert, align_block_size_value, stream);
+        get_ptr<int64_t>(expert_first_token_offset),
+        aligned_expert_first_token_offset_ptr, n_token, valid_num_ptr, n_hidden,
+        topk, n_local_expert, align_block_size_value, stream);
   });
 
-  // get m_indices and update expert_first_token_offset with align block
   // this is only required for DeepGemm and not required for CUTLASS group gemm
   if (align_block_size.has_value()) {
-    auto align_expert_first_token_offset =
-        torch::zeros_like(expert_first_token_offset);
-    getMIndices(get_ptr<int64_t>(expert_first_token_offset),
-                get_ptr<int64_t>(align_expert_first_token_offset),
-                get_ptr<int>(m_indices), n_local_expert, align_block_size_value,
-                stream);
     expert_first_token_offset.copy_(align_expert_first_token_offset);
   }
 }
