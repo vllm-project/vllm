@@ -40,7 +40,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
-    "gptq_marlin_24",
     "experts_int8",
     "ipex",
     "petit_nvfp4",
