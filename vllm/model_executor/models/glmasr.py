@@ -620,6 +620,28 @@ class GlmAsrMultiModalProjector(nn.Module):
         return hidden_states
 
 
+class GlmAsrMultiModalDataParser(MultiModalDataParser):
+    """
+    Custom parser for GLM-ASR multimodal data.
+
+    Extends the base parser to handle GLM-ASR specific audio data formats,
+    including both pre-computed audio embeddings and raw audio features.
+    """
+
+    def _parse_audio_data(
+        self,
+        data: dict[str, torch.Tensor] | ModalityData[Any],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="audio",
+                required_fields={"audio_embeds"},
+                fields_factory=_glmasr_field_config,
+            )
+        return super()._parse_audio_data(data)
+
+
 class GlmAsrProcessingInfo(BaseProcessingInfo):
     """
     Processing information provider for GLM-ASR model.
@@ -640,7 +662,7 @@ class GlmAsrProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         feature_extractor = self.get_feature_extractor()
 
-        return MultiModalDataParser(
+        return GlmAsrMultiModalDataParser(
             target_sr=feature_extractor.sampling_rate,
             expected_hidden_size=self._get_expected_hidden_size(),
         )
@@ -721,28 +743,6 @@ def _glmasr_field_config(
         feature_attention_mask=MultiModalFieldConfig.batched("audio"),
         chunk_counts=MultiModalFieldConfig.batched("audio"),
     )
-
-
-class GlmAsrMultiModalDataParser(MultiModalDataParser):
-    """
-    Custom parser for GLM-ASR multimodal data.
-
-    Extends the base parser to handle GLM-ASR specific audio data formats,
-    including both pre-computed audio embeddings and raw audio features.
-    """
-
-    def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[Any],
-    ) -> ModalityDataItems[Any, Any] | None:
-        if isinstance(data, dict):
-            return DictEmbeddingItems(
-                data,
-                modality="audio",
-                required_fields={"audio_embeds"},
-                fields_factory=_glmasr_field_config,
-            )
-        return super()._parse_audio_data(data)
 
 
 class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"]):
