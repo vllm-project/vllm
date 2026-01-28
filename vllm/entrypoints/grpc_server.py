@@ -308,6 +308,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             seed=params.seed if params.HasField("seed") else None,
             include_stop_str_in_output=params.include_stop_str_in_output,
             logit_bias=dict(params.logit_bias) if params.logit_bias else None,
+            truncate_prompt_tokens=params.truncate_prompt_tokens
+            if params.HasField("truncate_prompt_tokens")
+            else None,
             structured_outputs=structured_outputs,
             # detokenize must be True if stop strings are used
             detokenize=bool(stop),

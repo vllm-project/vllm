@@ -20,8 +20,10 @@ class PoolingParams(
     """API parameters for pooling models.
 
     Attributes:
-        truncate_prompt_tokens: Deprecated, please pass it to
-            `tokenization_kwargs` instead.
+        truncate_prompt_tokens: Controls prompt truncation.
+            Set to -1 to use the model's default truncation size.
+            Set to k to keep only the last k tokens (left truncation).
+            Set to None to disable truncation.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
         normalize: Deprecated, please use use_activation instead.

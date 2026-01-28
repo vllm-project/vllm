@@ -213,7 +213,9 @@ class SamplingParams(
     include_stop_str_in_output: bool = False
     """Whether to include the stop strings in output text."""
     truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None
-    """Deprecated, please pass it to `tokenization_kwargs` instead."""
+    """If set to -1, will use the truncation size supported by the model. If
+    set to an integer k, will use only the last k tokens from the prompt
+    (i.e., left truncation). If set to `None`, truncation is disabled."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
     skip_clone: bool = False
     """Internal flag indicating that this SamplingParams instance is safe to
