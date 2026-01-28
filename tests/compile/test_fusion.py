@@ -410,7 +410,7 @@ def test_aiter_fusion_rmsnorm_quant(
     )
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        from vllm.compilation.rocm_aiter_fusion import RocmAiterRMSNormFusionPass
+        from vllm.compilation.rocm_aiter_fusion import RocmAiterRMSNormQuantFusionPass
 
         m.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -420,7 +420,7 @@ def test_aiter_fusion_rmsnorm_quant(
         torch.set_default_dtype(dtype)
         torch.manual_seed(1)
 
-        fusion_pass = RocmAiterRMSNormFusionPass(vllm_config)
+        fusion_pass = RocmAiterRMSNormQuantFusionPass(vllm_config)
 
         model = TestModel(
             hidden_size=hidden_size,
