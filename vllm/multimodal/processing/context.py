@@ -570,11 +570,12 @@ class BaseProcessingInfo:
         """
         return self.ctx.get_hf_processor(**kwargs)
 
-    def _get_expected_hidden_size(self):
+    def _get_expected_hidden_size(self) -> int | None:
         """
-        # Get expected hidden size for embedding validation if mm_embeds enabled
-        # This validates hidden dimensions to prevent vulnerabilities: embeddings
-        # with correct ndim but wrong shape could cause crashes at inference time
+        Get expected hidden size for embedding validation if `mm_embeds` are enabled.
+
+        This validates hidden dimensions to prevent a vulnerability where embeddings
+        with correct `ndim` but wrong `shape` could cause crashes at inference time.
         """
         model_config = self.ctx.model_config
         mm_config = model_config.get_multimodal_config()
