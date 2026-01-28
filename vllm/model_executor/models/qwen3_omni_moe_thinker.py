@@ -79,15 +79,6 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.platforms import current_platform
-
-is_gfx1x = False
-if current_platform.is_rocm():
-    try:
-        from vllm.platforms.rocm import on_gfx1x
-
-        is_gfx1x = on_gfx1x()
-    except ImportError:
-        is_gfx1x = False
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -115,6 +106,15 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import get_vit_attn_backend
+
+is_gfx1x = False
+if current_platform.is_rocm():
+    try:
+        from vllm.platforms.rocm import on_gfx1x
+
+        is_gfx1x = on_gfx1x()
+    except ImportError:
+        is_gfx1x = False
 
 logger = init_logger(__name__)
 
