@@ -72,6 +72,8 @@ select = [
     "UP",
     # flake8-bugbear
     "B",
+    # flake8-implicit-str-concat
+    "ISC",
     # flake8-simplify
     "SIM",
     # isort

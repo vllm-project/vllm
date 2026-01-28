@@ -32,8 +32,8 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             return (
                 False,
                 "requires setting `VLLM_ROCM_USE_AITER=1` "
-                + "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
-                + "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
             )
         return True, None
 
@@ -97,9 +97,9 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             per_token_scale_a and per_channel_scale_b
         ), (
             "Currently only support per-tensor-per-tensor GEMM "
-            + " and per-token-per-channel GEMM through AITER"
+            " and per-token-per-channel GEMM through AITER"
             " w8a8 scaled gemm. `AiterInt8ScaledMMLinearKernel` "
-            + "does not support AITER block scaled GEMM."
+            "does not support AITER block scaled GEMM."
         )
 
         # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects

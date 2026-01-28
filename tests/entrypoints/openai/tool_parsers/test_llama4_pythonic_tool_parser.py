@@ -193,7 +193,7 @@ TEST_CASES = [
     pytest.param(
         False,
         "<|python_start|>[get_weather(city='LA', metric='C'), "
-        + "register_user(name='Doe', age=9)]",
+        "register_user(name='Doe', age=9)]",
         [
             SIMPLE_FUNCTION_CALL,
             FunctionCall(name="register_user", arguments='{"name": "Doe", "age": 9}'),
