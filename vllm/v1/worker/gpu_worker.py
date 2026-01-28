@@ -107,6 +107,9 @@ class Worker(WorkerBase):
 
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
+        if self.use_v2_model_runner:
+            logger.info_once("Using V2 Model Runner", scope="global")
+
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
