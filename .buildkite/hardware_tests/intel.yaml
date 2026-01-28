@@ -2,7 +2,6 @@ group: Hardware
 depends_on: ~
 steps:
   - label: "Intel CPU Test"
-    depends_on: ~
     soft_fail: true
     device: intel_cpu
     no_plugin: true
