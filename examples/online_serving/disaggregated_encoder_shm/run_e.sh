@@ -1,0 +1,28 @@
+unset ftp_proxy
+unset https_proxy
+unset http_proxy
+EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/user/ec_cache}"
+rm /home/user/10T/user/ec_cache -rf
+mkdir -p /user/ec_cache
+
+CUDA_VISIBLE_DEVICES=0 vllm serve "/model_path" \
+    --gpu-memory-utilization 0.01 \
+    --port "23001" \
+    --enforce-eager \
+    --conver "mm_encoder_only" \
+    --enable-request-id-headers \
+    --served-model-name model_name \
+    --no-enable-prefix-caching \
+    --max-num-batched-tokens 114688 \
+    --max-num-seqs 128 \
+    --ec-transfer-config '{
+        "ec_connector": "ECExampleConnectorSHM",
+        "ec_role": "ec_producer",
+        "ec_ip": "127.0.0.1",
+        "ec_connector_module_path":"vllm.distributed.ec_transfer.ec_connector.example_connector_shm",
+        "ec_connector_extra_config": {
+            "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
+            "listen_ports": [30161]
+        }
+    }'
+    
