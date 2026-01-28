@@ -861,6 +861,22 @@ def get_vllm_version() -> str:
     return version
 
 
+def get_torch_version_constraint() -> str:
+    """Get a torch version constraint matching the build-time torch version.
+
+    This ensures the wheel is installed with the same major.minor.patch version
+    of PyTorch that it was built against, preventing ABI incompatibilities.
+    """
+    # torch.__version__ is like "2.10.0+rocm7.12.0a20260128" or "2.5.1+cu124"
+    # Extract the base version (before any local version identifier)
+    base_version = torch.__version__.split("+")[0]
+    # Parse to get major.minor.patch
+    parsed = parse(base_version)
+    major, minor, patch = parsed.major, parsed.minor, parsed.micro
+    # Require the same major.minor.patch (allows different local versions)
+    return f"torch>={major}.{minor}.{patch},<{major}.{minor + 1}.0"
+
+
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
     requirements_dir = ROOT_DIR / "requirements"
@@ -903,6 +919,12 @@ def get_requirements() -> list[str]:
         requirements = _read_requirements("xpu.txt")
     else:
         raise ValueError("Unsupported platform, please use CUDA, ROCm, or CPU.")
+
+    # Add torch version constraint to ensure ABI compatibility
+    # Filter out any existing torch requirements first
+    requirements = [r for r in requirements if not r.strip().startswith("torch")]
+    requirements.append(get_torch_version_constraint())
+
     return requirements
 
 
