@@ -77,10 +77,12 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    funaudiochat="FunAudioChatConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
+    kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     jais="JAISConfig",
@@ -328,7 +330,7 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     partial_rotary_factor = getattr_iter(config, names, None, warn=True)
     ompe = getattr(config, "original_max_position_embeddings", None)
 
-    if Version(version("transformers")) < Version("5.0.0.dev0"):
+    if Version(version("transformers")) < Version("5.0.0"):
         # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
             config.rope_parameters = rope_scaling
