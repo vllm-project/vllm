@@ -727,6 +727,7 @@ class CompilationConfig:
         "level",
         "mode",
         "cudagraph_mode",
+        "max_cudagraph_capture_size",
         "use_inductor_graph_partition",
         mode="wrap",
     )
