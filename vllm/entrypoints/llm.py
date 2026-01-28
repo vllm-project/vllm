@@ -771,7 +771,7 @@ class LLM:
 
         return outputs
 
-    def _get_tok_params(self, tokenization_kwargs: dict[str, Any] | None):
+    def _get_cmpl_tok_params(self, tokenization_kwargs: dict[str, Any] | None):
         model_config = self.model_config
         encoder_config = model_config.encoder_config or {}
 
@@ -849,7 +849,7 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
-        tok_params = self._get_tok_params(tokenization_kwargs)
+        tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
 
         engine_prompts = list[EnginePrompt | EngineEncDecPrompt]()
         for prompt in self._normalize_prompts(prompts):
@@ -877,6 +877,16 @@ class LLM:
         | list[list[ChatCompletionMessageParam]],
     ) -> list[list[ChatCompletionMessageParam]]:
         return conversations if is_list_of(conversations, list) else [conversations]  # type: ignore[list-item,return-value]
+
+    def _get_chat_tok_params(self, tokenization_kwargs: dict[str, Any] | None):
+        model_config = self.model_config
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case"),
+            add_special_tokens=False,
+        ).with_kwargs(tokenization_kwargs)
 
     def _preprocess_chat(
         self,
@@ -916,7 +926,7 @@ class LLM:
                 ),
             ),
         )
-        tok_params = self._get_tok_params(tokenization_kwargs)
+        tok_params = self._get_chat_tok_params(tokenization_kwargs)
 
         engine_prompts = list[EnginePrompt]()
         for conversation in self._normalize_conversations(conversations):
@@ -1554,7 +1564,7 @@ class LLM:
 
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
-        tok_params = self._get_tok_params(tokenization_kwargs)
+        tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
         encode_kwargs = tok_params.get_encode_kwargs()
 
         if model_config.is_cross_encoder:
@@ -1760,7 +1770,7 @@ class LLM:
                 dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
             )
 
-        tok_params = self._get_tok_params(tokenization_kwargs)
+        tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
 
         tokenization_kwargs = tok_params.get_encode_kwargs()
         engine_request = self.input_processor.process_inputs(
