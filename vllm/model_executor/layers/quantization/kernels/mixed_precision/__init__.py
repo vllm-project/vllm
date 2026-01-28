@@ -36,27 +36,17 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision.xpu import 
 from vllm.platforms import PlatformEnum, current_platform
 
 # in priority/performance order (when available)
-_POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
-    PlatformEnum.CUDA: [
-        CutlassW4A8LinearKernel,
-        MacheteLinearKernel,
-        AllSparkLinearKernel,
-        MarlinLinearKernel,
-        ConchLinearKernel,
-        ExllamaLinearKernel,
-    ],
-    PlatformEnum.ROCM: [
-        ConchLinearKernel,
-        ExllamaLinearKernel,
-    ],
-    PlatformEnum.XPU: [
-        XPUwNa16LinearKernel,
-    ],
-    PlatformEnum.CPU: [
-        Dynamic4bitLinearKernel,
-        CPUWNA16LinearKernel,
-    ],
-}
+_POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
+    CutlassW4A8LinearKernel,
+    MacheteLinearKernel,
+    AllSparkLinearKernel,
+    MarlinLinearKernel,
+    Dynamic4bitLinearKernel,
+    ConchLinearKernel,
+    ExllamaLinearKernel,
+    XPUwNa16LinearKernel,
+    CPUWNA16LinearKernel,
+]
 
 
 def choose_mp_linear_kernel(
