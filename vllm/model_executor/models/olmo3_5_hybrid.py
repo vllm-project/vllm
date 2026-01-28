@@ -680,13 +680,6 @@ class Olmo3_5HybridAttention(nn.Module):
 
         self.scaling = self.head_dim**-0.5
 
-        layer_idx = extract_layer_index(prefix)
-        sliding_window = None
-        if (
-            layer_types := getattr(self.config, "layer_types", None)
-        ) is not None and layer_types[layer_idx] == "sliding_attention":
-            sliding_window = self.config.sliding_window
-
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -694,21 +687,22 @@ class Olmo3_5HybridAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=vllm_config.cache_config,
             quant_config=vllm_config.quant_config,
-            per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
         )
 
-        if sliding_window is None:
-            rope_parameters = self.config.rope_parameters
-        else:
-            rope_theta = self.config.rope_parameters["rope_theta"]
-            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
-
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
+        rope_parameters = getattr(self.config, "rope_parameters", None)
+        self._use_rope = (rope_parameters is not None) and (
+            rope_parameters["rope_theta"] is not None
         )
+
+        if self._use_rope:
+            self.rotary_emb = get_rope(
+                self.head_dim,
+                max_position=self.max_position_embeddings,
+                rope_parameters=rope_parameters,
+            )
+        else:
+            self.rotary_emb = None
 
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -740,7 +734,8 @@ class Olmo3_5HybridAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self._apply_qk_norm(q, k)
-        q, k = self.rotary_emb(positions, q, k)
+        if self._use_rope:
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -800,25 +795,33 @@ class Olmo3_5HybridDecoderLayer(nn.Module):
                 speculative_config=speculative_config,
                 prefix=f"{prefix}.linear_attn",
             )
+            # FLA layers use these norm names
+            self.attention_layer_norm = RMSNorm(
+                config.hidden_size,
+                eps=config.rms_norm_eps,
+            )
+            self.feedforward_layer_norm = RMSNorm(
+                config.hidden_size,
+                eps=config.rms_norm_eps,
+            )
         else:
-            # Both full_attention and sliding_attention use the same attention class
             self.self_attn = Olmo3_5HybridAttention(
                 vllm_config=vllm_config,
                 prefix=f"{prefix}.self_attn",
+            )
+            # Attention layers use these norm names
+            self.post_attention_layernorm = RMSNorm(
+                config.hidden_size,
+                eps=config.rms_norm_eps,
+            )
+            self.post_feedforward_layernorm = RMSNorm(
+                config.hidden_size,
+                eps=config.rms_norm_eps,
             )
 
         self.mlp = Olmo3_5HybridMLP(
             vllm_config=vllm_config,
             prefix=f"{prefix}.mlp",
-        )
-
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
-        )
-        self.post_feedforward_layernorm = RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
         )
 
     def forward(
@@ -827,10 +830,8 @@ class Olmo3_5HybridDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         if self.layer_type == "linear_attention":
-            # Linear attention uses pre-norm pattern:
-            # h = x + fla(fla_norm(x))
             residual = hidden_states
-            hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states = self.attention_layer_norm(hidden_states)
 
             attn_output = torch.empty_like(hidden_states)
             self.linear_attn(
@@ -839,20 +840,16 @@ class Olmo3_5HybridDecoderLayer(nn.Module):
             )
             hidden_states = residual + attn_output
 
-            # MLP: h = h + mlp(mlp_norm(h))
             residual = hidden_states
-            hidden_states = self.post_feedforward_layernorm(hidden_states)
+            hidden_states = self.feedforward_layer_norm(hidden_states)
             hidden_states = self.mlp(hidden_states)
             hidden_states = residual + hidden_states
         else:
-            # Standard attention uses post-norm pattern:
-            # h = x + post_attn_norm(attn(x))
             residual = hidden_states
             hidden_states = self.self_attn(positions, hidden_states)
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = residual + hidden_states
 
-            # MLP: h = h + post_ff_norm(mlp(h))
             residual = hidden_states
             hidden_states = self.mlp(hidden_states)
             hidden_states = self.post_feedforward_layernorm(hidden_states)
