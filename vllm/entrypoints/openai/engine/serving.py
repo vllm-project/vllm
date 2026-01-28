@@ -1513,12 +1513,10 @@ class OpenAIServing:
     @staticmethod
     def _get_decoded_token(
         logprob: Logprob,
-        token_id: int | list[int],
+        token_id: int,
         tokenizer: TokenizerLike | None,
         return_as_token_id: bool = False,
     ) -> str:
-        token_id = token_id if isinstance(token_id, int) else token_id[0]
-
         if return_as_token_id:
             return f"token_id:{token_id}"
 

@@ -838,7 +838,7 @@ class OpenAIServingResponses(OpenAIServing):
                 break
             text = self._get_decoded_token(
                 logprob=_logprob,
-                token_id=[token_id],
+                token_id=token_id,
                 tokenizer=tokenizer,
                 return_as_token_id=self.return_tokens_as_token_ids,
             )
@@ -868,7 +868,7 @@ class OpenAIServingResponses(OpenAIServing):
             token_logprob = logprob[token_id]
             text = self._get_decoded_token(
                 logprob=token_logprob,
-                token_id=[token_id],
+                token_id=token_id,
                 tokenizer=tokenizer,
                 return_as_token_id=self.return_tokens_as_token_ids,
             )
