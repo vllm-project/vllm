@@ -942,7 +942,6 @@ class OpenAIServingResponses(OpenAIServing):
                 request=request,
                 enable_auto_tools=self.enable_auto_tools,
                 tool_call_id_type=self.tool_call_id_type,
-                use_harmony=self.use_harmony,
                 logprobs=logprobs,
             )
 

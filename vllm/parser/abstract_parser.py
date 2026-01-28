@@ -158,7 +158,6 @@ class Parser:
         request: ResponsesRequest,
         enable_auto_tools: bool = False,
         tool_call_id_type: str = "random",
-        use_harmony: bool = False,
         logprobs: list[Logprob] | None = None,
     ) -> list[ResponseOutputItem]:
         """
@@ -173,7 +172,6 @@ class Parser:
             request: The request object used to generate the output.
             enable_auto_tools: Whether to enable automatic tool call parsing.
             tool_call_id_type: Type of tool call ID generation ("random", etc).
-            use_harmony: Whether harmony mode is enabled (affects output).
             logprobs: Pre-computed logprobs for the output text, if any.
 
         Returns:
@@ -318,7 +316,6 @@ class DelegatingParser(Parser):
         request: ResponsesRequest,
         enable_auto_tools: bool = False,
         tool_call_id_type: str = "random",
-        use_harmony: bool = False,
         logprobs: list[Logprob] | None = None,
     ) -> list[ResponseOutputItem]:
         # First extract reasoning
@@ -353,19 +350,17 @@ class DelegatingParser(Parser):
             )
             outputs.append(reasoning_item)
 
-        # Add message item if there's content or if harmony mode with tool calls
-        if content or (use_harmony and tool_calls):
-            res_text_part = None
-            if content:
-                res_text_part = ResponseOutputText(
-                    text=content,
-                    annotations=[],
-                    type="output_text",
-                    logprobs=logprobs,
-                )
+        # Add message item if there's content
+        if content:
+            res_text_part = ResponseOutputText(
+                text=content,
+                annotations=[],
+                type="output_text",
+                logprobs=logprobs,
+            )
             message_item = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
-                content=[res_text_part] if res_text_part else [],
+                content=[res_text_part],
                 role="assistant",
                 status="completed",
                 type="message",
