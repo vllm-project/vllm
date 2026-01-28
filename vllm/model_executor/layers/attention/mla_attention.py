@@ -2529,11 +2529,11 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         if self.dcp_world_size == -1:
             self.dcp_world_size = get_dcp_group().world_size
-        if self.pcp_world_size is None:
+        if self.pcp_world_size == -1:
             self.pcp_world_size = get_pcp_group().world_size
-        if self.dcp_rank is None:
+        if self.dcp_rank == -1:
             self.dcp_rank = get_dcp_group().rank_in_group
-        if self.pcp_rank is None:
+        if self.pcp_rank == -1:
             self.pcp_rank = get_pcp_group().rank_in_group
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
