@@ -8,7 +8,6 @@ import torch
 from torch import nn
 
 import vllm.envs as envs
-from vllm.attention.layer import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
@@ -19,6 +18,7 @@ from vllm.distributed import (get_dp_group,
                               get_tp_group)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluStepAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
