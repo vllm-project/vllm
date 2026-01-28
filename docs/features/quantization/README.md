@@ -6,7 +6,6 @@ Contents:
 
 - [AutoAWQ](auto_awq.md)
 - [BitsAndBytes](bnb.md)
-- [BitBLAS](bitblas.md)
 - [GGUF](gguf.md)
 - [GPTQModel](gptqmodel.md)
 - [Intel Neural Compressor](inc.md)
@@ -49,8 +48,6 @@ th:not(:first-child) {
 | Marlin (GPTQ/AWQ/FP8) | ❌      | ❌       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
 | INT8 (W8A8)           | ❌      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ✅︎        |
 | FP8 (W8A8)            | ❌      | ❌       | ❌       | ✅︎    | ✅︎       | ✅︎         | ❌          | ❌        |
-| BitBLAS               | ✅︎      | ✅       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
-| BitBLAS (GPTQ)        | ❌      | ❌       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
 | bitsandbytes          | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
 | DeepSpeedFP           | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ❌         | ❌          | ❌        |
 | GGUF                  | ✅︎      | ✅︎       | ✅︎       | ✅︎    | ✅︎       | ✅︎         | ❌          | ❌        |
