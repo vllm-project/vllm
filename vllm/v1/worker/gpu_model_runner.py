@@ -3582,8 +3582,6 @@ class GPUModelRunner(
                 aux_hidden_states = None
 
             if self.pcp_world_size > 1:
-                # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
-                # ignores the padding from CUDA Graph.
                 hidden_states = self.pcp_manager.restore_hidden_states(
                     hidden_states,
                     local_total_num_tokens,
