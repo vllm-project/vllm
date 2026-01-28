@@ -180,9 +180,15 @@ class TokenizeParams:
                 tokenization_kwargs,
             )
 
+        max_total_tokens = self.max_total_tokens
+
         return TokenizeParams(
-            max_total_tokens=self.max_total_tokens,
-            max_output_tokens=self.max_total_tokens - max_length,
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=(
+                0
+                if max_total_tokens is None or max_length is None
+                else max_total_tokens - max_length
+            ),
             truncate_prompt_tokens=truncate_prompt_tokens,
             do_lower_case=do_lower_case,
             add_special_tokens=add_special_tokens,

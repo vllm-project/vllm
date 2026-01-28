@@ -771,6 +771,19 @@ class LLM:
 
         return outputs
 
+    def _get_tok_params(self, tokenization_kwargs: dict[str, Any] | None):
+        model_config = self.model_config
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case"),
+            # For Whisper, special tokens should be provided by the user based
+            # on the task and language of their request. Also needed to avoid
+            # appending an EOS token to the prompt which disrupts generation.
+            add_special_tokens=not model_config.is_encoder_decoder,
+        ).with_kwargs(tokenization_kwargs)
+
     def _normalize_prompts(
         self,
         prompts: PromptType | Sequence[PromptType],
@@ -784,18 +797,15 @@ class LLM:
         self,
         prompt: SingletonPrompt,
         tok_params: TokenizeParams,
+        *,
+        tokenize: bool,
     ) -> EnginePrompt:
         renderer = self.llm_engine.renderer
 
         if not isinstance(prompt, dict):
             prompt = renderer.render_completion(prompt)
 
-        # This is needed because some MM models have non-default `add_special_tokens`
-        # TODO: Move multi-modal processor into tokenization
-        if "multi_modal_data" in prompt or "multi_modal_uuids" in prompt:
-            return prompt
-
-        return renderer.tokenize_prompt(prompt, tok_params)
+        return renderer.tokenize_prompt(prompt, tok_params) if tokenize else prompt
 
     def _preprocess_cmpl_enc_dec(
         self,
@@ -806,11 +816,21 @@ class LLM:
         dec_prompt = prompt["decoder_prompt"]
 
         return EngineEncDecPrompt(
-            encoder_prompt=self._preprocess_cmpl_singleton(enc_prompt, tok_params),
+            encoder_prompt=self._preprocess_cmpl_singleton(
+                enc_prompt,
+                tok_params,
+                # TODO: Move multi-modal processor into tokenization
+                tokenize=not self.model_config.is_multimodal_model,
+            ),
             decoder_prompt=(
                 None
                 if dec_prompt is None
-                else self._preprocess_cmpl_singleton(dec_prompt, tok_params)
+                else self._preprocess_cmpl_singleton(
+                    dec_prompt,
+                    tok_params,
+                    # TODO: Move multi-modal processor into tokenization
+                    tokenize=not self.model_config.is_multimodal_model,
+                )
             ),
         )
 
@@ -829,21 +849,24 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
-        model_config = self.model_config
-        encoder_config = model_config.encoder_config or {}
-
-        tok_params = TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case"),
-        ).with_kwargs(tokenization_kwargs)
+        tok_params = self._get_tok_params(tokenization_kwargs)
 
         engine_prompts = list[EnginePrompt | EngineEncDecPrompt]()
         for prompt in self._normalize_prompts(prompts):
             if is_explicit_encoder_decoder_prompt(prompt):
                 engine_prompts.append(self._preprocess_cmpl_enc_dec(prompt, tok_params))
             else:
+                # Some MM models have non-default `add_special_tokens`
+                # TODO: Move multi-modal processor into tokenization
                 engine_prompts.append(
-                    self._preprocess_cmpl_singleton(prompt, tok_params)
+                    self._preprocess_cmpl_singleton(
+                        prompt,
+                        tok_params,
+                        tokenize=not (
+                            "multi_modal_data" in prompt
+                            or "multi_modal_uuids" in prompt
+                        ),
+                    )
                 )
 
         return engine_prompts
@@ -878,8 +901,6 @@ class LLM:
             A list of `TokensPrompts` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
-        model_config = self.model_config
-        encoder_config = model_config.encoder_config or {}
         renderer = self.llm_engine.renderer
 
         chat_params = ChatParams(
@@ -895,11 +916,7 @@ class LLM:
                 ),
             ),
         )
-        tok_params = TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case"),
-            add_special_tokens=False,
-        ).with_kwargs(tokenization_kwargs)
+        tok_params = self._get_tok_params(tokenization_kwargs)
 
         engine_prompts = list[EnginePrompt]()
         for conversation in self._normalize_conversations(conversations):
@@ -1449,7 +1466,6 @@ class LLM:
             generated scores in the same order as the input prompts.
         """
         model_config = self.model_config
-        encoder_config = model_config.encoder_config or {}
 
         runner_type = model_config.runner_type
         if runner_type != "pooling":
@@ -1538,10 +1554,7 @@ class LLM:
 
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
-        tok_params = TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case"),
-        ).with_kwargs(tokenization_kwargs)
+        tok_params = self._get_tok_params(tokenization_kwargs)
         encode_kwargs = tok_params.get_encode_kwargs()
 
         if model_config.is_cross_encoder:
@@ -1729,9 +1742,6 @@ class LLM:
         priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> str:
-        model_config = self.model_config
-        encoder_config = model_config.encoder_config or {}
-
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
 
@@ -1750,10 +1760,7 @@ class LLM:
                 dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
             )
 
-        tok_params = TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case"),
-        ).with_kwargs(tokenization_kwargs)
+        tok_params = self._get_tok_params(tokenization_kwargs)
 
         tokenization_kwargs = tok_params.get_encode_kwargs()
         engine_request = self.input_processor.process_inputs(

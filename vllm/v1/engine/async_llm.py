@@ -284,6 +284,19 @@ class AsyncLLM(EngineClient):
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return await self.engine_core.get_supported_tasks_async()
 
+    def _get_tok_params(self, tokenization_kwargs: dict[str, Any] | None):
+        model_config = self.model_config
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case"),
+            # For Whisper, special tokens should be provided by the user based
+            # on the task and language of their request. Also needed to avoid
+            # appending an EOS token to the prompt which disrupts generation.
+            add_special_tokens=not model_config.is_encoder_decoder,
+        ).with_kwargs(tokenization_kwargs)
+
     async def add_request(
         self,
         request_id: str,
@@ -298,8 +311,6 @@ class AsyncLLM(EngineClient):
         prompt_text: str | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
-        model_config = self.model_config
-        encoder_config = model_config.encoder_config or {}
 
         if self.errored:
             raise EngineDeadError()
@@ -332,10 +343,7 @@ class AsyncLLM(EngineClient):
                 dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
             )
 
-        tok_params = TokenizeParams(
-            max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case"),
-        ).with_kwargs(tokenization_kwargs)
+        tok_params = self._get_tok_params(tokenization_kwargs)
         tokenization_kwargs = tok_params.get_encode_kwargs()
 
         if isinstance(prompt, AsyncGenerator):
