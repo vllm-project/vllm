@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 import vllm.envs as envs
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig

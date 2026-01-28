@@ -381,8 +381,11 @@ class SpecDecodeBaseProposer:
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
+            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
+                self.input_ids[:num_tokens],
+            )
             input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = None
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
 
         model_kwargs = {
             "input_ids": input_ids,
@@ -575,12 +578,12 @@ class SpecDecodeBaseProposer:
             self.hidden_states[:batch_size] = hidden_states
             if self.supports_mm_inputs:
                 self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
-
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:input_batch_size]
             else:
+                self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
                 input_ids = self.input_ids[:input_batch_size]
-                inputs_embeds = None
+                inputs_embeds = self.inputs_embeds[:input_batch_size]
 
             # Run the model.
             model_kwargs = {
@@ -1326,7 +1329,7 @@ class SpecDecodeBaseProposer:
                     inputs_embeds = self.inputs_embeds[:num_input_tokens]
                 else:
                     input_ids = self.input_ids[:num_input_tokens]
-                    inputs_embeds = None
+                    inputs_embeds = self.inputs_embeds[:num_input_tokens]
 
                 kwargs = dict(
                     input_ids=input_ids,
