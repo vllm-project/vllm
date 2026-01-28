@@ -18,7 +18,6 @@ QuantizationMethods = Literal[
     "modelopt",
     "modelopt_fp4",
     "gguf",
-    "gptq_marlin_24",
     "gptq_marlin",
     "awq_marlin",
     "gptq",
@@ -41,7 +40,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
-    "gptq_marlin_24",
     "experts_int8",
     "ipex",
     "petit_nvfp4",
@@ -122,7 +120,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
     from .gptq_marlin import GPTQMarlinConfig
-    from .gptq_marlin_24 import GPTQMarlin24Config
     from .inc import INCConfig
     from .ipex_quant import IPEXConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
@@ -140,7 +137,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
         "gguf": GGUFConfig,
-        "gptq_marlin_24": GPTQMarlin24Config,
         "gptq_marlin": GPTQMarlinConfig,
         "awq_marlin": AWQMarlinConfig,
         "gptq": GPTQConfig,
