@@ -40,6 +40,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     sharded_weight_loader,
 )
+from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -414,7 +415,7 @@ class MambaMixer2(MambaBase, CustomOp):
             # Apply the custom weight loader to in_proj.weight
             # Works for both non-quantized (Parameter) and quantized
             # (ModelWeightParameter which extends BasevLLMParameter)
-            if hasattr(self.in_proj.weight, "_weight_loader"):
+            if isinstance(self.in_proj.weight, BasevLLMParameter):
                 # For BasevLLMParameter subclasses (quantized layers like FP8)
                 # These have a weight_loader property that can be directly set
                 self.in_proj.weight.weight_loader = mamba_loader
