@@ -299,7 +299,13 @@ def wait_for_completion_or_failure(
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(procs: list[BaseProcess]):
+def shutdown(procs: list[BaseProcess], files_to_close: list[Any] | None = None):
+    # close any files/resources first
+    if files_to_close:
+        for f in files_to_close:
+            with contextlib.suppress(Exception):
+                f.close()
+
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
