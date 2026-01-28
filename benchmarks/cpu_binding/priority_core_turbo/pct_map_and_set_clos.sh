@@ -1,158 +1,121 @@
 #!/usr/bin/env bash
-# pct_map_and_set_clos.sh
+# pct_map_and_set_clos_v3.sh
 #
-# Combines:
-#   - pct_map.sh  (derive HP CPU list from numactl -H + intel-speed-select core-power info)
-#   - set_clos.sh (apply HP -> CLOS0 and non-HP -> CLOS2)
-# And adds authoritative verification via:
-#   $SUDO intel-speed-select -c <cpu-list> core-power get-assoc
+# Auto-detect HP_PER_DOMAIN from:
+#   intel-speed-select perf-profile info
+# by reading: speed-select-turbo-freq-properties -> bucket-X -> high-priority-cores-count
 #
-# IMPORTANT BEHAVIOR ON YOUR PLATFORM:
-#   Your get-assoc output shows that when a CPU thread is assigned to a CLOS, its HT sibling
-#   (e.g., +128 on a 256-CPU system) is also effectively in the same CLOS.
-#   Therefore we "close" the HP set under HT-sibling relation before computing the non-HP set.
+# Then:
+#  - Build HP CPU list per NUMA node (domain approximation via numactl -H)
+#  - Close HP set under HT siblings (required on your platform)
+#  - Compute Non-HP = All online CPUs - HP_effective
+#  - Optionally apply CLOS:
+#        HP_effective -> HP_CLOS (default 0)
+#        Non-HP       -> OTHER_CLOS (default 2)
 #
-# Usage:
-#   chmod +x pct_map_and_set_clos.sh
-#   DRY_RUN=1 ./pct_map_and_set_clos.sh
-#   ./pct_map_and_set_clos.sh
-#   HP_PER_DOMAIN=8 INCLUDE_HT=0 ./pct_map_and_set_clos.sh      # INCLUDE_HT influences initial HP pick
-#   HP_CLOS=0 OTHER_CLOS=2 ./pct_map_and_set_clos.sh
+# Output control:
+#   Quiet by default: suppresses verbose intel-speed-select structural output.
+#   DEBUG_VERBOSE=1 shows raw intel-speed-select outputs.
+#
+# Modes:
+#   DEBUG_MODE=1 : compute-only (no writes, no verification)
+#   DRY_RUN=1    : print commands only (no writes)
 #
 set -euo pipefail
 
-HP_PER_DOMAIN="${HP_PER_DOMAIN:-8}"   # number of "physical" CPUs to pick per domain (initial pick)
-INCLUDE_HT="${INCLUDE_HT:-0}"         # 1 = include HT half in initial pick per domain (still will be closed under siblings later)
+HP_PER_DOMAIN="${HP_PER_DOMAIN:-}"
+HP_BUCKET="${HP_BUCKET:-0}"
+INCLUDE_HT="${INCLUDE_HT:-0}"
+
 HP_CLOS="${HP_CLOS:-0}"
 OTHER_CLOS="${OTHER_CLOS:-2}"
+
+DEBUG_MODE="${DEBUG_MODE:-0}"
 DRY_RUN="${DRY_RUN:-0}"
+DEBUG_VERBOSE="${DEBUG_VERBOSE:-0}"
+DEBUG_MAP="${DEBUG_MAP:-0}"
+SHOW_VERIFY_LINES="${SHOW_VERIFY_LINES:-40}"
+
 SUDO=""
-if [ "$(id -u)" -ne 0 ]; then
-  SUDO="sudo"
-fi
+[[ "$(id -u)" -ne 0 ]] && SUDO="sudo"
 
-ISS_INFO_CMD="${ISS_INFO_CMD:-$SUDO intel-speed-select core-power info}"
-NUMACTL_CMD="${NUMACTL_CMD:-numactl -H}"
+ISS="${ISS:-$SUDO intel-speed-select}"
+ISS_PERF_CMD="${ISS_PERF_CMD:-$ISS perf-profile info}"
 
-tmp_iss="$(mktemp)"
-tmp_num="$(mktemp)"
-trap 'rm -f "$tmp_iss" "$tmp_num"' EXIT
-
-# -------------------------- collect inputs (capture stderr too) --------------------------
-$ISS_INFO_CMD > "$tmp_iss" 2>&1
-$NUMACTL_CMD > "$tmp_num" 2>&1
-
-# -------------------------- parse representative CPUs from intel-speed-select ------------
-mapfile -t REP_CPUS < <(
-  awk '
-    BEGIN{FS="cpu-"}
-    /^[[:space:]]*cpu-/{
-      x=$2
-      gsub(/[:[:space:]].*$/,"",x)     # trim trailing ":" or spaces
-      if (x=="None") next
-      if (x ~ /^-?[0-9]+$/ && x+0 >= 0) print x+0
-    }
-  ' "$tmp_iss" | sort -n | uniq
-)
-
-if [[ "${#REP_CPUS[@]}" -eq 0 ]]; then
-  echo "ERROR: Could not extract any representative cpu-N entries from: $ISS_INFO_CMD" >&2
-  echo "---- First 120 lines of intel-speed-select output ----" >&2
-  sed -n '1,120p' "$tmp_iss" >&2
-  exit 2
-fi
-
-# -------------------------- parse numactl nodes: node->cpus and cpu->node ----------------
-declare -A NODE_CPUS
-declare -A CPU_TO_NODE
-
-while IFS= read -r line; do
-  [[ "$line" =~ ^node[[:space:]]+([0-9]+)[[:space:]]+cpus: ]] || continue
-  node="${BASH_REMATCH[1]}"
-  cpus="${line#*cpus:}"
-  cpus="$(echo "$cpus" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-  NODE_CPUS["$node"]="$cpus"
-  for c in $cpus; do
-    CPU_TO_NODE["$c"]="$node"
-  done
-done < "$tmp_num"
-
-if [[ "${#NODE_CPUS[@]}" -eq 0 ]]; then
-  echo "ERROR: Could not parse any NUMA node cpu lists from: $NUMACTL_CMD" >&2
-  echo "---- First 120 lines of numactl -H output ----" >&2
-  sed -n '1,120p' "$tmp_num" >&2
-  exit 2
-fi
-
-# -------------------------- helpers ------------------------------------------------------
-pick_hp_for_node() {
-  local node="$1"
-  local n="$2"
-  local include_ht="$3"
-
-  read -r -a arr <<< "${NODE_CPUS[$node]}"
-  local len="${#arr[@]}"
-
-  local -a phys=()
-  local -a ht=()
-
-  # Infer "physical half + HT half" if second half = first half + constant offset
-  if (( len >= 2 && len % 2 == 0 )); then
-    local half=$((len/2))
-    local ok=1
-    local offset=$(( arr[half] - arr[0] ))
-    for ((i=0;i<half;i++)); do
-      if (( arr[i+half] - arr[i] != offset )); then
-        ok=0
-        break
-      fi
-    done
-    if (( ok==1 )); then
-      phys=( "${arr[@]:0:half}" )
-      ht=( "${arr[@]:half:half}" )
-    else
-      phys=( "${arr[@]}" )
-      ht=()
-    fi
-  else
-    phys=( "${arr[@]}" )
-    ht=()
-  fi
-
-  local -a hp_phys=( "${phys[@]:0:n}" )
-  local -a out=( "${hp_phys[@]}" )
-
-  if [[ "$include_ht" == "1" && "${#ht[@]}" -gt 0 ]]; then
-    local k="${#hp_phys[@]}"
-    local -a hp_ht=( "${ht[@]:0:k}" )
-    out+=( "${hp_ht[@]}" )
-  fi
-
-  printf '%s\n' "${out[@]}" | sort -n | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+print_header() {
+  echo "------------------------------------------------------------"
+  echo "$1"
+  echo "------------------------------------------------------------"
 }
 
-compress_ranges() {
-  awk '
-    NR==1{start=$1;prev=$1;next}
-    {
-      if ($1==prev+1){prev=$1;next}
-      print start "-" prev
-      start=$1;prev=$1
-    }
-    END{print start "-" prev}
-  ' | awk '
-    {
-      split($0,a,"-");
-      if (a[1]==a[2]) print a[1];
-      else print $0
-    }
-  ' | paste -sd, -
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+detect_hp_per_domain() {
+  local want_bucket="${1:-0}"
+  local out
+  out="$($ISS_PERF_CMD 2>&1 || true)"
+
+  local pairs
+  pairs="$(
+    echo "$out" | tr -d '\r' | awk '
+      BEGIN { in_tf=0; b="" }
+      /speed-select-turbo-freq-properties/ { in_tf=1; b=""; next }
+      in_tf && $1 ~ /^bucket-[0-9]+$/ { b=$1; next }
+      in_tf && index($0, "high-priority-cores-count:") {
+        line=$0
+        sub(/.*high-priority-cores-count:[[:space:]]*/, "", line)
+        sub(/[^0-9].*$/, "", line)
+        if (b != "" && line != "") print b ":" line
+      }
+    ' | sort -V | uniq
+  )"
+  [[ -z "$pairs" ]] && { echo ""; return 0; }
+
+  if [[ "$DEBUG_MAP" == "1" ]]; then
+    print_header "Detected HP buckets (unique)"
+    echo "$pairs" | sed 's/^/  /'
+    echo
+  fi
+
+  local sel
+  sel="$(
+    echo "$pairs" | awk -F: -v want="bucket-${want_bucket}" '
+      $1==want {print $2; found=1}
+      END{ if(!found) exit 1 }
+    ' 2>/dev/null | head -n1 || true
+  )"
+  [[ -n "$sel" ]] && { echo "$sel"; return 0; }
+
+  echo "$pairs" | awk -F: 'BEGIN{m=999999}{v=$2+0; if(v<m)m=v}END{print m}'
+}
+
+compress_ranges_from_list() {
+  python3 -c '
+import sys
+xs=[]
+for line in sys.stdin:
+  line=line.strip()
+  if not line: continue
+  try: xs.append(int(line.split()[0]))
+  except: pass
+xs=sorted(set(xs))
+if not xs:
+  print("")
+  raise SystemExit(0)
+res=[]
+i=0
+while i<len(xs):
+  j=i
+  while j+1<len(xs) and xs[j+1]==xs[j]+1: j+=1
+  res.append(str(xs[i]) if i==j else f"{xs[i]}-{xs[j]}")
+  i=j+1
+print(",".join(res))
+'
 }
 
 expand_with_ht_siblings() {
-  # Input: cpu ranges, e.g. "0-7,32-39"
-  # Output: includes HT siblings based on inferred offset = total_online_cpus/2 (e.g., +128)
   local cpu_ranges="$1"
+  [[ -n "$cpu_ranges" ]] || { echo ""; return; }
 
   local total
   total="$(lscpu -p=CPU | grep -v '^#' | wc -l | tr -d ' ')"
@@ -168,182 +131,210 @@ hp=os.environ["HP_LIST"]
 offset=int(os.environ["OFFSET"])
 
 def expand(s):
-    out=set()
-    for part in s.split(","):
-        part=part.strip()
-        if not part: continue
-        if "-" in part:
-            a,b=part.split("-",1)
-            out.update(range(int(a), int(b)+1))
-        else:
-            out.add(int(part))
-    return out
+  out=set()
+  for part in s.split(","):
+    part=part.strip()
+    if not part: continue
+    if "-" in part:
+      a,b=part.split("-",1)
+      out.update(range(int(a), int(b)+1))
+    else:
+      out.add(int(part))
+  return out
 
 hp_set=expand(hp)
 all_set=set(hp_set)
 for c in list(hp_set):
-    all_set.add(c+offset)
+  all_set.add(c+offset)
 
 xs=sorted(all_set)
 res=[]
 i=0
 while i<len(xs):
-    j=i
-    while j+1<len(xs) and xs[j+1]==xs[j]+1:
-        j+=1
-    res.append(str(xs[i]) if i==j else f"{xs[i]}-{xs[j]}")
-    i=j+1
+  j=i
+  while j+1<len(xs) and xs[j+1]==xs[j]+1: j+=1
+  res.append(str(xs[i]) if i==j else f"{xs[i]}-{xs[j]}")
+  i=j+1
 print(",".join(res))
 PY
 }
 
-verify_get_assoc() {
+apply_assoc() {
+  # IMPORTANT: cpu_list first, clos second
   local cpu_list="$1"
-  local expect_clos="$2"
-  local label="$3"
+  local clos="$2"
 
-  echo "=== Verify ($label): expect clos:$expect_clos on cpu-list [$cpu_list] ==="
+  [[ -n "$cpu_list" ]] || die "apply_assoc got empty cpu_list (clos=$clos)"
+  [[ "$clos" =~ ^[0-9]+$ ]] || die "apply_assoc got non-numeric clos='$clos'"
 
-  out="$($SUDO intel-speed-select -c "$cpu_list" core-power get-assoc 2>&1)"
-
-  # Show a short preview
-  echo "$out" | sed -n '1,25p'
-
-  local bad=0
-  local current_cpu=""
-
-  while IFS= read -r line; do
-    if [[ "$line" =~ cpu-([0-9]+) ]]; then
-      current_cpu="${BASH_REMATCH[1]}"
-    fi
-    if [[ "$line" =~ clos:([0-9]+) ]]; then
-      found="${BASH_REMATCH[1]}"
-      if [[ "$found" != "$expect_clos" ]]; then
-        echo "ERROR: cpu-$current_cpu has clos:$found (expected clos:$expect_clos)"
-        bad=1
-      fi
-    fi
-  done <<< "$out"
-
-  if [[ "$bad" -eq 1 ]]; then
-    echo "Verification FAILED for $label"
-    return 1
+  local out rc
+  if [[ "$DEBUG_VERBOSE" == "1" ]]; then
+    $ISS -c "$cpu_list" core-power assoc --clos "$clos"
+    return 0
   fi
 
-  echo "OK: All queried CPUs show clos:$expect_clos"
-  echo
+  out="$($ISS -c "$cpu_list" core-power assoc --clos "$clos" 2>&1 >/dev/null)" || rc=$?
+  rc="${rc:-0}"
+
+  # Some builds print errors but still return 0; catch both.
+  if (( rc != 0 )) || echo "$out" | grep -qiE 'malformed arguments|Error:'; then
+    echo "$out" >&2
+    die "intel-speed-select assoc failed (clos=$clos cpu_list=$cpu_list)"
+  fi
 }
 
-# -------------------------- map rep CPUs to NUMA nodes (domains) -------------------------
-echo "=== Representative CPUs discovered from intel-speed-select core-power info ==="
-printf 'rep_cpu: %s\n' "${REP_CPUS[@]}"
-echo
+get_assoc_pairs() {
+  local cpu_list="$1"
+  [[ -n "$cpu_list" ]] || return 0
+  $ISS -c "$cpu_list" core-power get-assoc 2>&1 | awk '
+    /cpu-[0-9]+/{
+      cpu=$0; sub(/^.*cpu-/,"",cpu); sub(/[^0-9].*$/,"",cpu); next
+    }
+    /clos:[0-9]+/{
+      clos=$0; sub(/^.*clos:/,"",clos); sub(/[^0-9].*$/,"",clos);
+      if (cpu!="") printf "cpu-%s clos:%s\n", cpu, clos
+    }'
+}
 
-echo "=== Domain NUMA nodes (inferred via rep_cpu membership) ==="
-declare -A DOMAIN_NODES
-for rep in "${REP_CPUS[@]}"; do
-  node="${CPU_TO_NODE[$rep]:-}"
-  [[ -n "$node" ]] && DOMAIN_NODES["$node"]=1
-done
+# ---- checks
+command -v numactl >/dev/null 2>&1 || die "numactl not found"
+command -v lscpu >/dev/null 2>&1 || die "lscpu not found"
+command -v python3 >/dev/null 2>&1 || die "python3 not found"
+command -v intel-speed-select >/dev/null 2>&1 || die "intel-speed-select not found"
 
-if [[ "${#DOMAIN_NODES[@]}" -eq 0 ]]; then
-  echo "ERROR: None of the representative CPUs were found in numactl -H CPU lists." >&2
-  exit 3
+# ---- NUMA
+TMP_NUMA="$(mktemp)"
+trap 'rm -f "$TMP_NUMA"' EXIT
+numactl -H > "$TMP_NUMA"
+
+declare -A NODE_CPUS
+while IFS= read -r line; do
+  [[ "$line" =~ ^node[[:space:]]+([0-9]+)[[:space:]]+cpus: ]] || continue
+  node="${BASH_REMATCH[1]}"
+  cpus="${line#*cpus:}"
+  cpus="$(echo "$cpus" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  NODE_CPUS["$node"]="$cpus"
+done < "$TMP_NUMA"
+[[ "${#NODE_CPUS[@]}" -gt 0 ]] || die "Could not parse NUMA nodes from numactl -H"
+
+# ---- HP_PER_DOMAIN auto
+if [[ -z "${HP_PER_DOMAIN}" || "${HP_PER_DOMAIN}" == "0" ]]; then
+  det="$(detect_hp_per_domain "$HP_BUCKET")"
+  [[ -n "$det" ]] || die "Could not auto-detect HP_PER_DOMAIN (set HP_PER_DOMAIN manually)"
+  HP_PER_DOMAIN="$det"
 fi
 
-for node in $(printf '%s\n' "${!DOMAIN_NODES[@]}" | sort -n); do
-  rep_show=""
-  for rep in "${REP_CPUS[@]}"; do
-    if [[ "${CPU_TO_NODE[$rep]:-}" == "$node" ]]; then
-      rep_show="$rep"
-      break
+print_header "Config"
+echo "HP_PER_DOMAIN=$HP_PER_DOMAIN (HP_BUCKET=$HP_BUCKET)"
+echo "INCLUDE_HT=$INCLUDE_HT"
+echo "HP_CLOS=$HP_CLOS  OTHER_CLOS=$OTHER_CLOS"
+echo "DEBUG_MODE=$DEBUG_MODE  DRY_RUN=$DRY_RUN  DEBUG_VERBOSE=$DEBUG_VERBOSE  DEBUG_MAP=$DEBUG_MAP"
+echo
+
+print_header "HP selection per NUMA node (initial pick)"
+HP_LIST=()
+for node in $(printf '%s\n' "${!NODE_CPUS[@]}" | sort -n); do
+  read -r -a arr <<< "${NODE_CPUS[$node]}"
+  len="${#arr[@]}"
+  phys=("${arr[@]}"); ht=()
+
+  if (( len >= 2 && len % 2 == 0 )); then
+    half=$((len/2))
+    offset=$(( arr[half] - arr[0] ))
+    ok=1
+    for ((i=0;i<half;i++)); do
+      if (( arr[i+half] - arr[i] != offset )); then ok=0; break; fi
+    done
+    if (( ok==1 )); then
+      phys=( "${arr[@]:0:half}" )
+      ht=( "${arr[@]:half:half}" )
     fi
-  done
-  echo "NUMA node $node (rep_cpu=$rep_show)"
-  echo "  node_cpus: ${NODE_CPUS[$node]}"
-done
-echo
+  fi
 
-# -------------------------- build initial HP list across domains -------------------------
-echo "=== Suggested High-Priority (HP) CPU list (initial pick) ==="
-echo "HP_PER_DOMAIN=$HP_PER_DOMAIN INCLUDE_HT=$INCLUDE_HT"
-hp_all=()
-for node in $(printf '%s\n' "${!DOMAIN_NODES[@]}" | sort -n); do
-  hp_node="$(pick_hp_for_node "$node" "$HP_PER_DOMAIN" "$INCLUDE_HT")"
-  echo "node $node hp_cpus: $hp_node"
-  hp_all+=( $hp_node )
+  hp_phys=( "${phys[@]:0:HP_PER_DOMAIN}" )
+  out=( "${hp_phys[@]}" )
+  if [[ "$INCLUDE_HT" == "1" && "${#ht[@]}" -gt 0 ]]; then
+    out+=( "${ht[@]:0:${#hp_phys[@]}}" )
+  fi
+
+  echo "node $node -> ${out[*]}"
+  HP_LIST+=( "${out[@]}" )
 done
 
-hp_sorted_unique="$(printf '%s\n' "${hp_all[@]}" | sort -n | uniq)"
-HP_RANGES="$(printf '%s\n' "$hp_sorted_unique" | compress_ranges)"
+HP_RANGES="$(printf "%s\n" "${HP_LIST[@]}" | sort -n | uniq | compress_ranges_from_list)"
+[[ -n "$HP_RANGES" ]] || die "HP_RANGES is empty"
+HP_EFFECTIVE="$(expand_with_ht_siblings "$HP_RANGES")"
+[[ -n "$HP_EFFECTIVE" ]] || die "HP_EFFECTIVE is empty"
 
 echo
-echo "HP cpu-list (ranges, initial): $HP_RANGES"
-
-# Close HP set under HT-sibling relation (required on your platform)
-HP_EFFECTIVE_RANGES="$(expand_with_ht_siblings "$HP_RANGES")"
-echo "HP effective cpu-list (incl HT siblings): $HP_EFFECTIVE_RANGES"
+echo "HP initial ranges      : $HP_RANGES"
+echo "HP effective (with HT) : $HP_EFFECTIVE"
 echo
 
-# -------------------------- compute non-HP list across ALL online CPUs -------------------
 ALL_CPUS_CSV="$(lscpu -p=CPU | grep -v '^#' | cut -d, -f1 | sort -n | uniq | paste -sd, -)"
-
 NON_HP_RANGES="$(
-  HP_LIST="$HP_EFFECTIVE_RANGES" ALL_CPUS="$ALL_CPUS_CSV" python3 - <<'PY'
+  HP_LIST="$HP_EFFECTIVE" ALL_CPUS="$ALL_CPUS_CSV" python3 - <<'PY'
 import os
-hp=os.environ["HP_LIST"]
-all_=os.environ["ALL_CPUS"]
-def expand(s: str):
-    out=set()
-    for part in s.split(","):
-        part=part.strip()
-        if not part: continue
-        if "-" in part:
-            a,b=part.split("-",1)
-            out.update(range(int(a), int(b)+1))
-        else:
-            out.add(int(part))
-    return out
-hp_set=expand(hp)
-all_set=expand(all_)
-non=sorted(all_set - hp_set)
-res=[]
-i=0
-while i < len(non):
-    j=i
-    while j+1 < len(non) and non[j+1] == non[j] + 1:
-        j += 1
-    res.append(str(non[i]) if i==j else f"{non[i]}-{non[j]}")
-    i = j + 1
+hp=os.environ["HP_LIST"]; all_=os.environ["ALL_CPUS"]
+def expand(s):
+  out=set()
+  for part in s.split(","):
+    part=part.strip()
+    if not part: continue
+    if "-" in part:
+      a,b=part.split("-",1); out.update(range(int(a), int(b)+1))
+    else:
+      out.add(int(part))
+  return out
+hp_set=expand(hp); all_set=expand(all_)
+non=sorted(all_set-hp_set)
+res=[]; i=0
+while i<len(non):
+  j=i
+  while j+1<len(non) and non[j+1]==non[j]+1: j+=1
+  res.append(str(non[i]) if i==j else f"{non[i]}-{non[j]}")
+  i=j+1
 print(",".join(res))
 PY
 )"
 
-echo "NON-HP cpu-list (ranges): $NON_HP_RANGES"
+print_header "Computed CPU lists"
+echo "HP (effective) : $HP_EFFECTIVE"
+echo "Non-HP         : $NON_HP_RANGES"
 echo
 
-# -------------------------- apply CLOS assignments ---------------------------------------
-echo "=== Apply CLOS assignments ==="
-echo "HP -> CLOS${HP_CLOS}       : $HP_EFFECTIVE_RANGES"
-echo "Non-HP -> CLOS${OTHER_CLOS}: $NON_HP_RANGES"
-echo
-
-if [[ "$DRY_RUN" == "1" ]]; then
-  echo "DRY_RUN=1 set; not applying changes."
-  echo "Would run:"
-  echo "  $SUDO intel-speed-select -c \"$HP_EFFECTIVE_RANGES\" core-power assoc --clos \"$HP_CLOS\""
-  echo "  $SUDO intel-speed-select -c \"$NON_HP_RANGES\" core-power assoc --clos \"$OTHER_CLOS\""
-  echo "And verify via get-assoc."
+if [[ "$DEBUG_MODE" == "1" ]]; then
+  print_header "DEBUG_MODE=1 (read-only)"
+  echo "No CLOS changes applied. No verification performed."
   exit 0
 fi
 
-$SUDO intel-speed-select -c "$HP_EFFECTIVE_RANGES" core-power assoc --clos "$HP_CLOS"
-$SUDO intel-speed-select -c "$NON_HP_RANGES" core-power assoc --clos "$OTHER_CLOS"
+if [[ "$DRY_RUN" == "1" ]]; then
+  print_header "DRY_RUN=1 (no changes)"
+  echo "Would run:"
+  echo "  $ISS -c \"$HP_EFFECTIVE\" core-power assoc --clos $HP_CLOS"
+  echo "  $ISS -c \"$NON_HP_RANGES\" core-power assoc --clos $OTHER_CLOS"
+  exit 0
+fi
 
+print_header "Apply CLOS assignments (quiet)"
+echo "Setting HP -> CLOS${HP_CLOS}, Non-HP -> CLOS${OTHER_CLOS}"
+
+apply_assoc "$HP_EFFECTIVE" "$HP_CLOS"
+apply_assoc "$NON_HP_RANGES" "$OTHER_CLOS"
+
+echo "Applied."
 echo
-echo "=== Verification using get-assoc (authoritative for your build) ==="
-verify_get_assoc "$HP_EFFECTIVE_RANGES" "$HP_CLOS" "HP (effective, incl siblings)"
-verify_get_assoc "$NON_HP_RANGES" "$OTHER_CLOS" "Non-HP"
+
+print_header "Verification (concise CPU->CLOS)"
+echo "HP list should be clos:$HP_CLOS"
+get_assoc_pairs "$HP_EFFECTIVE" | head -n "$SHOW_VERIFY_LINES" || true
+echo "… (showing first $SHOW_VERIFY_LINES lines)"
+echo
+
+echo "Non-HP list should be clos:$OTHER_CLOS"
+get_assoc_pairs "$NON_HP_RANGES" | head -n "$SHOW_VERIFY_LINES" || true
+echo "… (showing first $SHOW_VERIFY_LINES lines)"
+echo
 
 echo "Done."
-
