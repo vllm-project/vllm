@@ -2,6 +2,7 @@ group: Hardware
 depends_on: ~
 steps:
   - label: "Intel CPU Test"
+    depends_on: ~
     soft_fail: true
     device: intel_cpu
     no_plugin: true
@@ -9,6 +10,7 @@ steps:
     - bash .buildkite/scripts/hardware_ci/run-cpu-test.sh
   
   - label: "Intel HPU Test"
+    depends_on: ~
     soft_fail: true
     device: intel_hpu
     no_plugin: true
@@ -16,6 +18,7 @@ steps:
     - bash .buildkite/scripts/hardware_ci/run-hpu-test.sh
 
   - label: "Intel GPU Test"
+    depends_on: ~
     soft_fail: true
     device: intel_gpu
     no_plugin: true
