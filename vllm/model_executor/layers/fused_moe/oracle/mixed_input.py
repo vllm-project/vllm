@@ -27,7 +27,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.fused_moe import FusedMoE
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
