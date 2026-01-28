@@ -56,6 +56,12 @@ def parse_args():
         default="eagle",
         choices=["ngram", "eagle", "eagle3", "mtp", "draft_model"],
     )
+    parser.add_argument(
+        "--parallel-draft",
+        action="store_true",
+        help="Generate all draft tokens in a single forward pass. "
+        "Requires a draft model trained for parallel drafting.",
+    )
     parser.add_argument("--num-spec-tokens", type=int, default=2)
     parser.add_argument("--prompt-lookup-max", type=int, default=5)
     parser.add_argument("--prompt-lookup-min", type=int, default=2)
@@ -104,18 +110,28 @@ def main(args):
     else:
         prompts = get_custom_mm_prompts(args.num_prompts)
 
-    if args.method == "eagle" or args.method == "eagle3":
+    if args.method in ("eagle", "eagle3"):
         eagle_dir = args.eagle_dir
         if args.method == "eagle" and eagle_dir is None:
+            if args.parallel_draft:
+                raise ValueError(
+                    "--eagle-dir is required when using --parallel-draft. "
+                    "No public parallel draft model is available yet."
+                )
             eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
-
         elif args.method == "eagle3" and eagle_dir is None:
+            if args.parallel_draft:
+                raise ValueError(
+                    "--eagle-dir is required when using --parallel-draft. "
+                    "No public parallel draft model is available yet."
+                )
             eagle_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
         speculative_config = {
             "method": args.method,
             "model": eagle_dir,
             "num_speculative_tokens": args.num_spec_tokens,
             "disable_padded_drafter_batch": args.disable_padded_drafter_batch,
+            "parallel_draft": args.parallel_draft,
         }
     elif args.method == "ngram":
         speculative_config = {

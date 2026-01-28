@@ -108,6 +108,10 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
+    parallel_draft: bool = False
+    """When True, generate all draft tokens in a single forward pass instead
+    of sequential passes. Requires a draft model trained for parallel
+    drafting."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -377,7 +381,7 @@ class SpeculativeConfig:
                     config_format=self.target_model_config.config_format,
                 )
 
-                # Automatically detect the method
+                # Automatically detect the method (skip if already set to eagle variant)
                 if self.method in ("eagle", "eagle3"):
                     pass
                 # examples:
