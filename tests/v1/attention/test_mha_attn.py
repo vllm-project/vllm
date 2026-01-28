@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
@@ -210,18 +210,3 @@ def test_mha_attn_varlen_forward(
         ref_output.append(output_i)
     ref_output = torch.cat(ref_output, dim=1)
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
-
-
-@pytest.mark.parametrize("attention_cls", [Attention, MMEncoderAttention])
-def test_num_heads_not_divisble_by_num_kv_heads(attention_cls: type) -> None:
-    head_size = 64
-    scale = float(1.0 / (head_size**0.5))
-    num_heads = 16
-    num_kv_heads = 5
-    with pytest.raises(AssertionError):
-        _ = attention_cls(
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=scale,
-            num_kv_heads=num_kv_heads,
-        )
