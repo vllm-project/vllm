@@ -122,10 +122,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "qwen3coder_tool_parser",
         "Qwen3CoderToolParser",
     ),
-    "qwen3_coder_rl": (
-        "qwen3coder_tool_parser_rl",
-        "Qwen3CoderToolParserRL",
-    ),
     "qwen3_xml": (
         "qwen3xml_tool_parser",
         "Qwen3XMLToolParser",
@@ -137,6 +133,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "step3": (
         "step3_tool_parser",
         "Step3ToolParser",
+    ),
+    "step3p5": (
+        "step3p5_tool_parser",
+        "Step3p5ToolParser",
     ),
     "xlam": (
         "xlam_tool_parser",
