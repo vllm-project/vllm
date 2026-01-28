@@ -181,9 +181,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             (not self.moe.moe_parallel_config.use_all2all_kernels)
             or self.moe.moe_parallel_config.use_naive_all2all_kernels
         ):
-            prepare_finalize = MoEPrepareAndFinalizeNoEP(
-                defer_input_quant=False,
-            )
+            prepare_finalize = MoEPrepareAndFinalizeNoEP()
 
             experts = TritonExperts(
                 moe_config=self.moe,
