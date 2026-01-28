@@ -26,6 +26,7 @@ RELEVANT_PATTERNS = [
     "vllm/v1/attention/backends/*.py",
     "vllm/v1/attention/backends/**/*.py",
     "vllm/v1/attention/backends/fa_utils.py",
+    "vllm/model_executor/layers/attention/mla_attention.py",
     "vllm/platforms/cuda.py",
     "tools/pre_commit/generate_attention_backend_docs.py",
     "docs/design/attention_backends.md",
@@ -50,6 +51,9 @@ REGISTRY_FILE = BACKENDS_DIR / "registry.py"
 CUDA_PLATFORM_FILE = REPO_ROOT / "vllm" / "platforms" / "cuda.py"
 FA_UTILS_FILE = BACKENDS_DIR / "fa_utils.py"
 FLASHINFER_UTILS_FILE = REPO_ROOT / "vllm" / "utils" / "flashinfer.py"
+MLA_ATTENTION_FILE = (
+    REPO_ROOT / "vllm" / "model_executor" / "layers" / "attention" / "mla_attention.py"
+)
 
 
 def parse_registry() -> dict[str, str]:
@@ -215,6 +219,129 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
             "supports_sink": True,
         },
     }
+
+
+def parse_mla_prefill_backends() -> list[dict[str, Any]]:
+    """Parse MLA prefill backend options from mla_attention.py.
+
+    MLA uses different backends for prefill vs decode. The decode backends are
+    registered in the registry, but prefill backends are selected at runtime
+    based on conditions in MLACommonImpl.__init__.
+
+    Returns a list of prefill backend info dicts with their requirements.
+    """
+    if not MLA_ATTENTION_FILE.exists():
+        return []
+
+    try:
+        tree = ast.parse(MLA_ATTENTION_FILE.read_text())
+    except Exception:
+        return []
+
+    # Find compute capability requirements by parsing use_* functions
+    flashinfer_cc: str | None = None
+    cudnn_cc: str | None = None
+    trtllm_cc: str | None = None
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+
+        # Parse use_flashinfer_prefill for compute capability (SM100)
+        if node.name == "use_flashinfer_prefill":
+            for n in ast.walk(node):
+                if (
+                    isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "is_device_capability_family"
+                    and n.args
+                    and isinstance(n.args[0], ast.Constant)
+                    and isinstance(n.args[0].value, int)
+                ):
+                    flashinfer_cc = f"{n.args[0].value // 10}.x"
+
+        # Parse use_cudnn_prefill for compute capability (SM100)
+        if node.name == "use_cudnn_prefill":
+            for n in ast.walk(node):
+                if (
+                    isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "is_device_capability_family"
+                    and n.args
+                    and isinstance(n.args[0], ast.Constant)
+                    and isinstance(n.args[0].value, int)
+                ):
+                    cudnn_cc = f"{n.args[0].value // 10}.x"
+
+        # Parse use_trtllm_ragged_deepseek_prefill for compute capability
+        if node.name == "use_trtllm_ragged_deepseek_prefill":
+            for n in ast.walk(node):
+                if (
+                    isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Attribute)
+                    and n.func.attr == "is_device_capability_family"
+                    and n.args
+                    and isinstance(n.args[0], ast.Constant)
+                    and isinstance(n.args[0].value, int)
+                ):
+                    trtllm_cc = f"{n.args[0].value // 10}.x"
+
+    # Build prefill backend list based on what we found
+    # Order matches the priority in MLACommonImpl.__init__
+    prefill_backends: list[dict[str, Any]] = []
+
+    # TRT-LLM Ragged (highest priority if available)
+    if trtllm_cc:
+        prefill_backends.append(
+            {
+                "name": "TRT-LLM Ragged‡",
+                "description": "TensorRT-LLM ragged attention",
+                "compute_capability": trtllm_cc,
+                "enable": "Default on SM100",
+                "disable": "`-ac.use_trtllm_ragged_deepseek_prefill=0`",
+                "notes": "DeepSeek R1 dims only",
+            }
+        )
+
+    # FlashInfer prefill
+    if flashinfer_cc:
+        prefill_backends.append(
+            {
+                "name": "FlashInfer",
+                "description": "FlashInfer CUTLASS backend",
+                "compute_capability": flashinfer_cc,
+                "enable": "`-ac.disable_flashinfer_prefill=0`",
+                "disable": "`-ac.disable_flashinfer_prefill=1`",
+                "notes": "DeepSeek R1 dims only",
+            }
+        )
+
+    # cuDNN prefill
+    if cudnn_cc:
+        prefill_backends.append(
+            {
+                "name": "cuDNN",
+                "description": "cuDNN-based attention",
+                "compute_capability": cudnn_cc,
+                "enable": "`-ac.use_cudnn_prefill=1`",
+                "disable": "`-ac.use_cudnn_prefill=0`",
+                "notes": "",
+            }
+        )
+
+    # FlashAttention is always available as fallback
+    prefill_backends.append(
+        {
+            "name": "FlashAttention",
+            "description": "FlashAttention varlen (FA2/FA3)",
+            "compute_capability": "Any",
+            "enable": "Default fallback",
+            "disable": "Use other backends",
+            "notes": "FA3 on SM90, FA2 otherwise",
+        }
+    )
+
+    return prefill_backends
 
 
 def find_class_in_ast(tree: ast.AST, class_name: str) -> ast.ClassDef | None:
@@ -564,7 +691,7 @@ def generate_markdown_table(
 
     for info in sorted(backends, key=sort_key):
         if is_mla_table:
-            row = "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            row = "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 info["name"],
                 info["dtypes"],
                 add_literal_quotes(info["kv_cache_dtypes"]),
@@ -577,7 +704,7 @@ def generate_markdown_table(
                 info["compute_capability"],
             )
         elif has_versions:
-            row = "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            row = "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 info["name"],
                 info.get("version", ""),
                 info["dtypes"],
@@ -590,7 +717,7 @@ def generate_markdown_table(
                 info["compute_capability"],
             )
         else:
-            row = "| {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            row = "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 info["name"],
                 info["dtypes"],
                 add_literal_quotes(info["kv_cache_dtypes"]),
@@ -714,13 +841,15 @@ There are two ways to specify the backend from the command line:
 vllm serve <model> --attention-backend FLASH_ATTN
 ```
 
-**Option 2: Using `--attention-config.backend` (structured config)**
+**Option 2: Using `--attention-config.backend` / `-ac.backend` (structured config)**
 
 ```bash
 # Dot notation
 vllm serve <model> --attention-config.backend FLASH_ATTN
+vllm serve <model> -ac.backend FLASH_ATTN
 
-# JSON format with -ac shorthand
+# JSON format
+vllm serve <model> --attention-config '{"backend": "FLASH_ATTN"}'
 vllm serve <model> -ac '{"backend": "FLASH_ATTN"}'
 ```
 
@@ -830,6 +959,79 @@ def generate_priority_section(priorities: dict[str, list[str]]) -> str:
     return "\n".join(lines)
 
 
+def generate_mla_section(
+    prefill_backends: list[dict[str, Any]], decode_backends: list[dict[str, Any]]
+) -> str:
+    """Generate the complete MLA section with prefill and decode tables."""
+    lines = [
+        "## MLA (Multi-head Latent Attention) Backends",
+        "",
+        "MLA uses separate backends for prefill and decode phases.",
+        "",
+        "### Prefill Backends",
+        "",
+        "The prefill backend is selected at runtime based on hardware and",
+        "configuration.",
+        "",
+        "| Backend | Description | Compute Cap. | Enable | Disable | Notes |",
+        "|---------|-------------|--------------|--------|---------|-------|",
+    ]
+
+    for backend in prefill_backends:
+        row = "| {} | {} | {} | {} | {} | {} |".format(
+            backend["name"],
+            backend["description"],
+            backend["compute_capability"],
+            backend["enable"],
+            backend["disable"],
+            backend.get("notes", ""),
+        )
+        lines.append(row)
+
+    lines.extend(
+        [
+            "",
+            "> **‡** TRT-LLM Ragged is the default on Blackwell (SM100).",
+            "> On other GPUs, FlashAttention is used as the default.",
+            "",
+            "### Decode Backends",
+            "",
+        ]
+    )
+
+    # Generate decode backends table
+    header = (
+        "| Backend | Dtypes | KV Dtypes | Block Sizes | Head Sizes "
+        "| Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |"
+    )
+    separator = (
+        "|---------|--------|-----------|-------------|------------"
+        "|------|--------|-----------|-----------------|--------------|"
+    )
+    lines.extend([header, separator])
+
+    def sort_key(x: dict[str, Any]) -> tuple[str, int]:
+        return (x.get("_sort_key", x["name"]), x.get("_sort_order", 0))
+
+    for info in sorted(decode_backends, key=sort_key):
+        row = "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            info["name"],
+            info["dtypes"],
+            add_literal_quotes(info["kv_cache_dtypes"]),
+            info["block_sizes"],
+            info["head_sizes"],
+            bool_to_emoji(info["supports_sink"]),
+            bool_to_emoji(info["is_sparse"]),
+            bool_to_emoji(info["supports_mm_prefix"]),
+            info["attn_types"],
+            info["compute_capability"],
+        )
+        lines.append(row)
+
+    lines.append("")
+    return "\n".join(lines)
+
+
 def generate_legend() -> str:
     """Generate a legend explaining the table columns."""
     return """## Legend
@@ -862,6 +1064,9 @@ def generate_docs() -> str:
 
     # Parse FlashInfer TRTLLM feature differences (native vs TRTLLM on Blackwell)
     fi_features = parse_flashinfer_trtllm_features()
+
+    # Parse MLA prefill backends
+    mla_prefill_backends = parse_mla_prefill_backends()
 
     # Collect backend info
     all_backends = []
@@ -996,10 +1201,9 @@ def generate_docs() -> str:
         )
     if footnotes:
         doc_lines.append("\n>\n".join(footnotes) + "\n")
-    mla_title = "MLA (Multi-head Latent Attention) Backends"
-    doc_lines.append(
-        generate_markdown_table(mla_backends, mla_title, is_mla_table=True)
-    )
+
+    # Add MLA section with prefill and decode backends
+    doc_lines.append(generate_mla_section(mla_prefill_backends, mla_backends))
 
     return "\n".join(doc_lines)
 
