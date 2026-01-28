@@ -836,11 +836,14 @@ class OpenAIServingResponses(OpenAIServing):
         for i, (token_id, _logprob) in enumerate(logprobs.items()):
             if i >= top_logprobs:
                 break
-            text = (
-                _logprob.decoded_token
-                if _logprob.decoded_token is not None
-                else tokenizer.decode([token_id])
-            )
+            if self.return_tokens_as_token_ids:
+                text = f"token_id:{token_id}"
+            else:
+                text = (
+                    _logprob.decoded_token
+                    if _logprob.decoded_token is not None
+                    else tokenizer.decode([token_id])
+                )
             out.append(
                 LogprobTopLogprob(
                     token=text,
@@ -865,11 +868,14 @@ class OpenAIServingResponses(OpenAIServing):
         for i, token_id in enumerate(token_ids):
             logprob = logprobs[i]
             token_logprob = logprob[token_id]
-            text = (
-                token_logprob.decoded_token
-                if token_logprob.decoded_token is not None
-                else tokenizer.decode([token_id])
-            )
+            if self.return_tokens_as_token_ids:
+                text = f"token_id:{token_id}"
+            else:
+                text = (
+                    token_logprob.decoded_token
+                    if token_logprob.decoded_token is not None
+                    else tokenizer.decode([token_id])
+                )
             out.append(
                 Logprob(
                     token=text,
