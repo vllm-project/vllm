@@ -191,7 +191,7 @@ import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, cast
 
 if TYPE_CHECKING:
     from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
@@ -250,6 +250,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import (
+    fused_pcp_qkv_select,
     get_cp_local_seq_lens,
     get_pcp_query_indices,
     get_per_layer_parameters,
@@ -257,11 +258,7 @@ from vllm.v1.attention.backends.utils import (
     pcp_kv_allgather_and_restore,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import (
-    cp_lse_ag_out_ar,
-    cp_lse_ag_out_rs,
-    fused_pcp_qkv_select,
-)
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -695,6 +692,22 @@ class MLACommonBackend(AttentionBackend):
         return True
 
 
+class PrefillKernelMetadataProtocol(Protocol):
+    """Protocol for prefill attention kernel metadata."""
+
+    @property
+    def cu_seqlens_q(self) -> torch.Tensor: ...
+
+    @property
+    def cu_seqlens_k(self) -> torch.Tensor: ...
+
+    @property
+    def max_seqlen_q(self) -> int: ...
+
+    @property
+    def max_seqlen_k(self) -> int: ...
+
+
 @dataclass
 class MLACommonPrefillMetadata:
     """Prefill Specific Metadata"""
@@ -721,11 +734,16 @@ class MLACommonPrefillMetadata:
 
     @dataclass
     class PCPMetadata:
-        # For PCP
-        output_restore_idx: torch.Tensor | None = None
-        query_start_loc: torch.Tensor | None = None
-        kv_head_start_loc: torch.Tensor | None = None
-        kv_tail_start_loc: torch.Tensor | None = None
+        @dataclass
+        class ChunkMetadata:
+            cu_seqlens_q: torch.Tensor
+            cu_seqlens_k: torch.Tensor
+            max_seqlen_q: int
+            max_seqlen_k: int
+
+        output_restore_idx: torch.Tensor
+        head: "MLACommonPrefillMetadata.PCPMetadata.ChunkMetadata"
+        tail: "MLACommonPrefillMetadata.PCPMetadata.ChunkMetadata"
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
@@ -735,6 +753,23 @@ class MLACommonPrefillMetadata:
     workspace_buffer: torch.Tensor | None = None
     q_data_type: torch.dtype | None = None
     pcp_metadata: PCPMetadata | None = None
+
+    # Implement PrefillKernelMetadataProtocol for non-PCP case
+    @property
+    def cu_seqlens_q(self) -> torch.Tensor:
+        return self.query_start_loc
+
+    @property
+    def cu_seqlens_k(self) -> torch.Tensor:
+        return self.query_start_loc
+
+    @property
+    def max_seqlen_q(self) -> int:
+        return self.max_query_len
+
+    @property
+    def max_seqlen_k(self) -> int:
+        return self.max_query_len
 
 
 @dataclass
@@ -1415,17 +1450,30 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     prefill_query_start_loc_cpu
                 )
                 output_res_idx = torch.cat([q_head_idx, q_tail_idx]).argsort()
+                pcp_query_start_loc = prefill_query_start_loc // 2
+                max_query_len_half = max_query_len // 2
+
+                head_chunk = MLACommonPrefillMetadata.PCPMetadata.ChunkMetadata(
+                    cu_seqlens_q=pcp_query_start_loc,
+                    cu_seqlens_k=pcp_query_start_loc * (self.pcp_rank + 1),
+                    max_seqlen_q=max_query_len_half,
+                    max_seqlen_k=max_query_len_half * (self.pcp_rank + 1),
+                )
+                tail_chunk = MLACommonPrefillMetadata.PCPMetadata.ChunkMetadata(
+                    cu_seqlens_q=pcp_query_start_loc,
+                    cu_seqlens_k=pcp_query_start_loc
+                    * (self.pcp_world_size * 2 - self.pcp_rank),
+                    max_seqlen_q=max_query_len_half,
+                    max_seqlen_k=max_query_len_half
+                    * (self.pcp_world_size * 2 - self.pcp_rank),
+                )
+
                 pcp_metadata = MLACommonPrefillMetadata.PCPMetadata(
                     output_restore_idx=output_res_idx.to(
                         device, dtype=torch.int32, non_blocking=True
                     ),
-                    query_start_loc=prefill_query_start_loc // 2,
-                    kv_head_start_loc=prefill_query_start_loc
-                    // 2
-                    * (self.pcp_rank + 1),
-                    kv_tail_start_loc=prefill_query_start_loc
-                    // 2
-                    * (self.pcp_world_size * 2 - self.pcp_rank),
+                    head=head_chunk,
+                    tail=tail_chunk,
                 )
 
             prefill_metadata = self.prefill_metadata_cls(
@@ -1866,102 +1914,115 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             return attn_out, lse
         return attn_out
 
-    def _run_prefill_new_tokens_fa(
+    def _run_prefill_new_tokens_pcp(
         self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
     ):
-        assert self.pcp_world_size is not None
-        assert self.pcp_rank is not None
-        if self.pcp_world_size > 1:
-            # NOTE When PCP is enabled, we split the queries keys and values into
-            # "head" and "tail" parts using the DualChunkSwap strategy to balance
-            # workload across PCP ranks. We run attention twice (once for the head
-            # part and once for the tail part), then concatenate the results and
-            # restore the original ordering.
-            #
-            # Considering pcp_world_size=2 and sequence is [0,1,2,3,4,5,6,7]
-            #
-            #   pcp_rank0: Q [0,1,6,7] KV [0,1,2,3,4,5,6,7]
-            #    Q\KV  0 1 2 3 4 5 6 7
-            # head 0   1 0 0 0 0 0 0 0
-            #      1   1 1 0 0 0 0 0 0
-            #      -------------------
-            # tail 6   1 1 1 1 1 1 1 0
-            #      7   1 1 1 1 1 1 1 1
-            #
-            #   pcp_rank1: Q[2,3,4,5] KV [0,1,2,3,4,5,6,7]
-            #    Q\KV  0 1 2 3 4 5 6 7
-            # head 2   1 1 1 0 0 0 0 0
-            #      3   1 1 1 1 0 0 0 0
-            #      -------------------
-            # tail 4   1 1 1 1 1 0 0 0
-            #      5   1 1 1 1 1 1 0 0
+        """Run prefill attention with PCP (Prefill Context Parallelism) support.
 
-            q_head, k_head, v_head, q_tail, k_tail, v_tail = fused_pcp_qkv_select(
-                q=q,
-                k=k,
-                v=v,
-                query_start_loc=prefill.query_start_loc,
-                pcp_rank=self.pcp_rank,
-                pcp_world_size=self.pcp_world_size,
+        This method handles PCP by splitting QKV into head/tail chunks,
+        running attention on each, then merging and restoring order.
+
+        NOTE: Only call this when pcp_world_size > 1.
+        """
+        assert self.pcp_world_size > 1
+        assert self.pcp_rank != -1
+
+        # NOTE When PCP is enabled, we split the queries keys and values into
+        # "head" and "tail" parts using the DualChunkSwap strategy to balance
+        # workload across PCP ranks. We run attention twice (once for the head
+        # part and once for the tail part), then concatenate the results and
+        # restore the original ordering.
+        #
+        # Considering pcp_world_size=2 and sequence is [0,1,2,3,4,5,6,7]
+        #
+        #   pcp_rank0: Q [0,1,6,7] KV [0,1,2,3,4,5,6,7]
+        #    Q\KV  0 1 2 3 4 5 6 7
+        # head 0   1 0 0 0 0 0 0 0
+        #      1   1 1 0 0 0 0 0 0
+        #      -------------------
+        # tail 6   1 1 1 1 1 1 1 0
+        #      7   1 1 1 1 1 1 1 1
+        #
+        #   pcp_rank1: Q[2,3,4,5] KV [0,1,2,3,4,5,6,7]
+        #    Q\KV  0 1 2 3 4 5 6 7
+        # head 2   1 1 1 0 0 0 0 0
+        #      3   1 1 1 1 0 0 0 0
+        #      -------------------
+        # tail 4   1 1 1 1 1 0 0 0
+        #      5   1 1 1 1 1 1 0 0
+
+        q_head, k_head, v_head, q_tail, k_tail, v_tail = fused_pcp_qkv_select(
+            q=q,
+            k=k,
+            v=v,
+            query_start_loc=prefill.query_start_loc,
+            pcp_rank=self.pcp_rank,
+            pcp_world_size=self.pcp_world_size,
+        )
+
+        pcp_metadata = prefill.pcp_metadata
+        assert pcp_metadata is not None
+
+        output_head, lse_head = self._run_prefill_new_tokens(
+            q=q_head,
+            k=k_head,
+            v=v_head,
+            prefill=pcp_metadata.head,
+            return_softmax_lse=True,
+        )
+
+        output_tail, lse_tail = self._run_prefill_new_tokens(
+            q=q_tail,
+            k=k_tail,
+            v=v_tail,
+            prefill=pcp_metadata.tail,
+            return_softmax_lse=True,
+        )
+
+        output = torch.cat([output_head, output_tail], dim=0)
+        output_restore_idx = pcp_metadata.output_restore_idx
+        if return_softmax_lse:
+            # FA returns LSE in shape [ H, B ]
+            lse = torch.cat([lse_head, lse_tail], dim=-1)
+            return (
+                torch.index_select(output, 0, output_restore_idx),
+                torch.index_select(lse, -1, output_restore_idx),
             )
-
-            pcp_metadata = prefill.pcp_metadata
-            assert pcp_metadata is not None
-            output_head, lse_head = self._flash_attn_varlen_diff_headdims(
-                q=q_head,
-                k=k_head,
-                v=v_head,
-                cu_seqlens_q=pcp_metadata.query_start_loc,
-                cu_seqlens_k=pcp_metadata.kv_head_start_loc,
-                max_seqlen_q=prefill.max_query_len // 2,
-                max_seqlen_k=prefill.max_query_len // 2 * (self.pcp_rank + 1),
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=True,
-            )
-
-            output_tail, lse_tail = self._flash_attn_varlen_diff_headdims(
-                q=q_tail,
-                k=k_tail,
-                v=v_tail,
-                cu_seqlens_q=pcp_metadata.query_start_loc,
-                cu_seqlens_k=pcp_metadata.kv_tail_start_loc,
-                max_seqlen_q=prefill.max_query_len // 2,
-                max_seqlen_k=prefill.max_query_len
-                // 2
-                * (self.pcp_world_size * 2 - self.pcp_rank),
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=True,
-            )
-
-            output = torch.cat([output_head, output_tail], dim=0)
-            output_restore_idx = pcp_metadata.output_restore_idx
-            if return_softmax_lse:
-                # FA returns LSE in shape [ H, B ]
-                lse = torch.cat([lse_head, lse_tail], dim=-1)
-                return (
-                    torch.index_select(output, 0, output_restore_idx),
-                    torch.index_select(lse, -1, output_restore_idx),
-                )
-            else:
-                return torch.index_select(output, 0, output_restore_idx)
         else:
-            return self._flash_attn_varlen_diff_headdims(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=prefill.query_start_loc,
-                cu_seqlens_k=prefill.query_start_loc,
-                max_seqlen_q=prefill.max_query_len,
-                max_seqlen_k=prefill.max_query_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=return_softmax_lse,
-            )
+            return torch.index_select(output, 0, output_restore_idx)
+
+    def _run_prefill_new_tokens_fa(
+        self,
+        q,
+        k,
+        v,
+        prefill: PrefillKernelMetadataProtocol,
+        return_softmax_lse: bool,
+    ):
+        """Flash attention implementation for prefill new tokens.
+
+        Args:
+            q: Query tensor
+            k: Key tensor
+            v: Value tensor
+            prefill: Metadata conforming to PrefillKernelMetadataProtocol
+            return_softmax_lse: Whether to return softmax LSE
+        """
+        return self._flash_attn_varlen_diff_headdims(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=prefill.cu_seqlens_q,
+            cu_seqlens_k=prefill.cu_seqlens_k,
+            max_seqlen_q=prefill.max_seqlen_q,
+            max_seqlen_k=prefill.max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=True,
+            return_softmax_lse=return_softmax_lse,
+        )
 
     def _run_prefill_new_tokens_fi(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self, q, k, v, prefill: PrefillKernelMetadataProtocol, return_softmax_lse
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
         assert prefill.prefill_main is not None
@@ -1979,7 +2040,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         return ret
 
     def _run_prefill_new_tokens_cudnn(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self, q, k, v, prefill: PrefillKernelMetadataProtocol, return_softmax_lse
     ):
         assert isinstance(prefill, CudnnPrefillMetadata)
         assert prefill.query_seq_lens is not None
@@ -2066,11 +2127,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
     def _run_prefill_new_tokens_trtllm_ragged(
-        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+        self, q, k, v, prefill: PrefillKernelMetadataProtocol, return_softmax_lse
     ):
         """TRT-LLM ragged attention for new tokens (causal)."""
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
+        assert isinstance(prefill, MLACommonPrefillMetadata)
         assert prefill.query_seq_lens is not None
         assert prefill.workspace_buffer is not None
         assert self.pcp_world_size == 1, "PCP is not supported for TRT-LLM Prefill."
@@ -2366,13 +2428,22 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
 
         k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
-        output_prefill = self._run_prefill_new_tokens(
-            prefill=attn_metadata.prefill,
-            q=q,
-            k=k,
-            v=v,
-            return_softmax_lse=has_context,
-        )
+        if self.pcp_world_size > 1:
+            output_prefill = self._run_prefill_new_tokens_pcp(
+                prefill=attn_metadata.prefill,
+                q=q,
+                k=k,
+                v=v,
+                return_softmax_lse=has_context,
+            )
+        else:
+            output_prefill = self._run_prefill_new_tokens(
+                q=q,
+                k=k,
+                v=v,
+                prefill=attn_metadata.prefill,
+                return_softmax_lse=has_context,
+            )
 
         if has_context:
             suffix_output, suffix_lse = output_prefill

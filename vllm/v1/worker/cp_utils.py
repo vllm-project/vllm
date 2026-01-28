@@ -28,7 +28,6 @@ class PCPManager:
         pcp_world_size: int,
         pcp_rank: int,
         max_padded_num_tokens: int,
-        max_num_reqs: int,
         device: torch.device,
         pin_memory: bool = False,
     ) -> None:
@@ -41,21 +40,6 @@ class PCPManager:
             device=device,
             pin_memory=pin_memory,
         )
-        self.pcp_padded_slot_mapping = torch.empty(
-            (max_padded_num_tokens,),
-            dtype=torch.int64,
-            device=device,
-        )
-        self.num_pcp_pads_cpu_tensor = torch.zeros(
-            (max_num_reqs,), device="cpu", dtype=torch.int64
-        )
-        self.num_pcp_pads_cpu = self.num_pcp_pads_cpu_tensor.numpy()
-        self.pcp_unpad_mask_cpu_tensor = torch.zeros(
-            (max_padded_num_tokens,),
-            device="cpu",
-            dtype=torch.bool,
-        )
-        self.pcp_unpad_mask_cpu = self.pcp_unpad_mask_cpu_tensor.numpy()
 
     def _get_cumsum_and_arange(
         self,
@@ -99,13 +83,8 @@ class PCPManager:
         - Computes how many tokens each request should be processed by the
           current PCP rank (pcp_num_scheduled).
         - Computes indices into the original batch for gathering real tokens.
-        - Updates runner state arrays used to restore original order and mask
-          out padded tokens after allgather:
-            - self.num_pcp_pads_cpu: number of pads added per request
-            - self.pcp_unpad_mask_cpu: boolean mask marking real tokens in the
-              padded allgather buffer
-            - self.pcp_allgather_restore_idx: index array used to restore
-              original ordering after per-rank allgather and interleaving.
+        - Updates self.pcp_allgather_restore_idx: index array used to restore
+          original ordering after per-rank allgather and interleaving.
 
         Args:
             num_scheduled_tokens: 1D numpy array of per-request token counts.
@@ -120,12 +99,12 @@ class PCPManager:
 
         Example:
             Assume tokens = [1, 5, 8], pcp_world_size = 2:
-            - pcp_rank=0 gets pcp_num_scheduled=[1, 4, 4], positions=[0,0,1,6,7,0,1,6,7]
-            - pcp_rank=1 gets pcp_num_scheduled=[1, 4, 4], positions=[0,2,3,4,5,2,3,4,5]
-            Meanwhile, these are same for each pcp rank:
-            - num_pcp_pads_cpu: [1, 3, 0]
-            - pcp_unpad_mask_cpu: [T,F,T,T,T,T,T,F,F,F,T,T,T,T,T,T,T,T]
-            - pcp_allgather_restore_idx: [0,9,1,2,10,11,12,13,3,4,5,6,14,15,16,17,7,8]
+            - pcp_rank=0 gets pcp_num_scheduled=[1, 4, 4],
+              local_token_indices=[0,0,1,6,7,0,1,6,7]
+            - pcp_rank=1 gets pcp_num_scheduled=[1, 4, 4],
+              local_token_indices=[0,2,3,4,5,2,3,4,5]
+            - pcp_allgather_restore_idx:
+              [0,9,1,2,10,11,12,13,3,4,5,6,14,15,16,17,7,8]
         """
         assert reorder_batch_threshold is not None, (
             "PCP depends on reorder batch to split decode and prefill requests."
@@ -145,22 +124,9 @@ class PCPManager:
             num_scheduled_tokens[:num_decode_reqs] * self.pcp_world_size
         )
 
-        # Record how many pads were added per request (padded - original).
-        self.num_pcp_pads_cpu[:num_reqs] = (
-            num_padded_scheduled_tokens - num_scheduled_tokens
-        )
-
-        # cu_padded_tokens: cumulative sum of padded token counts,
-        # pcp_padded_arange: per-request arange flattened for padded tokens.
-        cu_padded_tokens, pcp_padded_arange = self._get_cumsum_and_arange(
+        # cu_padded_tokens: cumulative sum of padded token counts
+        cu_padded_tokens, _ = self._get_cumsum_and_arange(
             num_padded_scheduled_tokens, arange_np
-        )
-
-        # Build the mask that marks which positions in the padded allgather
-        # buffer correspond to real (unpadded) tokens.
-        self.pcp_unpad_mask_cpu[: pcp_padded_arange.shape[0]] = (
-            pcp_padded_arange
-            < np.repeat(num_scheduled_tokens, num_padded_scheduled_tokens)
         )
 
         # pcp_tokens: tokens per request for this rank after splitting
@@ -259,20 +225,7 @@ class PCPManager:
 
         return pcp_tokens[:num_reqs], local_token_indices.astype(np.int64)
 
-    def get_padded_slot_mapping(self, num_tokens: int, slot_mapping: torch.Tensor):
-        # After pcp allgather and restore, there are padded tokens in kv,
-        # so we need pad slotmapping for alignment.
-        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[
-            : num_tokens * self.pcp_world_size
-        ]
-        cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[
-            : num_tokens * self.pcp_world_size
-        ]
-        pcp_padded_slot_mapping.fill_(-1)
-        pcp_padded_slot_mapping[cp_unpad_mask] = slot_mapping
-        return pcp_padded_slot_mapping
-
-    def get_restore_hidden_states(
+    def restore_hidden_states(
         self, hidden_states: torch.Tensor, num_tokens_unpadded: int
     ):
         # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx

@@ -617,7 +617,6 @@ class GPUModelRunner(
                 self.pcp_world_size,
                 self.pcp_rank,
                 max_padded_num_tokens,
-                self.max_num_reqs,
                 self.device,
                 self.pin_memory,
             )
@@ -1446,18 +1445,6 @@ class GPUModelRunner(
         num_scheduled_tokens_np: np.ndarray,
         num_reqs: int,
     ) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Compute PCP partition indices.
-
-        Args:
-            num_scheduled_tokens_np: Per-request token counts (original).
-            num_reqs: Number of requests in the batch.
-
-        Returns:
-            Tuple (local_num_scheduled_tokens, local_token_indices):
-            - local_num_scheduled_tokens: Per-request token counts for this rank
-            - local_token_indices: Indices into full-batch positions for this rank
-        """
         local_num_scheduled, local_token_indices = (
             self.pcp_manager.compute_rank_indices(
                 num_scheduled_tokens_np[:num_reqs],
@@ -1472,7 +1459,7 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
         local_num_scheduled_tokens: np.ndarray,
-        total_num_scheduled_tokens: int,
+        local_num_tokens: int,
         local_token_indices: np.ndarray | None = None,
     ) -> tuple[
         torch.Tensor,
@@ -1483,8 +1470,7 @@ class GPUModelRunner(
             logits_indices, spec_decode_metadata,
         ]
         """
-        total_local_tokens = int(local_num_scheduled_tokens.sum())
-        assert total_local_tokens > 0
+        assert local_num_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
@@ -1500,8 +1486,10 @@ class GPUModelRunner(
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
 
+        total_num_tokens = scheduler_output.total_num_scheduled_tokens
+
         # Get positions.
-        positions_np = self.positions.np[:total_num_scheduled_tokens]
+        positions_np = self.positions.np[:total_num_tokens]
         np.add(
             self.input_batch.num_computed_tokens_cpu[req_indices],
             arange,
@@ -1509,7 +1497,7 @@ class GPUModelRunner(
         )
 
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
-        self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
+        self.input_batch.block_table.commit_slot_mapping(total_num_tokens)
 
         logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
             self.device, non_blocking=True
@@ -1518,12 +1506,11 @@ class GPUModelRunner(
         # For PCP: gather positions and recompute local indices
         if local_token_indices is not None:
             cu_num_tokens, _ = self._get_cumsum_and_arange(local_num_scheduled_tokens)
-            positions_np[:total_local_tokens] = positions_np[local_token_indices]
-            req_indices[:total_local_tokens] = req_indices[local_token_indices]
+            positions_np[:local_num_tokens] = positions_np[local_token_indices]
+            req_indices[:local_num_tokens] = req_indices[local_token_indices]
             # Slice to local length for subsequent use
-            positions_np = positions_np[:total_local_tokens]
-            req_indices = req_indices[:total_local_tokens]
-            total_num_scheduled_tokens = total_local_tokens
+            positions_np = positions_np[:local_num_tokens]
+            req_indices = req_indices[:local_num_tokens]
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1551,7 +1538,7 @@ class GPUModelRunner(
             self.input_batch.token_ids_cpu_tensor.flatten(),
             0,
             token_indices_tensor,
-            out=self.input_ids.cpu[:total_num_scheduled_tokens],
+            out=self.input_ids.cpu[:local_num_tokens],
         )
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
@@ -1559,7 +1546,7 @@ class GPUModelRunner(
                 is_token_ids,
                 0,
                 token_indices_tensor,
-                out=self.is_token_ids.cpu[:total_num_scheduled_tokens],
+                out=self.is_token_ids.cpu[:local_num_tokens],
             )
 
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
@@ -1628,25 +1615,25 @@ class GPUModelRunner(
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
             scheduler_output,
-            total_num_scheduled_tokens,
+            local_num_tokens,
             cu_num_tokens,
         )
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
+            self.mrope_positions.gpu[:, :local_num_tokens].copy_(
+                self.mrope_positions.cpu[:, :local_num_tokens],
                 non_blocking=True,
             )
         elif self.uses_xdrope_dim > 0:
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
+            self.xdrope_positions.gpu[:, :local_num_tokens].copy_(
+                self.xdrope_positions.cpu[:, :local_num_tokens],
                 non_blocking=True,
             )
         else:
             # Common case (1D positions)
-            self.positions.copy_to_gpu(total_num_scheduled_tokens)
+            self.positions.copy_to_gpu(local_num_tokens)
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -1655,7 +1642,6 @@ class GPUModelRunner(
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            # logits_indices already computed above using original cu_num_tokens
             spec_decode_metadata = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
         else:
@@ -1724,10 +1710,6 @@ class GPUModelRunner(
         # Attention metadata is not needed for attention free models
         if len(self.kv_cache_config.kv_cache_groups) == 0:
             return {}, None
-
-        assert num_tokens_padded is None or self.pcp_world_size == 1, (
-            "PCP not support pad attn now"
-        )
 
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
@@ -3412,16 +3394,15 @@ class GPUModelRunner(
             num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            # PCP partitioning
             local_num_scheduled_tokens = num_scheduled_tokens_np
             local_token_indices = None
-            total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+            local_total_num_tokens = scheduler_output.total_num_scheduled_tokens
 
             if self.pcp_world_size > 1:
                 local_num_scheduled_tokens, local_token_indices = (
                     self._partition_for_pcp(num_scheduled_tokens_np, num_reqs)
                 )
-                total_num_scheduled_tokens = int(local_num_scheduled_tokens.sum())
+                local_total_num_tokens = int(local_num_scheduled_tokens.sum())
 
             max_num_scheduled_tokens = int(local_num_scheduled_tokens.max())
 
@@ -3429,7 +3410,7 @@ class GPUModelRunner(
                 scheduler_output,
                 num_scheduled_tokens_np,
                 local_num_scheduled_tokens,
-                total_num_scheduled_tokens,
+                local_total_num_tokens,
                 local_token_indices,
             )
 
@@ -3603,9 +3584,9 @@ class GPUModelRunner(
             if self.pcp_world_size > 1:
                 # NOTE we must `slice` hidden_states because pcp_allgather_restore_idx
                 # ignores the padding from CUDA Graph.
-                hidden_states = self.pcp_manager.get_restore_hidden_states(
+                hidden_states = self.pcp_manager.restore_hidden_states(
                     hidden_states,
-                    total_num_scheduled_tokens,
+                    local_total_num_tokens,
                 )
             if not self.broadcast_pp_output:
                 # Common case.
