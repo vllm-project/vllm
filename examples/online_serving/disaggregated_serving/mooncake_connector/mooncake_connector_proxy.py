@@ -5,7 +5,6 @@ import argparse
 import asyncio
 import ipaddress
 import itertools
-import logging
 import os
 import urllib
 import uuid
@@ -15,9 +14,6 @@ from typing import Any
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
 
 
 def maybe_wrap_ipv6_address(address: str) -> str:
@@ -43,24 +39,28 @@ async def get_prefiller_info(prefill_clients: list, ready: asyncio.Event):
     for prefill_client in prefill_clients:
         while True:
             try:
-                response = await prefill_client["client"].get(
-                    prefill_client["bootstrap_addr"] + "/query"
-                )
+                # Wait for prefill service to be ready
+                response = await prefill_client["client"].get("/health")
                 response.raise_for_status()
-                data = response.json()
-                break
             except Exception:
                 await asyncio.sleep(1)
+                continue
 
-        dp_size = 0
-        for engine_id, engine_entry in data.items():
-            dp_size += len(engine_entry)
-            for dp_rank in engine_entry:
-                prefill_client["dp_engine_id"][int(dp_rank)] = engine_id
+            response = await prefill_client["client"].get(
+                prefill_client["bootstrap_addr"] + "/query"
+            )
+            response.raise_for_status()
+            data = response.json()
+            break
+
+        for dp_rank, dp_entry in data.items():
+            prefill_client["dp_engine_id"][int(dp_rank)] = dp_entry["engine_id"]
+        dp_size = len(data)
         prefill_client["dp_size"] = dp_size
+        print(f"Inited prefiller {prefill_client['url']} with dp_size={dp_size}")
 
     ready.set()
-    logger.info("All prefiller instances are ready.")
+    print("All prefiller instances are ready.")
 
 
 @asynccontextmanager
@@ -87,6 +87,7 @@ async def lifespan(app: FastAPI):
                         max_keepalive_connections=None,
                     ),
                 ),
+                "url": url,
                 "bootstrap_addr": make_http_path(hostname, bootstrap_port or 8998),
                 "dp_engine_id": {},
             }
@@ -116,7 +117,7 @@ async def lifespan(app: FastAPI):
     app.state.decode_iterator = itertools.cycle(range(len(app.state.decode_clients)))
 
     print(
-        f"Initialized {len(app.state.prefill_clients)} prefill clients "
+        f"Got {len(app.state.prefill_clients)} prefill clients "
         f"and {len(app.state.decode_clients)} decode clients."
     )
 
@@ -256,6 +257,7 @@ async def send_request_to_service(
     req_data["kv_transfer_params"] = {
         "do_remote_decode": True,
         "do_remote_prefill": False,
+        "transfer_id": f"xfer-{request_id}",
     }
     req_data["stream"] = False
     req_data["max_tokens"] = 1
@@ -299,7 +301,7 @@ async def stream_service_response(
         "do_remote_prefill": True,
         "remote_bootstrap_addr": prefill_client_info["bootstrap_addr"],
         "remote_engine_id": prefill_client_info["dp_engine_id"][prefill_dp_rank],
-        "remote_dp_rank": prefill_dp_rank,
+        "transfer_id": f"xfer-{request_id}",
     }
 
     async with decode_client_info["client"].stream(
@@ -363,16 +365,6 @@ async def handle_completions(request: Request):
 @app.post("/v1/chat/completions")
 async def handle_chat_completions(request: Request):
     return await _handle_completions("/v1/chat/completions", request)
-
-
-@app.get("/healthcheck")
-async def healthcheck():
-    """Simple endpoint to check if the server is running."""
-    return {
-        "status": "ok",
-        "prefill_instances": len(app.state.prefill_clients),
-        "decode_instances": len(app.state.decode_clients),
-    }
 
 
 if __name__ == "__main__":

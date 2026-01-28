@@ -923,12 +923,6 @@ class EngineCoreProc(EngineCore):
                 )
 
             parallel_config.data_parallel_index = dp_rank
-            parallel_config.origin_data_parallel_size = (
-                parallel_config.data_parallel_size
-            )
-            parallel_config.origin_data_parallel_size_local = (
-                parallel_config.data_parallel_size_local
-            )
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank

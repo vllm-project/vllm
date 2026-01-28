@@ -280,14 +280,6 @@ class ParallelConfig:
     """Equal to the data parallel rank but not used for torch process groups
     and not overridden for dense models."""
 
-    origin_data_parallel_size: int = Field(init=False)
-    """Equal to the data parallel size but not used for torch process groups
-    and not overridden for dense models."""
-
-    origin_data_parallel_size_local: int = Field(init=False)
-    """Equal to the data parallel size local but not used for torch process groups
-    and not overridden for dense models."""
-
     _api_process_count: int = Field(default=1, gt=0)
     """
     The number of API processes initialized.
@@ -602,8 +594,6 @@ class ParallelConfig:
                 )
 
         self.data_parallel_index = self.data_parallel_rank
-        self.origin_data_parallel_size = self.data_parallel_size
-        self.origin_data_parallel_size_local = self.data_parallel_size_local
 
         if self.distributed_executor_backend == "external_launcher":
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"

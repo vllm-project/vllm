@@ -3,6 +3,7 @@
 import threading
 import time
 from collections.abc import MutableMapping
+from dataclasses import dataclass
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -25,8 +26,11 @@ class RegisterWorkerPayload(BaseModel):
     addr: WorkerAddr
 
 
-# {dp_rank: {tp_rank: {pp_rank: worker_addr}}}
-EngineEntry = dict[int, dict[int, dict[int, WorkerAddr]]]
+@dataclass
+class EngineEntry:
+    engine_id: EngineId
+    # {tp_rank: {pp_rank: worker_addr}}
+    worker_addr: dict[int, dict[int, WorkerAddr]]
 
 
 class MooncakeBootstrapServer:
@@ -36,55 +40,7 @@ class MooncakeBootstrapServer:
     """
 
     def __init__(self, vllm_config: VllmConfig, host: str, port: int):
-        # Since #30739, dp with non-Moe models are treated as separate worlds.
-        # Multiple dp ranks may have the same engine id because
-        # DPEngineCoreProc._init_data_parallel() is not called.
-        # So we cannot simply use engine id to distinguish dp ranks.
-        # Instead, we use [engine_id][dp_rank] to double check.
-        #
-        # For example, for vllm instance in 2 nodes and each with dp_size==2:
-        #
-        # Internal LB (non-Moe models):
-        # engine_id0 dp_rank=0
-        # engine_id0 dp_rank=1
-        # engine_id1 dp_rank=2
-        # engine_id1 dp_rank=3
-        #
-        # Internal LB (Moe models):
-        # engine_id0_dp0 dp_rank=0
-        # engine_id0_dp1 dp_rank=1
-        # engine_id1_dp0 dp_rank=2
-        # engine_id1_dp1 dp_rank=3
-        #
-        # Hybrid LB (non-Moe models):
-        # engine_id0 dp_rank=0
-        # engine_id0 dp_rank=1
-        # engine_id1 dp_rank=0 *
-        # engine_id1 dp_rank=1 *
-        #
-        # Hybrid LB (Moe models):
-        # engine_id0_dp0 dp_rank=0
-        # engine_id0_dp1 dp_rank=1
-        # engine_id1_dp0 dp_rank=0 *
-        # engine_id1_dp1 dp_rank=1 *
-        #
-        # External LB:
-        # engine_id0 dp_rank=0
-        # engine_id1 dp_rank=0 *
-        # engine_id2 dp_rank=0 *
-        # engine_id3 dp_rank=0 *
-        #
-        # * here we use local dp_rank
-
-        self.workers: dict[EngineId, EngineEntry] = {}
-
-        assert (parallel_config := vllm_config.parallel_config)
-        dp_size = parallel_config.origin_data_parallel_size
-        dp_local_size = parallel_config.origin_data_parallel_size_local
-        self.dp_size = dp_local_size if parallel_config.local_engines_only else dp_size
-        # We should have these workers registered before serving requests.
-        self.total_count = parallel_config.world_size * self.dp_size
-        self.registered_count = 0
+        self.workers: dict[int, EngineEntry] = {}
 
         self.host = host
         self.port = port
@@ -99,7 +55,7 @@ class MooncakeBootstrapServer:
     def _register_routes(self):
         # All methods are async. No need to use lock to protect data.
         self.app.post("/register")(self.register_worker)
-        self.app.get("/query", response_model=dict[EngineId, EngineEntry])(self.query)
+        self.app.get("/query", response_model=dict[int, EngineEntry])(self.query)
 
     def start(self):
         if self.server_thread:
@@ -125,23 +81,25 @@ class MooncakeBootstrapServer:
 
     async def register_worker(self, payload: RegisterWorkerPayload):
         """Handles registration of a prefiller worker."""
-        if self.registered_count >= self.total_count:
+        if payload.dp_rank not in self.workers:
+            self.workers[payload.dp_rank] = EngineEntry(
+                engine_id=payload.engine_id,
+                worker_addr={},
+            )
+
+        dp_entry = self.workers[payload.dp_rank]
+        if dp_entry.engine_id != payload.engine_id:
             raise HTTPException(
                 status_code=400,
-                detail=(f"All {self.total_count} workers have been registered"),
+                detail=(
+                    f"Engine ID mismatch for dp_rank={payload.dp_rank}: "
+                    f"expected {dp_entry.engine_id}, got {payload.engine_id}"
+                ),
             )
-        if payload.engine_id not in self.workers:
-            self.workers[payload.engine_id] = {}
+        if payload.tp_rank not in dp_entry.worker_addr:
+            dp_entry.worker_addr[payload.tp_rank] = {}
 
-        engine_entry = self.workers[payload.engine_id]
-        if payload.dp_rank not in engine_entry:
-            engine_entry[payload.dp_rank] = {}
-
-        dp_entry = engine_entry[payload.dp_rank]
-        if payload.tp_rank not in dp_entry:
-            dp_entry[payload.tp_rank] = {}
-
-        tp_entry = dp_entry[payload.tp_rank]
+        tp_entry = dp_entry.worker_addr[payload.tp_rank]
         if payload.pp_rank in tp_entry:
             raise HTTPException(
                 status_code=400,
@@ -153,8 +111,8 @@ class MooncakeBootstrapServer:
                     f"but still want to register at {payload.addr}"
                 ),
             )
-        tp_entry[payload.pp_rank] = payload.addr
 
+        tp_entry[payload.pp_rank] = payload.addr
         logger.debug(
             "Registered worker: engine_id=%s, dp_rank=%d, tp_rank=%d, pp_rank=%d at %s",
             payload.engine_id,
@@ -164,18 +122,9 @@ class MooncakeBootstrapServer:
             payload.addr,
         )
 
-        self.registered_count += 1
         return {"status": "ok"}
 
-    async def query(self) -> dict[EngineId, EngineEntry]:
-        if self.registered_count < self.total_count:
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "Workers still registering: "
-                    f"{self.registered_count}/{self.total_count}"
-                ),
-            )
+    async def query(self) -> dict[int, EngineEntry]:
         return self.workers
 
 
