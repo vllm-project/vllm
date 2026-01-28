@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # This vLLM Dockerfile is used to build images that can run vLLM on both x86_64 and arm64 CPU platforms.
 #
 # Supported platforms:
@@ -89,7 +91,6 @@ FROM base AS vllm-build
 ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
 
-ARG GIT_REPO_CHECK=0
 # Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
 ARG VLLM_CPU_DISABLE_AVX512=0
 ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
@@ -117,10 +118,9 @@ COPY requirements/cpu-build.txt requirements/build.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/build.txt
 
-COPY . .
+COPY --exclude=.git . .
 
-RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
-
+ARG VLLM_VERSION_OVERRIDE="0.0.0+src.build"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
@@ -171,7 +171,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py develop
 
 COPY --from=vllm-test-deps /vllm-workspace/requirements/cpu-test.txt requirements/test.txt

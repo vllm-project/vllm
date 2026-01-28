@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
@@ -394,11 +396,8 @@ WORKDIR /workspace
 
 # Copy pre-built csrc wheel directly
 COPY --from=csrc-build /workspace/dist /precompiled-wheels
-COPY . .
 
-ARG GIT_REPO_CHECK=0
-RUN --mount=type=bind,source=.git,target=.git \
-    if [ "$GIT_REPO_CHECK" != "0" ]; then bash tools/check_repo.sh ; fi
+COPY --exclude=.git . .
 
 ARG vllm_target_device="cuda"
 ENV VLLM_TARGET_DEVICE=${vllm_target_device}
@@ -413,8 +412,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 # Build the vLLM wheel
+ARG VLLM_VERSION_OVERRIDE="0.0.0+src.build"
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,source=.git,target=.git \
     if [ "${vllm_target_device}" = "cuda" ]; then \
         export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
     fi && \
