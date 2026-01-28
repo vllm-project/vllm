@@ -239,7 +239,7 @@ class OpenAIServing:
 
     def _get_tool_parser(
         self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
-    ) -> Callable[[TokenizerLike], ToolParser] | None:
+    ) -> type[ToolParser] | None:
         """Get the tool parser based on the name."""
         parser = None
         if not enable_auto_tools or tool_parser_name is None:
@@ -264,8 +264,8 @@ class OpenAIServing:
 
     def _get_reasoning_parser(
         self,
-        reasoning_parser_name: str,
-    ) -> Callable[[TokenizerLike], ReasoningParser] | None:
+        reasoning_parser_name: str | None,
+    ) -> type[ReasoningParser] | None:
         """Get the reasoning parser based on the name."""
         parser = None
         if not reasoning_parser_name:
