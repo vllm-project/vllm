@@ -280,13 +280,6 @@ class MambaMixer2(MambaBase, CustomOp):
             "then num_groups must equal 1."
         )
 
-        assert (
-            (n_groups % self.tp_size == 0) or self.tp_size == 1 or quant_config is None
-        ), (
-            "Tensor parallel currently supported for quantized models only "
-            "if tensor parallel world size divides num groups."
-        )
-
         self.ssm_state_size = ssm_state_size
         self.conv_kernel_size = conv_kernel_size
         self.activation = activation
@@ -404,25 +397,31 @@ class MambaMixer2(MambaBase, CustomOp):
                 },
             )
 
-            if quant_config is None:
-                # - quant layers do not have a weight loader
+            # Create the custom weight loader for Mamba sharding with group
+            # replication. This handles the interleaved projections correctly.
+            mamba_loader = mamba_v2_sharded_weight_loader(
+                [
+                    intermediate_settings,  # for gate
+                    intermediate_settings,
+                    group_shard_settings,
+                    group_shard_settings,
+                    head_settings,  # for dt
+                ],
+                self.tp_size,
+                tp_rank,
+            )
+
+            # Apply the custom weight loader to in_proj.weight
+            # Works for both non-quantized (Parameter) and quantized
+            # (ModelWeightParameter which extends BasevLLMParameter)
+            if hasattr(self.in_proj.weight, "_weight_loader"):
+                # For BasevLLMParameter subclasses (quantized layers like FP8)
+                # These have a weight_loader property that can be directly set
+                self.in_proj.weight.weight_loader = mamba_loader
+            else:
+                # For standard Parameter (non-quantized layers)
                 delattr(self.in_proj.weight, "weight_loader")
-                set_weight_attrs(
-                    self.in_proj.weight,
-                    {
-                        "weight_loader": mamba_v2_sharded_weight_loader(
-                            [
-                                intermediate_settings,  # for gate
-                                intermediate_settings,
-                                group_shard_settings,
-                                group_shard_settings,
-                                head_settings,  # for dt
-                            ],
-                            self.tp_size,
-                            tp_rank,
-                        )
-                    },
-                )
+                set_weight_attrs(self.in_proj.weight, {"weight_loader": mamba_loader})
 
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
