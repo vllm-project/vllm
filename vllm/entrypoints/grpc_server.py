@@ -113,6 +113,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
             # Track first chunk per index (for input_logprobs in first chunk)
             is_first_chunk_per_index: dict[int, bool] = defaultdict(lambda: True)
+            # Track which indices have already sent Complete (for n>1 support)
+            completed_indices: set[int] = set()
 
             async for output in self.async_llm.generate(
                 prompt=prompt,
@@ -136,8 +138,18 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
                         is_first_chunk_per_index[idx] = False
 
-                # Send complete response for EACH completion when finished
-                if output.finished:
+                        # Send Complete as each sequence finishes (n>1 support)
+                        if completion.finish_reason and idx not in completed_indices:
+                            yield self._complete_response(
+                                output,
+                                completion=completion,
+                                num_logprobs=num_logprobs,
+                                num_prompt_logprobs=num_prompt_logprobs,
+                            )
+                            completed_indices.add(idx)
+
+                # For non-streaming, send complete response when finished
+                if output.finished and not request.stream:
                     for completion in output.outputs:
                         yield self._complete_response(
                             output,
