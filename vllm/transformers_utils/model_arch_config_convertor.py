@@ -4,6 +4,7 @@
 from typing import final
 
 import torch
+from huggingface_hub import constants
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import PretrainedConfig
 
@@ -14,6 +15,7 @@ from vllm.config.model_arch import (
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
+    ConfigFormat,
     try_get_safetensors_metadata,
 )
 from vllm.utils.torch_utils import common_broadcastable_dtype
@@ -123,7 +125,11 @@ class ModelArchConfigConvertorBase:
     @final
     @classmethod
     def get_torch_dtype(
-        cls, hf_config: PretrainedConfig, model_id: str, revision: str | None
+        cls,
+        hf_config: PretrainedConfig,
+        model_id: str,
+        revision: str | None,
+        config_format: ConfigFormat,
     ):
         # NOTE: getattr(config, "dtype", torch.float32) is not correct
         # because config.dtype can be None.
@@ -140,7 +146,22 @@ class ModelArchConfigConvertorBase:
 
         # Try to read the dtype of the weights if they are in safetensors format
         if config_dtype is None:
-            repo_mt = try_get_safetensors_metadata(model_id, revision=revision)
+            if config_format == "mistral":
+                try:
+                    constants.SAFETENSORS_SINGLE_FILE, hf_safetensors_single_file = (
+                        "consolidated.safetensors",
+                        constants.SAFETENSORS_SINGLE_FILE,
+                    )
+                    constants.SAFETENSORS_INDEX_FILE, hf_safetensors_index_file = (
+                        "consolidated.safetensors.index.json",
+                        constants.SAFETENSORS_INDEX_FILE,
+                    )
+                    repo_mt = try_get_safetensors_metadata(model_id, revision=revision)
+                finally:
+                    constants.SAFETENSORS_SINGLE_FILE = hf_safetensors_single_file
+                    constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
+            else:
+                repo_mt = try_get_safetensors_metadata(model_id, revision=revision)
 
             if repo_mt and (files_mt := repo_mt.files_metadata):
                 param_dtypes: set[torch.dtype] = {

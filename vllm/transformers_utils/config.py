@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
-from huggingface_hub import constants, get_safetensors_metadata
+from huggingface_hub import get_safetensors_metadata
 from packaging.version import Version
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
@@ -628,10 +628,6 @@ def get_config(
             ).format(model=model)
 
             raise ValueError(error_message) from e
-
-    if config_format == "mistral":
-        constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"
-        constants.SAFETENSORS_INDEX_FILE = "consolidated.safetensors.index.json"
 
     config_parser = get_config_parser(config_format)
     config_dict, config = config_parser.parse(
