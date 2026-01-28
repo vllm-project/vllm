@@ -38,6 +38,11 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
         )
         value_layout = StridedLayout
         scale_layout = StridedLayout
+    elif current_platform.is_cuda() and current_platform.is_device_capability_family(120):
+        # SM120 (Blackwell consumer) - cannot use persistent kernels due to cluster TMA
+        # Use StridedLayout to avoid "Must use persistent kernel" error in matmul_ogs.py
+        value_layout = StridedLayout
+        scale_layout = StridedLayout
     elif current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx950
 
@@ -67,6 +72,14 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
             constraints = {
                 "is_persistent": True,
                 "epilogue_subtile": 1,
+            }
+            opt_flags.update_opt_flags_constraints(constraints)
+        elif current_platform.is_device_capability_family(120):
+            # SM120 (Blackwell consumer) uses similar constraints to SM100
+            # Note: cluster-related TMA operations are not supported on SM120
+            constraints = {
+                "is_persistent": False,
+                "num_stages": 1,  # SM120 shared memory limit
             }
             opt_flags.update_opt_flags_constraints(constraints)
     # transpose the tensor so that the quantization axis is on dim1
