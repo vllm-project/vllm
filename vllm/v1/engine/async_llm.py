@@ -622,7 +622,7 @@ class AsyncLLM(EngineClient):
                 except Exception as e2:
                     s = (
                         f"{e.__class__.__name__}: "
-                        + "error during printing an exception of class"
+                        "error during printing an exception of class"
                         + e2.__class__.__name__
                     )
                 logger.info("Request %s failed due to %s.", request_id, s)
