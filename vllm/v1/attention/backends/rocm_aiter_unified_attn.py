@@ -194,6 +194,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return
         key_cache, value_cache = kv_cache.unbind(0)
 
         # key and value may be None in the case of cross attention. They are
