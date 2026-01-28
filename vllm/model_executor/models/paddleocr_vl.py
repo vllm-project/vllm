@@ -30,11 +30,11 @@ from transformers.modeling_outputs import (
 )
 from transformers.utils import torch_int
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
+from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -63,12 +63,12 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -532,7 +532,6 @@ class SiglipAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -565,7 +564,6 @@ class SiglipAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
         self.apply_rotary_emb = ApplyRotaryEmb(
@@ -662,7 +660,6 @@ class SiglipEncoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -673,14 +670,12 @@ class SiglipEncoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             projection_size=config.hidden_size,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -718,7 +713,6 @@ class SiglipEncoder(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -727,13 +721,9 @@ class SiglipEncoder(nn.Module):
         num_heads = config.num_attention_heads
         head_dim = embed_dim // num_heads
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend if multimodal_config else None
-        )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
         )
         if self.attn_backend not in {
             AttentionBackendEnum.FLASH_ATTN,
@@ -748,7 +738,6 @@ class SiglipEncoder(nn.Module):
                 SiglipEncoderLayer(
                     config,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)
@@ -830,7 +819,6 @@ class SiglipVisionTransformer(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -841,7 +829,6 @@ class SiglipVisionTransformer(nn.Module):
         self.encoder = SiglipEncoder(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.encoder",
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -880,7 +867,6 @@ class SiglipVisionModel(nn.Module):
         self,
         config,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -888,7 +874,6 @@ class SiglipVisionModel(nn.Module):
         self.vision_model = SiglipVisionTransformer(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.vision_model",
         )
         self.quant_config = quant_config
@@ -999,31 +984,37 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         }
     )
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+
+        raise ValueError("Only image modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
-        self.multimodal_config = multimodal_config
 
-        self.visual = SiglipVisionModel(
-            config=config.vision_config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "visual"),
-        )
-        self.mlp_AR = Projector(config, config.vision_config)
+        with self._mark_tower_model(vllm_config, "image"):
+            self.visual = SiglipVisionModel(
+                config=config.vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+            self.mlp_AR = Projector(config, config.vision_config)
 
-        self.language_model = Ernie4_5ForCausalLM(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = Ernie4_5ForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
-        for layer in self.language_model.model.layers:
-            if not isinstance(layer, PPMissingLayer):
-                layer.self_attn.rotary_emb.is_neox_style = True
+            for layer in self.language_model.model.layers:
+                if not isinstance(layer, PPMissingLayer):
+                    layer.self_attn.rotary_emb.is_neox_style = True
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1151,9 +1142,6 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
         return llm_positions, mrope_position_delta
 
-    def get_language_model(self) -> nn.Module:
-        return self.language_model
-
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> PaddleOCRImagePixelInputs | None:
@@ -1171,7 +1159,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1180,28 +1168,9 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        elif inputs_embeds is None:
-            vision_embeddings = self.embed_multimodal(**kwargs)
-            is_multimodal = kwargs.pop("is_multimodal", None)
-            handle_oov_mm_token = kwargs.pop("handle_oov_mm_token", False)
-            inputs_embeds = self.embed_input_ids(
-                input_ids,
-                vision_embeddings,
-                is_multimodal=is_multimodal,
-                handle_oov_mm_token=handle_oov_mm_token,
-            )
-            input_ids = None
-
         return self.language_model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
-
-    @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality.startswith("image"):
-            return "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
-
-        raise ValueError("Only image modality is supported")
 
     def encode_image(
         self, pixel_values: torch.Tensor, image_grid_thw: torch.Tensor

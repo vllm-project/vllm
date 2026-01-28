@@ -5,7 +5,7 @@ steps:
 - label: Distributed Model Tests (2 GPUs)
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_devices: 2
   source_file_dependencies:
   - vllm/model_executor/model_loader/sharded_state_loader.py
   - vllm/model_executor/models/

@@ -6,35 +6,44 @@ import dataclasses
 import functools
 import os
 from argparse import Namespace
-from pathlib import Path
-from typing import Any
+from logging import Logger
+from string import Template
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
-from vllm.config import ModelConfig
+from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    load_chat_template,
-    resolve_hf_chat_template,
-    resolve_mistral_chat_template,
-)
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.openai.engine.protocol import (
-    CompletionRequest,
-    StreamOptions,
-)
-from vllm.entrypoints.openai.serving_models import LoRAModulePath
-from vllm.logger import init_logger
+from vllm.inputs import EmbedsPrompt, TokensPrompt
+from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
-from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionRequest,
+    )
+    from vllm.entrypoints.openai.completion.protocol import (
+        CompletionRequest,
+    )
+    from vllm.entrypoints.openai.engine.protocol import (
+        StreamOptions,
+    )
+    from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+    from vllm.entrypoints.openai.responses.protocol import (
+        ResponsesRequest,
+    )
+else:
+    ChatCompletionRequest = object
+    CompletionRequest = object
+    StreamOptions = object
+    LoRAModulePath = object
+    ResponsesRequest = object
+
 
 logger = init_logger(__name__)
 
@@ -208,11 +217,26 @@ def _validate_truncation_size(
 
 def get_max_tokens(
     max_model_len: int,
-    request: ChatCompletionRequest | CompletionRequest,
-    input_length: int,
+    request: "CompletionRequest | ChatCompletionRequest | ResponsesRequest",
+    prompt: TokensPrompt | EmbedsPrompt,
     default_sampling_params: dict,
 ) -> int:
-    max_tokens = getattr(request, "max_completion_tokens", None) or request.max_tokens
+    # NOTE: Avoid isinstance() for better efficiency
+    max_tokens: int | None = None
+    if max_tokens is None:
+        # ChatCompletionRequest
+        max_tokens = getattr(request, "max_completion_tokens", None)
+    if max_tokens is None:
+        # ResponsesRequest
+        max_tokens = getattr(request, "max_output_tokens", None)
+    if max_tokens is None:
+        # CompletionRequest (also a fallback for ChatCompletionRequest)
+        max_tokens = getattr(request, "max_tokens", None)
+
+    input_length = length_from_prompt_token_ids_or_embeds(
+        prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        prompt.get("prompt_embeds"),  # type: ignore[arg-type]
+    )
     default_max_tokens = max_model_len - input_length
     max_output_tokens = current_platform.get_max_output_tokens(input_length)
 
@@ -229,6 +253,8 @@ def get_max_tokens(
 
 
 def log_non_default_args(args: Namespace | EngineArgs):
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
+
     non_default_args = {}
 
     # Handle Namespace
@@ -257,7 +283,7 @@ def log_non_default_args(args: Namespace | EngineArgs):
 
 
 def should_include_usage(
-    stream_options: StreamOptions | None, enable_force_include_usage: bool
+    stream_options: "StreamOptions | None", enable_force_include_usage: bool
 ) -> tuple[bool, bool]:
     if stream_options:
         include_usage = stream_options.include_usage or enable_force_include_usage
@@ -272,6 +298,8 @@ def should_include_usage(
 def process_lora_modules(
     args_lora_modules: list[LoRAModulePath], default_mm_loras: dict[str, str] | None
 ) -> list[LoRAModulePath]:
+    from vllm.entrypoints.openai.models.serving import LoRAModulePath
+
     lora_modules = args_lora_modules
     if default_mm_loras:
         default_mm_lora_paths = [
@@ -288,40 +316,31 @@ def process_lora_modules(
     return lora_modules
 
 
-async def process_chat_template(
-    args_chat_template: Path | str | None,
-    engine_client: EngineClient,
-    model_config: ModelConfig,
-) -> str | None:
-    resolved_chat_template = load_chat_template(args_chat_template)
-    if resolved_chat_template is not None:
-        # Get the tokenizer to check official template
-        tokenizer = await engine_client.get_tokenizer()
-
-        if isinstance(tokenizer, MistralTokenizer):
-            # The warning is logged in resolve_mistral_chat_template.
-            resolved_chat_template = resolve_mistral_chat_template(
-                chat_template=resolved_chat_template
-            )
-        else:
-            hf_chat_template = resolve_hf_chat_template(
-                tokenizer=tokenizer,
-                chat_template=None,
-                tools=None,
-                model_config=model_config,
-            )
-
-            if hf_chat_template != resolved_chat_template:
-                logger.warning(
-                    "Using supplied chat template: %s\n"
-                    "It is different from official chat template '%s'. "
-                    "This discrepancy may lead to performance degradation.",
-                    resolved_chat_template,
-                    model_config.model,
-                )
-    return resolved_chat_template
-
-
 def sanitize_message(message: str) -> str:
     # Avoid leaking memory address from object reprs
     return re.sub(r" at 0x[0-9a-f]+>", ">", message)
+
+
+def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
+    if envs.VLLM_DISABLE_LOG_LOGO or (formatter := current_formatter_type(lgr)) is None:
+        message = "vLLM server version %s, serving model %s"
+    else:
+        logo_template = Template(
+            "\n       ${w}█     █     █▄   ▄█${r}\n"
+            " ${o}▄▄${r} ${b}▄█${r} ${w}█     █     █ ▀▄▀ █${r}  version ${w}%s${r}\n"
+            "  ${o}█${r}${b}▄█▀${r} ${w}█     █     █     █${r}  model   ${w}%s${r}\n"
+            "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
+        )
+        colors = {
+            "w": "\033[97;1m",  # white
+            "o": "\033[93m",  # orange
+            "b": "\033[94m",  # blue
+            "r": "\033[0m",  # reset
+        }
+        if formatter != "color":
+            # monochrome logo (no ansi escape codes)
+            colors = dict.fromkeys(colors, "")
+
+        message = logo_template.substitute(colors)
+
+    lgr.info(message, version, model_name)

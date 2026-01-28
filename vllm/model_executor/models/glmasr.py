@@ -16,7 +16,7 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -39,13 +39,13 @@ from vllm.multimodal.parse import (
     MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
@@ -181,6 +181,12 @@ class GlmAsrEncoderAttention(nn.Module):
 
         # Use vLLM's ApplyRotaryEmb CustomOp
         # enforce_enable=True ensures the op is always enabled (important for ViT)
+        rope_params = getattr(config, "rope_parameters", None)
+        if rope_params:
+            partial_rotary_factor = rope_params.get("partial_rotary_factor", 0.5)
+        else:
+            partial_rotary_factor = getattr(config, "partial_rotary_factor", 0.5)
+        self.rotary_dim = int(self.head_dim * partial_rotary_factor)
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
         # Use vLLM's MMEncoderAttention for hardware-optimized attention
@@ -226,8 +232,12 @@ class GlmAsrEncoderAttention(nn.Module):
         # Apply rotary position embeddings using vLLM's ApplyRotaryEmb
         # ApplyRotaryEmb expects x: [batch, seq, heads, head_dim]
         # cos/sin: [seq_len, rotary_dim/2]
-        q = self.apply_rotary_emb(q, rotary_pos_emb_cos, rotary_pos_emb_sin)
-        k = self.apply_rotary_emb(k, rotary_pos_emb_cos, rotary_pos_emb_sin)
+        q[..., : self.rotary_dim] = self.apply_rotary_emb(
+            q[..., : self.rotary_dim], rotary_pos_emb_cos, rotary_pos_emb_sin
+        )
+        k[..., : self.rotary_dim] = self.apply_rotary_emb(
+            k[..., : self.rotary_dim], rotary_pos_emb_cos, rotary_pos_emb_sin
+        )
 
         # MMEncoderAttention expects [batch, seq, num_heads, head_dim]
         # It handles GQA internally via repeat_interleave
@@ -934,26 +944,27 @@ class GlmAsrForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-
-        # Use optimized vLLM native encoder
-        self.audio_tower = GlmAsrEncoder(
-            config.audio_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "audio_tower"),
-        )
-        self.multi_modal_projector = GlmAsrMultiModalProjector(
-            config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"),
-        )
         self.quant_config = quant_config
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["LlamaForCausalLM"],
-        )
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio_tower = GlmAsrEncoder(
+                config.audio_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "audio_tower"),
+            )
+            self.multi_modal_projector = GlmAsrMultiModalProjector(
+                config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["LlamaForCausalLM"],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -1053,9 +1064,6 @@ class GlmAsrForConditionalGeneration(
         )
         return _group_audio_embeddings(chunk_embeddings, chunk_counts)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
@@ -1067,7 +1075,7 @@ class GlmAsrForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
