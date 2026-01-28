@@ -352,14 +352,15 @@ class TpKVTopology:
             kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
             physical_block_size_position = kv_cache_shape.index(16)
-            logger.info(
-                "XXX shape %s blk_size_pos %d",
-                kv_cache_shape,
-                physical_block_size_position,
-            )
+
             assert physical_block_size_position is not None
             self._physical_block_size_position = -(
                 len(kv_cache_shape) - physical_block_size_position
+            )
+            logger.info(
+                "XXX shape %s blk_size_pos %d",
+                kv_cache_shape,
+                self._physical_block_size_position,
             )
 
     @property
