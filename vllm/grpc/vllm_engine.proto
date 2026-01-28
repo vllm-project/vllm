@@ -151,6 +151,9 @@ message GenerateStreamChunk {
   // Logprobs support
   OutputLogProbs output_logprobs = 5;
   InputLogProbs input_logprobs = 6;  // Only in first chunk
+
+  // Index for n>1 support (0-indexed, identifies which of n outputs this belongs to)
+  uint32 index = 7;
 }
 
 message GenerateComplete {
@@ -163,6 +166,9 @@ message GenerateComplete {
   // Logprobs support
   OutputLogProbs output_logprobs = 6;
   InputLogProbs input_logprobs = 7;
+
+  // Index for n>1 support (0-indexed, identifies which of n outputs this belongs to)
+  uint32 index = 8;
 }
 
 // =====================

@@ -22,6 +22,7 @@ import asyncio
 import signal
 import sys
 import time
+from collections import defaultdict
 from collections.abc import AsyncGenerator
 
 import grpc
@@ -33,7 +34,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.utils import log_version_and_model
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import (
     PromptLogprobs,
     RequestOutputKind,
@@ -81,6 +82,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         Handle streaming generation requests.
 
+        Supports n>1 by sending separate chunk/complete messages for each output index.
+        When streaming with n>1, chunks for different indices are interleaved.
+
         Args:
             request: The GenerateRequest protobuf
             context: gRPC context
@@ -111,47 +115,40 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             num_logprobs = sampling_params.logprobs
             num_prompt_logprobs = sampling_params.prompt_logprobs
 
-            # Track state for streaming
-            is_first_chunk = True
-            all_output_token_ids: list[int] = []
-            all_output_logprobs: SampleLogprobs = []
+            # Track first chunk per index (for input_logprobs in first chunk)
+            is_first_chunk_per_index: dict[int, bool] = defaultdict(lambda: True)
 
             async for output in self.async_llm.generate(
                 prompt=prompt,
                 sampling_params=sampling_params,
                 request_id=request_id,
             ):
-                # Convert vLLM output to protobuf
-                # For streaming, always send chunks
+                # For streaming, send chunks for EACH completion output (n outputs)
                 if request.stream:
-                    yield self._chunk_response(
-                        output,
-                        num_logprobs=num_logprobs,
-                        num_prompt_logprobs=num_prompt_logprobs,
-                        is_first_chunk=is_first_chunk,
-                    )
-                    is_first_chunk = False
+                    for completion in output.outputs:
+                        idx = completion.index
+                        is_first = is_first_chunk_per_index[idx]
 
-                    # Accumulate token IDs and logprobs for final response
-                    completion = output.outputs[0] if output.outputs else None
-                    if completion:
-                        all_output_token_ids.extend(completion.token_ids)
-                        if completion.logprobs:
-                            all_output_logprobs.extend(completion.logprobs)
+                        # Send chunk with delta data (Rust accumulates for vLLM)
+                        yield self._chunk_response(
+                            output,
+                            completion=completion,
+                            num_logprobs=num_logprobs,
+                            num_prompt_logprobs=num_prompt_logprobs,
+                            is_first_chunk=is_first,
+                        )
 
-                # Send complete response when finished
+                        is_first_chunk_per_index[idx] = False
+
+                # Send complete response for EACH completion when finished
                 if output.finished:
-                    yield self._complete_response(
-                        output,
-                        num_logprobs=num_logprobs,
-                        num_prompt_logprobs=num_prompt_logprobs,
-                        all_output_token_ids=all_output_token_ids
-                        if request.stream
-                        else None,
-                        all_output_logprobs=all_output_logprobs
-                        if request.stream
-                        else None,
-                    )
+                    for completion in output.outputs:
+                        yield self._complete_response(
+                            output,
+                            completion=completion,
+                            num_logprobs=num_logprobs,
+                            num_prompt_logprobs=num_prompt_logprobs,
+                        )
 
         except ValueError as e:
             # Invalid request error (equiv to 400).
@@ -458,6 +455,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     @staticmethod
     def _chunk_response(
         output: RequestOutput,
+        completion: "CompletionOutput | None" = None,
         num_logprobs: int | None = None,
         num_prompt_logprobs: int | None = None,
         is_first_chunk: bool = False,
@@ -466,17 +464,24 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Build a streaming chunk response from vLLM output.
         When output_kind=DELTA, vLLM returns only new tokens automatically.
 
+        Note: This sends DELTA logprobs (only for new tokens in this chunk).
+        The Rust side is responsible for accumulating if needed.
+
         Args:
             output: vLLM RequestOutput (with delta tokens when output_kind=DELTA)
+            completion: Specific CompletionOutput to use (for n>1 support).
+                       If None, uses output.outputs[0] for backwards compatibility.
             num_logprobs: Number of top logprobs for output tokens
             num_prompt_logprobs: Number of top logprobs for prompt tokens
-            is_first_chunk: Whether this is the first chunk (include input_logprobs)
+            is_first_chunk: Whether this is the first chunk for this index
+                           (include input_logprobs only on first chunk)
 
         Returns:
             GenerateResponse with chunk field set
         """
-        # Get the completion output (first one if n > 1)
-        completion = output.outputs[0] if output.outputs else None
+        # Use provided completion or fall back to first output
+        if completion is None:
+            completion = output.outputs[0] if output.outputs else None
 
         if completion is None:
             # Empty chunk
@@ -486,15 +491,16 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     prompt_tokens=0,
                     completion_tokens=0,
                     cached_tokens=0,
+                    index=0,
                 ),
             )
 
-        # Build output logprobs for this chunk's tokens
+        # Build output logprobs for this chunk's tokens (delta, not cumulative)
         output_logprobs = VllmEngineServicer._build_output_logprobs(
             completion.logprobs, completion.token_ids, num_logprobs
         )
 
-        # Build input logprobs only on first chunk
+        # Build input logprobs only on first chunk for this index
         input_logprobs = None
         if is_first_chunk:
             input_logprobs = VllmEngineServicer._build_input_logprobs(
@@ -516,32 +522,36 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 cached_tokens=output.num_cached_tokens,
                 output_logprobs=output_logprobs,
                 input_logprobs=input_logprobs,
+                index=completion.index,
             ),
         )
 
     @staticmethod
     def _complete_response(
         output: RequestOutput,
+        completion: "CompletionOutput | None" = None,
         num_logprobs: int | None = None,
         num_prompt_logprobs: int | None = None,
-        all_output_token_ids: list[int] | None = None,
-        all_output_logprobs: SampleLogprobs | None = None,
     ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a final completion response from vLLM output.
 
+        For non-streaming (FINAL_ONLY): completion has all tokens and logprobs.
+        For streaming (DELTA): completion has last delta; Rust accumulates.
+
         Args:
             output: vLLM RequestOutput (finished=True)
+            completion: Specific CompletionOutput to use (for n>1 support).
+                       If None, uses output.outputs[0] for backwards compatibility.
             num_logprobs: Number of top logprobs for output tokens
             num_prompt_logprobs: Number of top logprobs for prompt tokens
-            all_output_token_ids: Accumulated token IDs (for streaming mode)
-            all_output_logprobs: Accumulated logprobs (for streaming mode)
 
         Returns:
             GenerateResponse with complete field set
         """
-        # Get the completion output (first one if n > 1)
-        completion = output.outputs[0] if output.outputs else None
+        # Use provided completion or fall back to first output
+        if completion is None:
+            completion = output.outputs[0] if output.outputs else None
 
         if completion is None:
             # Empty completion
@@ -552,17 +562,15 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     prompt_tokens=0,
                     completion_tokens=0,
                     cached_tokens=0,
+                    index=0,
                 ),
             )
 
-        # For non-streaming, use completion's token_ids and logprobs directly
-        # For streaming, use accumulated values if provided
-        token_ids_for_logprobs = all_output_token_ids or completion.token_ids
-        logprobs_for_output = all_output_logprobs or completion.logprobs
-
-        # Build output logprobs
+        # Build output logprobs from completion's data
+        # For non-streaming: this has all logprobs
+        # For streaming: this has only last delta (Rust accumulates from chunks)
         output_logprobs = VllmEngineServicer._build_output_logprobs(
-            logprobs_for_output, token_ids_for_logprobs, num_logprobs
+            completion.logprobs, completion.token_ids, num_logprobs
         )
 
         # Build input logprobs
@@ -587,6 +595,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 cached_tokens=output.num_cached_tokens,
                 output_logprobs=output_logprobs,
                 input_logprobs=input_logprobs,
+                index=completion.index,
             ),
         )
 
