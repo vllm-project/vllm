@@ -51,10 +51,6 @@ class OpenAIServingRealtime(OpenAIServing):
         from vllm.model_executor.model_loader import get_model_cls
 
         model_cls = get_model_cls(self.model_config)
-        if not supports_realtime(model_cls):
-            raise ValueError(
-                f"Model {self.model_config.model} does not support transcription"
-            )
         return cast(type[SupportsRealtime], model_cls)
 
     async def transcribe_realtime(

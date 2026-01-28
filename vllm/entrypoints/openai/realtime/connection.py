@@ -12,6 +12,7 @@ import numpy as np
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from vllm import envs
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.openai.realtime.protocol import (
     ErrorEvent,
@@ -21,6 +22,7 @@ from vllm.entrypoints.openai.realtime.protocol import (
     TranscriptionDone,
 )
 from vllm.entrypoints.openai.realtime.serving import OpenAIServingRealtime
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -43,12 +45,14 @@ class RealtimeConnection:
         self.serving = serving
         self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
         self.generation_task: asyncio.Task | None = None
+
         self._is_connected = False
+        self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
     async def handle_connection(self):
         """Main connection loop."""
         await self.websocket.accept()
-        logger.info("WebSocket connection accepted: %s", self.connection_id)
+        logger.debug("WebSocket connection accepted: %s", self.connection_id)
         self._is_connected = True
 
         # Send session created event
@@ -66,7 +70,7 @@ class RealtimeConnection:
                     logger.exception("Error handling event: %s", e)
                     await self.send_error(str(e), "processing_error")
         except WebSocketDisconnect:
-            logger.info("WebSocket disconnected: %s", self.connection_id)
+            logger.debug("WebSocket disconnected: %s", self.connection_id)
             self._is_connected = False
         except Exception as e:
             logger.exception("Unexpected error in connection: %s", e)
@@ -83,7 +87,7 @@ class RealtimeConnection:
         """
         event_type = event.get("type")
         if event_type == "session.update":
-            logger.info("Session updated: %s", event)
+            logger.debug("Session updated: %s", event)
             # TODO: Validate model change
             # await self.serving.validate_model(event["model"])
         elif event_type == "input_audio_buffer.append":
@@ -96,11 +100,16 @@ class RealtimeConnection:
                     / 32768.0
                 )
 
-                # TODO: Add audio validation
-                # if len(audio_array) == 0:
-                #     raise ValueError("Empty audio chunk")
-                # if not self._is_valid_audio(audio_array):
-                #     raise ValueError("Invalid audio format")
+                if len(audio_array) / 1024**2 > self._max_audio_filesize_mb:
+                    raise VLLMValidationError(
+                        "Maximum file size exceeded",
+                        parameter="audio_filesize_mb",
+                        value=len(audio_array) / 1024**2,
+                    )
+                if len(audio_array) == 0:
+                    raise VLLMValidationError(
+                        "Can't process empty audio."
+                    )
 
                 # Put audio chunk in queue
                 self.audio_queue.put_nowait(audio_array)
@@ -242,4 +251,4 @@ class RealtimeConnection:
             self.generation_task.cancel()
             contextlib.suppress(asyncio.CancelledError)
 
-        logger.info("Connection cleanup complete: %s", self.connection_id)
+        logger.debug("Connection cleanup complete: %s", self.connection_id)
