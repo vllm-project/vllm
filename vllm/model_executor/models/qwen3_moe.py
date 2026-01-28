@@ -683,6 +683,12 @@ class Qwen3MoeForCausalLM(
         ]
     }
 
+    # LoRA specific attributes
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
