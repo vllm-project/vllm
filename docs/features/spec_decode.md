@@ -263,9 +263,7 @@ A few important things to consider when using the EAGLE based draft models:
    [script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) to convert the speculative model,
    and specify `"model": "path/to/modified/eagle/model"` in `speculative_config`. If weight-loading problems still occur when using the latest version of vLLM, please leave a comment or raise an issue.
 
-2. The EAGLE based draft models need to be run without tensor parallelism
-   (i.e. draft_tensor_parallel_size is set to 1 in `speculative_config`), although
-   it is possible to run the main model using tensor parallelism (see example above).
+2. It's possible to run EAGLE-based draft models with tensor parallelism. The `draft_tensor_parallel_size` in `speculative_config` can be set to either 1 or the same value as the target model's tensor parallel size.
 
 3. When using EAGLE-based speculators with vLLM, the observed speedup is lower than what is
    reported in the reference implementation [here](https://github.com/SafeAILab/EAGLE). This issue is under
