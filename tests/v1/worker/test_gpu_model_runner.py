@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.attention.layer import Attention
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -19,6 +18,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams

@@ -715,7 +715,7 @@ def test_mixtral_moe(
 
         # need to override the forward context for unittests, otherwise it assumes
         # we're running the model forward pass (the model specified in vllm_config)
-        get_forward_context().remaining_moe_layers = None
+        get_forward_context().all_moe_layers = None
 
         # Run forward passes for both MoE blocks
         hf_states, _ = hf_moe.forward(hf_inputs)
@@ -1311,6 +1311,7 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
     opcheck(torch.ops._moe_C.moe_sum, (input, actual))
 
 
+@pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("m", [1, 33])
 @pytest.mark.parametrize("n,k", [(128, 128)])
 @pytest.mark.parametrize("e", [8])
