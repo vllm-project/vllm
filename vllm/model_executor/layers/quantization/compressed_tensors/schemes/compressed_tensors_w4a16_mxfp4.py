@@ -98,7 +98,7 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
-            weight_scale_2=None,
+            weight_global_scale=None,
             workspace=layer.workspace,
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
