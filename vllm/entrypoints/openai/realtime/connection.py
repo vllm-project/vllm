@@ -194,7 +194,7 @@ class RealtimeConnection:
                     full_text += delta
 
                     # append output to input
-                    await input_stream.put(list(output.outputs[0].token_ids))
+                    input_stream.put_nowait(list(output.outputs[0].token_ids))
                     await self.send(TranscriptionDelta(delta=delta))
 
                     completion_tokens_len += len(output.outputs[0].token_ids)
@@ -214,10 +214,7 @@ class RealtimeConnection:
 
             # Clear queue for next utterance
             while not self.audio_queue.empty():
-                try:
-                    self.audio_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+                self.audio_queue.get_nowait()
 
         except Exception as e:
             logger.exception("Error in generation: %s", e)
