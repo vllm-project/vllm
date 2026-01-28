@@ -620,6 +620,43 @@ class GlmAsrMultiModalProjector(nn.Module):
         return hidden_states
 
 
+def _glmasr_field_config(
+    hf_inputs: Mapping[str, torch.Tensor],
+) -> dict[str, MultiModalFieldConfig]:
+    """
+    Configure multimodal field batching strategy for GLM-ASR.
+
+    Determines how to batch audio inputs based on whether chunking is used.
+    When chunk_counts is present, features are flattened across chunks;
+    otherwise, they are batched normally.
+
+    Args:
+        hf_inputs: Dictionary of preprocessed inputs from HuggingFace processor.
+
+    Returns:
+        Dictionary mapping field names to MultiModalFieldConfig objects \
+            that specify batching behavior.
+    """
+    chunk_counts = hf_inputs.get("chunk_counts")
+    if chunk_counts is not None:
+        return dict(
+            audio_embeds=MultiModalFieldConfig.batched("audio"),
+            input_features=MultiModalFieldConfig.flat_from_sizes(
+                "audio", chunk_counts, dim=0
+            ),
+            feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
+                "audio", chunk_counts, dim=0
+            ),
+            chunk_counts=MultiModalFieldConfig.batched("audio"),
+        )
+    return dict(
+        audio_embeds=MultiModalFieldConfig.batched("audio"),
+        input_features=MultiModalFieldConfig.batched("audio"),
+        feature_attention_mask=MultiModalFieldConfig.batched("audio"),
+        chunk_counts=MultiModalFieldConfig.batched("audio"),
+    )
+
+
 class GlmAsrMultiModalDataParser(MultiModalDataParser):
     """
     Custom parser for GLM-ASR multimodal data.
@@ -706,43 +743,6 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
                 length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
         }
-
-
-def _glmasr_field_config(
-    hf_inputs: Mapping[str, torch.Tensor],
-) -> dict[str, MultiModalFieldConfig]:
-    """
-    Configure multimodal field batching strategy for GLM-ASR.
-
-    Determines how to batch audio inputs based on whether chunking is used.
-    When chunk_counts is present, features are flattened across chunks;
-    otherwise, they are batched normally.
-
-    Args:
-        hf_inputs: Dictionary of preprocessed inputs from HuggingFace processor.
-
-    Returns:
-        Dictionary mapping field names to MultiModalFieldConfig objects \
-            that specify batching behavior.
-    """
-    chunk_counts = hf_inputs.get("chunk_counts")
-    if chunk_counts is not None:
-        return dict(
-            audio_embeds=MultiModalFieldConfig.batched("audio"),
-            input_features=MultiModalFieldConfig.flat_from_sizes(
-                "audio", chunk_counts, dim=0
-            ),
-            feature_attention_mask=MultiModalFieldConfig.flat_from_sizes(
-                "audio", chunk_counts, dim=0
-            ),
-            chunk_counts=MultiModalFieldConfig.batched("audio"),
-        )
-    return dict(
-        audio_embeds=MultiModalFieldConfig.batched("audio"),
-        input_features=MultiModalFieldConfig.batched("audio"),
-        feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-        chunk_counts=MultiModalFieldConfig.batched("audio"),
-    )
 
 
 class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"]):
