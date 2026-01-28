@@ -500,6 +500,13 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
     }
 
 
+def add_literal_quotes(value: str) -> str:
+    """Add literal backticks around all comma-separated items in a string."""
+    items = [item.strip() for item in value.split(",")]
+    quoted_items = [f"`{item}`" for item in items]
+    return ", ".join(quoted_items)
+
+
 def bool_to_emoji(value: bool) -> str:
     """Convert a boolean to a checkmark or X emoji."""
     return "✅" if value else "❌"
@@ -524,29 +531,29 @@ def generate_markdown_table(
 
     if is_mla_table:
         header = (
-            "| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes "
+            "| Backend | Dtypes | KV Dtypes | Block Sizes | Head Sizes "
             "| Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |"
         )
         separator = (
-            "|---------|--------|-----------------|-------------|------------"
+            "|---------|--------|-----------|-------------|------------"
             "|------|--------|-----------|-----------------|--------------|"
         )
     elif has_versions:
         header = (
-            "| Backend | Version | Dtypes | KV Cache Dtypes | Block Sizes "
+            "| Backend | Version | Dtypes | KV Dtypes | Block Sizes "
             "| Head Sizes | Sink | MM Prefix | Attention Types | Compute Cap. |"
         )
         separator = (
-            "|---------|---------|--------|-----------------|-------------"
+            "|---------|---------|--------|-----------|-------------"
             "|------------|------|-----------|-----------------|--------------|"
         )
     else:
         header = (
-            "| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes "
+            "| Backend | Dtypes | KV Dtypes | Block Sizes | Head Sizes "
             "| Sink | MM Prefix | Attention Types | Compute Cap. |"
         )
         separator = (
-            "|---------|--------|-----------------|-------------|------------"
+            "|---------|--------|-----------|-------------|------------"
             "|------|-----------|-----------------|--------------|"
         )
     lines = [f"## {title}", "", header, separator]
@@ -560,7 +567,7 @@ def generate_markdown_table(
             row = "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 info["name"],
                 info["dtypes"],
-                info["kv_cache_dtypes"],
+                add_literal_quotes(info["kv_cache_dtypes"]),
                 info["block_sizes"],
                 info["head_sizes"],
                 bool_to_emoji(info["supports_sink"]),
@@ -574,7 +581,7 @@ def generate_markdown_table(
                 info["name"],
                 info.get("version", ""),
                 info["dtypes"],
-                info["kv_cache_dtypes"],
+                add_literal_quotes(info["kv_cache_dtypes"]),
                 info["block_sizes"],
                 info["head_sizes"],
                 bool_to_emoji(info["supports_sink"]),
@@ -586,7 +593,7 @@ def generate_markdown_table(
             row = "| {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 info["name"],
                 info["dtypes"],
-                info["kv_cache_dtypes"],
+                add_literal_quotes(info["kv_cache_dtypes"]),
                 info["block_sizes"],
                 info["head_sizes"],
                 bool_to_emoji(info["supports_sink"]),
@@ -780,7 +787,7 @@ def _priority_table(title: str, backends: list[str]) -> list[str]:
         "",
         "| Priority | Backend |",
         "|----------|---------|",
-        *[f"| {i} | {b} |" for i, b in enumerate(backends, 1)],
+        *[f"| {i} | `{b}` |" for i, b in enumerate(backends, 1)],
         "",
     ]
 
@@ -830,7 +837,7 @@ def generate_legend() -> str:
 | Column | Description |
 |--------|-------------|
 | **Dtypes** | Supported model data types (fp16, bf16, fp32) |
-| **KV Cache Dtypes** | Supported KV cache data types (auto, fp8, fp8_e4m3, etc.) |
+| **KV Dtypes** | Supported KV cache data types (`auto`, `fp8`, `fp8_e4m3`, etc.) |
 | **Block Sizes** | Supported KV cache block sizes (%N means multiples of N) |
 | **Head Sizes** | Supported attention head sizes |
 | **Sink** | Attention sink support (for StreamingLLM) |
@@ -839,7 +846,7 @@ def generate_legend() -> str:
 | **Attention Types** | Supported attention patterns (Decoder, Encoder, Enc-Dec) |
 | **Compute Cap.** | Required CUDA compute capability (N/A for non-CUDA backends) |
 
-**Symbols:** ✓ = Supported, ✗ = Not supported
+**Symbols:** ✅ = Supported, ❌ = Not supported
 """
 
 
@@ -978,7 +985,7 @@ def generate_docs() -> str:
     footnotes = []
     if fi_features:
         footnotes.append(
-            "> **†** FLASHINFER uses TRTLLM attention on Blackwell (SM100), which "
+            "> **†** FlashInfer uses TRTLLM attention on Blackwell (SM100), which "
             "supports sinks. Disable via `--attention-config.use_trtllm_attention=0`."
         )
     if fa_features:
