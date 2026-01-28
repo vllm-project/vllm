@@ -65,20 +65,8 @@ logger = init_logger(__name__)
 # system reboots, so users will not complain about annoying lock files
 temp_dir = tempfile.gettempdir()
 
-
-def enable_hf_transfer():
-    """automatically activates hf_transfer"""
-    if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
-        try:
-            # enable hf hub transfer if available
-            import hf_transfer  # type: ignore # noqa
-
-            huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
-        except ImportError:
-            pass
-
-
-enable_hf_transfer()
+# Automatically activates `hf-xet` high performance mode
+huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
 
 
 class DisabledTqdm(tqdm):

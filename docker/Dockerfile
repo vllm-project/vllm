@@ -627,7 +627,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
     fi; \
-    uv pip install --system accelerate hf_transfer modelscope \
+    uv pip install --system accelerate modelscope \
         "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
@@ -752,9 +752,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -e tests/vllm_test_utils
 
 # enable fast downloads from hf (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system hf_transfer
-ENV HF_HUB_ENABLE_HF_TRANSFER 1
+ENV HF_XET_HIGH_PERFORMANCE 1
 
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1

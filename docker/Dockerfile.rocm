@@ -317,9 +317,7 @@ RUN cd /vllm-workspace \
     && python3 -m pip install pytest-shard
 
 # enable fast downloads from hf (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system hf_transfer
-ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_XET_HIGH_PERFORMANCE=1
 
 # install audio decode package `torchcodec` from source (required due to 
 # ROCm and torch version mismatch) for tests with datasets package
