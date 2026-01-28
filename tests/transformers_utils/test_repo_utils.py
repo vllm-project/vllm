@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from vllm.transformers_utils.repo_utils import (
+    any_pattern_in_repo_files,
     is_mistral_model_repo,
-    is_one_pattern_in_repo_files,
     list_filtered_repo_files,
 )
 
@@ -102,7 +102,7 @@ def test_one_filtered_repo_files(allow_patterns: list[str], expected_bool: bool)
             MagicMock(return_value=_glob_path()),
         ) as mock_list_repo_files:
             assert (
-                is_one_pattern_in_repo_files(
+                any_pattern_in_repo_files(
                     tmp_dir, allow_patterns, "revision", "model", "token"
                 )
             ) is expected_bool

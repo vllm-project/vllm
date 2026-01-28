@@ -18,8 +18,8 @@ from vllm.transformers_utils.gguf_utils import (
     split_remote_gguf,
 )
 from vllm.transformers_utils.repo_utils import (
+    any_pattern_in_repo_files,
     is_mistral_model_repo,
-    is_one_pattern_in_repo_files,
 )
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -149,7 +149,7 @@ def resolve_tokenizer_args(
         and is_mistral_model_repo(
             model_name_or_path=str(tokenizer_name), revision=revision
         )
-        and is_one_pattern_in_repo_files(
+        and any_pattern_in_repo_files(
             model_name_or_path=str(tokenizer_name),
             allow_patterns=["tekken.json", "tokenizer.model.v*"],
             revision=revision,
@@ -158,7 +158,7 @@ def resolve_tokenizer_args(
         tokenizer_mode = "mistral"
 
     # Try to use Grok2 tiktoken tokenizer if possible
-    if tokenizer_mode == "auto" and is_one_pattern_in_repo_files(
+    if tokenizer_mode == "auto" and any_pattern_in_repo_files(
         model_name_or_path=str(tokenizer_name),
         allow_patterns=["tokenizer.tok.json"],
         revision=revision,

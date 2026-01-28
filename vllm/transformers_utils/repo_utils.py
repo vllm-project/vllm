@@ -127,7 +127,7 @@ def list_filtered_repo_files(
     return file_list
 
 
-def is_one_pattern_in_repo_files(
+def any_pattern_in_repo_files(
     model_name_or_path: str,
     allow_patterns: list[str],
     revision: str | None = None,
@@ -154,7 +154,7 @@ def is_mistral_model_repo(
     repo_type: str | None = None,
     token: str | bool | None = None,
 ) -> bool:
-    return is_one_pattern_in_repo_files(
+    return any_pattern_in_repo_files(
         model_name_or_path=model_name_or_path,
         allow_patterns=["consolidated*.safetensors"],
         revision=revision,
