@@ -428,7 +428,7 @@ class ModelConfig:
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
-        multimodal_tensor_ipc: Literal["msgspec", "torch"] | None,
+        multimodal_tensor_ipc: Literal["msgspec", "torch"],
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
