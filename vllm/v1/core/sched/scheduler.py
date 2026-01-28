@@ -129,17 +129,27 @@ class Scheduler(SchedulerInterface):
             # request_id → number of prompt tokens processed
             self._journey_prefill_hiwater: dict[str, int] = {}
 
-        # NEW: Initialize tracer for OTEL span creation
+        # Initialize tracer for OTEL span creation (scheduler process)
         self.tracer: Any | None = None
         if self._enable_journey_tracing:
             endpoint = self.observability_config.otlp_traces_endpoint
             if endpoint is not None:
                 try:
                     from vllm.tracing import init_tracer
+                    logger.info(
+                        "Initializing vllm.scheduler tracer with endpoint: %s",
+                        endpoint
+                    )
                     self.tracer = init_tracer("vllm.scheduler", endpoint)
+                    logger.info(
+                        "Successfully initialized vllm.scheduler tracer: %s",
+                        type(self.tracer).__name__
+                    )
                 except Exception as e:
-                    logger.warning(
-                        "Failed to initialize tracer for journey tracing: %s", e
+                    logger.error(
+                        "Failed to initialize tracer for journey tracing: %s",
+                        e,
+                        exc_info=True
                     )
 
         # Core spans: Track active "llm_core" spans for each request
@@ -168,14 +178,26 @@ class Scheduler(SchedulerInterface):
                 endpoint = self.observability_config.otlp_traces_endpoint
                 if endpoint is None:
                     # Explicitly disable step tracing if no OTEL endpoint configured
+                    logger.warning(
+                        "Step tracing enabled but no OTLP endpoint configured, disabling"
+                    )
                     self._enable_step_tracing = False
                 else:
                     try:
                         from vllm.tracing import init_tracer
+                        logger.info(
+                            "Initializing vllm.scheduler tracer for step tracing with endpoint: %s",
+                            endpoint
+                        )
                         self.tracer = init_tracer("vllm.scheduler", endpoint)
+                        logger.info(
+                            "Successfully initialized vllm.scheduler tracer for step tracing"
+                        )
                     except Exception as e:
-                        logger.warning(
-                            "Failed to initialize tracer for step tracing: %s", e
+                        logger.error(
+                            "Failed to initialize tracer for step tracing: %s",
+                            e,
+                            exc_info=True
                         )
                         self._enable_step_tracing = False
 
@@ -1788,6 +1810,10 @@ class Scheduler(SchedulerInterface):
             The created span, or None if tracing is disabled or creation fails
         """
         if not self.tracer:
+            logger.debug(
+                "Skipping core span creation for request %s (tracer not initialized)",
+                request.request_id
+            )
             return None
 
         try:
@@ -1795,10 +1821,26 @@ class Scheduler(SchedulerInterface):
             from vllm.tracing import extract_trace_context, SpanAttributes
             from opentelemetry.trace import SpanKind
 
+            logger.debug(
+                "Creating core span for request %s (has_trace_headers=%s)",
+                request.request_id,
+                request.trace_headers is not None
+            )
+
             # Extract parent context from trace_headers
             parent_context = None
             if request.trace_headers:
                 parent_context = extract_trace_context(request.trace_headers)
+                logger.debug(
+                    "Extracted parent context for request %s: %s",
+                    request.request_id,
+                    parent_context is not None
+                )
+            else:
+                logger.debug(
+                    "No trace headers for request %s, creating root span",
+                    request.request_id
+                )
 
             # Create child span with explicit timing and kind
             span = self.tracer.start_span(
@@ -1808,16 +1850,32 @@ class Scheduler(SchedulerInterface):
                 start_time=time.time_ns(),
             )
 
+            logger.info(
+                "Created core span 'llm_core' for request %s (scope=vllm.scheduler, parent_context=%s)",
+                request.request_id,
+                parent_context is not None
+            )
+
             # Set span attributes
             if span and span.is_recording():
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request.request_id)
+                logger.debug(
+                    "Set request_id attribute on core span for %s",
+                    request.request_id
+                )
+            else:
+                logger.warning(
+                    "Core span is not recording for request %s",
+                    request.request_id
+                )
 
             return span
         except Exception as e:
-            logger.warning(
+            logger.error(
                 "Failed to create core span for request %s: %s",
                 request.request_id,
-                e
+                e,
+                exc_info=True
             )
             return None
 

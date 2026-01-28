@@ -97,10 +97,12 @@ class LLMEngine:
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
         )
-        endpoint = self.observability_config.otlp_traces_endpoint
-        if endpoint is not None:
-            tracer = init_tracer("vllm.llm_engine", endpoint)
-            self.output_processor.tracer = tracer
+        # NOTE: OutputProcessor tracing is disabled in favor of journey tracing.
+        # Journey tracing creates spans at two layers:
+        #   - vllm.api: API-level spans (llm_request) with API events
+        #   - vllm.scheduler: Core spans (llm_core) with journey events
+        # The vllm.llm_engine scope was causing duplicate spans and provider conflicts.
+        logger.debug("OutputProcessor created (tracing disabled, using journey tracing)")
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
