@@ -140,6 +140,15 @@ class Qwen2AudioProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return Qwen2AudioMultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.get_target_channels(),
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_target_channels(self) -> int:
         """Return target audio channels for Qwen2 Audio models (mono)."""
         return 1
@@ -203,13 +212,6 @@ class Qwen2AudioMultiModalDataParser(MultiModalDataParser):
 
 
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return Qwen2AudioMultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate,
-            target_channels=self.info.get_target_channels(),
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,

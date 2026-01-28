@@ -637,6 +637,14 @@ class GlmAsrProcessingInfo(BaseProcessingInfo):
     def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
         return self.get_hf_processor(**kwargs).feature_extractor
 
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
@@ -742,10 +750,6 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
     GLM-ASR processor that inherits directly from BaseMultiModalProcessor
     for better performance and cleaner implementation.
     """
-
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return GlmAsrMultiModalDataParser(target_sr=feature_extractor.sampling_rate)
 
     def _calculate_chunk_counts(
         self,
