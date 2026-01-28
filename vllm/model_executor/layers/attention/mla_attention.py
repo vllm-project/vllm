@@ -1999,15 +1999,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         prefill: PrefillKernelMetadataProtocol,
         return_softmax_lse: bool,
     ):
-        """Flash attention implementation for prefill new tokens.
-
-        Args:
-            q: Query tensor
-            k: Key tensor
-            v: Value tensor
-            prefill: Metadata conforming to PrefillKernelMetadataProtocol
-            return_softmax_lse: Whether to return softmax LSE
-        """
         return self._flash_attn_varlen_diff_headdims(
             q=q,
             k=k,
