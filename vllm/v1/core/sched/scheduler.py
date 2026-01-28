@@ -171,6 +171,7 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        self.pending_kv_block_transfers = 0
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -1419,6 +1420,25 @@ class Scheduler(SchedulerInterface):
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
+        if self.connector is not None:
+            kv_connector_scheduler_output = self.connector.report_to_scheduler()
+            if kv_connector_scheduler_output is not None:
+                block_pool = self.kv_cache_manager.block_pool
+
+                block_ids_to_lock = kv_connector_scheduler_output.block_ids_to_lock
+                if block_ids_to_lock:
+                    block_pool.touch(
+                        block_pool.blocks[block_id] for block_id in block_ids_to_lock
+                    )
+                    self.pending_kv_block_transfers += len(block_ids_to_lock)
+
+                block_ids_to_unlock = kv_connector_scheduler_output.block_ids_to_unlock
+                if block_ids_to_unlock:
+                    block_pool.free_blocks(
+                        block_pool.blocks[block_id] for block_id in block_ids_to_unlock
+                    )
+                    self.pending_kv_block_transfers -= len(block_ids_to_unlock)
+                    assert self.pending_kv_block_transfers >= 0
 
         # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
@@ -1706,6 +1726,9 @@ class Scheduler(SchedulerInterface):
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
+
+    def has_kv_connector_work(self) -> bool:
+        return self.pending_kv_block_transfers > 0
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False

@@ -5,13 +5,19 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
+from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorSchedulerOutput,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
@@ -21,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     NixlKVConnectorStats,
 )
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import KVCacheConfig
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -41,7 +48,14 @@ class MockConnectorStats(KVConnectorStats):
 
 
 class MockConnector(KVConnectorBase_V1):
-    """Mock connector that implements build_kv_connector_stats for testing."""
+    """Mock connector for testing."""
+
+    def __new__(cls, *args, **kwargs):
+        # mock all KVConnectorBase_V1 functions
+        mock = MagicMock(spec_set=KVConnectorBase_V1)
+        # Override just build_kv_connector_stats
+        mock.build_kv_connector_stats = cls.build_kv_connector_stats
+        return mock
 
     @classmethod
     def build_kv_connector_stats(
@@ -71,14 +85,40 @@ class MockConnector(KVConnectorBase_V1):
         pass
 
 
-class MockCrossLayerConnector(MockConnector):
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        return True
-
-
 # Register the mock connector
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
+
+
+@pytest.fixture
+def mc() -> MultiConnector:
+    """MultiConnector using two mocked connectors"""
+    vllm_config = create_vllm_config()
+
+    mock_connector_config = {
+        "kv_connector": "MockConnector",
+        "kv_role": "kv_both",
+        "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",
+    }
+
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [mock_connector_config, mock_connector_config],
+        },
+    )
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+    )
+
+    mc = MultiConnector(
+        vllm_config=vllm_config,
+        role=KVConnectorRole.WORKER,
+        kv_cache_config=kv_cache_config,
+    )
+
+    return mc
 
 
 # Helper function to compare directories recursively
@@ -630,19 +670,57 @@ class TestMultiConnectorStats:
         assert not stats.is_empty()
 
 
-class TestMultiConnectorPreferCrossLayerBlocks:
-    def test_all_connectors_prefer_cross_layer_blocks(self):
-        mc = MultiConnector.__new__(MultiConnector)
-        mc._connectors = [
-            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
-            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
-        ]
-        assert mc.prefer_cross_layer_blocks is True
+def test_multi_connector_prefer_cross_layer_blocks(mc):
+    mc._connectors[0].prefer_cross_layer_blocks = False
+    mc._connectors[1].prefer_cross_layer_blocks = True
+    assert mc.prefer_cross_layer_blocks is False
 
-    def test_mixed_connectors_do_not_prefer_cross_layer_blocks(self):
-        mc = MultiConnector.__new__(MultiConnector)
-        mc._connectors = [
-            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
-            MockConnector.__new__(MockConnector),  # default False
-        ]
-        assert mc.prefer_cross_layer_blocks is False
+    mc._connectors[0].prefer_cross_layer_blocks = True
+    mc._connectors[1].prefer_cross_layer_blocks = True
+    assert mc.prefer_cross_layer_blocks is True
+
+
+def test_multi_connector_report_to_scheduler(mc):
+    # both return None
+    mc._connectors[0].report_to_scheduler.return_value = None
+    mc._connectors[1].report_to_scheduler.return_value = None
+    output = mc.report_to_scheduler()
+    assert output is None
+
+    # only first is None
+    kv_connector_scheduler_output = KVConnectorSchedulerOutput(
+        block_ids_to_lock=[1, 2, 3],
+        block_ids_to_unlock=[4, 5, 6],
+    )
+    mc._connectors[0].report_to_scheduler.return_value = None
+    mc._connectors[1].report_to_scheduler.return_value = kv_connector_scheduler_output
+
+    output = mc.report_to_scheduler()
+    assert output is not None
+    assert output.block_ids_to_lock == [1, 2, 3]
+    assert output.block_ids_to_unlock == [4, 5, 6]
+
+    # only second is None
+    kv_connector_scheduler_output = KVConnectorSchedulerOutput(
+        block_ids_to_lock=[1, 2, 3],
+        block_ids_to_unlock=[4, 5, 6],
+    )
+    mc._connectors[0].report_to_scheduler.return_value = kv_connector_scheduler_output
+    mc._connectors[1].report_to_scheduler.return_value = None
+    output = mc.report_to_scheduler()
+    assert output is not None
+    assert output.block_ids_to_lock == [1, 2, 3]
+    assert output.block_ids_to_unlock == [4, 5, 6]
+
+    # two outputs
+    kv_connector_scheduler_output2 = KVConnectorSchedulerOutput(
+        block_ids_to_lock=[7, 1, 8],
+        block_ids_to_unlock=[9, 2, 10],
+    )
+    mc._connectors[0].report_to_scheduler.return_value = kv_connector_scheduler_output
+    mc._connectors[1].report_to_scheduler.return_value = kv_connector_scheduler_output2
+
+    output = mc.report_to_scheduler()
+    assert output is not None
+    assert output.block_ids_to_lock == [1, 2, 3, 7, 1, 8]
+    assert output.block_ids_to_unlock == [4, 5, 6, 9, 2, 10]

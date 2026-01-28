@@ -6,6 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.utils import MockKVConnector
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
@@ -15,6 +16,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorSchedulerOutput
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -31,7 +33,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    DraftTokenIds,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -1413,6 +1420,110 @@ def test_kv_connector_handles_preemption(is_async, use_ec_connector, ec_role):
     assert len(scheduler.running) == 0
     # All memory should be freed since nothing is running.
     assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == NUM_BLOCKS - 1
+
+
+def test_kv_connector_lock_blocks():
+    """
+    Test a KV connector locking (holding back from eviction) GPU blocks.
+    """
+    block_size = 16
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+        block_size=block_size,
+    )
+    connector = scheduler.connector
+    assert isinstance(connector, MockKVConnector)
+
+    kv_cache_manager = scheduler.kv_cache_manager
+    block_pool = kv_cache_manager.block_pool
+    free_block_queue = block_pool.free_block_queue
+    num_blocks = free_block_queue.num_free_blocks
+
+    # single request with 3 blocks + 4 decoded tokens
+    request = create_requests(
+        num_requests=1,
+        num_tokens=3 * block_size,
+        max_tokens=4,
+        block_size=block_size,
+    )[0]
+    scheduler.add_request(request)
+
+    # decoded token #1, no blocks locked/unlocked
+    scheduler_output = scheduler.schedule()
+    model_runner_output = make_output(scheduler)
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert request.num_tokens == 3 * block_size + 1
+
+    # extract request block IDs
+    req_block_id_groups = kv_cache_manager.get_block_ids(request.request_id)
+    assert len(req_block_id_groups) == 1
+    req_block_ids = req_block_id_groups[0]
+
+    # assert that all request blocks have ref_cnt == 1
+    req_blocks = [block_pool.blocks[block_id] for block_id in req_block_ids]
+    assert [block.ref_cnt for block in req_blocks] == [1, 1, 1]
+
+    # decoded token #2, block #0 locked once, block #2 locked twice
+    scheduler_output = scheduler.schedule()
+    connector.kv_connector_scheduler_output = KVConnectorSchedulerOutput(
+        block_ids_to_lock=[req_block_ids[2], req_block_ids[0], req_block_ids[2]]
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert request.num_tokens == 3 * block_size + 2
+    assert [block.ref_cnt for block in req_blocks] == [2, 1, 3]
+
+    # decoded token #3, block #1 locked three times, block #1 unlocked once
+    scheduler_output = scheduler.schedule()
+    connector.kv_connector_scheduler_output = KVConnectorSchedulerOutput(
+        block_ids_to_lock=[req_block_ids[1], req_block_ids[1], req_block_ids[1]],
+        block_ids_to_unlock=[req_block_ids[1]],
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert request.num_tokens == 3 * block_size + 3
+    assert [block.ref_cnt for block in req_blocks] == [2, 3, 3]
+
+    # decoded token #4 (last), block #2 unlocked twice, request is freed
+    scheduler_output = scheduler.schedule()
+    connector.kv_connector_scheduler_output = KVConnectorSchedulerOutput(
+        block_ids_to_unlock=[req_block_ids[1], req_block_ids[1]]
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    assert not scheduler.running
+    assert not scheduler.waiting
+    assert request.num_tokens == 3 * block_size + 4
+    assert [block.ref_cnt for block in req_blocks] == [1, 0, 2]
+    assert scheduler.has_work()
+
+    # step with no KV connector output
+    scheduler_output = scheduler.schedule()
+    connector.kv_connector_scheduler_output = None
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+    assert [block.ref_cnt for block in req_blocks] == [1, 0, 2]
+    assert free_block_queue.num_free_blocks == num_blocks - 2
+    assert not scheduler.has_finished_requests()
+    assert not scheduler.has_unfinished_requests()
+    assert scheduler.has_work()
+
+    # block #0 unlocked once, block #2 unlocked once
+    scheduler_output = scheduler.schedule()
+    connector.kv_connector_scheduler_output = KVConnectorSchedulerOutput(
+        block_ids_to_unlock=[req_block_ids[0], req_block_ids[2]]
+    )
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+    assert [block.ref_cnt for block in req_blocks] == [0, 0, 1]
+    assert free_block_queue.num_free_blocks == num_blocks - 1
+    assert scheduler.has_work()
+
+    # block #2 unlocked once
+    scheduler_output = scheduler.schedule()
+    connector.kv_connector_scheduler_output = KVConnectorSchedulerOutput(
+        block_ids_to_unlock=[req_block_ids[2]]
+    )
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+    assert [block.ref_cnt for block in req_blocks] == [0, 0, 0]
+    assert free_block_queue.num_free_blocks == num_blocks
+    assert not scheduler.has_work()
 
 
 def make_output(scheduler: Scheduler):

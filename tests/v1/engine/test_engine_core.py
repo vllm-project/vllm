@@ -179,11 +179,11 @@ def test_engine_core():
     req0.request_id = req1.request_id = "test"
     engine_core.add_request(*engine_core.preprocess_add_request(req0))
 
-    while engine_core.scheduler.has_requests():
+    while engine_core.scheduler.has_work():
         engine_core.step_fn()
 
     engine_core.add_request(*engine_core.preprocess_add_request(req1))
-    while engine_core.scheduler.has_requests():
+    while engine_core.scheduler.has_work():
         engine_core.step_fn()
 
     assert len(engine_core.scheduler.waiting) == 0
@@ -222,7 +222,7 @@ def test_engine_core_advanced_sampling():
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
         # Loop through until they are all done.
-        while engine_core.scheduler.has_requests():
+        while engine_core.scheduler.has_work():
             engine_core.step_fn()
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 0
