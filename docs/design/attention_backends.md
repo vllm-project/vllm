@@ -47,13 +47,13 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 # Method 1: Using AttentionConfig with enum
 llm = LLM(
-    model="meta-llama/Llama-2-7b-hf",
+    model="Qwen/Qwen3-0.6B",
     attention_config=AttentionConfig(backend=AttentionBackendEnum.FLASH_ATTN),
 )
 
 # Method 2: Using attention_backend parameter with string
 llm = LLM(
-    model="meta-llama/Llama-2-7b-hf",
+    model="Qwen/Qwen3-0.6B",
     attention_backend="FLASH_ATTN",
 )
 ```
