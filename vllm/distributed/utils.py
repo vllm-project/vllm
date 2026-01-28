@@ -31,7 +31,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import suppress_stdout
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -478,20 +477,11 @@ def init_gloo_process_group(
     different torch versions.
     """
     with suppress_stdout():
-        if is_torch_equal_or_newer("2.6"):
-            pg = ProcessGroup(
-                prefix_store,
-                group_rank,
-                group_size,
-            )
-        else:
-            options = ProcessGroup.Options(backend="gloo")
-            pg = ProcessGroup(
-                prefix_store,
-                group_rank,
-                group_size,
-                options,
-            )
+        pg = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
         from torch.distributed.distributed_c10d import ProcessGroupGloo
 
         backend_class = ProcessGroupGloo(
@@ -499,9 +489,7 @@ def init_gloo_process_group(
         )
         backend_type = ProcessGroup.BackendType.GLOO
         device = torch.device("cpu")
-        if is_torch_equal_or_newer("2.6"):
-            # _set_default_backend is supported in torch >= 2.6
-            pg._set_default_backend(backend_type)
+        pg._set_default_backend(backend_type)
         backend_class._set_sequence_number_for_group()
 
         pg._register_backend(device, backend_type, backend_class)
@@ -599,12 +587,5 @@ def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     Destroy ProcessGroup returned by
         stateless_init_torch_distributed_process_group().
     """
-    if is_torch_equal_or_newer("2.7"):
-        pg.shutdown()
-    else:
-        # Lazy import for non-CUDA backends.
-        from torch.distributed.distributed_c10d import _shutdown_backend
-
-        _shutdown_backend(pg)
-
+    pg.shutdown()
     _unregister_process_group(pg.group_name)
