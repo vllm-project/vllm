@@ -104,6 +104,34 @@ message GenerateRequest {
 }
 
 // =====================
+// Logprobs Types
+// =====================
+
+// Output logprobs - matches SGLang structure for code reuse
+message OutputLogProbs {
+  repeated float token_logprobs = 1;   // Logprob for each output token
+  repeated int32 token_ids = 2;        // Token ID for each position
+  repeated TopLogProbs top_logprobs = 3; // Top-k alternatives per position
+}
+
+// Input (prompt) logprobs - first token has no logprob (None)
+message InputLogProbs {
+  repeated InputTokenLogProb token_logprobs = 1;  // Logprob per prompt token
+  repeated int32 token_ids = 2;                   // Prompt token IDs
+  repeated TopLogProbs top_logprobs = 3;          // Top-k alternatives per position
+}
+
+// Wrapper for optional logprob (first prompt token has no logprob)
+message InputTokenLogProb {
+  optional float value = 1;
+}
+
+message TopLogProbs {
+  repeated float values = 1;           // Logprob values for top-k tokens
+  repeated int32 token_ids = 2;        // Token IDs for top-k tokens
+}
+
+// =====================
 // Generate Response
 // =====================
 
@@ -120,9 +148,9 @@ message GenerateStreamChunk {
   uint32 completion_tokens = 3;
   uint32 cached_tokens = 4;
 
-  // Logprobs support (TODO: implement in Phase 4)
-  // OutputLogProbs output_logprobs = 5;
-  // InputLogProbs input_logprobs = 6;  // Only in first chunk
+  // Logprobs support
+  OutputLogProbs output_logprobs = 5;
+  InputLogProbs input_logprobs = 6;  // Only in first chunk
 }
 
 message GenerateComplete {
@@ -132,9 +160,9 @@ message GenerateComplete {
   uint32 completion_tokens = 4;
   uint32 cached_tokens = 5;
 
-  // Logprobs support (TODO: implement in Phase 4)
-  // OutputLogProbs output_logprobs = 6;
-  // InputLogProbs input_logprobs = 7;
+  // Logprobs support
+  OutputLogProbs output_logprobs = 6;
+  InputLogProbs input_logprobs = 7;
 }
 
 // =====================

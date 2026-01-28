@@ -34,7 +34,12 @@ from vllm.entrypoints.utils import log_version_and_model
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
+from vllm.sampling_params import (
+    PromptLogprobs,
+    RequestOutputKind,
+    SampleLogprobs,
+    StructuredOutputsParams,
+)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -102,6 +107,15 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 request.sampling_params, stream=request.stream
             )
 
+            # Extract logprobs configuration
+            num_logprobs = sampling_params.logprobs
+            num_prompt_logprobs = sampling_params.prompt_logprobs
+
+            # Track state for streaming
+            is_first_chunk = True
+            all_output_token_ids: list[int] = []
+            all_output_logprobs: SampleLogprobs = []
+
             async for output in self.async_llm.generate(
                 prompt=prompt,
                 sampling_params=sampling_params,
@@ -110,11 +124,34 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 # Convert vLLM output to protobuf
                 # For streaming, always send chunks
                 if request.stream:
-                    yield self._chunk_response(output)
+                    yield self._chunk_response(
+                        output,
+                        num_logprobs=num_logprobs,
+                        num_prompt_logprobs=num_prompt_logprobs,
+                        is_first_chunk=is_first_chunk,
+                    )
+                    is_first_chunk = False
+
+                    # Accumulate token IDs and logprobs for final response
+                    completion = output.outputs[0] if output.outputs else None
+                    if completion:
+                        all_output_token_ids.extend(completion.token_ids)
+                        if completion.logprobs:
+                            all_output_logprobs.extend(completion.logprobs)
 
                 # Send complete response when finished
                 if output.finished:
-                    yield self._complete_response(output)
+                    yield self._complete_response(
+                        output,
+                        num_logprobs=num_logprobs,
+                        num_prompt_logprobs=num_prompt_logprobs,
+                        all_output_token_ids=all_output_token_ids
+                        if request.stream
+                        else None,
+                        all_output_logprobs=all_output_logprobs
+                        if request.stream
+                        else None,
+                    )
 
         except ValueError as e:
             # Invalid request error (equiv to 400).
@@ -320,13 +357,120 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         )
 
     @staticmethod
-    def _chunk_response(output: RequestOutput) -> vllm_engine_pb2.GenerateResponse:
+    def _build_output_logprobs(
+        logprobs: SampleLogprobs | None,
+        token_ids: list[int],
+        num_top_logprobs: int | None,
+    ) -> vllm_engine_pb2.OutputLogProbs | None:
+        """
+        Convert vLLM SampleLogprobs to proto OutputLogProbs.
+
+        Args:
+            logprobs: vLLM logprobs (list of dict[int, Logprob])
+            token_ids: Token IDs for each position
+            num_top_logprobs: Number of top logprobs to include
+
+        Returns:
+            OutputLogProbs proto or None
+        """
+        if logprobs is None or len(logprobs) == 0:
+            return None
+
+        proto = vllm_engine_pb2.OutputLogProbs()
+
+        for i, token_id in enumerate(token_ids):
+            if i >= len(logprobs):
+                break
+
+            logprob_entry = logprobs[i]  # dict[int, Logprob]
+            if token_id in logprob_entry:
+                proto.token_logprobs.append(logprob_entry[token_id].logprob)
+                proto.token_ids.append(token_id)
+
+                # Build top logprobs for this position
+                if num_top_logprobs and num_top_logprobs > 0:
+                    top = vllm_engine_pb2.TopLogProbs()
+                    sorted_entries = sorted(
+                        logprob_entry.items(),
+                        key=lambda x: x[1].logprob,
+                        reverse=True,
+                    )[:num_top_logprobs]
+                    for tid, lp in sorted_entries:
+                        top.token_ids.append(tid)
+                        top.values.append(lp.logprob)
+                    proto.top_logprobs.append(top)
+
+        return proto if len(proto.token_ids) > 0 else None
+
+    @staticmethod
+    def _build_input_logprobs(
+        prompt_logprobs: PromptLogprobs | None,
+        prompt_token_ids: list[int],
+        num_top_logprobs: int | None,
+    ) -> vllm_engine_pb2.InputLogProbs | None:
+        """
+        Convert vLLM PromptLogprobs to proto InputLogProbs.
+
+        Args:
+            prompt_logprobs: vLLM prompt logprobs (list of dict[int, Logprob] | None)
+            prompt_token_ids: Prompt token IDs
+            num_top_logprobs: Number of top logprobs to include
+
+        Returns:
+            InputLogProbs proto or None
+        """
+        if prompt_logprobs is None or len(prompt_logprobs) == 0:
+            return None
+
+        proto = vllm_engine_pb2.InputLogProbs()
+
+        for i, token_id in enumerate(prompt_token_ids):
+            if i >= len(prompt_logprobs):
+                break
+
+            logprob_entry = prompt_logprobs[i]  # dict[int, Logprob] | None
+            token_logprob = vllm_engine_pb2.InputTokenLogProb()
+
+            # First token has no logprob (None)
+            if logprob_entry is not None and token_id in logprob_entry:
+                token_logprob.value = logprob_entry[token_id].logprob
+
+            proto.token_logprobs.append(token_logprob)
+            proto.token_ids.append(token_id)
+
+            # Build top logprobs
+            if num_top_logprobs and num_top_logprobs > 0 and logprob_entry:
+                top = vllm_engine_pb2.TopLogProbs()
+                sorted_entries = sorted(
+                    logprob_entry.items(),
+                    key=lambda x: x[1].logprob,
+                    reverse=True,
+                )[:num_top_logprobs]
+                for tid, lp in sorted_entries:
+                    top.token_ids.append(tid)
+                    top.values.append(lp.logprob)
+                proto.top_logprobs.append(top)
+            else:
+                proto.top_logprobs.append(vllm_engine_pb2.TopLogProbs())
+
+        return proto if len(proto.token_ids) > 0 else None
+
+    @staticmethod
+    def _chunk_response(
+        output: RequestOutput,
+        num_logprobs: int | None = None,
+        num_prompt_logprobs: int | None = None,
+        is_first_chunk: bool = False,
+    ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a streaming chunk response from vLLM output.
         When output_kind=DELTA, vLLM returns only new tokens automatically.
 
         Args:
             output: vLLM RequestOutput (with delta tokens when output_kind=DELTA)
+            num_logprobs: Number of top logprobs for output tokens
+            num_prompt_logprobs: Number of top logprobs for prompt tokens
+            is_first_chunk: Whether this is the first chunk (include input_logprobs)
 
         Returns:
             GenerateResponse with chunk field set
@@ -345,6 +489,20 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 ),
             )
 
+        # Build output logprobs for this chunk's tokens
+        output_logprobs = VllmEngineServicer._build_output_logprobs(
+            completion.logprobs, completion.token_ids, num_logprobs
+        )
+
+        # Build input logprobs only on first chunk
+        input_logprobs = None
+        if is_first_chunk:
+            input_logprobs = VllmEngineServicer._build_input_logprobs(
+                output.prompt_logprobs,
+                output.prompt_token_ids,
+                num_prompt_logprobs,
+            )
+
         # When output_kind=DELTA, completion.token_ids contains only new tokens
         # vLLM handles the delta logic internally
         # completion_tokens = delta count (client will accumulate)
@@ -356,16 +514,28 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 else 0,
                 completion_tokens=len(completion.token_ids),  # Delta count
                 cached_tokens=output.num_cached_tokens,
+                output_logprobs=output_logprobs,
+                input_logprobs=input_logprobs,
             ),
         )
 
     @staticmethod
-    def _complete_response(output: RequestOutput) -> vllm_engine_pb2.GenerateResponse:
+    def _complete_response(
+        output: RequestOutput,
+        num_logprobs: int | None = None,
+        num_prompt_logprobs: int | None = None,
+        all_output_token_ids: list[int] | None = None,
+        all_output_logprobs: SampleLogprobs | None = None,
+    ) -> vllm_engine_pb2.GenerateResponse:
         """
         Build a final completion response from vLLM output.
 
         Args:
             output: vLLM RequestOutput (finished=True)
+            num_logprobs: Number of top logprobs for output tokens
+            num_prompt_logprobs: Number of top logprobs for prompt tokens
+            all_output_token_ids: Accumulated token IDs (for streaming mode)
+            all_output_logprobs: Accumulated logprobs (for streaming mode)
 
         Returns:
             GenerateResponse with complete field set
@@ -385,6 +555,23 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 ),
             )
 
+        # For non-streaming, use completion's token_ids and logprobs directly
+        # For streaming, use accumulated values if provided
+        token_ids_for_logprobs = all_output_token_ids or completion.token_ids
+        logprobs_for_output = all_output_logprobs or completion.logprobs
+
+        # Build output logprobs
+        output_logprobs = VllmEngineServicer._build_output_logprobs(
+            logprobs_for_output, token_ids_for_logprobs, num_logprobs
+        )
+
+        # Build input logprobs
+        input_logprobs = VllmEngineServicer._build_input_logprobs(
+            output.prompt_logprobs,
+            output.prompt_token_ids,
+            num_prompt_logprobs,
+        )
+
         # Build complete response
         # When streaming (DELTA mode): completion.token_ids will be empty/last delta
         # When non-streaming (FINAL_ONLY mode): completion.token_ids has all tokens
@@ -398,6 +585,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 else 0,
                 completion_tokens=len(completion.token_ids),
                 cached_tokens=output.num_cached_tokens,
+                output_logprobs=output_logprobs,
+                input_logprobs=input_logprobs,
             ),
         )
 
