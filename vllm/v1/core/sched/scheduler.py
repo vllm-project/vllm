@@ -344,13 +344,6 @@ class Scheduler(SchedulerInterface):
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
-            # do not schedule another step for the same request while it still has
-            # output placeholders for PP.
-            # TODO: support PP + async scheduling without this limit
-            if self.use_pp and request.num_output_placeholders > 0:
-                req_index += 1
-                continue
-
             if (
                 request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
@@ -1003,7 +996,10 @@ class Scheduler(SchedulerInterface):
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
-            if self.use_pp:
+            # NOTE: In PP+async scheduling, we consume token ids via a direct GPU
+            # broadcast path (`input_batch.prev_sampled_token_ids`), so we can
+            # omit this payload.
+            if self.use_pp and not self.scheduler_config.async_scheduling:
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker. Otherwise, we don't
