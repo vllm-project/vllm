@@ -34,13 +34,9 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.utils import log_version_and_model
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.logger import init_logger
+from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.sampling_params import (
-    PromptLogprobs,
-    RequestOutputKind,
-    SampleLogprobs,
-    StructuredOutputsParams,
-)
+from vllm.sampling_params import RequestOutputKind, StructuredOutputsParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
