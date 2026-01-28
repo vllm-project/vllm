@@ -44,6 +44,17 @@ cleanup_docker() {
   fi
 }
 
+cleanup_network() {
+  for node in $(seq 0 $((NUM_NODES-1))); do
+    if docker pr -a -q -f name="node${node}" | grep -q .; then
+      docker stop "node${node}"
+    fi
+  done
+  if docker network ls | grep docker-net; then
+    docker network rm docker-net
+  fi
+}
+
 # Call the cleanup docker function
 cleanup_docker
 
@@ -59,7 +70,7 @@ while true; do
         fi
 done
 
-echo "--- Pulling container" 
+echo "--- Pulling container"
 image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 docker pull "${image_name}"
@@ -141,7 +152,6 @@ if [[ $commands == *" entrypoints/openai "* ]]; then
   --ignore=entrypoints/openai/test_audio.py \
   --ignore=entrypoints/openai/test_shutdown.py \
   --ignore=entrypoints/openai/test_completion.py \
-  --ignore=entrypoints/openai/test_sleep.py \
   --ignore=entrypoints/openai/test_models.py \
   --ignore=entrypoints/openai/test_lora_adapters.py \
   --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
@@ -177,13 +187,13 @@ if [[ -z "$render_gid" ]]; then
   exit 1
 fi
 
-# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
+# check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs.
 if [[ $commands == *"--shard-id="* ]]; then
-  # assign job count as the number of shards used   
-  commands=${commands//"--num-shards= "/"--num-shards=${PARALLEL_JOB_COUNT} "}
+  # assign job count as the number of shards used
+  commands=$(echo "$commands" | sed -E "s/--num-shards[[:blank:]]*=[[:blank:]]*[0-9]*/--num-shards=${PARALLEL_JOB_COUNT} /g" | sed 's/ \\ / /g')
   for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
     # assign shard-id for each shard
-    commands_gpu=${commands//"--shard-id= "/"--shard-id=${GPU} "}
+    commands_gpu=$(echo "$commands" | sed -E "s/--shard-id[[:blank:]]*=[[:blank:]]*[0-9]*/--shard-id=${GPU} /g" | sed 's/ \\ / /g')
     echo "Shard ${GPU} commands:$commands_gpu"
     echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
     docker run \
@@ -210,12 +220,50 @@ if [[ $commands == *"--shard-id="* ]]; then
     wait "${pid}"
     STATUS+=($?)
   done
+  at_least_one_shard_with_tests=0
   for st in "${STATUS[@]}"; do
-    if [[ ${st} -ne 0 ]]; then
+    if [[ ${st} -ne 0 ]] && [[ ${st} -ne 5 ]]; then
       echo "One of the processes failed with $st"
       exit "${st}"
+    elif [[ ${st} -eq 5 ]]; then
+      echo "Shard exited with status 5 (no tests collected) - treating as success"
+    else # This means st is 0
+      at_least_one_shard_with_tests=1
     fi
   done
+  if [[ ${#STATUS[@]} -gt 0 && ${at_least_one_shard_with_tests} -eq 0 ]]; then
+    echo "All shards reported no tests collected. Failing the build."
+    exit 1
+  fi
+
+elif [[ $commands == *"VLLM_TEST_GROUP_NAME=mi325_4-2-node-tests-4-gpus-in-total"* ]]; then
+
+  export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+
+  if [[ "$commands" =~ ^(.*)"["(.*)"] && ["(.*)"]"$ ]]; then
+      prefix=$( echo "${BASH_REMATCH[1]}" | sed 's/;//g')
+      echo "PREFIX: ${prefix}"
+      export composite_command="(command rocm-smi || true)"
+      myIFS=$IFS
+      IFS=','
+      read -ra node0 <<< ${BASH_REMATCH[2]}
+      read -ra node1 <<< ${BASH_REMATCH[3]}
+      IFS=$myIFS
+      for i in "${!node0[@]}";do 
+        command_node_0=$(echo ${node0[i]} | sed 's/\"//g')
+        command_node_1=$(echo ${node1[i]} | sed 's/\"//g')
+        
+        export commands="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
+        echo "COMMANDS: ${commands}"
+        composite_command=$(echo "${composite_command} && ${commands}")
+      done
+      /bin/bash -c "${composite_command}"
+      cleanup_network
+  else
+      echo "Failed to parse node commands! Exiting."
+      cleanup_network
+      exit 111
+  fi
 else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \

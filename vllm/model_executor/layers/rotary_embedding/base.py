@@ -7,12 +7,15 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 
-from .common import apply_rotary_emb_torch
+from .common import ApplyRotaryEmb
 
 
+# --8<-- [start:rotary_embedding]
 @CustomOp.register("rotary_embedding")
 class RotaryEmbeddingBase(CustomOp):
     """Original rotary positional embedding."""
+
+    # --8<-- [end:rotary_embedding]
 
     def __init__(
         self,
@@ -38,7 +41,10 @@ class RotaryEmbeddingBase(CustomOp):
         #                        and current_platform.is_cuda()
         #                        and has_flashinfer()
         #                        and self.head_size in [64, 128, 256, 512])
-        self.use_flashinfer = False
+
+        # Check if use_flashinfer is already set
+        if not hasattr(self, "use_flashinfer"):
+            self.use_flashinfer = False
 
         cache = self._compute_cos_sin_cache()
         if not self.use_flashinfer:
@@ -47,6 +53,10 @@ class RotaryEmbeddingBase(CustomOp):
         self.register_buffer("cos_sin_cache", cache, persistent=False)
         self.is_rocm_triton_rotary_embed_enabled = (
             rocm_aiter_ops.is_triton_rotary_embed_enabled()
+        )
+
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            is_neox_style=self.is_neox_style,
         )
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
@@ -83,6 +93,11 @@ class RotaryEmbeddingBase(CustomOp):
         ):
             self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
 
+    def get_cos_sin(self, seqlen: int) -> tuple[torch.Tensor, torch.Tensor]:
+        cos_sin = self.cos_sin_cache[:seqlen]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        return cos, sin
+
 
 class RotaryEmbedding(RotaryEmbeddingBase):
     def __init__(
@@ -118,7 +133,12 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query = query.view(num_tokens, -1, head_size)
         query_rot = query[..., :rotary_dim]
         query_pass = query[..., rotary_dim:]
-        query_rot = apply_rotary_emb_torch(query_rot, cos, sin, is_neox_style)
+        query_rot = ApplyRotaryEmb.forward_static(
+            query_rot,
+            cos,
+            sin,
+            is_neox_style,
+        )
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         # key may be None in some cases, e.g. cross-layer KV sharing
@@ -127,7 +147,12 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             key = key.view(num_tokens, -1, head_size)
             key_rot = key[..., :rotary_dim]
             key_pass = key[..., rotary_dim:]
-            key_rot = apply_rotary_emb_torch(key_rot, cos, sin, is_neox_style)
+            key_rot = ApplyRotaryEmb.forward_static(
+                key_rot,
+                cos,
+                sin,
+                is_neox_style,
+            )
             key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
@@ -226,6 +251,28 @@ class RotaryEmbedding(RotaryEmbeddingBase):
                 self.cos_sin_cache,
                 self.is_neox_style,
             )
+        return query, key
+
+    def forward_cpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        from vllm import _custom_ops as ops
+
+        self._match_cos_sin_cache_dtype(query)
+
+        # ops.rotary_embedding() is an in-place operation
+        # that updates the query and key tensors.
+        ops.rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+            self.is_neox_style,
+        )
         return query, key
 
     def extra_repr(self) -> str:

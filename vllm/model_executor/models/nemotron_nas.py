@@ -26,13 +26,11 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
 
 import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention import AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
@@ -50,6 +48,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.llama import LlamaAttention, LlamaMLP
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import HasNoOps, SupportsLoRA, SupportsPP
 from .utils import (
@@ -82,8 +81,6 @@ class DeciLMAttention(LlamaAttention):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -97,8 +94,6 @@ class DeciLMAttention(LlamaAttention):
             hidden_size,
             num_heads,
             num_kv_heads,
-            rope_theta,
-            rope_scaling,
             max_position_embeddings,
             quant_config,
             bias,
@@ -111,7 +106,6 @@ class DeciLMAttention(LlamaAttention):
     def _init_rotary_emb(
         self,
         config,
-        rope_scaling: dict[str, Any] | None,
         quant_config: QuantizationConfig | None,
     ) -> None:
         # Enables YARN for Mistral and LLaMA4 derivatives.
@@ -124,12 +118,9 @@ class DeciLMAttention(LlamaAttention):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
 
@@ -148,14 +139,6 @@ class DeciLMDecoderLayer(nn.Module):
         self._is_no_op_ffn = block_config.ffn.no_op
 
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None
-        ):
-            rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings
-            )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
@@ -176,8 +159,6 @@ class DeciLMDecoderLayer(nn.Module):
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
                 num_kv_heads=num_kv_heads,
-                rope_theta=rope_theta,
-                rope_scaling=rope_scaling,
                 max_position_embeddings=max_position_embeddings,
                 quant_config=quant_config,
                 bias=attention_bias,
@@ -188,10 +169,13 @@ class DeciLMDecoderLayer(nn.Module):
             self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         if not self._is_no_op_ffn:
-            ffn_mult = block_config.ffn.ffn_mult
-            intermediate_size = _ffn_mult_to_intermediate_size(
-                ffn_mult, config.hidden_size
-            )
+            if hasattr(block_config.ffn, "ffn_mult"):
+                ffn_mult = block_config.ffn.ffn_mult
+                intermediate_size = _ffn_mult_to_intermediate_size(
+                    ffn_mult, config.hidden_size
+                )
+            else:
+                intermediate_size = block_config.ffn.intermediate_size
 
             self.mlp = LlamaMLP(
                 hidden_size=self.hidden_size,
@@ -358,7 +342,7 @@ class DeciModel(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            if "scale" in name:
+            if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
@@ -404,7 +388,6 @@ class DeciLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, HasNoOps):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
@@ -466,7 +449,7 @@ class DeciLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, HasNoOps):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

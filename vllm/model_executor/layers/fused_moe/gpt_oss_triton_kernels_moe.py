@@ -1,16 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
@@ -88,14 +95,17 @@ def triton_kernel_moe_forward(
         gating_output, topk, sm_first=not renormalize
     )
 
+    output = torch.empty_like(hidden_states)
+
     return triton_kernel_fused_experts(
-        None,
+        output,
         hidden_states,
         w1,
         w2,
         routing_data,
         gather_idx,
         scatter_idx,
+        topk=topk,
         activation=activation,
         quant_config=quant_config,
         apply_router_weight_on_input=apply_router_weight_on_input,
@@ -113,6 +123,7 @@ def triton_kernel_fused_experts(
     routing_data,  # RoutingData
     gather_indx,  # GatherIndx
     scatter_indx,  # ScatterIndx
+    topk: int,
     activation: str = "silu",
     quant_config: FusedMoEQuantConfig | None = None,
     swiglu_alpha: float = 1.702,
@@ -120,6 +131,7 @@ def triton_kernel_fused_experts(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
+    intermediate_cache: torch.Tensor | None = None,
     a1q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
@@ -131,13 +143,29 @@ def triton_kernel_fused_experts(
     assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
 
     # Shape check, only check non-mxfp4
+    assert hidden_states.ndim == 2
     assert hidden_states.shape[-1] == w1.shape[-2]
     assert w2.shape[-1] == w1.shape[1]
 
+    batch_dim = 1
+    M, K = hidden_states.shape[-2:]
     E, _, N = w1.shape
 
     if global_num_experts == -1:
         global_num_experts = E
+
+    if intermediate_cache is None:
+        intermediate_cache = torch.empty(
+            (batch_dim, M * topk, N // 2),
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+
+    # Add batch_dim to output buffer because matmul_ogs expects 3D output
+    intermediate_cache = _resize_cache(
+        intermediate_cache, (batch_dim, M * topk, N // 2)
+    )
+    output_tensor = _resize_cache(output_tensor, (batch_dim, M, K))
 
     act = FusedActivation(
         FnSpecs("swiglu", triton_kernels.swiglu.swiglu_fn, ("alpha", "limit")),
@@ -146,7 +174,7 @@ def triton_kernel_fused_experts(
     )
     gammas = routing_data.gate_scal if routing_data else None
 
-    intermediate_cache1 = matmul_ogs(
+    matmul_ogs(
         hidden_states,
         w1,
         quant_config.w1_bias,
@@ -155,10 +183,11 @@ def triton_kernel_fused_experts(
         precision_config=quant_config.w1_precision,
         gammas=gammas if apply_router_weight_on_input else None,
         fused_activation=act,
+        y=intermediate_cache,
     )
 
-    intermediate_cache3 = matmul_ogs(
-        intermediate_cache1,
+    matmul_ogs(
+        intermediate_cache.view(M * topk, N // 2),
         w2,
         quant_config.w2_bias,
         routing_data,
@@ -167,7 +196,8 @@ def triton_kernel_fused_experts(
         gammas=None if apply_router_weight_on_input else gammas,
         y=output_tensor,
     )
-    return intermediate_cache3
+    output_tensor = output_tensor.view(M, K)
+    return output_tensor
 
 
 def make_routing_data(
@@ -215,11 +245,82 @@ def make_routing_data(
 
 
 class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        super().__init__(quant_config)
+    @staticmethod
+    def _supports_current_device() -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        raise NotImplementedError(
+            "OAITritonExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     def supports_expert_map(self) -> bool:
         return True
+
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        """
+        Extract the MoE problem size from the given tensor arguments:
+        - a: The hidden states, input to the MoE layer.
+        - w1: The first set of expert weights.
+        - w2: The second set of expert weights.
+        - topk_ids: The topk ids.
+        Note: extracting the problem shape from the weight and activation
+        tensors is not obvious.  It needs to be done this way specifically
+        due to subtle issues with particular kernels, e.g. the int4 kernels
+        divide the trailing dimension by two, so it's not "correct" to
+        extract N or K from the trailing dimension of w1 or w2.  Similarly,
+        some kernels transpose the weights, so this needs to be kept in mind.
+        Note: This implementation covers most cases. However, if experts
+        require a specialized implementation, like MarlinExperts, they are free
+        to override this function.
+        """
+        assert w1.dim() == 3 and w2.dim() == 3
+        E, _, N = w1.size()
+        K = a1.size(-1)
+
+        assert a1.dim() == 2
+        assert topk_ids.size(0) == a1.size(0), f"{topk_ids.size(0)} != {a1.size(0)}"
+        M = a1.size(0)
+
+        assert topk_ids.dim() == 2
+        topk = topk_ids.size(1)
+
+        return E, M, N, K, topk
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Weight application and reduction happens in the fused_experts kernel.
@@ -235,19 +336,9 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class OAITritonExperts(BaseOAITritonExperts):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
-        super().__init__(quant_config)
-
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
 
     def supports_chunking(self) -> bool:
         return True
@@ -261,10 +352,12 @@ class OAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
-        workspace1 = (M, K)
-        workspace2 = (0, 0)
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        workspace1 = (0, 0)
+        workspace2 = (M * topk, activation_out_dim)
         output = (M, K)
         return (workspace1, workspace2, output)
 
@@ -297,20 +390,161 @@ class OAITritonExperts(BaseOAITritonExperts):
             topk_ids, topk_weights, local_num_experts
         )
 
-        experts_output = triton_kernel_fused_experts(
-            None,
+        topk = topk_ids.size(1)
+        triton_kernel_fused_experts(
+            output,
             hidden_states,
             w1,
             w2,
             routing_data,
             gather_indx,
             scatter_indx,
+            topk=topk,
             activation=activation,
             quant_config=self.quant_config,
             apply_router_weight_on_input=False,
             global_num_experts=local_num_experts,
             expert_map=None,  # applied already
+            intermediate_cache=workspace2,
             a1q_scale=a1q_scale,
         )
 
-        output.copy_(experts_output, non_blocking=True)
+
+class UnfusedOAITritonExperts(BaseOAITritonExperts):
+    """
+    A Triton based MoE expert class that operates on expert standard
+    format and explicitly keeps the activation and reduction (moe_sum) steps
+    unfused from the matmul_ogs kernel. This exposes injection points
+    for activation and moe_sum.
+
+    One use case for it is to inject LoRA modules on the activation and moe_sum.
+    """
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    def supports_chunking(self) -> bool:
+        return True
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # workspace are allocated inside the kernel
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        workspace1 = (M * topk, activation_out_dim)
+        workspace2 = (M * topk, max(N, K))
+        output = (M, K)
+        return (workspace1, workspace2, output)
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor):
+        ops.moe_sum(input, output)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ):
+        # Use local variable to help mypy narrow the type after None check
+        quant_config = self.quant_config
+        if quant_config is None:
+            quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+
+        if expert_map is not None:
+            topk_ids = expert_map[topk_ids]
+
+        local_num_experts = w1.size(0)
+        if global_num_experts == -1:
+            global_num_experts = local_num_experts
+
+        routing_data, gather_indx, scatter_indx = self._make_routing_data(
+            topk_ids, topk_weights, local_num_experts
+        )
+
+        topk = topk_ids.size(1)
+
+        # type check, uint8 means mxfp4
+        assert hidden_states.dtype == torch.bfloat16
+        assert (
+            quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
+        )
+        assert (
+            quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
+        )
+
+        # Shape check, only check non-mxfp4
+        assert hidden_states.ndim == 2
+        assert hidden_states.shape[-1] == w1.shape[-2]
+        assert w2.shape[-1] == w1.shape[1]
+
+        batch_dim = 1
+        M, K = hidden_states.shape
+        E, _, N = w1.shape
+
+        if global_num_experts == -1:
+            global_num_experts = E
+
+        # Note that the output tensor might be in workspace13
+        intermediate_cache1 = _resize_cache(workspace2, (batch_dim, M * topk, N))
+        intermediate_cache3 = _resize_cache(workspace2, (batch_dim, M * topk, K))
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        intermediate_cache2 = _resize_cache(workspace13, (M * topk, activation_out_dim))
+
+        gammas = routing_data.gate_scal if routing_data else None
+
+        matmul_ogs(
+            hidden_states,
+            w1,
+            quant_config.w1_bias,
+            routing_data,
+            gather_indx=gather_indx,
+            precision_config=quant_config.w1_precision,
+            gammas=gammas if apply_router_weight_on_input else None,
+            fused_activation=None,
+            y=intermediate_cache1,
+        )
+
+        self.activation(
+            activation,
+            intermediate_cache2,
+            intermediate_cache1.view(-1, N)[gather_indx.dst_indx],
+        )
+
+        # matmul_ogs grouped reduction fuse sum across multiple experts:
+        # y[dst_indx // n_expts_act, :] += x
+        # Need to set n_expts_act to 1 to unfuse moe_sum
+        routing_data.n_expts_act = 1
+
+        matmul_ogs(
+            intermediate_cache2[gather_indx.src_indx],
+            w2,
+            quant_config.w2_bias,
+            routing_data,
+            scatter_indx=scatter_indx,
+            precision_config=quant_config.w2_precision,
+            gammas=None if apply_router_weight_on_input else gammas,
+            y=intermediate_cache3,
+        )
+
+        self.moe_sum(intermediate_cache3.view(-1, topk, K), output)

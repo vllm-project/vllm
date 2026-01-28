@@ -32,7 +32,6 @@ import torch
 from torch import nn
 from transformers import Olmo2Config
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -40,6 +39,7 @@ from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.distributed.utils import split_tensor_along_last_dim
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -99,7 +99,6 @@ class Olmo2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.max_position_embeddings = self.config.max_position_embeddings
-        self.rope_theta = self.config.rope_theta
 
         # Attention input projection. Projects x -> (q, k, v)
         self.qkv_proj = QKVParallelLinear(
@@ -139,15 +138,16 @@ class Olmo2Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        # Rotary embeddings. Rope scaling is only applied on full attention
-        # layers.
-        self.rope_scaling = self.config.rope_scaling if sliding_window is None else None
+        # Rotary embeddings. Rope scaling is only applied on full attention layers.
+        if sliding_window is None:
+            rope_parameters = self.config.rope_parameters
+        else:
+            rope_theta = self.config.rope_parameters["rope_theta"]
+            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,  # type: ignore
-            rope_scaling=self.rope_scaling,
+            rope_parameters=rope_parameters,
         )
 
         # Attention output projection.
@@ -309,7 +309,7 @@ class Olmo2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -424,7 +424,7 @@ class Olmo2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

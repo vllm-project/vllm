@@ -31,12 +31,11 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
-
 # from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -58,6 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from .ernie45_moe import Ernie4_5_MoeMLP
 from .interfaces import SupportsPP
@@ -91,9 +91,8 @@ class Ernie4_5_VLMoeAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        rope_parameters: dict[str, Any],
         head_dim: int | None = None,
-        rope_theta: float = 500000,
-        rope_scaling: dict[str, Any] | None = None,
         freq_allocation: int = 20,
         max_position_embeddings: int = 131072,
         rms_norm_eps: float = 1e-05,
@@ -126,7 +125,6 @@ class Ernie4_5_VLMoeAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -155,7 +153,7 @@ class Ernie4_5_VLMoeAttention(nn.Module):
             head_size=self.head_dim,
             rotary_dim=self.head_dim,
             max_position_embeddings=max_position_embeddings,
-            base=rope_theta,
+            base=rope_parameters["rope_theta"],
             is_neox_style=False,
             dtype=torch.get_default_dtype(),
             mrope_section=[h_rope, w_rope, t_rope],
@@ -270,6 +268,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[0],
                 prefix=f"{prefix}.text_experts",
+                router_logits_dtype=torch.float32,
             )
         else:
             self.text_experts = Ernie4_5_VLMoeMLP(
@@ -307,6 +306,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[1],
                 prefix=f"{prefix}.vision_experts",
+                router_logits_dtype=torch.float32,
             )
         else:
             self.vision_experts = Ernie4_5_VLMoeMLP(
@@ -413,8 +413,7 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 500000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        set_default_rope_theta(config, default_theta=500000)
         freq_allocation = getattr(config, "freq_allocation", 20)
         max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
 
@@ -423,8 +422,7 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             head_dim=getattr(config, "head_dim", None),
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             freq_allocation=freq_allocation,
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
@@ -566,7 +564,7 @@ class Ernie4_5_VLMoeModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -647,7 +645,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -678,6 +676,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

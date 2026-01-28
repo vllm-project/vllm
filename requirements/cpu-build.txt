@@ -1,12 +1,10 @@
 cmake>=3.26.1
 ninja
 packaging>=24.2
-setuptools>=77.0.3,<81.0.0
+setuptools==77.0.3 # this version can reuse CMake build dir
 setuptools-scm>=8
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.8.0+cpu; platform_machine == "x86_64"
-torch==2.8.0; platform_machine == "ppc64le" or platform_machine == "aarch64" or platform_system == "Darwin"
-scons; platform_machine == "aarch64"    # needed to build Arm Compute Library (ACL)
+torch==2.10.0+cpu; platform_machine == "x86_64" or platform_machine == "s390x"
+torch==2.10.0; platform_machine == "aarch64" or platform_system == "Darwin" or platform_machine == "ppc64le"
 wheel
 jinja2>=3.1.6
 regex

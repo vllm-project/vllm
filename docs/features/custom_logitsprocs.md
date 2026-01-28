@@ -71,7 +71,7 @@ Logits processor `update_state()` implementations should assume the following mo
 
         * **"Condense" the batch to be contiguous:** starting with the lowest-index empty slot (which was caused by a Remove), apply a Unidirectional Move from the current highest non-empty slot in the batch to fill the empty slot. Proceed with additional Unidirectional Move operations in order of increasing empty slot destination index and decreasing non-empty slot source index until the batch is contiguous
 
-        * **Shrink the batch:** a side-effect of condensing the batch is that empty slots resulting from Remove operations are grouped in a contiguous block at the end of the batch array. Thus, after condensing, update `BatchUpdate.batch_size` to reflect the number of non-empty slots
+        * **Shrink the batch:** a side effect of condensing the batch is that empty slots resulting from Remove operations are grouped in a contiguous block at the end of the batch array. Thus, after condensing, update `BatchUpdate.batch_size` to reflect the number of non-empty slots
 
 5. Reorder the batch for improved efficiency. Depending on the attention backend implementation and the current characteristics of the batch, zero or more Swap Move operations may be applied to reorder the batch
 
@@ -180,7 +180,7 @@ The `DummyLogitsProcessor.update_state()` implementation maintains a "sparse" re
 
 ### Wrapping an Existing Request-Level Logits Processor
 
-Although the vLLM engine applies logits processors at batch granularity, some users may want to use vLLM with a "request-level" logits processor implementation - an implementation which operates on individual requests. This will be especially true if your logits processor was developed for vLLM version 0, which required it to be a `Callable` (as described [here](https://docs.vllm.ai/en/v0.10.1.1/api/vllm/logits_process.html)) conforming to the following type annotation:
+Although the vLLM engine applies logits processors at batch granularity, some users may want to use vLLM with a "request-level" logits processor implementation - an implementation which operates on individual requests. This will be especially true if your logits processor was developed for vLLM version 0, which required it to be a `Callable` (as described [here][vllm.logits_process]) conforming to the following type annotation:
 
 ``` python
 RequestLogitsProcessor = Union[
@@ -286,7 +286,7 @@ Once you have created a custom subclass (like `WrappedPerReqLogitsProcessor`) wh
 
 ## Ways to Load Your Custom Logits Processor in vLLM
 
-Logits processors are loaded at initialization. Critically, the set of loaded logits processors cannot be modified after the vLLM engine finishes loading, and new logits logits processors cannot be loaded on-demand for individual requests.
+Logits processors are loaded at initialization. Critically, the set of loaded logits processors cannot be modified after the vLLM engine finishes loading, and new logits processors cannot be loaded on-demand for individual requests.
 
 This section details different ways of making your logits processor visible to vLLM and triggering vLLM to load your logits processor.
 
@@ -438,7 +438,7 @@ The examples below show how a user would pass a custom argument (`target_token`)
 
 ## Best Practices for Writing Custom Logits Processors
 
-Once vLLM loads a logits processor during initialization, then vLLM will invoke `update_state()` and `apply()` against that logits processor in every engine step. Both methods operate on all requests which currently reside in the vLLM persistent batch. Thus it is important to implement these methods efficiently.
+Once vLLM loads a logits processor during initialization, then vLLM will invoke `update_state()` and `apply()` against that logits processor in every engine step. Both methods operate on all requests which currently reside in the vLLM persistent batch. Thus, it is important to implement these methods efficiently.
 
 * Write efficient `apply()` and `update_state()` implementations in light of the fact that logits processors operate at batch granularity
     * For example, you may be able to use efficient vectorized operations to implement `apply()` or update internal state vectors in `update_state()`
@@ -465,4 +465,4 @@ Once vLLM loads a logits processor during initialization, then vLLM will invoke 
 
     * **Note:** for wrapped per-request logits processors, the `AdapterLogitsProcessor` base-class handles this by default
 
-* `is_argmax_invariant()` can be hard-coded to `True` or `False` if the logits processor has consistent behavior. However the argmax invariance may also be determined programmatically (i.e. if your logits processor is user-customizable in some way that impacts whether the logits processor is argmax invariant). For this reason, `is_argmax_invariant()` is not a class method
+* `is_argmax_invariant()` can be hard-coded to `True` or `False` if the logits processor has consistent behavior. However, the argmax invariance may also be determined programmatically (i.e. if your logits processor is user-customizable in some way that impacts whether the logits processor is argmax invariant). For this reason, `is_argmax_invariant()` is not a class method

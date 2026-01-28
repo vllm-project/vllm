@@ -30,7 +30,12 @@ def create_dummy_model(repo: str, model_arch: str) -> PreTrainedModel:
     model_cls: PreTrainedModel = getattr(transformers, model_arch)
     config = AutoConfig.from_pretrained(repo)
     with torch.device("meta"):
-        return model_cls._from_config(config)
+        model = model_cls._from_config(config)
+    # TODO(hmellor): Remove this once Transformers has fixed tied weights on meta device
+    # https://github.com/huggingface/transformers/issues/43522
+    if getattr(config.get_text_config(), "tie_word_embeddings", False):
+        model.tie_weights()
+    return model
 
 
 def model_architectures_for_test() -> list[str]:
@@ -50,12 +55,24 @@ def test_hf_model_weights_mapper(model_arch: str):
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
+    is_mistral_model = model_arch in [
+        "Mistral3ForConditionalGeneration",
+        "PixtralForConditionalGeneration",
+        "VoxtralForConditionalGeneration",
+    ]
+
+    if not is_mistral_model or model_info.tokenizer_mode == "mistral":
+        tokenizer_mode = model_info.tokenizer_mode
+    else:
+        tokenizer_mode = "hf"
+
     model_id = model_info.default
 
     model_config = ModelConfig(
         model_id,
         tokenizer=model_info.tokenizer or model_id,
-        tokenizer_mode=model_info.tokenizer_mode,
+        tokenizer_mode=tokenizer_mode,
+        config_format="hf",
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,

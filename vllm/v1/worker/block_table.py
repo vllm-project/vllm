@@ -4,10 +4,11 @@
 import numpy as np
 import torch
 
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
 
@@ -22,7 +23,7 @@ class BlockTable:
         pin_memory: bool,
         device: torch.device,
         kernel_block_size: int,
-        dcp_kv_cache_interleave_size: int,
+        cp_kv_cache_interleave_size: int,
     ):
         """
         Args:
@@ -81,13 +82,20 @@ class BlockTable:
             self._kernel_block_arange = None
 
         try:
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            # PCP might not be initialized in testing
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
+        try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.dcp_kv_cache_interleave_size = dcp_kv_cache_interleave_size
+        self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
     def append_row(
         self,
@@ -98,7 +106,9 @@ class BlockTable:
             return
 
         if self.use_hybrid_blocks:
-            block_ids = self._map_to_kernel_blocks(np.array(block_ids))
+            block_ids = self.map_to_kernel_blocks(
+                np.array(block_ids), self.blocks_per_kv_block, self._kernel_block_arange
+            )
 
         num_blocks = len(block_ids)
         start = self.num_blocks_per_row[row_idx]
@@ -129,14 +139,16 @@ class BlockTable:
         # NOTE(woosuk): We can't simply use `token_indices // block_size`
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
-        if self.dcp_world_size > 1:
+        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        if total_cp_world_size > 1:
             # Note(hc): The DCP implement store kvcache with an interleave
             # style, the kvcache for the token whose token_idx is i is
             # always stored on the GPU whose dcp_rank equals i % cp_world_size:
 
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
-            virtual_block_size = self.block_size * self.dcp_world_size
+            virtual_block_size = self.block_size * total_cp_world_size
             block_table_indices = (
                 req_indices * self.max_num_blocks_per_req
                 + positions // virtual_block_size
@@ -148,16 +160,16 @@ class BlockTable:
             virtual_block_offsets = positions % virtual_block_size
             mask = (
                 virtual_block_offsets
-                // self.dcp_kv_cache_interleave_size
-                % self.dcp_world_size
-                == self.dcp_rank
+                // self.cp_kv_cache_interleave_size
+                % total_cp_world_size
+                == total_cp_rank
             )
             # Calculate local block_offsets
             block_offsets = (
                 virtual_block_offsets
-                // (self.dcp_world_size * self.dcp_kv_cache_interleave_size)
-                * self.dcp_kv_cache_interleave_size
-                + virtual_block_offsets % self.dcp_kv_cache_interleave_size
+                // (total_cp_world_size * self.cp_kv_cache_interleave_size)
+                * self.cp_kv_cache_interleave_size
+                + virtual_block_offsets % self.cp_kv_cache_interleave_size
             )
             # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
@@ -188,7 +200,12 @@ class BlockTable:
         self.block_table.gpu.fill_(0)
         self.block_table.cpu.fill_(0)
 
-    def _map_to_kernel_blocks(self, kv_manager_block_ids: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def map_to_kernel_blocks(
+        kv_manager_block_ids: np.ndarray,
+        blocks_per_kv_block: int,
+        kernel_block_arange: np.ndarray,
+    ) -> np.ndarray:
         """Convert kv_manager_block_id IDs to kernel block IDs.
 
         Example:
@@ -203,12 +220,12 @@ class BlockTable:
             # kv_manager_block_id 1 → kernel block id [2, 3]
             # kv_manager_block_id 2 → kernel block id [4, 5]
         """
-        if not self.use_hybrid_blocks:
+        if blocks_per_kv_block == 1:
             return kv_manager_block_ids
 
         kernel_block_ids = (
-            kv_manager_block_ids.reshape(-1, 1) * self.blocks_per_kv_block
-            + self._kernel_block_arange
+            kv_manager_block_ids.reshape(-1, 1) * blocks_per_kv_block
+            + kernel_block_arange
         )
 
         return kernel_block_ids.reshape(-1)
@@ -245,22 +262,28 @@ class MultiGroupBlockTable:
         device: torch.device,
         block_sizes: list[int],
         kernel_block_sizes: list[int],
-        num_speculative_tokens: int = 0,
-        dcp_kv_cache_interleave_size: int = 1,
+        max_num_blocks: list[int] | None = None,
+        cp_kv_cache_interleave_size: int = 1,
     ) -> None:
-        # Note(hc): each dcp rank only store
-        # (max_model_len//dcp_world_size) tokens in kvcache,
-        # so the block_size which used for calc max_num_blocks_per_req
-        # must be multiplied by dcp_world_size.
-        try:
-            dcp_world_size = get_dcp_group().world_size
-        except AssertionError:
-            # DCP might not be initialized in testing
-            dcp_world_size = 1
-
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
                 f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
+                f"must match block_sizes length ({len(block_sizes)})"
+            )
+        if max_num_blocks is None:
+            # Note(hc): each dcp rank only store
+            # (max_model_len//dcp_world_size) tokens in kvcache,
+            # so the block_size which used for calc max_num_blocks_per_req
+            # must be multiplied by dcp_world_size.
+            total_cp_world_size = get_total_cp_world_size()
+            max_num_blocks = [
+                cdiv(max_model_len, block_size * total_cp_world_size)
+                for block_size in block_sizes
+            ]
+
+        if len(max_num_blocks) != len(block_sizes):
+            raise ValueError(
+                f"max_num_blocks length ({len(max_num_blocks)}) "
                 f"must match block_sizes length ({len(block_sizes)})"
             )
 
@@ -268,17 +291,16 @@ class MultiGroupBlockTable:
             BlockTable(
                 block_size,
                 max_num_reqs,
-                max(
-                    cdiv(max_model_len, block_size * dcp_world_size),
-                    1 + num_speculative_tokens,
-                ),
+                max_num_blocks_per_req,
                 max_num_batched_tokens,
                 pin_memory,
                 device,
                 kernel_block_size,
-                dcp_kv_cache_interleave_size,
+                cp_kv_cache_interleave_size,
             )
-            for block_size, kernel_block_size in zip(block_sizes, kernel_block_sizes)
+            for block_size, kernel_block_size, max_num_blocks_per_req in zip(
+                block_sizes, kernel_block_sizes, max_num_blocks
+            )
         ]
 
     def append_row(self, block_ids: tuple[list[int], ...], row_idx: int) -> None:

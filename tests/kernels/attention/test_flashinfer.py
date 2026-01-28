@@ -2,11 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import flashinfer
 import pytest
-import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
+
+try:
+    import flashinfer
+except ImportError:
+    if current_platform.is_rocm():
+        pytest.skip(
+            "flashinfer is not supported for vLLM on ROCm.", allow_module_level=True
+        )
+
+import torch
 
 NUM_HEADS = [(32, 8), (6, 1)]
 HEAD_SIZES = [128, 256]
@@ -93,7 +102,7 @@ def test_flashinfer_decode_with_paged_kv(
     sliding_window: int | None,
 ) -> None:
     torch.set_default_device("cuda")
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     num_seqs = len(kv_lens)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
@@ -188,7 +197,7 @@ def test_flashinfer_prefill_with_paged_kv(
     sliding_window: int | None,
 ) -> None:
     torch.set_default_device("cuda")
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
@@ -291,7 +300,7 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
 ) -> None:
     pytest.skip("TODO: fix the accuracy issue")
     torch.set_default_device("cuda")
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
@@ -401,7 +410,7 @@ def test_flashinfer_decode_with_paged_fp8_kv(
 ) -> None:
     # test doesn't work for num_heads = (16,16)
     torch.set_default_device("cuda")
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     num_seqs = len(kv_lens)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]

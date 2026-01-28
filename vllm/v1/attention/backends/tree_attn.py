@@ -9,20 +9,20 @@ from typing import ClassVar, Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionType,
-    MultipleOf,
-)
-from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.utils import (
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionImpl,
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
+from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
@@ -31,7 +31,10 @@ logger = init_logger(__name__)
 class TreeAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(16)]
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        return [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -152,7 +155,9 @@ class TreeAttentionMetadataBuilder(AttentionMetadataBuilder[TreeAttentionMetadat
         self.block_size = kv_cache_spec.block_size
 
         spec_config = vllm_config.speculative_config
-        spec_token_tree = (spec := spec_config) and spec.speculative_token_tree
+        spec_token_tree: str | None = None
+        if spec := spec_config:
+            spec_token_tree = spec.speculative_token_tree
         tree_choices: list[tuple[int, ...]] = (
             ast.literal_eval(spec_token_tree) if spec_token_tree is not None else [(0,)]
         )

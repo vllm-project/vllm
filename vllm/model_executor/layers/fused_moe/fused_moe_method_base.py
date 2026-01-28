@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Callable
 
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -27,6 +27,19 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         super().__init__()
         self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
+        self.moe_mk: mk.FusedMoEModularKernel | None = None
+
+    @property
+    def supports_internal_mk(self) -> bool:
+        # NOTE(rob): temporary attribute to indicate support for
+        # completed migration to the new internal MK interface.
+        return self.moe_mk is not None
+
+    @property
+    def mk_owns_shared_expert(self) -> bool:
+        # NOTE(rob): temporary attribute to indicate support for
+        # completed migration to the new internal MK interface.
+        return self.moe_mk is not None and self.moe_mk.shared_experts is not None
 
     @abstractmethod
     def create_weights(
@@ -50,10 +63,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """
         return False
 
-    def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> FusedMoEPrepareAndFinalize | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        return maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
+        return maybe_make_prepare_finalize(
+            self.moe, self.moe_quant_config, routing_tables
+        )
 
     def select_gemm_impl(
         self,
@@ -67,6 +85,18 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             "implementation based on the prepare_finalize"
         )
 
+    def prepare_dp_allgather_tensor(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Hook to prepare tensors and extra tensors for DP allgather + EP dispatch."""
+        raise NotImplementedError(
+            "Method 'prepare_dp_allgather_tensor' is not implemented in "
+            f"{self.__class__.__name__}."
+        )
+
     @abstractmethod
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -75,6 +105,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.moe_mk is not None:
+            return self.moe_mk.prepare_finalize.topk_indices_dtype()
         return None
 
     @property
@@ -85,28 +117,29 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def allow_inplace(self) -> bool:
         return False
 
-    @abstractmethod
+    @property
+    def method_name(self) -> str:
+        return self.__class__.__name__
+
+    @property
+    def is_monolithic(self) -> bool:
+        return False
+
+    # @abstractmethod
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    # @abstractmethod
+    def apply_monolithic(
+        self,
+        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError

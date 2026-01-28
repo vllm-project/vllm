@@ -33,7 +33,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -43,6 +42,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import FatreluAndMul, SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -90,6 +90,7 @@ class MiniCPMMoE(nn.Module):
         intermediate_size: int,
         params_dtype: torch.dtype | None = None,
         tp_size: int | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
@@ -108,6 +109,7 @@ class MiniCPMMoE(nn.Module):
             bias=False,
             params_dtype=self.params_dtype,
             quant_config=None,
+            prefix=f"{prefix}.gate",
         )
 
         self.ws = nn.Parameter(
@@ -230,8 +232,7 @@ class MiniCPMAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -257,7 +258,6 @@ class MiniCPMAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -279,10 +279,8 @@ class MiniCPMAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
 
         self.attn = Attention(
@@ -302,10 +300,7 @@ class MiniCPMAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        orig_dtype = q.dtype
-        q, k = q.float(), k.float()
         q, k = self.rotary_emb(positions, q, k)
-        q, k = q.to(orig_dtype), k.to(orig_dtype)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -324,8 +319,6 @@ class MiniCPMDecoderLayer(nn.Module):
         self.cache_config = cache_config
         self.quant_config = quant_config
         self.hidden_size = config.hidden_size
-        self.rope_theta = getattr(config, "rope_theta", 10000)
-        self.rope_scaling = getattr(config, "rope_scaling", None)
         self.max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.prefix = prefix
         self._init_attn_block()
@@ -339,8 +332,7 @@ class MiniCPMDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=self.config.num_attention_heads,
             num_kv_heads=self.config.num_key_value_heads,
-            rope_theta=self.rope_theta,
-            rope_scaling=self.rope_scaling,
+            rope_parameters=self.config.rope_parameters,
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,
@@ -359,6 +351,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 hidden_act=self.config.hidden_act,
                 hidden_act_param=getattr(self.config, "hidden_act_param", 0.0),
                 quant_config=self.quant_config,
+                prefix=f"{self.prefix}.mlp",
             )
         else:
             self.mlp = MiniCPMMoE(
@@ -366,6 +359,7 @@ class MiniCPMDecoderLayer(nn.Module):
                 top_k=self.config.num_experts_per_tok,
                 hidden_size=self.config.hidden_size,
                 intermediate_size=self.config.intermediate_size,
+                prefix=f"{self.prefix}.mlp",
             )
 
     def forward(
@@ -446,7 +440,7 @@ class MiniCPMModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -574,7 +568,6 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -627,7 +620,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

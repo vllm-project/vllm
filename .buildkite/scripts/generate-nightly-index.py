@@ -1,0 +1,468 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# do not complain about line length (for docstring)
+# ruff: noqa: E501
+
+import argparse
+import json
+import sys
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote
+
+import regex as re
+
+
+def normalize_package_name(name: str) -> str:
+    """
+    Normalize package name according to PEP 503.
+    https://peps.python.org/pep-0503/#normalized-names
+
+    Replace runs of underscores, hyphens, and periods with a single hyphen,
+    and lowercase the result.
+    """
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+if not sys.version_info >= (3, 12):
+    raise RuntimeError("This script requires Python 3.12 or higher.")
+
+INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
+<html>
+  <!-- {comment} -->
+  <meta name="pypi:repository-version" content="1.0">
+  <body>
+{items}
+  </body>
+</html>
+"""
+
+
+@dataclass
+class WheelFileInfo:
+    package_name: str
+    version: str
+    build_tag: str | None
+    python_tag: str
+    abi_tag: str
+    platform_tag: str
+    variant: str | None
+    filename: str
+
+
+def parse_from_filename(file: str) -> WheelFileInfo:
+    """
+    Parse wheel file name to extract metadata.
+
+    The format of wheel names:
+        {package_name}-{version}(-{build_tag})?-{python_tag}-{abi_tag}-{platform_tag}.whl
+    All versions could contain a variant like '+cu129' or '.cpu' or `.rocm` (or not).
+    Example:
+        vllm-0.11.0-cp38-abi3-manylinux1_x86_64.whl
+        vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl
+        vllm-0.11.1rc8.dev14+gaa384b3c0-cp38-abi3-manylinux2014_aarch64.whl
+        vllm-0.11.1rc8.dev14+gaa384b3c0.cu130-cp38-abi3-manylinux1_x86_64.whl
+    """
+    wheel_file_re = re.compile(
+        r"^(?P<package_name>.+)-(?P<version>[^-]+?)(-(?P<build_tag>[^-]+))?-(?P<python_tag>[^-]+)-(?P<abi_tag>[^-]+)-(?P<platform_tag>[^-]+)\.whl$"
+    )
+    match = wheel_file_re.match(file)
+    if not match:
+        raise ValueError(f"Invalid wheel file name: {file}")
+
+    package_name = match.group("package_name")
+    version = match.group("version")
+    build_tag = match.group("build_tag")
+    python_tag = match.group("python_tag")
+    abi_tag = match.group("abi_tag")
+    platform_tag = match.group("platform_tag")
+
+    # extract variant from version
+    variant = None
+    if "dev" in version:
+        ver_after_dev = version.split("dev")[-1]
+        if "." in ver_after_dev:
+            variant = ver_after_dev.split(".")[-1]
+            version = version.removesuffix("." + variant)
+    else:
+        if "+" in version:
+            version_part, suffix = version.split("+", 1)
+            # Only treat known patterns as variants (rocmXXX, cuXXX, cpu)
+            # Git hashes and other suffixes are NOT variants
+            if suffix.startswith(("rocm", "cu", "cpu")):
+                variant = suffix
+                version = version_part
+            # Otherwise keep the full version string (variant stays None)
+
+    return WheelFileInfo(
+        package_name=package_name,
+        version=version,
+        build_tag=build_tag,
+        python_tag=python_tag,
+        abi_tag=abi_tag,
+        platform_tag=platform_tag,
+        variant=variant,
+        filename=file,
+    )
+
+
+def generate_project_list(subdir_names: list[str], comment: str = "") -> str:
+    """
+    Generate project list HTML content linking to each project & variant sub-directory.
+    """
+    href_tags = []
+    for name in sorted(subdir_names):
+        name = name.strip("/").strip(".")
+        href_tags.append(f'    <a href="{name}/">{name}/</a><br/>')
+    return INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags), comment=comment)
+
+
+def generate_package_index_and_metadata(
+    wheel_files: list[WheelFileInfo],
+    wheel_base_dir: Path,
+    index_base_dir: Path,
+    comment: str = "",
+) -> tuple[str, str]:
+    """
+    Generate package index HTML content for a specific package, linking to actual wheel files.
+    """
+    href_tags = []
+    metadata = []
+    for file in sorted(wheel_files, key=lambda x: x.filename):
+        relative_path = (
+            wheel_base_dir.relative_to(index_base_dir, walk_up=True) / file.filename
+        )
+        # handle with '+' in URL, and avoid double-encoding '/' and already-encoded '%2B'
+        # NOTE: this is AWS S3 specific behavior!
+        file_path_quoted = quote(relative_path.as_posix(), safe=":%/")
+        href_tags.append(f'    <a href="{file_path_quoted}">{file.filename}</a><br/>')
+        file_meta = asdict(file)
+        file_meta["path"] = file_path_quoted
+        metadata.append(file_meta)
+    index_str = INDEX_HTML_TEMPLATE.format(items="\n".join(href_tags), comment=comment)
+    metadata_str = json.dumps(metadata, indent=2)
+    return index_str, metadata_str
+
+
+def generate_index_and_metadata(
+    whl_files: list[str],
+    wheel_base_dir: Path,
+    index_base_dir: Path,
+    default_variant: str | None = None,
+    alias_to_default: str | None = None,
+    comment: str = "",
+):
+    """
+    Generate index for all wheel files.
+
+    Args:
+        whl_files (list[str]): List of wheel files (must be directly under `wheel_base_dir`).
+        wheel_base_dir (Path): Base directory for wheel files.
+        index_base_dir (Path): Base directory to store index files.
+        default_variant (str | None): The default variant name, if any.
+        alias_to_default (str | None): Alias variant name for the default variant, if any.
+        comment (str | None): Optional comment to include in the generated HTML files.
+
+    First, parse all wheel files to extract metadata.
+    We need to collect all wheel files for each variant, and generate an index for it (in a sub-directory).
+    The index for the default variant (if any) is generated in the root index directory.
+
+    If `default_variant` is provided, all wheels must have variant suffixes, and the default variant index
+    is purely a copy of the corresponding variant index, with only the links adjusted.
+    Otherwise, all wheels without variant suffixes are treated as the default variant.
+
+    If `alias_to_default` is provided, an additional alias sub-directory is created, it has the same content
+    as the default variant index, but the links are adjusted accordingly.
+
+    Index directory structure:
+        index_base_dir/ (hosted at wheels.vllm.ai/{nightly,$commit,$version}/)
+            index.html  # project list, linking to "vllm/" and other packages, and all variant sub-directories
+            vllm/
+                index.html # package index, pointing to actual files in wheel_base_dir (relative path)
+                metadata.json # machine-readable metadata for all wheels in this package
+            cpu/ # cpu variant sub-directory
+                index.html
+                vllm/
+                    index.html
+                    metadata.json
+            cu129/ # cu129 is actually the alias to default variant
+                index.html
+                vllm/
+                    index.html
+                    metadata.json
+            cu130/ # cu130 variant sub-directory
+                index.html
+                vllm/
+                    index.html
+                    metadata.json
+            ...
+
+    metadata.json stores a dump of all wheel files' metadata in a machine-readable format:
+        [
+            {
+                "package_name": "vllm",
+                "version": "0.10.2rc2",
+                "build_tag": null,
+                "python_tag": "cp38",
+                "abi_tag": "abi3",
+                "platform_tag": "manylinux2014_aarch64",
+                "variant": "cu129",
+                "filename": "vllm-0.10.2rc2+cu129-cp38-abi3-manylinux2014_aarch64.whl",
+                "path": "../vllm-0.10.2rc2%2Bcu129-cp38-abi3-manylinux2014_aarch64.whl" # to be concatenated with the directory URL and URL-encoded
+            },
+            ...
+        ]
+    """
+
+    parsed_files = [parse_from_filename(f) for f in whl_files]
+
+    if not parsed_files:
+        print("No wheel files found, skipping index generation.")
+        return
+
+    # For ROCm builds: inherit variant from vllm wheel
+    # All ROCm wheels should share the same variant as vllm
+    rocm_variant = None
+    for file in parsed_files:
+        if (
+            file.package_name == "vllm"
+            and file.variant
+            and file.variant.startswith("rocm")
+        ):
+            rocm_variant = file.variant
+            print(f"Detected ROCm variant from vllm: {rocm_variant}")
+            break
+
+    # Apply ROCm variant to all wheels without a variant
+    if rocm_variant:
+        for file in parsed_files:
+            if file.variant is None:
+                file.variant = rocm_variant
+                print(f"Inherited variant '{rocm_variant}' for {file.filename}")
+
+    # Group by variant
+    variant_to_files: dict[str, list[WheelFileInfo]] = {}
+    for file in parsed_files:
+        variant = file.variant or "default"
+        if variant not in variant_to_files:
+            variant_to_files[variant] = []
+        variant_to_files[variant].append(file)
+
+    print(f"Found variants: {list(variant_to_files.keys())}")
+
+    # sanity check for default variant
+    if default_variant:
+        if "default" in variant_to_files:
+            raise ValueError(
+                "All wheel files must have variant suffixes when `default_variant` is specified."
+            )
+        if default_variant not in variant_to_files:
+            raise ValueError(
+                f"Default variant '{default_variant}' not found among wheel files."
+            )
+
+    if alias_to_default:
+        if "default" not in variant_to_files:
+            # e.g. only some wheels are uploaded to S3 currently
+            print(
+                "[WARN] Alias to default variant specified, but no default variant found."
+            )
+        elif alias_to_default in variant_to_files:
+            raise ValueError(
+                f"Alias variant name '{alias_to_default}' already exists among wheel files."
+            )
+        else:
+            variant_to_files[alias_to_default] = variant_to_files["default"].copy()
+            print(f"Alias variant '{alias_to_default}' created for default variant.")
+
+    # Generate comment in HTML header
+    comment_str = f" ({comment})" if comment else ""
+    comment_tmpl = f"Generated on {datetime.now().isoformat()}{comment_str}"
+
+    # Generate index for each variant
+    subdir_names = set()
+    for variant, files in variant_to_files.items():
+        if variant == "default":
+            variant_dir = index_base_dir
+        else:
+            variant_dir = index_base_dir / variant
+            subdir_names.add(variant)
+
+        variant_dir.mkdir(parents=True, exist_ok=True)
+
+        # gather all package names in this variant (normalized per PEP 503)
+        packages = set(normalize_package_name(f.package_name) for f in files)
+        if variant == "default":
+            # these packages should also appear in the "project list"
+            # generate after all variants are processed
+            subdir_names = subdir_names.union(packages)
+        else:
+            # generate project list for this variant directly
+            project_list_str = generate_project_list(sorted(packages), comment_tmpl)
+            with open(variant_dir / "index.html", "w") as f:
+                f.write(project_list_str)
+
+        for package in packages:
+            # filter files belonging to this package only (compare normalized names)
+            package_files = [
+                f for f in files if normalize_package_name(f.package_name) == package
+            ]
+            package_dir = variant_dir / package
+            package_dir.mkdir(parents=True, exist_ok=True)
+            index_str, metadata_str = generate_package_index_and_metadata(
+                package_files, wheel_base_dir, package_dir, comment
+            )
+            with open(package_dir / "index.html", "w") as f:
+                f.write(index_str)
+            with open(package_dir / "metadata.json", "w") as f:
+                f.write(metadata_str)
+
+    # Generate top-level project list index
+    project_list_str = generate_project_list(sorted(subdir_names), comment_tmpl)
+    with open(index_base_dir / "index.html", "w") as f:
+        f.write(project_list_str)
+
+
+if __name__ == "__main__":
+    """
+    Arguments:
+        --version <version> : version string for the current build (e.g., commit hash)
+        --wheel-dir <wheel_directory> : directory containing wheel files (default to be same as `version`)
+        --current-objects <path_to_json> : path to JSON file containing current S3 objects listing in this version directory
+        --output-dir <output_directory> : directory to store generated index files
+        --alias-to-default <alias_variant_name> : (optional) alias variant name for the default variant
+        --comment <comment_string> : (optional) comment string to include in generated HTML files
+    """
+
+    parser = argparse.ArgumentParser(
+        description="Process nightly build wheel files to generate indices."
+    )
+    parser.add_argument(
+        "--version",
+        type=str,
+        required=True,
+        help="Version string for the current build (e.g., commit hash)",
+    )
+    parser.add_argument(
+        "--current-objects",
+        type=str,
+        required=True,
+        help="Path to JSON file containing current S3 objects listing in this version directory",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        required=True,
+        help="Directory to store generated index files",
+    )
+    parser.add_argument(
+        "--wheel-dir",
+        type=str,
+        default=None,
+        help="Directory containing wheel files (default to be same as `version`)",
+    )
+    parser.add_argument(
+        "--alias-to-default",
+        type=str,
+        default=None,
+        help="Alias variant name for the default variant",
+    )
+    parser.add_argument(
+        "--comment",
+        type=str,
+        default="",
+        help="Optional comment string to include in generated HTML files",
+    )
+
+    args = parser.parse_args()
+
+    version = args.version
+    # Allow rocm/ prefix, reject other slashes and all backslashes
+    if "\\" in version:
+        raise ValueError("Version string must not contain backslashes.")
+    if "/" in version and not version.startswith("rocm/"):
+        raise ValueError(
+            "Version string must not contain slashes (except for 'rocm/' prefix)."
+        )
+    current_objects_path = Path(args.current_objects)
+    output_dir = Path(args.output_dir)
+    if not output_dir.exists():
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Read current objects JSON
+    with open(current_objects_path) as f:
+        current_objects: dict[str, list[dict[str, Any]]] = json.load(f)
+
+    # current_objects looks like from list_objects_v2 S3 API:
+    """
+    "Contents": [
+        {
+            "Key": "e2f56c309d2a28899c68975a7e104502d56deb8f/vllm-0.11.2.dev363+ge2f56c309-cp38-abi3-manylinux1_x86_64.whl",
+            "LastModified": "2025-11-28T14:00:32+00:00",
+            "ETag": "\"37a38339c7cdb61ca737021b968075df-52\"",
+            "ChecksumAlgorithm": [
+                "CRC64NVME"
+            ],
+            "ChecksumType": "FULL_OBJECT",
+            "Size": 435649349,
+            "StorageClass": "STANDARD"
+        },
+        ...
+    ]
+    """
+
+    # Extract wheel file keys
+    wheel_files = []
+    for item in current_objects.get("Contents", []):
+        key: str = item["Key"]
+        if key.endswith(".whl"):
+            wheel_files.append(key.split("/")[-1])  # only the filename is used
+
+    print(f"Found {len(wheel_files)} wheel files for version {version}: {wheel_files}")
+
+    # keep only "official" files for a non-nightly version (specified by cli args)
+    PY_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([a-zA-Z0-9.+-]*)?$")
+    if PY_VERSION_RE.match(version):
+        # upload-wheels.sh ensures no "dev" is in args.version
+        wheel_files = list(
+            filter(lambda x: version in x and "dev" not in x, wheel_files)
+        )
+        print(f"Non-nightly version detected, wheel files used: {wheel_files}")
+    else:
+        print("Nightly version detected, keeping all wheel files.")
+
+    # Generate index and metadata, assuming wheels and indices are stored as:
+    # s3://vllm-wheels/{wheel_dir}/<wheel files>
+    # s3://vllm-wheels/<anything>/<index files>
+    #
+    # For ROCm builds, version is "rocm/{commit}" and indices are uploaded to:
+    #   - rocm/{commit}/  (same as wheels)
+    #   - rocm/nightly/
+    #   - rocm/{version}/
+    # All these are under the "rocm/" prefix, so relative paths should be
+    # relative to "rocm/", not the bucket root.
+    if args.wheel_dir:
+        # Explicit wheel-dir provided (e.g., for version-specific indices pointing to commit dir)
+        wheel_dir = args.wheel_dir.strip().rstrip("/")
+    elif version.startswith("rocm/"):
+        # For rocm/commit, wheel_base_dir should be just the commit part
+        # so relative path from rocm/0.12.0/rocm710/vllm/ -> ../../../{commit}/
+        wheel_dir = version.split("/", 1)[1]
+    else:
+        wheel_dir = version
+    wheel_base_dir = Path(output_dir).parent / wheel_dir
+    index_base_dir = Path(output_dir)
+
+    generate_index_and_metadata(
+        whl_files=wheel_files,
+        wheel_base_dir=wheel_base_dir,
+        index_base_dir=index_base_dir,
+        default_variant=None,
+        alias_to_default=args.alias_to_default,
+        comment=args.comment.strip(),
+    )
+    print(f"Successfully generated index and metadata in {output_dir}")

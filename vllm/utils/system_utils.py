@@ -16,13 +16,14 @@ import psutil
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms.interface import in_wsl
 from vllm.ray.lazy_utils import is_in_ray_actor
 
 from .platform_utils import cuda_is_initialized, xpu_is_initialized
 
 logger = init_logger(__name__)
 
-CYAN = "\033[1;36m"
+CYAN = "\033[0;36m"
 RESET = "\033[0;0m"
 
 
@@ -54,6 +55,39 @@ def set_env_var(key: str, value: str) -> Iterator[None]:
             os.environ.pop(key, None)
         else:
             os.environ[key] = old
+
+
+@contextlib.contextmanager
+def suppress_stdout():
+    """
+    Suppress stdout from C libraries at the file descriptor level.
+
+    Only suppresses stdout, not stderr, to preserve error messages.
+    Suppression is disabled when VLLM_LOGGING_LEVEL is set to DEBUG.
+
+    Example:
+        with suppress_stdout():
+            # C library calls that would normally print to stdout
+            torch.distributed.new_group(ranks, backend="gloo")
+    """
+    # Don't suppress if logging level is DEBUG
+    if envs.VLLM_LOGGING_LEVEL == "DEBUG":
+        yield
+        return
+
+    stdout_fd = sys.stdout.fileno()
+    stdout_dup = os.dup(stdout_fd)
+    devnull_fd = os.open(os.devnull, os.O_WRONLY)
+
+    try:
+        sys.stdout.flush()
+        os.dup2(devnull_fd, stdout_fd)
+        yield
+    finally:
+        sys.stdout.flush()
+        os.dup2(stdout_dup, stdout_fd)
+        os.close(stdout_dup)
+        os.close(devnull_fd)
 
 
 # File path utilities
@@ -99,6 +133,9 @@ def _maybe_force_spawn():
     elif xpu_is_initialized():
         reasons.append("XPU is initialized")
 
+    if in_wsl():
+        reasons.append("WSL is detected and NVML is not compatible with fork")
+
     if reasons:
         logger.warning(
             "We must use the `spawn` multiprocessing start method. "
@@ -142,7 +179,10 @@ def set_process_title(
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     """Add colored prefix to file output for log decoration."""
-    prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
+    if envs.NO_COLOR:
+        prefix = f"({worker_name} pid={pid}) "
+    else:
+        prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
     file_write = file.write
 
     def write_with_prefix(s: str):
@@ -168,6 +208,10 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
 
 def decorate_logs(process_name: str | None = None) -> None:
     """Decorate stdout/stderr with process name and PID prefix."""
+    # Respect VLLM_CONFIGURE_LOGGING environment variable
+    if not envs.VLLM_CONFIGURE_LOGGING:
+        return
+
     if process_name is None:
         process_name = get_mp_context().current_process().name
 
@@ -228,3 +272,30 @@ def set_ulimit(target_soft_limit: int = 65535):
                 current_soft,
                 e,
             )
+
+
+def find_loaded_library(lib_name: str) -> str | None:
+    """
+    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
+    the file `/proc/self/maps` contains the memory maps of the process, which includes the
+    shared libraries loaded by the process. We can use this file to find the path of the
+    a loaded library.
+    """  # noqa
+    found_line = None
+    with open("/proc/self/maps") as f:
+        for line in f:
+            if lib_name in line:
+                found_line = line
+                break
+    if found_line is None:
+        # the library is not loaded in the current process
+        return None
+    # if lib_name is libcudart, we need to match a line with:
+    # address /path/to/libcudart-hash.so.11.0
+    start = found_line.index("/")
+    path = found_line[start:].strip()
+    filename = path.split("/")[-1]
+    assert filename.rpartition(".so")[0].startswith(lib_name), (
+        f"Unexpected filename: {filename} for library {lib_name}"
+    )
+    return path

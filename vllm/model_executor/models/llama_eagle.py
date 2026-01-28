@@ -9,15 +9,23 @@ from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    get_draft_quant_config,
+    maybe_prefix,
+    process_eagle_weight,
+)
 
 logger = init_logger(__name__)
 
@@ -40,14 +48,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Use drafter's quantization config instead of verifier's."""
-        draft_model_config = vllm_config.speculative_config.draft_model_config
-        draft_load_config = vllm_config.load_config
-
-        return (
-            VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
-            if draft_model_config
-            else None
-        )
+        return get_draft_quant_config(vllm_config)
 
 
 @support_torch_compile
@@ -62,6 +63,9 @@ class LlamaModel(nn.Module):
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
+
+        # Get drafter's quantization config
+        self.quant_config = get_draft_quant_config(vllm_config)
 
         self.embed_tokens = VocabParallelEmbedding(
             self.config.vocab_size,
@@ -80,8 +84,14 @@ class LlamaModel(nn.Module):
                 for i in range(self.config.num_hidden_layers)
             ]
         )
-        self.fc = torch.nn.Linear(
-            self.config.hidden_size * 2, self.config.hidden_size, bias=False
+        self.fc = ReplicatedLinear(
+            input_size=self.config.hidden_size * 2,
+            output_size=self.config.hidden_size,
+            bias=False,
+            params_dtype=vllm_config.model_config.dtype,
+            quant_config=self.quant_config,
+            prefix=maybe_prefix(prefix, "fc"),
+            return_bias=False,
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -117,6 +127,24 @@ class LlamaModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            # Handle kv cache quantization scales
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+            # Remapping the name FP8 kv-scale or zero point.
+            if "scale" in name or "zero_point" in name:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -126,10 +154,6 @@ class LlamaModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # if PP disabled then draft will share embed with target
-                if get_pp_group().world_size == 1 and "embed_tokens." in name:
-                    continue
-
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -179,6 +203,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             name, loaded_weight = inputs
             if "lm_head" not in name:
                 name = "model." + name
+            process_eagle_weight(self, name)
             return name, loaded_weight
 
         loader = AutoWeightsLoader(

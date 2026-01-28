@@ -33,11 +33,11 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -56,6 +56,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsLoRA
 from .utils import (
@@ -112,10 +113,8 @@ class OuroAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_scaling: tuple | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
@@ -140,7 +139,6 @@ class OuroAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.dual_chunk_attention_config = dual_chunk_attention_config
 
         # Get total_ut_steps from config, default to 4 if not specified
@@ -168,10 +166,8 @@ class OuroAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position,
-            base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
         self.attn = nn.ModuleList()
@@ -226,9 +222,6 @@ class OuroDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 1000000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         dual_chunk_attention_config = getattr(
             config, "dual_chunk_attention_config", None
         )
@@ -244,10 +237,8 @@ class OuroDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_scaling=rope_scaling,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
@@ -366,7 +357,7 @@ class OuroModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -491,7 +482,7 @@ class OuroForCausalLM(nn.Module, SupportsLoRA):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

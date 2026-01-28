@@ -3,29 +3,33 @@
 
 import asyncio
 import atexit
-from collections.abc import Iterable, Set
+import mimetypes
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
-from urllib.parse import ParseResult, urlparse
 from urllib.request import url2pathname
 
 import numpy as np
 import numpy.typing as npt
 import torch
 from PIL import Image, UnidentifiedImageError
+from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
-from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.registry import ExtensionManager
 
-from .audio import AudioMediaIO
-from .base import MediaIO
-from .image import ImageEmbeddingMediaIO, ImageMediaIO
-from .video import VideoMediaIO
+from .media import (
+    AudioEmbeddingMediaIO,
+    AudioMediaIO,
+    ImageEmbeddingMediaIO,
+    ImageMediaIO,
+    MediaIO,
+    VideoMediaIO,
+)
 
 if TYPE_CHECKING:
     from .inputs import (
@@ -67,8 +71,9 @@ class MediaConnector:
                              to set num_frames for video, set
                              `--media-io-kwargs '{"video":{"num_frames":40}}'`
             connection: HTTP connection client to download media contents.
-            allowed_local_media_path: A local directory to load media files
-                                      from.
+            allowed_local_media_path: A local directory to load media files from.
+            allowed_media_domains: If set, only media URLs that belong to this
+                                   domain can be used for multi-modal inputs.
         """
         super().__init__()
 
@@ -100,11 +105,14 @@ class MediaConnector:
 
     def _load_data_url(
         self,
-        url_spec: ParseResult,
+        url_spec: Url,
         media_io: MediaIO[_M],
     ) -> _M:  # type: ignore[type-var]
-        data_spec, data = url_spec.path.split(",", 1)
+        url_spec_path = url_spec.path or ""
+        data_spec, data = url_spec_path.split(",", 1)
         media_type, data_type = data_spec.split(";", 1)
+        # media_type starts with a leading "/" (e.g., "/video/jpeg")
+        media_type = media_type.lstrip("/")
 
         if data_type != "base64":
             msg = "Only base64 data URLs are supported for now."
@@ -114,7 +122,7 @@ class MediaConnector:
 
     def _load_file_url(
         self,
-        url_spec: ParseResult,
+        url_spec: Url,
         media_io: MediaIO[_M],
     ) -> _M:  # type: ignore[type-var]
         allowed_local_media_path = self.allowed_local_media_path
@@ -123,16 +131,18 @@ class MediaConnector:
                 "Cannot load local files without `--allowed-local-media-path`."
             )
 
-        filepath = Path(url2pathname(url_spec.path))
+        url_spec_path = url_spec.path or ""
+        url_spec_netloc = url_spec.netloc or ""
+        filepath = Path(url2pathname(url_spec_netloc + url_spec_path))
         if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
-                f"of `--allowed-local-media-path` {allowed_local_media_path}."
+                f"of `--allowed-local-media-path {allowed_local_media_path}`."
             )
 
         return media_io.load_file(filepath)
 
-    def _assert_url_in_allowed_media_domains(self, url_spec) -> None:
+    def _assert_url_in_allowed_media_domains(self, url_spec: Url) -> None:
         if (
             self.allowed_media_domains
             and url_spec.hostname not in self.allowed_media_domains
@@ -150,9 +160,9 @@ class MediaConnector:
         *,
         fetch_timeout: int | None = None,
     ) -> _M:  # type: ignore[type-var]
-        url_spec = urlparse(url)
+        url_spec = parse_url(url)
 
-        if url_spec.scheme.startswith("http"):
+        if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
 
             connection = self.connection
@@ -180,10 +190,10 @@ class MediaConnector:
         *,
         fetch_timeout: int | None = None,
     ) -> _M:
-        url_spec = urlparse(url)
+        url_spec = parse_url(url)
         loop = asyncio.get_running_loop()
 
-        if url_spec.scheme.startswith("http"):
+        if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
 
             connection = self.connection
@@ -342,21 +352,46 @@ class MediaConnector:
 
         return image_embedding_io.load_base64("", data)
 
+    def fetch_audio_embedding(
+        self,
+        data: str,
+    ) -> torch.Tensor:
+        """
+        Load audio embedding from a URL.
+        """
+        audio_embedding_io = AudioEmbeddingMediaIO()
+
+        return audio_embedding_io.load_base64("", data)
+
 
 def encode_audio_base64(
     audio: np.ndarray,
     sampling_rate: int,
+    *,
+    format: str = "WAV",
 ) -> str:
     """Encode audio as base64."""
     audio_io = AudioMediaIO()
-    return audio_io.encode_base64((audio, sampling_rate))
+    return audio_io.encode_base64((audio, sampling_rate), audio_format=format)
+
+
+def encode_audio_url(
+    audio: np.ndarray,
+    sampling_rate: int,
+    *,
+    format: str = "WAV",
+) -> str:
+    """Encode audio as a data URL."""
+    audio_b64 = encode_audio_base64(audio, sampling_rate, format=format)
+    mimetype = mimetypes.types_map.get("." + format.lower(), "audio")
+    return f"data:{mimetype};base64,{audio_b64}"
 
 
 def encode_image_base64(
     image: Image.Image,
     *,
     image_mode: str = "RGB",
-    format: str = "JPEG",
+    format: str | None = None,
 ) -> str:
     """
     Encode a pillow image to base64 format.
@@ -367,10 +402,45 @@ def encode_image_base64(
     return image_io.encode_base64(image, image_format=format)
 
 
-def encode_video_base64(frames: npt.NDArray) -> str:
+def encode_image_url(
+    image: Image.Image,
+    *,
+    image_mode: str = "RGB",
+    format: str = "PNG",
+) -> str:
+    """
+    Encode a pillow image as a data URL.
+
+    By default, the image is converted into RGB format before being encoded.
+    """
+    image_b64 = encode_image_base64(image, image_mode=image_mode, format=format)
+    mimetype = mimetypes.types_map.get("." + format.lower(), "image")
+    return f"data:{mimetype};base64,{image_b64}"
+
+
+def encode_video_base64(
+    frames: npt.NDArray,
+    *,
+    format: str = "JPEG",
+) -> str:
     image_io = ImageMediaIO()
     video_io = VideoMediaIO(image_io)
-    return video_io.encode_base64(frames)
+    return video_io.encode_base64(frames, video_format=format)
+
+
+def encode_video_url(
+    frames: npt.NDArray,
+    *,
+    format: str = "JPEG",
+) -> str:
+    video_b64 = encode_video_base64(frames, format=format)
+
+    if format.lower() == "jpeg":
+        mimetype = "video/jpeg"
+    else:
+        mimetype = mimetypes.types_map.get("." + format.lower(), "video")
+
+    return f"data:{mimetype};base64,{video_b64}"
 
 
 def argsort_mm_positions(
@@ -401,9 +471,7 @@ def group_mm_kwargs_by_modality(
     *,
     device: torch.types.Device = None,
     pin_memory: bool = False,
-    merge_by_field_config: bool | None = None,
-    multimodal_cpu_fields: Set[str] = frozenset(),
-) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
+) -> Generator[tuple[str, int, BatchedTensorInputs], None, None]:
     """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
     modality together into the same `MultiModalKwargs` instance.
 
@@ -415,59 +483,17 @@ def group_mm_kwargs_by_modality(
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.
     """
-    if merge_by_field_config is None:
-        raise RuntimeError(
-            "`group_mm_kwargs_by_modality` now requires "
-            "`merge_by_field_config` arg, please update your model runner "
-            "according to https://github.com/vllm-project/vllm/pull/25676."
-        )
-    if merge_by_field_config is False:
-        logger.warning_once(
-            "The legacy code for batching multi-modal kwargs is deprecated and "
-            "will be removed in v0.12. Please update your model with "
-            "`merge_by_field_config=True` to use the new code defined by "
-            "`MultiModalFieldConfig`. You can refer to "
-            "https://github.com/vllm-project/vllm/issues/26149 "
-            "for some examples on how to do this."
-        )
-
-    from vllm.multimodal.inputs import MultiModalKwargs, MultiModalKwargsItems
+    from vllm.multimodal.inputs import MultiModalKwargsItems
 
     for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):
         items_lst = list(items)
+        mm_kwargs_items = MultiModalKwargsItems.from_seq(items_lst)
+        mm_kwargs_data = mm_kwargs_items.get_data(
+            device=device,
+            pin_memory=pin_memory,
+        )
 
-        if merge_by_field_config:
-            mm_kwargs_group: BatchedTensorInputs = dict(
-                MultiModalKwargsItems.from_seq(items_lst).get_data(
-                    pin_memory=pin_memory
-                )
-            )
-
-            if device is not None:
-                mm_kwargs_group = {
-                    k: json_map_leaves(
-                        lambda x: x.to(device=device, non_blocking=True)
-                        if isinstance(x, torch.Tensor)
-                        else x,
-                        v,
-                    )
-                    if k not in multimodal_cpu_fields
-                    else v
-                    for k, v in mm_kwargs_group.items()
-                }
-        else:
-            mm_kwargs_group = MultiModalKwargs.as_kwargs(
-                MultiModalKwargs.batch(
-                    [
-                        MultiModalKwargsItems.from_seq([item]).get_data()
-                        for item in items_lst
-                    ],
-                    pin_memory=pin_memory,
-                ),
-                device=device,
-            )
-
-        yield modality, len(items_lst), mm_kwargs_group
+        yield modality, len(items_lst), mm_kwargs_data
 
 
 def fetch_audio(
@@ -478,9 +504,16 @@ def fetch_audio(
     Args:
         audio_url: URL of the audio file to fetch.
         audio_io_kwargs: Additional kwargs passed to handle audio IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not audio_io_kwargs else {"audio": audio_io_kwargs}
-    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    media_connector = MediaConnector(
+        media_io_kwargs=media_io_kwargs,
+        allowed_local_media_path="/",
+    )
     return media_connector.fetch_audio(audio_url)
 
 
@@ -492,9 +525,16 @@ def fetch_image(
     Args:
         image_url: URL of the image file to fetch.
         image_io_kwargs: Additional kwargs passed to handle image IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not image_io_kwargs else {"image": image_io_kwargs}
-    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    media_connector = MediaConnector(
+        media_io_kwargs=media_io_kwargs,
+        allowed_local_media_path="/",
+    )
     return media_connector.fetch_image(image_url)
 
 
@@ -506,7 +546,14 @@ def fetch_video(
     Args:
         video_url: URL of the video file to fetch.
         video_io_kwargs: Additional kwargs passed to handle video IO.
+
+    Warning:
+        This method has direct access to local files and is only intended
+        to be called by user code. Never call this from the online server!
     """
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
-    media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
+    media_connector = MediaConnector(
+        media_io_kwargs=media_io_kwargs,
+        allowed_local_media_path="/",
+    )
     return media_connector.fetch_video(video_url)

@@ -17,7 +17,6 @@ def test_idefics_multimodal(
     with vllm_runner(
         model_name="HuggingFaceM4/Idefics3-8B-Llama3",
         runner="pooling",
-        task="classify",
         convert="classify",
         load_format="dummy",
         max_model_len=512,
@@ -75,7 +74,7 @@ def test_gemma_multimodal(
                 {
                     "type": "image_url",
                     "image_url": {
-                        "url": "https://upload.wikimedia.org/wikipedia/commons/c/c6/Set_of_fourteen_side_chairs_MET_DP110780.jpg"
+                        "url": "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/red_chair.jpg"
                     },
                 },
                 {"type": "text", "text": "A fine 19th century piece of furniture."},
@@ -86,11 +85,10 @@ def test_gemma_multimodal(
     with vllm_runner(
         model_name="google/gemma-3-4b-it",
         runner="pooling",
-        task="classify",
         convert="classify",
         load_format="auto",
         hf_overrides=update_config,
-        pooler_config=PoolerConfig(pooling_type="LAST"),
+        pooler_config=PoolerConfig(seq_pooling_type="LAST"),
         max_model_len=512,
         enforce_eager=True,
         tensor_parallel_size=1,

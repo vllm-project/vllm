@@ -30,6 +30,7 @@ from torch.distributed.rendezvous import rendezvous
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri
+from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
@@ -427,33 +428,34 @@ def init_gloo_process_group(
     Stateless init ProcessGroup with gloo backend compatible with
     different torch versions.
     """
-    if is_torch_equal_or_newer("2.6"):
-        pg = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
-    else:
-        options = ProcessGroup.Options(backend="gloo")
-        pg = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-            options,
-        )
-    from torch.distributed.distributed_c10d import ProcessGroupGloo
+    with suppress_stdout():
+        if is_torch_equal_or_newer("2.6"):
+            pg = ProcessGroup(
+                prefix_store,
+                group_rank,
+                group_size,
+            )
+        else:
+            options = ProcessGroup.Options(backend="gloo")
+            pg = ProcessGroup(
+                prefix_store,
+                group_rank,
+                group_size,
+                options,
+            )
+        from torch.distributed.distributed_c10d import ProcessGroupGloo
 
-    backend_class = ProcessGroupGloo(
-        prefix_store, group_rank, group_size, timeout=timeout
-    )
-    backend_type = ProcessGroup.BackendType.GLOO
-    device = torch.device("cpu")
-    if is_torch_equal_or_newer("2.6"):
-        # _set_default_backend is supported in torch >= 2.6
-        pg._set_default_backend(backend_type)
-    backend_class._set_sequence_number_for_group()
+        backend_class = ProcessGroupGloo(
+            prefix_store, group_rank, group_size, timeout=timeout
+        )
+        backend_type = ProcessGroup.BackendType.GLOO
+        device = torch.device("cpu")
+        if is_torch_equal_or_newer("2.6"):
+            # _set_default_backend is supported in torch >= 2.6
+            pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
 
-    pg._register_backend(device, backend_type, backend_class)
+        pg._register_backend(device, backend_type, backend_class)
     return pg
 
 

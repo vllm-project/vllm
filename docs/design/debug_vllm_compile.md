@@ -8,9 +8,9 @@ TL;DR:
 | Online Flag | Offline Flag   |      Result |
 |----------|----------|-------------|
 | --enforce-eager | enforce_eager=True |  Turn off torch.compile and CUDAGraphs |
-| -O.mode=0 | mode=CompilationMode.NONE |  Turn off torch.compile only |
-| -O.cudagraph_mode=NONE | compilation_config=CompilationConfig(mode=CompilationMode.NONE) |  Turn off CUDAGraphs only |
-| -O.backend=eager | compilation_config=CompilationConfig(backend='eager') |  Turn off TorchInductor |
+| -cc.mode=0 | mode=CompilationMode.NONE |  Turn off torch.compile only |
+| -cc.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) |  Turn off CUDAGraphs only |
+| -cc.backend=eager | compilation_config=CompilationConfig(backend='eager') |  Turn off TorchInductor |
 
 ## vLLM-torch.compile overview
 
@@ -33,16 +33,15 @@ goals while minimizing impact to performance and also helps us (vLLM) when you o
 For more details on the design, please see the following resources:
 
 - [Introduction to vLLM-torch.compile blogpost](https://blog.vllm.ai/2025/08/20/torch-compile.html)
-- [vLLM-torch.compile integration design](https://docs.vllm.ai/en/latest/design/torch_compile.html)
+- [vLLM-torch.compile integration design](./torch_compile.md)
 - [vLLM Office Hours #26](https://www.youtube.com/live/xLyxc7hxCJc?si=Xulo9pe53C6ywf0V&t=561)
 - [Talk at PyTorch Conference 2025](https://youtu.be/1wV1ESbGrVQ?si=s1GqymUfwiwOrDTg&t=725)
 
 ## Use tlparse
 
-Use [tlparse](https://github.com/meta-pytorch/tlparse) to acquire torch.compile logs. These logs show all stages of the compilation process,
-including the fused kernels that torch.compile produces.
-If you can, we recommend sending these or pieces of these along with any bug reports --
-they are very helpful.
+Use [tlparse](https://github.com/meta-pytorch/tlparse) to view torch.compile
+logs. These logs show all stages of the compilation process, including the fused
+kernels that torch.compile produces.
 
 Install tlparse:
 
@@ -50,11 +49,16 @@ Install tlparse:
 pip install tlparse
 ```
 
+To enable the torch.compile logs, you can set the envvar `TORCH_TRACE=<dir>`.
+During tracing, a file per rank will be created inside of that directory, with
+each file containing the artifacts during compilation. If you can, we recommend
+sending these log files along with bug reports -- they are very helpful.
+
 Usage (offline inference)
 
 ```sh
 TORCH_TRACE=~/trace_dir python my_script.py
-tlparse ~/trace_dir/<the_first_log_file>
+tlparse ~/trace_dir/<rank_0_log_file>
 ```
 
 Usage (serving)
@@ -62,10 +66,11 @@ Usage (serving)
 ```sh
 TORCH_TRACE=~/trace_dir vllm serve
 # ctrl-c out of the server
-tlparse ~/trace_dir/<the_first_log_file>
+tlparse ~/trace_dir/<rank_0_log_file>
 ```
 
-The `tlparse` command outputs some HTML files (perhaps into e.g. `./tl_out/index.html`).
+Given one of the log files, the `tlparse` command outputs some HTML files
+(perhaps into e.g. `./tl_out/index.html`).
 Open it to see the logs. It'll look something like the following:
 
 ![tlparse example](../assets/design/debug_vllm_compile/tlparse_inductor.png)
@@ -86,11 +91,11 @@ LLM(model, enforce_eager=True)
 ```
 
 To turn off just torch.compile, pass `mode = NONE` to the compilation config.
-(`-O` is short for `--compilation_config`):
+(`-cc` is short for `--compilation_config`):
 
 ```sh
 # Online
-vllm serve -O.mode=0
+vllm serve -cc.mode=0
 ```
 
 ```py
@@ -103,7 +108,7 @@ To turn off just CUDAGraphs, pass `cudagraph_mode = NONE`:
 
 ```sh
 # Online
-vllm serve -O.cudagraph_mode=NONE
+vllm serve -cc.cudagraph_mode=NONE
 ```
 
 ```py
@@ -151,6 +156,76 @@ To avoid this, please either:
 2. wrap the branching logic into a custom operator. TorchDynamo does not
 trace into custom operators.
 
+## Debugging constraint violations and dynamic shapes guards issues
+
+Dynamic-shape guards are a specific category of Dynamo guards. They are constraints that `torch.compile`
+attaches to dynamic dimensions (e.g., `seq_len`) to ensure the compiled artifact remains valid.
+These guards typically appear when framework code, custom passes, or user code branches based on
+dynamic shape values.
+
+**Example:**
+
+```python
+if x > 10:
+    # path A
+else:
+    # path B
+```
+
+This creates a guard `x > 10` or `x <= 10` depending on which path was traced.
+
+**vLLM's Assumption:**
+vLLM assumes that all guards added by torch.compile are safe to drop and will not
+constrain the compiled graph to specific input shapes. When this assumption is violated,
+it can cause issues that users need to debug.
+Some side effects that indicates this assumption is violated are runtime errors
+or `ConstraintViolationErrors`.
+
+A `ConstraintViolationErrors` will be thrown if a dynamic shape gets constrained to
+a single value. If you encounter a constraint violation error or suspect that a dynamic
+shapes guard is being added incorrectly, you can use stricter dynamic shape modes to
+help debug the issue:
+
+```sh
+# Online - using unbacked mode
+vllm serve meta-llama/Llama-3.2-1B -cc.dynamic_shapes_config.type=unbacked
+
+# Online - using backed_size_oblivious mode
+vllm serve meta-llama/Llama-3.2-1B -cc.dynamic_shapes_config.type=backed_size_oblivious
+```
+
+```py
+# Offline - using unbacked mode
+from vllm.config.compilation import CompilationConfig, DynamicShapesConfig, DynamicShapesType
+LLM(model, compilation_config=CompilationConfig(
+    dynamic_shapes_config=DynamicShapesConfig(type=DynamicShapesType.UNBACKED)
+))
+
+# Offline - using backed_size_oblivious mode
+from vllm.config.compilation import CompilationConfig, DynamicShapesConfig, DynamicShapesType
+LLM(model, compilation_config=CompilationConfig(
+    dynamic_shapes_config=DynamicShapesConfig(type=DynamicShapesType.BACKED_SIZE_OBLIVIOUS)
+))
+```
+
+These modes are stricter and reduce or eliminate the need of dynamic shapes guarding, which can help isolate issues:
+
+- `unbacked`: Uses unbacked symints which don't allow guards, making it easier to identify where guards are being incorrectly added
+- `backed_size_oblivious`: Uses a mode that is more strict about guarding.
+
+For more details on dynamic shapes modes, see [Dynamic shapes and vLLM guard dropping](torch_compile.md#dynamic-shapes-and-vllm-guard-dropping).
+
+### Printing guards
+
+To see all guards that are being added during compilation, you can use `TORCH_LOGS=+dynamic`:
+
+```sh
+TORCH_LOGS=+dynamic vllm serve meta-llama/Llama-3.2-1B
+```
+
+Look for `[guard added]` in the logs to see where guards are being added. This can help you identify which operations are
+causing guards to be added incorrectly.
+
 ## Debugging TorchInductor
 
 TorchInductor takes a captured graph and then compiles it down to some Python code
@@ -163,7 +238,7 @@ to the compilation config:
 
 ```sh
 # online
-vllm serve -O.backend=eager
+vllm serve -cc.backend=eager
 ```
 
 ```py
@@ -182,7 +257,7 @@ You can also use `TORCH_LOGS=output_code <command>` to print the Inductor output
 ### Editable TorchInductor code
 
 You can edit the TorchInductor code that gets run by setting `VLLM_COMPILE_CACHE_SAVE_FORMAT=unpacked`
-or passing `-O.compile_cache_save_format=unpacked`. The default is `binary`, which means it is not editable.
+or passing `-cc.compile_cache_save_format=unpacked`. The default is `binary`, which means it is not editable.
 
 This is a useful technique: you can put breakpoints (e.g. `torch.distributed.breakpoint()`)
 and print statements in the output code.
@@ -229,7 +304,7 @@ To turn off just CUDAGraphs, pass `cudagraph_mode = NONE`:
 
 ```sh
 # Online
-vllm serve -O.cudagraph_mode=NONE
+vllm serve -cc.cudagraph_mode=NONE
 ```
 
 ```py

@@ -27,9 +27,10 @@ from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2VisionConfig,
 )
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -60,7 +61,7 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -160,8 +161,8 @@ class Idefics2VisionAttention(nn.Module):
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
-        # Use unified MultiHeadAttention with Flash Attention support
-        self.attn = MultiHeadAttention(
+        # Use unified MMEncoderAttention with Flash Attention support
+        self.attn = MMEncoderAttention(
             self.num_heads_per_partition, self.head_dim, self.scale
         )
 
@@ -174,7 +175,7 @@ class Idefics2VisionAttention(nn.Module):
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
 
-        # Use unified MultiHeadAttention implementation
+        # Use unified MMEncoderAttention implementation
         out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
         return attn_output

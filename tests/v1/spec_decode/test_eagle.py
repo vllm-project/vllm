@@ -13,8 +13,8 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     DeviceConfig,
     ModelConfig,
@@ -26,6 +26,7 @@ from vllm.config import (
 from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -38,6 +39,7 @@ eagle3_dir = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"
 def _create_proposer(
     method: str,
     num_speculative_tokens: int,
+    attention_backend: str | None = None,
     speculative_token_tree: list[tuple[int, ...]] | None = None,
 ) -> EagleProposer:
     model_config = ModelConfig(model=model_dir, runner="generate", max_model_len=100)
@@ -66,7 +68,11 @@ def _create_proposer(
         device_config=DeviceConfig(device=current_platform.device_type),
         parallel_config=ParallelConfig(),
         load_config=LoadConfig(),
-        scheduler_config=SchedulerConfig(),
+        scheduler_config=SchedulerConfig(
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
+        attention_config=AttentionConfig(backend=attention_backend),
     )
 
     return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
@@ -103,16 +109,23 @@ def test_prepare_next_token_ids():
         mock_request.num_computed_tokens = 0
         mock_requests[req_id] = mock_request
 
+    # explicitly discard the last request
+    discarded_req_mask = torch.tensor(
+        [False, False, False, True], dtype=torch.bool, device=device
+    )
     sampled_token_ids = [
         [0, 1, -1, -1, -1],  # 1 accepted, 3 rejected, "1" sampled
         [0, 1, 2, 3, 4],  # all accepted, "4" sampled
         [-1, -1, -1, -1, -1],  # sampling skipped, use backup token "30"
-        [-1, -1, -1, -1, -1],  # this request will be discarded
+        [0, 1, 2, -1, -1],  # explicitly discarded, sampling should be ignored
     ]
     sampled_token_ids_tensor = torch.tensor(
         sampled_token_ids, dtype=torch.int32, device=device
     )
     sampled_token_ids_cpu = [[i for i in seq if i != -1] for seq in sampled_token_ids]
+    for i in range(len(sampled_token_ids_cpu)):
+        if discarded_req_mask[i]:
+            sampled_token_ids_cpu[i] = []
 
     expected_next_token_ids_cpu = [1, 4, 30, 40]
     expected_next_token_ids_tensor = torch.tensor(
@@ -136,9 +149,6 @@ def test_prepare_next_token_ids():
         device=device,
     )
 
-    discarded_req_indices = torch.tensor([3], dtype=torch.int64, device=device)
-    num_discarded_reqs = 1
-
     expected_valid_sampled_tokens_count = torch.tensor(
         [2, 5, 0, 0], dtype=torch.int32, device=device
     )
@@ -149,8 +159,7 @@ def test_prepare_next_token_ids():
             sampled_token_ids_tensor,
             mock_requests,
             mock_input_batch,
-            discarded_req_indices,
-            num_discarded_reqs,
+            discarded_req_mask,
         )
     )
 
@@ -256,11 +265,6 @@ def test_prepare_inputs_padded():
     - Request 3: query_len = 3, rejected = 2
 
     Expected outputs:
-    token_indices: [0, 1, 2,
-                    3, 4, 5,
-                    6, 7, 8]
-    Reason: Deferred computation should not disturb the original indices.
-
     token_indices_to_sample: [1, 5, 6]
     Reason: After accounting for rejections, these are the valid token positions
             from the original indices to sample from.
@@ -268,9 +272,6 @@ def test_prepare_inputs_padded():
 
     device = torch.device(current_platform.device_type)
 
-    expected_token_indices = torch.tensor(
-        [0, 1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int32, device=device
-    )
     expected_token_indices_to_sample = torch.tensor(
         [1, 5, 6], dtype=torch.int32, device=device
     )
@@ -305,15 +306,18 @@ def test_prepare_inputs_padded():
 
     proposer = _create_proposer("eagle", num_speculative_tokens)
 
-    output_metadata, token_indices, token_indices_to_sample = (
+    output_metadata, token_indices_to_sample, num_rejected_tokens_gpu = (
         proposer.prepare_inputs_padded(
             common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
         )
     )
 
+    # Verify num_rejected_tokens_gpu is calculated correctly
+    expected_num_rejected = torch.tensor([1, 0, 2], dtype=torch.int32, device=device)
+    assert torch.equal(num_rejected_tokens_gpu, expected_num_rejected)
+
     assert output_metadata.max_query_len == 3
     assert torch.equal(output_metadata.query_start_loc, expected_query_start_loc)
-    assert torch.equal(token_indices, expected_token_indices)
     assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
 
 
@@ -321,6 +325,7 @@ def test_prepare_inputs_padded():
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("pp_size", [1, 2])
 @pytest.mark.parametrize("use_distinct_embed_tokens", [True, False])
+@pytest.mark.parametrize("use_distinct_lm_head", [True, False])
 @mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
 @mock.patch("vllm.v1.spec_decode.eagle.get_layers_from_vllm_config")
 @mock.patch("vllm.v1.spec_decode.eagle.get_model")
@@ -332,27 +337,27 @@ def test_load_model(
     attn_backend,
     pp_size,
     use_distinct_embed_tokens,
+    use_distinct_lm_head,
     monkeypatch,
 ):
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
-
     if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
         pytest.skip(
             "TRITON_ATTN does not support "
             "multi-token eagle spec decode on current platform"
         )
 
-    if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
+    if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Setup draft model mock
     mock_model = mock.MagicMock()
+    mock_model.model = mock.MagicMock()
+    mock_model.has_own_embed_tokens = use_distinct_embed_tokens
     if use_distinct_embed_tokens:
-        # Some models can have a different hidden size than the target model,
-        # so we test that their embed_tokens doesn't get overwritten
-        mock_model.model.embed_tokens.weight.shape = (131072, 2048)
-    else:
-        mock_model.model.embed_tokens.weight.shape = (131072, 4096)
+        mock_model.model.embed_tokens = mock.MagicMock()
+    mock_model.has_own_lm_head = use_distinct_lm_head
+    if use_distinct_lm_head:
+        mock_model.lm_head = mock.MagicMock()
 
     mock_get_model.return_value = mock_model
 
@@ -388,17 +393,17 @@ def test_load_model(
 
     target_model = mock.create_autospec(_TargetModelStub, instance=True)
     target_model.model = mock.MagicMock()
-    target_model.model.embed_tokens.weight.shape = (131072, 4096)
+    target_model.lm_head = mock.MagicMock()
+    target_model.model.embed_tokens = mock.MagicMock()
 
     from vllm.model_executor.models import SupportsMultiModal
 
     assert not isinstance(target_model, SupportsMultiModal)
 
-    if method == "eagle":
-        target_model.lm_head = mock.MagicMock()
-
     # Create proposer using the helper function
-    proposer = _create_proposer(method, num_speculative_tokens=8)
+    proposer = _create_proposer(
+        method, num_speculative_tokens=8, attention_backend=attn_backend
+    )
 
     # Call the method under test
     proposer.load_model(target_model)
@@ -406,26 +411,24 @@ def test_load_model(
     # Verify common interactions
     mock_get_model.assert_called_once()
 
-    # Verify that EAGLE models gain the lm head from the target model
-    if method == "eagle":
-        assert proposer.model.lm_head == target_model.lm_head
+    # Verify that the lm head is set correctly
+    if use_distinct_lm_head:
+        assert proposer.model.lm_head is not target_model.lm_head
+    else:
+        assert proposer.model.lm_head is target_model.lm_head
 
     # Verify that the embed tokens are set correctly
     # If pp_size is > 1, the embed tokens should be distinct
     if pp_size > 1 or use_distinct_embed_tokens:
-        assert proposer.model.model.embed_tokens != target_model.model.embed_tokens
+        assert proposer.model.model.embed_tokens is not target_model.model.embed_tokens
     else:
-        # When pp_size is 1 and the draft and target models have
-        # embed_tokens of the same shape, they should be shared.
-        assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
+        assert proposer.model.model.embed_tokens is target_model.model.embed_tokens
 
 
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 8])
 def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
-
     if attn_backend == "TRITON_ATTN" and not current_platform.is_rocm():
         pytest.skip(
             "TRITON_ATTN does not support "
@@ -438,7 +441,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
             "because it requires special input mocking."
         )
 
-    if attn_backend == "FLASH_ATTN" and current_platform.is_rocm():
+    if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     # Use GPU device
@@ -453,7 +456,9 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     seq_lens = [seq_len_1, seq_len_2]
 
     # Create proposer first so we can use its actual hidden_size
-    proposer = _create_proposer("eagle", num_speculative_tokens)
+    proposer = _create_proposer(
+        "eagle", num_speculative_tokens, attention_backend=attn_backend
+    )
     # Get the hidden_size from the proposer to ensure consistency
     hidden_size = proposer.hidden_size
 
@@ -545,6 +550,10 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         attn_metadata_builder_cls, _ = try_get_attention_backend(
             AttentionBackendEnum.TREE_ATTN
         )
+    elif attn_backend == "ROCM_AITER_FA":
+        attn_metadata_builder_cls, _ = try_get_attention_backend(
+            AttentionBackendEnum.ROCM_AITER_FA
+        )
     else:
         raise ValueError(f"Unsupported attention backend: {attn_backend}")
 
@@ -622,7 +631,9 @@ def test_propose_tree(spec_token_tree):
 
     # Create proposer first so we can use its actual hidden_size.
     proposer = _create_proposer(
-        "eagle", num_speculative_tokens, speculative_token_tree=spec_token_tree
+        "eagle",
+        num_speculative_tokens,
+        speculative_token_tree=spec_token_tree,
     )
     # Get the hidden_size from the proposer to ensure consistency.
     hidden_size = proposer.hidden_size

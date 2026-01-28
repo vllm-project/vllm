@@ -12,17 +12,23 @@ from tests.kernels.quantization.nvfp4_utils import (
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
     is_valid_flashinfer_cutlass_fused_moe,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.torch_utils import set_random_seed
 
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     100
@@ -48,17 +54,26 @@ MNK_FACTORS = [
 @pytest.mark.parametrize("e", [40, 64, 256])
 @pytest.mark.parametrize("topk", [1, 6, 8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("activation", ["silu_and_mul", "relu2"])
 @torch.inference_mode()
 def test_flashinfer_fp4_moe_no_graph(
-    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    activation: str,
+    workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     with set_current_vllm_config(
         VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
     ):
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
 
         quant_blocksize = 16
+        is_gated_act = activation == "silu_and_mul"
 
         w1_q, w2_q, quant_config = make_test_quant_config(
             e,
@@ -68,6 +83,7 @@ def test_flashinfer_fp4_moe_no_graph(
             quant_dtype="nvfp4",
             block_shape=None,
             per_act_token_quant=False,
+            make_gate=is_gated_act,
         )
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
@@ -75,10 +91,26 @@ def test_flashinfer_fp4_moe_no_graph(
 
         assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
 
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size_per_partition=n,
+            num_local_experts=e,
+            activation=activation,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=dtype,
+            is_act_and_mul=is_gated_act,
+            routing_method=RoutingMethodType.TopK,
+        )
+
         flashinfer_experts = FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
-            FlashInferExperts(out_dtype=dtype, quant_config=quant_config),
+            FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
         )
+
+        fi_activation = {"silu_and_mul": "silu", "relu2": "relu2_no_mul"}[activation]
 
         flashinfer_output = flashinfer_experts(
             hidden_states=a,
@@ -86,6 +118,7 @@ def test_flashinfer_fp4_moe_no_graph(
             w2=w2_q,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            activation=fi_activation,
         )
 
         # Reference check:
@@ -103,7 +136,9 @@ def test_flashinfer_fp4_moe_no_graph(
             block_size=quant_blocksize,
         )
 
-        w1_d = torch.empty((e, 2 * n, k), device="cuda", dtype=dtype)
+        w1_d = torch.empty(
+            (e, (2 if is_gated_act else 1) * n, k), device="cuda", dtype=dtype
+        )
         w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
 
         for idx in range(0, e):
@@ -124,7 +159,9 @@ def test_flashinfer_fp4_moe_no_graph(
                 block_size=quant_blocksize,
             )
 
-        torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk)
+        torch_output = torch_moe(
+            a_in_dtype, w1_d, w2_d, score, topk, activation=activation
+        )
 
         torch.testing.assert_close(
             torch_output, flashinfer_output, atol=1e-1, rtol=1e-1

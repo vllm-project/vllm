@@ -21,18 +21,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GLM-4.5, GLM-4.6 model compatible with HuggingFace weights."""
+"""Inference-only GLM-4.5, GLM-4.6, GLM-4.7 model
+compatible with HuggingFace weights."""
 
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Any
 
 import torch
 from torch import nn
 from transformers.models.glm4_moe import Glm4MoeConfig
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -42,6 +41,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -197,6 +197,7 @@ class Glm4MoE(nn.Module):
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
+            router_logits_dtype=torch.float32,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -233,8 +234,6 @@ class Glm4MoeAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 131072,
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-05,
@@ -264,7 +263,6 @@ class Glm4MoeAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.use_qk_norm = use_qk_norm
 
@@ -286,14 +284,11 @@ class Glm4MoeAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        partial_rotary_factor = getattr(config, "partial_rotary_factor", 0.5)
+        config.rope_parameters.setdefault("partial_rotary_factor", 0.5)
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
-            rope_scaling=rope_scaling,
-            partial_rotary_factor=partial_rotary_factor,
+            rope_parameters=config.rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -341,8 +336,6 @@ class Glm4MoeDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
@@ -354,8 +347,6 @@ class Glm4MoeDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             head_dim=config.head_dim,
             rms_norm_eps=config.rms_norm_eps,
@@ -460,7 +451,7 @@ class Glm4MoeModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -487,24 +478,11 @@ class Glm4MoeModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def make_empty_intermediate_tensors(
-        self, batch_size: int, dtype: torch.dtype, device: torch.device
-    ) -> IntermediateTensors:
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-                "residual": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-            }
-        )
-
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -709,7 +687,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfExper
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

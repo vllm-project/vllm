@@ -5,6 +5,7 @@ import pytest
 
 from vllm.assets.video import VideoAsset
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.multimodal.video import OpenCVDynamicVideoBackend, OpenCVVideoBackend
 
 from ...utils import build_model_context
@@ -103,7 +104,7 @@ def test_video_loader_consistency(
     dynamic_outputs = processor.apply(prompt, dynamic_mm_data, hf_processor_mm_kwargs)
 
     assert static_outputs["prompt_token_ids"] == dynamic_outputs["prompt_token_ids"]
-    assert (
-        static_outputs["mm_kwargs"].get_data()
-        == dynamic_outputs["mm_kwargs"].get_data()
+    assert batched_tensors_equal(
+        static_outputs["mm_kwargs"].get_data(),
+        dynamic_outputs["mm_kwargs"].get_data(),
     )
