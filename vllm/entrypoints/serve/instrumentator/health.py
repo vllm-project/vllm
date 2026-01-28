@@ -21,9 +21,10 @@ def engine_client(request: Request) -> EngineClient:
 
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
-    """Health check. Returns 503 when draining or dead.
+    """Health check. Returns 503 when paused or dead.
 
-    Designed to be used as the readiness probe in a Kubernetes deployment
+    Note: During drain shutdown, middleware returns 503 before reaching here.
+    Designed to be used as the readiness probe in a Kubernetes deployment.
     """
     try:
         client = engine_client(raw_request)

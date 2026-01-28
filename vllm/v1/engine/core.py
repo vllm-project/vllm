@@ -701,7 +701,6 @@ class ParentDeathMonitor:
     def start(self):
         self._thread = threading.Thread(target=self._monitor, daemon=True)
         self._thread.start()
-        logger.debug("ParentDeathMonitor started")
 
     def _monitor(self):
         try:
@@ -1063,7 +1062,6 @@ class EngineCoreProc(EngineCore):
         # Loop until SHUTDOWN received or parent dies
         while parent_died is None or not parent_died.is_set():
             # 1) Poll the input queue until there is work to do.
-            #    Returns False if parent died (poison pill received).
             if not self._process_input_queue():
                 break
             # 2) Step the engine core and return the outputs.
@@ -1351,10 +1349,9 @@ class EngineCoreProc(EngineCore):
                 outputs.engine_index = engine_index
 
                 if client_index == -1:
-                    # Don't reuse buffer for coordinator message
-                    # which will be very small.
-                    assert coord_socket is not None
-                    coord_socket.send_multipart(encoder.encode(outputs))
+                    # broadcast message (e.g., stats, wave info) - send to coordinator
+                    if coord_socket is not None:
+                        coord_socket.send_multipart(encoder.encode(outputs))
                     continue
 
                 # Reclaim buffers that zmq is finished with.
@@ -1498,7 +1495,6 @@ class DPEngineCoreProc(EngineCoreProc):
         # Loop until SHUTDOWN received or parent dies
         while parent_died is None or not parent_died.is_set():
             # 1) Poll the input queue until there is work to do.
-            #    Returns False if parent died (poison pill received).
             if not self._process_input_queue():
                 break
 

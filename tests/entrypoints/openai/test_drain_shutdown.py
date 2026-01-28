@@ -112,6 +112,8 @@ def _start_server(
     shutdown_mode: str = "immediate",
     capture_output: bool = False,
     drain_timeout: int = 30,
+    tensor_parallel_size: int = 1,
+    disable_frontend_multiprocessing: bool = True,
 ):
     args = [
         sys.executable,
@@ -130,10 +132,15 @@ def _start_server(
         "0.05",
         "--max-num-seqs",
         "4",
-        "--disable-frontend-multiprocessing",
         "--shutdown-mode",
         shutdown_mode,
     ]
+
+    if disable_frontend_multiprocessing:
+        args.append("--disable-frontend-multiprocessing")
+
+    if tensor_parallel_size > 1:
+        args.extend(["--tensor-parallel-size", str(tensor_parallel_size)])
 
     if shutdown_mode == "drain":
         args.extend(["--shutdown-drain-timeout", str(drain_timeout)])
@@ -468,3 +475,89 @@ async def test_drain_with_short_timeout():
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5)
+
+
+def _get_gpu_count() -> int:
+    """Get the number of available GPUs."""
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return torch.cuda.device_count()
+    except ImportError:
+        pass
+    return 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(_get_gpu_count() < 2, reason="Requires at least 2 GPUs")
+async def test_drain_shutdown_with_tensor_parallel():
+    """Verify drain shutdown works with tensor parallelism (multiproc executor)."""
+    port = get_open_port()
+    # TP=2 uses multiproc executor, don't disable frontend multiprocessing
+    proc = _start_server(
+        port,
+        shutdown_mode="drain",
+        tensor_parallel_size=2,
+        disable_frontend_multiprocessing=False,
+    )
+
+    try:
+        client = openai.AsyncOpenAI(
+            base_url=f"http://localhost:{port}/v1",
+            api_key="dummy",
+            max_retries=0,
+            timeout=30,
+        )
+
+        if not await _wait_for_server_ready(client, _SERVER_STARTUP_TIMEOUT):
+            proc.terminate()
+            proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
+            pytest.fail(f"Server failed to start in {_SERVER_STARTUP_TIMEOUT}s")
+
+        child_pids = _get_child_pids(proc.pid)
+        # with TP=2, expect multiple child processes (EngineCore + 2 workers)
+        assert len(child_pids) >= 2, (
+            f"Expected >=2 child processes, got {len(child_pids)}"
+        )
+
+        state = DrainState()
+        sigterm_sent = asyncio.Event()
+
+        request_task = asyncio.create_task(
+            _concurrent_request_loop(client, state, sigterm_sent, concurrency=5)
+        )
+
+        await asyncio.sleep(0.5)
+        proc.send_signal(signal.SIGTERM)
+        sigterm_sent.set()
+
+        try:
+            await asyncio.wait_for(request_task, timeout=_DRAIN_DETECTION_TIMEOUT)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            state.stop_requesting = True
+            if not request_task.done():
+                request_task.cancel()
+            await asyncio.gather(request_task, return_exceptions=True)
+
+        # drain must complete in-flight requests
+        assert state.requests_after_sigterm > 0, (
+            f"Drain should complete in-flight requests. "
+            f"503: {state.got_503}, conn_errors: {state.connection_errors}, "
+            f"errors: {state.errors}"
+        )
+        # server must stop accepting new requests
+        assert state.got_503 or state.connection_errors > 0, (
+            f"Server should stop accepting requests (503 or connection close). "
+            f"completed: {state.requests_after_sigterm}, errors: {state.errors}"
+        )
+
+        await _assert_children_cleaned_up(child_pids)
+
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+        return_code = proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
+        assert return_code in (0, -15, None), f"Unexpected return code: {return_code}"

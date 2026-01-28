@@ -179,19 +179,12 @@ class CoreEngineProcManager:
         for i, w in enumerate(self.death_writers):
             try:
                 w.send("DRAIN")
-                logger.debug("Sent DRAIN to engine %d", i)
             except (BrokenPipeError, OSError) as e:
                 logger.warning("Failed to send DRAIN to engine %d: %s", i, e)
 
-    def join_first(self, timeout: float | None = None) -> bool:
-        """Wait for any process to exit.
-
-        Returns True if a process exited, False if timeout expired.
-        """
-        ready = connection.wait(
-            [proc.sentinel for proc in self.processes], timeout=timeout
-        )
-        return len(ready) > 0
+    def join_first(self):
+        """Wait for any process to exit."""
+        connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
