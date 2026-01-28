@@ -251,6 +251,7 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         *,
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
+        has_lora: bool = False,
     ) -> torch.Tensor:
         # We do not really use any input tokens and therefore no embeddings
         # to be calculated. However, due to the mandatory token ids in

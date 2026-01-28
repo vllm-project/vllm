@@ -160,6 +160,7 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         is_multimodal: torch.Tensor | None = None,
         # Multi-modal token ID may exceed vocab size
         handle_oov_mm_token: bool = True,
+        has_lora: bool = False,
     ) -> torch.Tensor:
         """Pass post-conv embeddings directly as input"""
         # for streaming we simply flatten the multimodal embeddings
