@@ -99,7 +99,7 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         )
         super().__init__(quant_config=quant_config)
         # Force weight quantization
-        self.fp8_linear = init_fp8_linear_kernel(
+        self.kernel = init_fp8_linear_kernel(
             activation_quant_key=kFp8DynamicTokenSym,
             weight_quant_key=kFp8DynamicTokenSym,
             out_dtype=torch.get_default_dtype(),
@@ -134,4 +134,4 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.fp8_linear.apply_weights(layer, x, bias)
+        return self.kernel.apply_weights(layer, x, bias)
