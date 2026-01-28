@@ -379,6 +379,11 @@ class RocmAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
     ):
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return
+
         key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache, self.num_kv_heads, self.head_size
         )
