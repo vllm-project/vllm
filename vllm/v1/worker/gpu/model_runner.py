@@ -500,7 +500,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         # Get the number of draft tokens for each request.
-        if not scheduler_output.scheduled_spec_decode_tokens:
+        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        if not draft_tokens:
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
@@ -510,7 +511,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             expanded_idx_mapping = idx_mapping
         else:
-            draft_tokens = scheduler_output.scheduled_spec_decode_tokens
             num_draft_tokens = np.array(
                 [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
                 dtype=np.int32,
