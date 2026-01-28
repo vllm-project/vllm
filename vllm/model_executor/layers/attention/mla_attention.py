@@ -63,7 +63,7 @@ W_UV        project kv_c to v                   shape [Lkv, N, V]
 W_O         project v to h_t                    shape [N * V, H]
 
 
-## Compute Friendly Approach (i.e. "_forward_prefill"):
+## Compute Friendly Approach (i.e. "forward_mha"):
 
 q_c      = h_t @ W_DQ
 q_nope   = (q_c @ W_UQ).view(Sq, N, P)
@@ -91,7 +91,7 @@ NOTE: in the actual code,
     `out_proj` is W_O
 
 
-## Data-Movement Friendly Approach (i.e. "_forward_decode"):
+## Data-Movement Friendly Approach (i.e. "forward_mqa"):
 
 Runtime
 q_c      = h_t @ W_DQ
@@ -547,7 +547,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         if has_prefill:
-            self.impl._forward_prefill(
+            self.impl.forward_mha(
                 prefill_q,
                 prefill_k_c_normed,
                 prefill_k_pe,
@@ -629,7 +629,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 decode_q = get_dcp_group().all_gather(decode_q, dim=1)
 
             # call decode attn
-            attn_out, lse = self.impl._forward_decode(
+            attn_out, lse = self.impl.forward_mqa(
                 decode_q, kv_cache, attn_metadata, self
             )
 
@@ -2365,7 +2365,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         return output, output_lse
 
-    def _forward_prefill(
+    def forward_mha(
         self,
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
@@ -2430,7 +2430,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             output.copy_(output_prefill)
 
     @abstractmethod
-    def _forward_decode(
+    def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
