@@ -60,6 +60,11 @@ class TrainModel:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, dtype=torch.bfloat16
         ).to("cuda:0")
+        self.port = get_open_port()
+        self.master_address = get_ip()
+
+    def get_master_address_and_port(self):
+        return self.master_address, self.port
 
     def get_weight_metadata(self):
         """Return weight names, dtypes, and shapes for weight transfer."""
@@ -72,12 +77,12 @@ class TrainModel:
             shapes.append(list(p.shape))
         return names, dtype_names, shapes
 
-    def init_weight_transfer_group(self, master_address, master_port, world_size):
+    def init_weight_transfer_group(self, world_size):
         """Initialize the NCCL process group for weight transfer."""
         self.model_update_group = NCCLWeightTransferEngine.trainer_init(
             dict(
-                master_address=master_address,
-                master_port=master_port,
+                master_address=self.master_address,
+                master_port=self.port,
                 world_size=world_size,
             ),
         )
@@ -151,8 +156,7 @@ for output in outputs:
 
 # Set up the communication channel between the training process and the
 # inference engine.
-master_address = get_ip()
-master_port = get_open_port()
+master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
 
 world_size = ray.get(llm.get_world_size.remote()) + 1  # +1 for the trainer
 inference_handle = llm.init_weight_transfer.remote(
@@ -167,9 +171,7 @@ inference_handle = llm.init_weight_transfer.remote(
 )
 
 # Initialize weight transfer group on both the training actor and inference engine
-train_handle = train_model.init_weight_transfer_group.remote(
-    master_address, master_port, world_size
-)
+train_handle = train_model.init_weight_transfer_group.remote(world_size)
 ray.get([train_handle, inference_handle])
 
 # Synchronize the updated weights to the inference engine using batched API.
