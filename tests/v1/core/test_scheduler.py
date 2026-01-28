@@ -4030,56 +4030,6 @@ def test_defensive_error_handling():
     assert request.request_id in scheduler.requests
 
 
-def test_no_events_when_span_none():
-    """Test graceful handling when tracer=None (no span created)."""
-    # Create scheduler with tracing enabled but endpoint=None (tracer won't init)
-    scheduler = create_scheduler(
-        enable_journey_tracing=True,
-        otlp_traces_endpoint=None  # No endpoint = no tracer
-    )
-
-    request = create_requests(num_requests=1)[0]
-    scheduler.add_request(request)
-    scheduler.schedule()
-
-    # Verify scheduler.tracer is None
-    assert scheduler.tracer is None
-
-    # Verify _core_spans is empty (no span created)
-    assert request.request_id not in scheduler._core_spans
-
-    # Verify legacy buffering still works
-    events = scheduler._journey_events_buffer_by_client[request.client_index]
-    assert len(events) >= 2  # At least QUEUED and SCHEDULED
-
-
-def test_legacy_buffering_still_works():
-    """Test that both span emission AND buffering happen (parallel operation)."""
-    mock_span = Mock()
-    mock_span.is_recording.return_value = True
-
-    scheduler = create_scheduler(enable_journey_tracing=True)
-    scheduler.tracer = Mock()  # CRITICAL: ensures span creation
-
-    with patch.object(scheduler, '_create_core_span', return_value=mock_span):
-        request = create_requests(num_requests=1)[0]
-        scheduler.add_request(request)
-        scheduler.schedule()
-
-    # Verify span emission happened
-    assert mock_span.add_event.call_count >= 2  # QUEUED, SCHEDULED
-
-    # Verify legacy buffering also happened (parallel)
-    events = scheduler._journey_events_buffer_by_client[request.client_index]
-    assert len(events) >= 2  # QUEUED, SCHEDULED
-
-    # Verify buffered events have correct structure
-    from vllm.v1.core.sched.journey_events import RequestJourneyEventType
-    queued = [e for e in events if e.event_type == RequestJourneyEventType.QUEUED][0]
-    assert queued.request_id == request.request_id
-    assert queued.scheduler_step == 0  # QUEUED uses step counter (typically 0)
-
-
 def test_first_token_dedup_set():
     """Test dedup set prevents duplicate FIRST_TOKEN emissions."""
     from vllm.v1.core.sched.journey_events import RequestJourneyEventType

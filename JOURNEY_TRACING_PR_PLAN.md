@@ -2,12 +2,12 @@
 
 ## Overview
 
-This document outlines the implementation plan for dual-stream journey tracing using OpenTelemetry spans. The implementation is split into **9 independently safe PRs**, each building on the previous ones while maintaining system stability and correctness.
+This document outlines the implementation plan for dual-stream journey tracing using OpenTelemetry spans. The implementation consists of **10 PRs (PR #0 through PR #9)**, including one prerequisite PR for cleanup, followed by 9 independently safe implementation PRs. Each builds on the previous ones while maintaining system stability and correctness.
 
 **Architecture**: Dual-stream design with parent-child span linkage
 - **API Layer**: Creates parent spans (`llm_request`) in OpenAI serving layer
 - **Core Layer**: Creates child spans (`llm_core`) in scheduler
-- **Parent-Child Linkage**: Via W3C Trace Context propagation (traceparent headers)
+- **Parent-Child Linkage**: Via W3C Trace Context propagation (HTTP traceparent headers at API boundary, internal trace_headers dict for API→Engine)
 - **Real-Time Emission**: Events emitted directly to spans (no buffering)
 
 **Timeline**: ~2 weeks for complete implementation (Jan 23-27, 2026)
@@ -52,9 +52,9 @@ This document outlines the implementation plan for dual-stream journey tracing u
 - ✅ **PR #6**: API parent span lifecycle (commit d01e6a0fb, PR #14)
 - ✅ **PR #7**: API↔Engine context propagation (commit c2540aff3, PR #15)
 - ✅ **PR #8**: API lifecycle events and request attributes (commit 959dd77fd, PR #16)
-- ✅ **PR #9**: Remove journey event buffering (commit b37142cc1, PR #17)
+- ✅ **PR #9**: Remove journey event buffering (commit 1d9b9f37c, PR #17)
 
-**Status**: All 9 PRs implemented and tested. Journey tracing dual-stream architecture fully operational.
+**Status**: All 10 PRs (PR #0 prerequisite + PRs #1-#9 implementation) completed and tested. Journey tracing dual-stream architecture fully operational.
 
 ---
 
@@ -206,11 +206,11 @@ def _end_core_span_and_cleanup(self, request: Request) -> None:
 | #4 | `pr4ofjourney` | Emit events to core spans | ~113 lines | 9 | ✅ **COMPLETED** |
 | #5 | `pr5ofjourney` | Add API span tracking dict | ~67 lines | 8 | ✅ **COMPLETED** |
 | #6 | `pr6ofjourney` | Create & close API spans | ~150 lines | 17 | ✅ **COMPLETED** |
-| #7 | `journey-tracing-07-context-propagation` | Link parent-child spans | ~25 lines | 12 | ✅ **COMPLETED** |
-| #8 | `pr8ofjourney` | Emit API lifecycle events | ~112 lines | 12 | ✅ **COMPLETED** |
-| #9 | `journey-tracing-09-remove-buffering` | Remove journey event buffering | ~389 removed, ~478 added | 16 | Clean break |
+| #7 | `journey-tracing-07-context-propagation` | Link parent-child spans | ~25 lines | 4 | ✅ **COMPLETED** |
+| #8 | `pr8ofjourney` | Emit API lifecycle events | ~112 lines | 5 | ✅ **COMPLETED** |
+| #9 | `journey-tracing-09-remove-buffering` | Remove journey event buffering | ~389 removed, ~478 added | 16 | ✅ **COMPLETED** |
 
-**Total**: ~7,528 lines added, ~1,116 lines removed, 27+ journey tracing tests
+**Total**: ~7,528 lines added, ~1,116 lines removed, 88 new journey tracing tests (1 in PR #0 + 87 in PRs #1-#9)
 
 ---
 
@@ -1443,12 +1443,12 @@ class OpenAIServingChat(OpenAIServing):
                 yield "data: [DONE]\n\n"
                 return
 
-            # Success path: all chunks yielded
-            yield "data: [DONE]\n\n"
+            # Success path: finalize BEFORE sending [DONE]
             self._finalize_api_span(
                 request_metadata.request_id,
                 terminal_event="DEPARTED",
             )
+            yield "data: [DONE]\n\n"
 
         finally:
             # CRITICAL: Unconditional cleanup-only in outer finally
@@ -1663,12 +1663,19 @@ class OpenAIServingChat(OpenAIServing):
 
 **Goal**: Inject API span context into trace_headers for parent-child linkage.
 
-**Why Safe**: No new resources created, just injects context into existing dict. Defensive error handling.
+**Why Safe**: No new resources created, just injects W3C trace context into internal trace_headers dict (not HTTP headers—internal propagation mechanism). Defensive error handling.
+
+**Context Propagation Path**:
+- External client MAY provide `traceparent` HTTP header (optional)
+- API layer extracts HTTP headers into internal `trace_headers` dict
+- API span context is injected into `trace_headers` using W3C TraceContext propagator
+- `trace_headers` dict is passed via Request object to engine core
+- Scheduler extracts parent context from Request.trace_headers to create linked child span
 
 **What was delivered**:
 - Added `inject_trace_context()` helper to `vllm/tracing.py` (~30 lines)
 - Injection call in `chat_completion/serving.py` after API span creation (~16 lines)
-- 12 comprehensive tests in `test_context_propagation.py` (~430 lines)
+- 4 comprehensive tests in `test_context_propagation.py` (~430 lines total test file)
 - All behavioral guarantees verified (G1-G6, I1-I3)
 - Polish fixes applied: clarified docstring, strengthened test to read span context
 
@@ -1765,7 +1772,7 @@ async def create_chat_completion(self, ...):
 - Set request attributes on API spans (model, prompt tokens, sampling params)
 - Added `_update_first_response_time()` helper for timing tracking
 - All span operations fully defensive (G6 + G7 compliance)
-- 12 behavioral tests covering G1, G3-G7 (G2 verified by code inspection)
+- 5 behavioral tests covering key scenarios (G1, G3-G7, with G2 verified by code inspection)
 - 795 lines added across 4 files
 
 #### Changes
@@ -1949,9 +1956,13 @@ async def chat_completion_full_generator(self, ...):
 
 ---
 
-### PR #9: Cleanup - Remove Journey Event Buffering (Clean Break)
+### PR #9: Cleanup - Remove Journey Event Buffering ✅ COMPLETED
 
 **Branch**: `journey-tracing-09-remove-buffering`
+
+**Status**: ✅ **COMPLETED** (commit 1d9b9f37c, PR #17)
+
+**Completed**: 2026-01-27
 
 **Goal**: Complete the migration to OTEL-based journey tracing by removing all intermediate buffering and deferred export mechanisms. Spans are the sole real-time tracing path; Prometheus metrics capture timestamps directly.
 
@@ -1999,7 +2010,9 @@ req_state.stats.{queued_ts, scheduled_ts}
    - Timestamp capture for metrics happens at event occurrence (not deferred extraction)
    - No race conditions or stale timestamp reads
    - Metrics see consistent, causally ordered timestamps
-   - **Time domain requirement**: All durations/latencies MUST use monotonic timestamps (`time.monotonic()`); wall-clock timestamps (`time.time()`) are for display/labels only
+   - **Time domain requirement**: All durations/latencies MUST use monotonic timestamps (`time.monotonic()` returns float seconds); wall-clock timestamps (`time.time()` returns float seconds, `time.time_ns()` returns int nanoseconds) are for display/labels only
+   - **OTEL span timestamps**: Use epoch nanoseconds (`time.time_ns()`) for OTEL span start_time/end_time and event timestamps
+   - **Event attributes**: Store monotonic timestamps as float seconds in `ts.monotonic` attribute for stable latency calculations
 
 4. **Zero Overhead When Tracing Is Disabled**
    - No buffer allocations when tracing is off
@@ -2181,7 +2194,7 @@ Add this to every PR description:
 - Exception safety on all paths
 
 ### ✅ Quality
-- All tests passing (45+ tests total)
+- All tests passing (88 new journey tracing tests: 1 in PR #0 + 87 in PRs #1-#9)
 - Legacy tracing removed cleanly (but preserved until ready)
 - Code well-documented
 - Clean, minimal diffs
