@@ -181,6 +181,8 @@ class LoRAModelRunnerMixin:
 
             # Make prompt lora mapping
             # Assign LoRA IDs cyclically to simulate a worst-case scenario.
+            # LoRA IDs are 1-indexed (1 to max_loras) as required by LoRARequest.
+            # convert_mapping() will convert these to 0-indexed slot indices.
             if effective_num_loras > 0:
                 if include_no_lora:
                     # Include -1 (no-LoRA) entries by cycling through
@@ -195,6 +197,7 @@ class LoRAModelRunnerMixin:
                         np.arange(num_reqs, dtype=np.int32) % len(cycle_values)
                     ]
                 else:
+                    # Use 1 to effective_num_loras (1-indexed lora IDs)
                     prompt_lora_mapping = (
                         np.arange(num_reqs, dtype=np.int32) % effective_num_loras
                     ) + 1

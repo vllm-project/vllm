@@ -236,12 +236,6 @@ class CudagraphDispatcher:
             disable_full: If True, skip FULL cudagraph checks and
                 return PIECEWISE or NONE only. (can be used for features like
                 cascade attention that are not supported by full cudagraphs)
-
-        Args:
-            num_tokens: Number of tokens in the batch.
-            uniform_decode: Whether this is a uniform decode batch.
-            has_lora: Whether this batch has active LoRA adapters.
-            disable_full: Whether to disable full cudagraph mode.
             num_active_loras: Number of distinct active LoRA adapters.
         """
         if (
