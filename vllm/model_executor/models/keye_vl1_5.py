@@ -274,21 +274,6 @@ class KeyeVL1_5Projector(nn.Module):
         return hidden_states.view(*dims, -1)
 
 
-class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
-    def get_data_parser(self):
-        return KeyeVL1_5MultiModalDataParser(
-            expected_hidden_size=self._get_expected_hidden_size(),
-        )
-
-    def get_max_frame_per_video(self) -> int:
-        return 2048
-
-    def get_supported_mm_limits(
-        self,
-    ) -> Mapping[str, int | None]:
-        return {"image": None, "video": 1}
-
-
 def _keye_field_config(
     hf_inputs: Mapping[str, torch.Tensor],
 ):
@@ -368,6 +353,21 @@ class KeyeVL1_5MultiModalDataParser(MultiModalDataParser):
             )
 
         return super()._parse_video_data(data)
+
+
+class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
+    def get_data_parser(self):
+        return KeyeVL1_5MultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
+    def get_max_frame_per_video(self) -> int:
+        return 2048
+
+    def get_supported_mm_limits(
+        self,
+    ) -> Mapping[str, int | None]:
+        return {"image": None, "video": 1}
 
 
 class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingInfo]):

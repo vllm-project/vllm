@@ -127,6 +127,30 @@ def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
     return feat_lengths, output_lengths
 
 
+def _qwen2audio_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    return dict(
+        audio_embeds=MultiModalFieldConfig.batched("audio"),
+        input_features=MultiModalFieldConfig.batched("audio"),
+        feature_attention_mask=MultiModalFieldConfig.batched("audio"),
+    )
+
+
+class Qwen2AudioMultiModalDataParser(MultiModalDataParser):
+    def _parse_audio_data(
+        self,
+        data: dict[str, torch.Tensor] | ModalityData[AudioItem],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="audio",
+                required_fields={"audio_embeds"},
+                fields_factory=_qwen2audio_field_config,
+            )
+
+        return super()._parse_audio_data(data)
+
+
 class Qwen2AudioProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen2AudioConfig)
@@ -185,30 +209,6 @@ class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingIn
                 length=audio_len, num_audios=num_audios, overrides=audio_overrides
             )
         }
-
-
-def _qwen2audio_field_config(hf_inputs: Mapping[str, torch.Tensor]):
-    return dict(
-        audio_embeds=MultiModalFieldConfig.batched("audio"),
-        input_features=MultiModalFieldConfig.batched("audio"),
-        feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-    )
-
-
-class Qwen2AudioMultiModalDataParser(MultiModalDataParser):
-    def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[AudioItem],
-    ) -> ModalityDataItems[Any, Any] | None:
-        if isinstance(data, dict):
-            return DictEmbeddingItems(
-                data,
-                modality="audio",
-                required_fields={"audio_embeds"},
-                fields_factory=_qwen2audio_field_config,
-            )
-
-        return super()._parse_audio_data(data)
 
 
 class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessingInfo]):
