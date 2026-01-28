@@ -95,8 +95,10 @@ def test_fuse_act_padding(
     )
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        from vllm.compilation.rocm_aiter_fusion import RocmAiterTritonAddRMSNormPadFusionPass
-        
+        from vllm.compilation.rocm_aiter_fusion import (
+            RocmAiterTritonAddRMSNormPadFusionPass,
+        )
+
         torch.set_default_device("cuda")
         torch.set_default_dtype(dtype)
         torch.manual_seed(1)
