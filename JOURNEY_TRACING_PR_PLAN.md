@@ -10,8 +10,8 @@ This document outlines the implementation plan for dual-stream journey tracing u
 - **Parent-Child Linkage**: Via W3C Trace Context propagation (traceparent headers)
 - **Real-Time Emission**: Events emitted directly to spans (no buffering)
 
-**Timeline**: ~2 weeks for complete implementation
-**Total Changes**: ~618 lines added, ~280 lines removed, 77 tests
+**Timeline**: ~2 weeks for complete implementation (Jan 23-27, 2026)
+**Total Changes**: ~7,528 lines added, ~1,116 lines removed, 27+ journey tracing tests
 
 ---
 
@@ -33,11 +33,28 @@ This document outlines the implementation plan for dual-stream journey tracing u
 - ✅ Journey event buffering (still needed for do_tracing())
 
 **What was added**:
-- Timestamp extraction from `RequestJourneyEvent` to restore Prometheus metrics
-- `queued_ts` from first QUEUED event
-- `scheduled_ts` from first SCHEDULED event
+- Restored Prometheus metrics using journey event timestamp extraction (interim approach)
+- Note: Journey event timestamps were later replaced by direct monotonic timestamp capture in PR #9
 
-**Key clarification**: EngineCoreEvent was the "legacy" system (now removed). The current tracing system is `RequestJourneyEvent` + `do_tracing()` (kept and functional).
+**Key clarification**: EngineCoreEvent was the "legacy" system (now removed). The current tracing system is `RequestJourneyEvent` + `do_tracing()` (kept functional through PR #8, removed in PR #9).
+
+---
+
+## ✅ Implementation Status
+
+**Completed PRs** (Jan 23-27, 2026):
+- ✅ **PR #0**: Remove EngineCoreEvent System (commit 717f90eb5, PR #7)
+- ✅ **PR #1**: Initialize OTEL tracer in scheduler (commit 24f263656, PR #8)
+- ✅ **PR #2**: Core span lifecycle management (commit d46cdf231, PR #10)
+- ✅ **PR #3**: Journey state cleanup (commit 35c46c3b1, PR #11)
+- ✅ **PR #4**: Emit journey events to core spans (commit 6a58608de, PR #12)
+- ✅ **PR #5**: API span tracking infrastructure (commit 91fa916a0, PR #13)
+- ✅ **PR #6**: API parent span lifecycle (commit d01e6a0fb, PR #14)
+- ✅ **PR #7**: API↔Engine context propagation (commit c2540aff3, PR #15)
+- ✅ **PR #8**: API lifecycle events and request attributes (commit 959dd77fd, PR #16)
+- ✅ **PR #9**: Remove journey event buffering (commit b37142cc1, PR #17)
+
+**Status**: All 9 PRs implemented and tested. Journey tracing dual-stream architecture fully operational.
 
 ---
 
@@ -191,9 +208,9 @@ def _end_core_span_and_cleanup(self, request: Request) -> None:
 | #6 | `pr6ofjourney` | Create & close API spans | ~150 lines | 17 | ✅ **COMPLETED** |
 | #7 | `journey-tracing-07-context-propagation` | Link parent-child spans | ~25 lines | 12 | ✅ **COMPLETED** |
 | #8 | `pr8ofjourney` | Emit API lifecycle events | ~112 lines | 12 | ✅ **COMPLETED** |
-| #9 | `journey-tracing-09-remove-buffering` | Remove journey event buffering | ~150 removed | 4 | Clean break |
+| #9 | `journey-tracing-09-remove-buffering` | Remove journey event buffering | ~389 removed, ~478 added | 16 | Clean break |
 
-**Total**: ~618 lines added, ~280 lines removed, 77 tests
+**Total**: ~7,528 lines added, ~1,116 lines removed, 27+ journey tracing tests
 
 ---
 
@@ -1936,186 +1953,160 @@ async def chat_completion_full_generator(self, ...):
 
 **Branch**: `journey-tracing-09-remove-buffering`
 
-**Goal**: Remove journey event buffering and export now that OTEL spans are the sole tracing path.
+**Goal**: Complete the migration to OTEL-based journey tracing by removing all intermediate buffering and deferred export mechanisms. Spans are the sole real-time tracing path; Prometheus metrics capture timestamps directly.
 
-**Why Safe**: Spans work end-to-end (PRs #2-8). Journey event buffering no longer needed for tracing.
+---
 
-**Clean Break Decision**: Journey tracing moves to OTEL spans exclusively. Prometheus metrics use direct timestamp capture.
+#### Scope
 
-**What Gets Removed**:
-- ❌ Journey event buffer dictionaries in scheduler
-- ❌ Journey event buffering logic in `_emit_journey_event()`
-- ❌ Journey event flushing in `schedule()`
-- ❌ Journey event export logic in `do_tracing()` (OTEL path only)
+**What Is Removed**:
+- All journey event buffering data structures (scheduler-side accumulation)
+- All journey event flushing logic (scheduler→output processor hand-off)
+- All journey event export logic in output processor (OTEL export path)
 
 **What Stays**:
-- ✅ `do_tracing()` method (for non-journey tracing, if any other uses exist)
-- ✅ `RequestJourneyEvent` dataclass (kept in code, just not buffered/exported)
-- ✅ Prometheus metrics (use direct timestamp capture in scheduler, not journey events)
+- Any existing public API signatures that accept journey event parameters (deprecated but ignored for backward compatibility)
+- Request state needed for Prometheus metrics (queued/scheduled timestamps)
+- All OTEL span emission paths from PRs #2-8 (unchanged and authoritative)
 
-**Key Change**: Replace journey event timestamp extraction with direct capture:
-
-```python
-# OLD (removed):
-# Buffer journey events → Extract timestamps in metrics collector
-
-# NEW (PR #9):
-# Capture timestamps directly for Prometheus metrics
-if self.log_stats:
-    request.queued_ts = time.time()  # Direct capture
-    request.scheduled_ts = time.time()  # When scheduled
+**Timestamp Propagation Path** (New in PR #9):
+```
+Scheduler (Request.{queued_ts, scheduled_ts})
+  ↓ time.monotonic() capture at event occurrence
+EngineCoreOutput.{queued_ts, scheduled_ts}
+  ↓ copied from Request in SchedulerOutput
+OutputProcessor.process_outputs()
+  ↓ propagated to RequestState
+req_state.stats.{queued_ts, scheduled_ts}
+  ↓ used for Prometheus metrics
 ```
 
-#### Changes
+---
 
-```python
-# vllm/v1/core/sched/scheduler.py
+#### Acceptance Criteria (Non-Negotiable)
 
-class Scheduler:
-    def __init__(self, ...):
-        # ... existing init ...
+1. **OTEL Spans Are Sole Journey Tracing Path**
+   - All journey lifecycle events flow exclusively through OTEL span events
+   - No buffering or deferred export; span events are emitted in normal control flow at the first point the event is known
+   - Parent-child span linkage remains intact across API/Core boundary
 
-        if self._enable_journey_tracing:
-            # REMOVED: Per-client event buffers
-            # self._journey_events_buffer_by_client: dict[int, list[RequestJourneyEvent]] = defaultdict(list)
+2. **Prometheus Metrics Continue to Work**
+   - Scheduler metrics (queue depth, scheduled tokens, etc.) remain functional
+   - Duration/latency metrics remain monotonic and numerically correct
+   - Metrics do NOT depend on journey event buffers or flushing
 
-            # Keep: span tracking, dedup sets, hiwater marks (from PRs #2-3)
-            self._first_token_emitted: set[str] = set()
-            self._journey_prefill_hiwater: dict[str, int] = {}
+3. **Timestamp Capture Is Monotonic and Safe**
+   - Timestamp capture for metrics happens at event occurrence (not deferred extraction)
+   - No race conditions or stale timestamp reads
+   - Metrics see consistent, causally ordered timestamps
+   - **Time domain requirement**: All durations/latencies MUST use monotonic timestamps (`time.monotonic()`); wall-clock timestamps (`time.time()`) are for display/labels only
 
-def _emit_journey_event(self, ...):
-    """Emit journey event to span only (buffering removed)."""
-    if not self._enable_journey_tracing:
-        return
+4. **Zero Overhead When Tracing Is Disabled**
+   - No buffer allocations when tracing is off
+   - Early exit branches prevent span-related work when tracing is disabled
+   - Metrics path is independent of tracing enablement (metrics timestamp capture still occurs when `log_stats` is enabled, regardless of tracing state)
 
-    # Emit to span (from PR #4) - unchanged
-    if span and span.is_recording() and SpanAttributes is not None:
-        # ... span emission code (unchanged) ...
+5. **Defensive Tracing**
+   - Tracing failures (span recording errors, missing context) never break request processing
+   - All tracing code is guarded and non-blocking
+   - Request lifecycle (queuing, scheduling, completion) is unaffected by tracing state
 
-    # REMOVED: Legacy buffering code
-    # No more:
-    # - RequestJourneyEvent creation
-    # - Buffer append
-    # - Client index tracking
+6. **Backward Compatibility**
+   - Preserve existing signatures at scheduler→output processor boundaries (`OutputProcessor.process_outputs`, `EngineCoreOutputs.journey_events`) and any external entrypoints
+   - Deprecated `journey_events` parameters are accepted but ignored (no-op)
+   - Existing callers (if any) do not break
 
-def schedule(self, ...):
-    # ... existing scheduling logic ...
+---
 
-    # REMOVED: Event buffering flushing at end of schedule()
-    # No more loop through _journey_events_buffer_by_client
+#### Behavioral Invariants
 
-# vllm/v1/engine/output_processor.py
+**BI-1: No Buffering When Tracing Is Enabled**
+- System MUST NOT accumulate journey events in memory for deferred export
+- Tracing events are emitted to spans in normal control flow without intermediate buffering
+- No periodic flushing or batch export of journey events
 
-class OutputProcessor:
-    def process_outputs(
-        self,
-        engine_core_outputs: list[EngineCoreOutput],
-        engine_core_timestamp: float,
-        journey_events: list[RequestJourneyEvent] | None = None,  # Keep for API compat
-    ) -> OutputProcessorOutput:
-        """Process outputs from engine core.
+**BI-2: Metrics Independence**
+- Prometheus metrics MUST derive from request state, not buffered events
+- Metrics collection path MUST NOT depend on journey tracing being enabled
+- Timestamp capture for metrics happens eagerly at event occurrence
 
-        Args:
-            engine_core_outputs: Outputs from engine core
-            engine_core_timestamp: Timestamp when outputs produced
-            journey_events: Deprecated, no longer used (kept for API compatibility)
-        """
-        # REMOVED: journey_events buffering and export logic
-        # Journey tracing now uses OTEL spans exclusively (PRs #2-8)
+**BI-3: Span Emission Unchanged**
+- All span emission logic from PRs #2-8 MUST remain functional
+- All journey event types MUST still be emitted to spans
+- Parent-child span correlation MUST be preserved
 
-        # KEEP: All existing output processing logic
-        # KEEP: do_tracing() method (for other tracing, if any)
-        # REMOVED from do_tracing(): Journey event export code
+**BI-4: API Stability**
+- Removing buffers MUST NOT break existing call sites
+- Deprecated parameters MUST be ignored (not rejected)
+- No new required parameters introduced
 
-        request_outputs: list[RequestOutput | PoolingRequestOutput] = []
-        reqs_to_abort: list[str] = []
+---
 
-        for engine_core_output in engine_core_outputs:
-            # ... existing processing (unchanged) ...
+#### Safety Invariants
 
-        return OutputProcessorOutput(
-            request_outputs=request_outputs,
-            reqs_to_abort=reqs_to_abort,
-        )
+**SI-1: Resource Cleanup Is Complete**
+- All buffer data structures are removed (no lingering dead code)
+- No per-request state remains for buffering purposes
+- Memory footprint decreases after removal
 
-    def do_tracing(self, ...):
-        """Export tracing data to OTEL.
+**SI-2: Request Lifecycle Is Unaffected**
+- Request queuing, scheduling, execution, and completion remain unchanged
+- No new failure modes introduced by buffer removal
+- Existing error handling paths are preserved
 
-        UPDATED: Journey event export removed.
-        This method remains for other tracing purposes if needed.
-        """
-        # REMOVED: Journey event export logic
-        # Journey events now emitted directly to spans in real-time
+**SI-3: Tracing Failures Are Isolated**
+- Missing spans, recording errors, or context propagation failures do not block requests
+- All tracing code paths have defensive guards
+- Metrics remain functional even if tracing infrastructure is broken
 
-        # KEEP: Any other tracing export logic that may exist
-        pass
+---
 
-# vllm/v1/core/sched/scheduler.py
+#### Test Obligations
 
-# NEW: Direct timestamp capture for Prometheus metrics
-def add_request(self, request: Request) -> None:
-    # ... existing code ...
+**TO-1: Verify No Buffering**
+- MUST prove that enabling journey tracing does not create buffer data structures
+- MUST prove that event emission does not accumulate events in memory
+- MUST verify no periodic flushing occurs
 
-    # Capture timestamp directly for Prometheus (replaces journey event extraction)
-    if self.log_stats:
-        request.queued_ts = time.time()
+**TO-2: Verify Spans Still Work End-to-End**
+- MUST prove that all journey events are emitted to OTEL spans
+- MUST prove that parent-child span linkage is intact
+- MUST prove there is no deferred flush/export path and events appear on spans without passing through an intermediate buffer
 
-def schedule(self, ...):
-    # ... when scheduling request ...
+**TO-3: Verify Metrics Independence**
+- MUST prove that Prometheus metrics work when journey tracing is DISABLED
+- MUST prove that metrics use request state, not buffered events
+- MUST prove that timestamp capture is direct and monotonic
 
-    # Capture timestamp directly for Prometheus
-    if self.log_stats and schedule_kind == ScheduleKind.FIRST:
-        request.scheduled_ts = time.time()
+**TO-4: Verify Backward Compatibility**
+- MUST prove that deprecated API parameters are accepted (no errors)
+- MUST prove that existing callers (if any) do not break
+- MUST prove that new behavior is a strict subset (removal only)
 
-# vllm/v1/core/sched/journey_events.py
+**TO-5: Verify Defensive Tracing**
+- MUST prove that request processing succeeds when spans are not recording
+- MUST prove that request processing succeeds when trace context is missing
+- MUST prove that tracing errors do not propagate to request lifecycle
 
-# NO CHANGES to this file
-# KEEP: RequestJourneyEvent dataclass (needed for Prometheus metrics extraction)
-# KEEP: RequestJourneyEventType enum (used for span events)
-# KEEP: ScheduleKind enum (still used)
-# KEEP: _map_finish_status helper (still used)
-```
+---
 
-#### Safety Checklist
+#### Design Contract
 
-- ✅ Spans work end-to-end (PRs #2-8) - OTEL tracing complete
-- ✅ No functionality lost (spans are sole tracing path, buffering obsolete)
-- ✅ **Clean break**: Journey event buffering and export removed completely
-- ✅ **do_tracing() PRESERVED** (method stays, journey export logic removed)
-- ✅ **RequestJourneyEvent PRESERVED** (dataclass kept in code, not buffered/exported)
-- ✅ **Prometheus metrics still work** (use direct timestamp capture, not journey events)
-- ✅ Tests verify spans still work after buffering removed
-- ✅ Tests verify Prometheus metrics still work with direct capture
-- ✅ Backward compatible (journey_events parameter kept for API compatibility)
+**Implementer Freedom**:
+- Choose timestamp capture mechanism (direct assignment, helper functions, etc.)
+- Choose metrics state storage location (Request attributes, separate structures, etc.)
+- Choose cleanup strategy (direct removal, deprecation markers, etc.)
 
-#### Tests
+**Implementer Constraints**:
+- MUST NOT reintroduce buffering under any name
+- MUST NOT break existing span emission paths
+- MUST NOT make metrics depend on tracing state
+- MUST preserve all public API signatures
 
-1. **`test_no_buffering_when_tracing()`**
-   - Enable journey tracing
-   - Verify buffer dict doesn't exist
-   - Verify no buffer-related code executed
+---
 
-2. **`test_spans_still_work()`**
-   - Add and complete request
-   - Verify span emission unchanged
-   - Verify all events present on span
-
-3. **`test_end_to_end_journey_tracing()`**
-   - Create API span
-   - Submit to engine (creates core span)
-   - Complete request
-   - Verify parent-child linkage
-   - Verify all events on both spans
-
-4. **`test_prometheus_metrics_with_direct_capture()`**
-   - Add and complete request with log_stats=True
-   - Verify `request.queued_ts` set directly (not from journey events)
-   - Verify `request.scheduled_ts` set directly
-   - Verify Prometheus metrics collector can access timestamps
-   - Prove metrics work WITHOUT journey event buffering
-
-**Size**: ~150 lines removed, ~100 lines added (direct timestamp capture), 4 tests
-**Review Time**: ~20 minutes
+**Actual Implementation**: ~389 lines removed (buffering logic), ~478 lines added (direct timestamp capture + 16 comprehensive tests)
+**Review Focus**: Verify no hidden buffering remains, metrics work independently, spans work end-to-end
 
 ---
 
@@ -2220,106 +2211,3 @@ When reviewing each PR:
 6. Confirm PR is independently safe
 
 ---
-
-## Implementation History
-
-Condensed summary of completed PRs. See individual PR sections above for detailed implementation notes.
-
-### ✅ PR #0: Remove EngineCoreEvent System
-- **Completed**: 2026-01-25 (prior to journey tracing)
-- **Commit**: 717f90eb5
-- **Changes**: ~130 lines removed, 1 new test
-- **Impact**: Removed legacy v0.0.1 metrics system, restored Prometheus metrics using RequestJourneyEvent timestamps
-
----
-
-### ✅ PR #1: Scheduler Tracer Initialization
-- **Completed**: 2026-01-26
-- **Branch**: `pr1ofjourney` | **Commit**: 24f263656 | **PR**: #10
-- **Changes**: +19 production, +110 test lines | 4 tests
-- **Key**: Added tracer initialization to scheduler with defensive error handling, zero per-request state
-
----
-
-### ✅ PR #2: Core Span Lifecycle Management
-- **Completed**: 2026-01-26
-- **Branch**: `pr2ofjourney` | **Commit**: d46cdf231 | **PR**: #33115
-- **Changes**: +125 production, +245 test lines | 6 tests
-- **Key**: Added `_core_spans` dict, span creation/cleanup on all termination paths with try/finally blocks
-
----
-
-### ✅ PR #3: Journey State Cleanup
-- **Completed**: 2026-01-26
-- **Branch**: `pr3ofjourney` | **Commit**: f4cf7903c | **PR**: #11
-- **Changes**: 26 production modified, +162 test lines | 4 tests
-- **Key**: Extended cleanup to handle journey state, fixed memory leak, decoupled span vs state cleanup
-
----
-
-### ✅ PR #4: Emit Journey Events to Core Spans
-- **Completed**: 2026-01-26
-- **Branch**: `pr4ofjourney` | **Commit**: 6a58608de | **PR**: #12
-- **Changes**: +113 production, +328 test lines | 9 tests
-- **Key**: Added event emission to spans (QUEUED, SCHEDULED, PREEMPTED, FIRST_TOKEN, FINISHED), defensive error handling, parallel buffering
-
----
-
-### ✅ PR #5: Add API Span Tracking Dict
-- **Completed**: 2026-01-27
-- **Branch**: `pr5ofjourney` | **Commit**: 3d11f662d | **PR**: #13
-- **Changes**: +67 production, +177 test lines | 8 tests
-- **Key**: Added `_api_spans` dict to OpenAIServing, helper methods with error handling, avoids Pydantic serialization risks
-
----
-
-### ✅ PR #6: API Parent Span Lifecycle
-- **Completed**: 2026-01-27
-- **Branch**: `pr6ofjourney` (formerly `journey-tracing-06-api-spans-full-lifecycle`)
-- **Commit**: d5429c59d | **PR**: #14
-- **Changes**: ~150 production, ~420 test lines | 17 tests (all passing)
-- **Key Implementation Details**:
-  - Added `_create_api_span()` method on `OpenAIServing` base class
-  - Created `_finalize_api_span()` single finalizer supporting DEPARTED/ABORTED/cleanup-only modes
-  - Added `_pop_api_span_info()` for explicit pop-at-start idempotence primitive
-  - Wrapped both streaming and non-streaming generators with comprehensive error handling
-  - Covered 12 termination paths (6 streaming, 6 non-streaming)
-  - **Streaming paths**: success (DEPARTED), GenerationError (ABORTED), CancelledError (ABORTED+re-raise), GeneratorExit (ABORTED+re-raise), generic Exception (ABORTED), outer finally fallback (cleanup-only)
-  - **Non-streaming paths**: success (DEPARTED), CancelledError (ABORTED), GeneratorExit (ABORTED+re-raise), ValueError (ABORTED), generic Exception (ABORTED), outer finally fallback (cleanup-only)
-- **Critical Fixes Applied** (Post-Review):
-  - **Fix #1**: Guaranteed span.end() using nested try/except/finally (BLOCKER resolved)
-    - Moved span.end() to outer finally block in `_finalize_api_span()`
-    - Wrapped set_status() and add_event() in inner try/except (best-effort)
-    - Prevents OTEL span leak if earlier operations throw
-  - **Fix #2**: Eliminated all brittle test patterns (BLOCKER resolved)
-    - Added `find_events()` helper using kwargs-only pattern: `call.kwargs.get("name") == "api.DEPARTED"`
-    - Replaced all 10 instances of `"X" in str(call)` pattern with helper usage
-    - Tests now robust to mock library changes and Python version updates
-  - **Fix #3**: Simplified partial fix to kwargs-only (QUALITY improvement)
-    - Changed test_full_generation_error_during_response_building from mixed args/kwargs to pure kwargs
-    - Reduced from 25 lines to 8 lines using helper function
-    - Added assertion for error message existence
-- **Design Patterns**:
-  - **Ownership**: All lifecycle methods on `OpenAIServing` base class (single owner)
-  - **Single Finalizer**: One method handles DEPARTED, ABORTED, cleanup-only (prevents drift)
-  - **Pop-At-Start Idempotence**: `_pop_api_span_info()` at method start ensures only one caller succeeds
-  - **Cleanup-Only Fallback**: `terminal_event=None` in outer finally for truly uncaught exceptions (idempotent no-op if already finalized)
-  - **Re-raise Pattern**: CancelledError, GeneratorExit finalize with ABORTED then re-raise (preserves observability + propagation)
-  - **Cleanup Independence**: status setting and span.end() NOT gated on is_recording() or flags (only event emission gated)
-- **Test Coverage**: 17 tests covering:
-  - Span creation (2 tests)
-  - Streaming termination (6 tests: success, generation_error, cancelled, generator_exit, exception, partial_fix)
-  - Non-streaming termination (5 tests: success, cancelled, generator_exit, validation, exception)
-  - Idempotence & leak tests (2 tests)
-  - Cleanup independence (2 tests: not_gated_on_is_recording, cleanup_only_fallback)
-- **Safety Guarantees**:
-  - ✅ span.end() ALWAYS called (even if set_status/add_event throw)
-  - ✅ All 12 termination paths finalize properly (no leaks)
-  - ✅ Idempotent via pop-at-start (safe to call multiple times)
-  - ✅ Tests use robust kwargs-only pattern (no brittle string matching)
-  - ✅ Dict cleanup NOT gated on flags (cleanup independence)
-  - ✅ All tests passing (17/17, 100% pass rate)
-
----
-
-**Summary**: 6 PRs completed, ~500 production lines added, ~1442 test lines added, 48 tests passing

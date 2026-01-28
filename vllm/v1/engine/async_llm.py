@@ -505,14 +505,8 @@ class AsyncLLM(EngineClient):
                         IterationStats() if (log_stats and num_outputs) else None
                     )
 
-                    # Distribute journey events ONCE before chunking to prevent loss
-                    # Events for requests without outputs must be accumulated
-                    if outputs.journey_events:
-                        for event in outputs.journey_events:
-                            if req_state := output_processor.request_states.get(
-                                event.request_id
-                            ):
-                                req_state.journey_events.append(event)
+                    # Note: Journey events are now emitted directly to OTEL spans (PR #9).
+                    # No buffering or distribution needed.
 
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the

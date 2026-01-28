@@ -123,6 +123,11 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
+        # Prometheus metrics timestamps (monotonic time domain)
+        # Set directly by scheduler for metrics collection
+        self.queued_ts: float = 0.0  # When added to scheduler (QUEUED event)
+        self.scheduled_ts: float = 0.0  # When first scheduled (SCHEDULED event)
+
         # The number of tokens that have been computed remotely.
         self.num_external_computed_tokens = 0
 

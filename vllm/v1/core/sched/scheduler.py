@@ -39,7 +39,6 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.journey_events import (
-    RequestJourneyEvent,
     RequestJourneyEventType,
     ScheduleKind,
     _map_finish_status,
@@ -124,10 +123,6 @@ class Scheduler(SchedulerInterface):
             self.observability_config.enable_journey_tracing
         )
         if self._enable_journey_tracing:
-            # Per-client event buffers (flushed in update_from_output)
-            self._journey_events_buffer_by_client: dict[
-                int, list[RequestJourneyEvent]
-            ] = defaultdict(list)
             # Track which requests have emitted FIRST_TOKEN (dedup)
             self._first_token_emitted: set[str] = set()
             # Prefill progress high-water marks (survives preemption)
@@ -760,6 +755,10 @@ class Scheduler(SchedulerInterface):
                     schedule_kind = ScheduleKind.RESUME
                 # If schedule_kind is None (unexpected state), skip emission
                 # to avoid incorrect labeling in production
+
+                # Capture scheduled timestamp for Prometheus metrics (first schedule only)
+                if self.log_stats and schedule_kind == ScheduleKind.FIRST and request.scheduled_ts == 0.0:
+                    request.scheduled_ts = time.monotonic()
 
                 if self._enable_journey_tracing and schedule_kind is not None:
                     core_span = self._core_spans.get(request.request_id)
@@ -1407,6 +1406,8 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        queued_ts=request.queued_ts,
+                        scheduled_ts=request.scheduled_ts,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
@@ -1437,6 +1438,8 @@ class Scheduler(SchedulerInterface):
                         finish_reason=request.get_finished_reason(),
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        queued_ts=request.queued_ts,
+                        scheduled_ts=request.scheduled_ts,
                     )
                 )
 
@@ -1482,28 +1485,6 @@ class Scheduler(SchedulerInterface):
                     )
             finished_req_ids.clear()
 
-        # Flush journey events for all clients with buffered events
-        # This ensures SCHEDULED/PREEMPTED events reach output even if
-        # no tokens generated
-        if self._enable_journey_tracing:
-            for (
-                client_index,
-                buffered_events,
-            ) in self._journey_events_buffer_by_client.items():
-                if buffered_events:
-                    journey_events = buffered_events.copy()
-                    buffered_events.clear()
-
-                    # Get or create EngineCoreOutputs for this client
-                    if client_index in engine_core_outputs:
-                        engine_core_outputs[client_index].journey_events = (
-                            journey_events
-                        )
-                    else:
-                        # Create new EngineCoreOutputs just for events
-                        engine_core_outputs[client_index] = EngineCoreOutputs(
-                            journey_events=journey_events
-                        )
 
         if (
             stats := self.make_stats(
@@ -1731,6 +1712,10 @@ class Scheduler(SchedulerInterface):
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
+
+        # Capture queued timestamp for Prometheus metrics (monotonic time domain)
+        if self.log_stats:
+            request.queued_ts = time.monotonic()
 
         # Create core span for request lifecycle
         core_span = self._create_core_span(request)
@@ -2394,26 +2379,3 @@ class Scheduler(SchedulerInterface):
                     request.request_id,
                     e,
                 )
-
-        # EXISTING: Legacy buffering (unchanged, parallel operation)
-        # This buffering will be removed in PR #9 (but do_tracing() stays)
-        # Reuse pre-computed progress and timestamp
-        event = RequestJourneyEvent(
-            request_id=request.request_id,
-            event_type=event_type,
-            ts_monotonic=ts_monotonic,  # Reused
-            scheduler_step=scheduler_step,
-            prefill_done_tokens=progress["prefill_done_tokens"],
-            prefill_total_tokens=progress["prefill_total_tokens"],
-            decode_done_tokens=progress["decode_done_tokens"],
-            decode_max_tokens=progress["decode_max_tokens"],
-            phase=progress["phase"],
-            num_preemptions_so_far=request.num_preemptions,
-            schedule_kind=schedule_kind,
-            finish_status=finish_status,
-        )
-
-        # Buffer per-client
-        self._journey_events_buffer_by_client[request.client_index].append(
-            event
-        )

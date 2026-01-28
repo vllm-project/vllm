@@ -21,10 +21,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import SpanAttributes, SpanKind, Tracer, extract_trace_context
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.v1.core.sched.journey_events import (
-    RequestJourneyEvent,
-    RequestJourneyEventType,
-)
+from vllm.v1.core.sched.journey_events import RequestJourneyEvent
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -149,9 +146,6 @@ class RequestState:
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
-
-        # Journey events for OTEL tracing
-        self.journey_events: list[RequestJourneyEvent] = []
 
     @classmethod
     def from_new_request(
@@ -525,13 +519,9 @@ class OutputProcessor:
         request_outputs: list[RequestOutput | PoolingRequestOutput] = []
         reqs_to_abort: list[str] = []
 
-        # Collect journey events by request_id for distribution
-        journey_events_by_req: dict[str, list[RequestJourneyEvent]] = {}
-        if journey_events:
-            for event in journey_events:
-                if event.request_id not in journey_events_by_req:
-                    journey_events_by_req[event.request_id] = []
-                journey_events_by_req[event.request_id].append(event)
+        # Note: journey_events parameter is deprecated (PR #9) but kept for backward compatibility.
+        # Journey events are now emitted directly to OTEL spans in the scheduler.
+        # Metrics timestamps are captured directly in Request fields by the scheduler.
 
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
@@ -540,34 +530,12 @@ class OutputProcessor:
                 # Ignore output for already-aborted request.
                 continue
 
-            # Accumulate journey events for this request (consume to prevent duplication)
-            events = journey_events_by_req.pop(req_id, None)
-            if events:
-                req_state.journey_events.extend(events)
-
-                # Extract timestamps for Prometheus metrics from journey events.
-                # This replaces the removed update_from_events() logic that previously
-                # extracted timestamps from EngineCoreEvents.
-                #
-                # Time domain: journey events use ts_monotonic (time.monotonic()), which
-                # matches first_token_ts/last_token_ts. All delta calculations in
-                # update_from_finished_request() operate on monotonic timestamps.
-                if req_state.stats:
-                    for event in events:
-                        event_type = event.event_type
-
-                        # Set queued_ts from first QUEUED event only (sentinel: 0.0).
-                        # Once set, never overwrite (preemption-safe).
-                        if event_type == RequestJourneyEventType.QUEUED:
-                            if req_state.stats.queued_ts == 0.0:
-                                req_state.stats.queued_ts = event.ts_monotonic
-
-                        # Set scheduled_ts from first SCHEDULED event only (sentinel: 0.0).
-                        # This ignores subsequent SCHEDULED events from resume-after-preemption,
-                        # matching the original update_from_events() behavior.
-                        elif event_type == RequestJourneyEventType.SCHEDULED:
-                            if req_state.stats.scheduled_ts == 0.0:
-                                req_state.stats.scheduled_ts = event.ts_monotonic
+            # Copy metrics timestamps from scheduler to request stats (monotonic time domain)
+            if req_state.stats:
+                if engine_core_output.queued_ts > 0.0 and req_state.stats.queued_ts == 0.0:
+                    req_state.stats.queued_ts = engine_core_output.queued_ts
+                if engine_core_output.scheduled_ts > 0.0 and req_state.stats.scheduled_ts == 0.0:
+                    req_state.stats.scheduled_ts = engine_core_output.scheduled_ts
 
             # 1) Compute stats for this iteration.
             self._update_stats_from_output(
@@ -640,16 +608,6 @@ class OutputProcessor:
                 )
                 if self.tracer:
                     self.do_tracing(engine_core_output, req_state, iteration_stats)
-                    # Note: do_tracing() clears journey_events after export
-                else:
-                    # If no tracer, clear events on finish to prevent memory leak
-                    req_state.journey_events.clear()
-
-        # Handle events for requests without outputs in this iteration
-        # (e.g., QUEUED events for requests added but not scheduled)
-        for req_id, events in journey_events_by_req.items():
-            if req_state := self.request_states.get(req_id):
-                req_state.journey_events.extend(events)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
@@ -704,39 +662,8 @@ class OutputProcessor:
             if req_state.n:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, req_state.n)
 
-            # Add journey events as span events
-            if req_state.journey_events:
-                if span is not None and span.is_recording():
-                    for event in req_state.journey_events:
-                        # Build event attributes (exclude None values)
-                        attributes = {
-                            SpanAttributes.JOURNEY_EVENT_TYPE: event.event_type.name,
-                            SpanAttributes.JOURNEY_TS_MONOTONIC: event.ts_monotonic,
-                            SpanAttributes.JOURNEY_PHASE: event.phase,
-                            SpanAttributes.JOURNEY_PREFILL_DONE_TOKENS: event.prefill_done_tokens,
-                            SpanAttributes.JOURNEY_PREFILL_TOTAL_TOKENS: event.prefill_total_tokens,
-                            SpanAttributes.JOURNEY_DECODE_DONE_TOKENS: event.decode_done_tokens,
-                            SpanAttributes.JOURNEY_DECODE_MAX_TOKENS: event.decode_max_tokens,
-                            SpanAttributes.JOURNEY_NUM_PREEMPTIONS: event.num_preemptions_so_far,
-                        }
-
-                        # Add optional fields (only if not None)
-                        if event.scheduler_step is not None:
-                            attributes[SpanAttributes.JOURNEY_SCHEDULER_STEP] = event.scheduler_step
-                        if event.schedule_kind is not None:
-                            attributes[SpanAttributes.JOURNEY_SCHEDULE_KIND] = event.schedule_kind.name
-                        if event.finish_status is not None:
-                            attributes[SpanAttributes.JOURNEY_FINISH_STATUS] = event.finish_status
-
-                        # Add as span event (timestamp omitted, will use current time)
-                        span.add_event(
-                            name=f"journey.{event.event_type.name}",
-                            attributes=attributes,
-                        )
-
-                # Clear events after export to prevent duplicate exports in subsequent iterations
-                # (whether exported or not, we've processed them for this iteration)
-                req_state.journey_events.clear()
+            # Note: Journey events are now emitted directly to OTEL core spans in the scheduler (PR #9).
+            # This method only handles other request attributes for the API-level span.
 
     def _update_stats_from_output(
         self,
