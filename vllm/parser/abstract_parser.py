@@ -1,16 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import logging
 from abc import abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
 
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputItem,
+    ResponseOutputMessage,
+    ResponseOutputText,
+    ResponseReasoningItem,
+    ToolChoiceFunction,
+)
+from openai.types.responses.response_output_text import Logprob
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent,
+)
+from pydantic import TypeAdapter
+
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
+    FunctionCall,
+    FunctionDefinition,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
@@ -18,6 +38,9 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.utils import random_uuid
+
+logger = logging.getLogger(__name__)
 
 
 class Parser:
@@ -126,6 +149,35 @@ class Parser:
 
         Returns:
             The extracted content token IDs.
+        """
+
+    @abstractmethod
+    def extract_response_outputs(
+        self,
+        model_output: str,
+        request: ResponsesRequest,
+        enable_auto_tools: bool = False,
+        tool_call_id_type: str = "random",
+        use_harmony: bool = False,
+        logprobs: list[Logprob] | None = None,
+    ) -> list[ResponseOutputItem]:
+        """
+        Extract reasoning, content, and tool calls from a complete
+        model-generated string and return as ResponseOutputItem objects.
+
+        Used for non-streaming responses where we have the entire model
+        response available before sending to the client.
+
+        Args:
+            model_output: The complete model-generated string.
+            request: The request object used to generate the output.
+            enable_auto_tools: Whether to enable automatic tool call parsing.
+            tool_call_id_type: Type of tool call ID generation ("random", etc).
+            use_harmony: Whether harmony mode is enabled (affects output).
+            logprobs: Pre-computed logprobs for the output text, if any.
+
+        Returns:
+            A list of ResponseOutputItem objects.
         """
 
     @abstractmethod
@@ -259,6 +311,169 @@ class DelegatingParser(Parser):
         if self._reasoning_parser is None:
             return None, model_output
         return self._reasoning_parser.extract_reasoning(model_output, request)
+
+    def extract_response_outputs(
+        self,
+        model_output: str,
+        request: ResponsesRequest,
+        enable_auto_tools: bool = False,
+        tool_call_id_type: str = "random",
+        use_harmony: bool = False,
+        logprobs: list[Logprob] | None = None,
+    ) -> list[ResponseOutputItem]:
+        # First extract reasoning
+        reasoning, content = self.extract_reasoning(model_output, request)
+
+        # Then parse tool calls from the content
+        tool_calls_result = self._parse_tool_calls(
+            request=request,
+            content=content,
+            enable_auto_tools=enable_auto_tools,
+        )
+
+        # Update content if tool calls were extracted
+        if tool_calls_result is not None:
+            tool_calls, content = tool_calls_result
+        else:
+            tool_calls = None
+
+        # Build output items
+        outputs: list[ResponseOutputItem] = []
+
+        # Add reasoning item if present
+        if reasoning:
+            reasoning_item = ResponseReasoningItem(
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(text=reasoning, type="reasoning_text")
+                ],
+                status=None,  # NOTE: Only the last output item has status.
+            )
+            outputs.append(reasoning_item)
+
+        # Add message item if there's content or if harmony mode with tool calls
+        if content or (use_harmony and tool_calls):
+            res_text_part = None
+            if content:
+                res_text_part = ResponseOutputText(
+                    text=content,
+                    annotations=[],
+                    type="output_text",
+                    logprobs=logprobs,
+                )
+            message_item = ResponseOutputMessage(
+                id=f"msg_{random_uuid()}",
+                content=[res_text_part] if res_text_part else [],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+            outputs.append(message_item)
+
+        # Add tool call items
+        if tool_calls:
+            for idx, tool_call in enumerate(tool_calls):
+                tool_call_item = ResponseFunctionToolCall(
+                    id=f"fc_{random_uuid()}",
+                    call_id=tool_call.id
+                    if tool_call.id
+                    else make_tool_call_id(
+                        id_type=tool_call_id_type,
+                        func_name=tool_call.name,
+                        idx=idx,
+                    ),
+                    type="function_call",
+                    status="completed",
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                )
+                outputs.append(tool_call_item)
+
+        return outputs
+
+    def _parse_tool_calls(
+        self,
+        request: ResponsesRequest,
+        content: str | None,
+        enable_auto_tools: bool,
+    ) -> tuple[list[FunctionCall], str | None] | None:
+        """
+        Parse tool calls from content based on request tool_choice settings.
+
+        Returns:
+            A tuple of (function_calls, remaining_content) if tool calls
+            were parsed, or None if no tool calls.
+        """
+        function_calls: list[FunctionCall] = []
+
+        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+            # Forced Function Call (Responses API style)
+            if content is None:
+                return None
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.name, arguments=content)
+            )
+            return function_calls, None
+
+        if request.tool_choice and isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        ):
+            # Forced Function Call (Chat Completion API style)
+            if content is None:
+                return None
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.function.name, arguments=content)
+            )
+            return function_calls, None
+
+        if request.tool_choice == "required":
+            # Required tool calls - parse JSON
+            if content is None:
+                return None
+            try:
+                tool_calls_data = TypeAdapter(list[FunctionDefinition]).validate_json(
+                    content
+                )
+                function_calls.extend(
+                    FunctionCall(
+                        name=tool_call.name,
+                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+                    )
+                    for tool_call in tool_calls_data
+                )
+                return function_calls, None
+            except Exception:
+                logger.warning("Failed to parse required tool calls from content")
+                return None
+
+        if (
+            self._tool_parser is not None
+            and enable_auto_tools
+            and (request.tool_choice == "auto" or request.tool_choice is None)
+        ):
+            # Automatic Tool Call Parsing
+            tool_call_info = self._tool_parser.extract_tool_calls(
+                content if content is not None else "",
+                request=request,  # type: ignore
+            )
+            if tool_call_info is not None and tool_call_info.tools_called:
+                function_calls.extend(
+                    FunctionCall(
+                        id=tool_call.id,
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    )
+                    for tool_call in tool_call_info.tool_calls
+                )
+                remaining_content = tool_call_info.content
+                if remaining_content and remaining_content.strip() == "":
+                    remaining_content = None
+                return function_calls, remaining_content
+
+        # No tool calls
+        return None
 
     def extract_reasoning_streaming(
         self,
