@@ -391,6 +391,7 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     numa_node: list[int] | None = ParallelConfig.numa_node
+    numa_node_auto: bool = ParallelConfig.numa_node_auto
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -591,6 +592,7 @@ class EngineArgs:
             self.attention_config = AttentionConfig(**self.attention_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
+
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -778,18 +780,9 @@ class EngineArgs:
         parallel_group.add_argument("--master-port", **parallel_kwargs["master_port"])
         parallel_group.add_argument("--nnodes", "-n", **parallel_kwargs["nnodes"])
         parallel_group.add_argument("--node-rank", "-r", **parallel_kwargs["node_rank"])
+        parallel_group.add_argument("--numa-node", **parallel_kwargs["numa_node"])
         parallel_group.add_argument(
-            "--numa-node",
-            type=int,
-            nargs="+",
-            default=None,
-            help=(
-                "NUMA nodes for each GPU worker (indexed by local_rank). "
-                "Example: --numa-node 0 0 1 1 for 4 GPUs where GPU 0-1 are on "
-                "NUMA node 0 and GPU 2-3 are on NUMA node 1. "
-                "Use 'nvidia-smi topo -m' to determine GPU-to-NUMA topology. "
-                "Requires VLLM_WORKER_MULTIPROC_METHOD=spawn."
-            ),
+            "--numa-node-auto", **parallel_kwargs["numa_node_auto"]
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1642,6 +1635,7 @@ class EngineArgs:
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
             numa_node=self.numa_node,
+            numa_node_auto=self.numa_node_auto,
         )
 
         speculative_config = self.create_speculative_config(

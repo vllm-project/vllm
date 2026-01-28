@@ -238,9 +238,13 @@ class ParallelConfig:
     """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
     numa_node: list[int] | None = None
-    """NUMA node for each local GPU. Example: [0, 0, 1, 1] for 4 GPUs
-    on a 2-socket system with GPUs 0-1 on node 0 and GPUs 2-3 on node 1.
+    """Manual NUMA node binding for GPU workers. Specify one NUMA node per GPU,
+    e.g., [0, 0, 1, 1] for 4 GPUs on a 2-socket system with GPUs 0-1 on
+    NUMA node 0 and GPUs 2-3 on NUMA node 1.
     Use 'nvidia-smi topo -m' to determine GPU-to-NUMA topology."""
+    numa_node_auto: bool = False
+    """Auto-detect GPU-to-NUMA topology using NVML and bind workers accordingly.
+    This queries each GPU's CPU affinity to determine the optimal NUMA node."""
 
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
