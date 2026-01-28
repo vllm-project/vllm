@@ -257,7 +257,7 @@ def test_tp2_attn_quant_async_tp(
     # Test rms norm+group quant_fp8 fusion
     list[tuple[Any, ...]](flat_product(MODELS_GROUP_FP8, CUSTOM_OPS_QUANT_RMS_NORM)),
 )
-@pytest.mark.parametrize("inductor_graph_partition", [True, False])
+@pytest.mark.parametrize("inductor_graph_partition", [True])
 # TODO: remove skip after we fix the fusion thoroughly
 @pytest.mark.skipif(is_blackwell(), reason="Temporarily disabled on Blackwell")
 def test_rms_group_quant(

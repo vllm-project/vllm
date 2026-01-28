@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import get_tma_aligned_size
 
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
@@ -292,6 +293,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
         match_rocm_aiter: bool = False,
+        is_tma_aligned: bool = False,
     ) -> None:
         if enabled is None:
             enabled = QuantFP8.enabled()
@@ -301,6 +303,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         self.has_col_major_scales = has_col_major_scales
         self.is_e8m0 = is_e8m0
         self.match_rocm_aiter = match_rocm_aiter
+        self.is_tma_aligned = is_tma_aligned
 
         if match_rocm_aiter:
             assert not quant_key.scale.group_shape.is_per_tensor(), (
@@ -336,6 +339,7 @@ class MatcherQuantFP8(MatcherCustomOp):
             quant_key.scale.group_shape,
             column_major_scales=has_col_major_scales,
             use_ue8m0=is_e8m0,
+            tma_aligned_scales=self.is_tma_aligned,
             compile_native=False,
         )
 
@@ -368,7 +372,9 @@ class MatcherQuantFP8(MatcherCustomOp):
 
         if self.quant_key.scale.group_shape.is_per_group():
             assert scale is None
-            scale = self.make_scale(input, transposed=self.has_col_major_scales)
+            scale = self.make_scale(
+                input, transposed=self.has_col_major_scales, tma=self.is_tma_aligned
+            )
 
             finfo = torch.finfo(self.quant_key.dtype)
             fp8_min = finfo.min
@@ -408,10 +414,31 @@ class MatcherQuantFP8(MatcherCustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.quant_fp8(input, scale)  # type: ignore[no-any-return]
 
-    def make_scale(self, input: torch.Tensor, transposed: bool = False) -> torch.Tensor:
+    def make_scale(
+        self, input: torch.Tensor, transposed: bool = False, tma: bool = False
+    ) -> torch.Tensor:
         normalized_group_shape = _normalize_quant_group_shape(
             input, self.quant_key.scale.group_shape
         )
+
+        if tma:
+            assert transposed, (
+                "Invalid scale format combination (TMA must be transposed)"
+            )
+            m = input.shape[-2]
+            sf_k = input.shape[-1] // self.quant_key.scale.group_shape[1]
+
+            tma_aligned_m = get_tma_aligned_size(m, 4)
+            scale_shape = input.shape[:-2] + (m, sf_k)
+            stride = (
+                (1, tma_aligned_m)
+                if input.dim() == 2
+                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
+            )
+            return torch.empty_strided(
+                scale_shape, stride, device=input.device, dtype=torch.float32
+            )
+
         scale_shape = (
             input.shape[0] // normalized_group_shape[0],
             input.shape[1] // normalized_group_shape[1],
