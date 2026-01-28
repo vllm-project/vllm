@@ -321,6 +321,10 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
         or "_mla" in backend_name.lower()
     )
 
+    # Determine compute capability - use N/A for non-CUDA backends
+    is_non_cuda = backend_name.startswith(("CPU_", "ROCM_"))
+    compute_cap = "N/A" if is_non_cuda else parse_compute_capability(class_node)
+
     return {
         "name": backend_name,
         "dtypes": parse_supported_dtypes(class_node),
@@ -328,7 +332,7 @@ def analyze_backend(backend_name: str, class_path: str) -> dict[str, Any] | None
         "block_sizes": parse_block_sizes(class_node),
         "head_sizes": parse_head_sizes(class_node),
         "attn_types": parse_attention_types(class_node),
-        "compute_capability": parse_compute_capability(class_node),
+        "compute_capability": compute_cap,
         "is_mla": is_mla_backend or check_method_overrides(class_node, "is_mla"),
         "supports_sink": check_method_overrides(class_node, "supports_sink"),
         "is_sparse": check_method_overrides(class_node, "is_sparse"),
