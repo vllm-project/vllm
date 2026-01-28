@@ -940,6 +940,21 @@ async def run_server_worker(
     ) as engine_client:
         app = build_app(args)
 
+        # Initialize tracer provider in API process for journey tracing
+        # This ensures API spans have valid SpanContext for parent-child linkage
+        observability_config = engine_client.vllm_config.observability_config
+        if observability_config.enable_journey_tracing:
+            endpoint = observability_config.otlp_traces_endpoint
+            if endpoint:
+                try:
+                    from vllm.tracing import init_tracer, is_otel_available
+                    if is_otel_available():
+                        init_tracer("vllm.api", endpoint)
+                        logger.debug("Initialized tracer for API process: %s", endpoint)
+                except Exception as e:
+                    # Tracing should never break server startup
+                    logger.warning("Failed to initialize API tracer: %s", e)
+
         await init_app_state(engine_client, app.state, args)
 
         logger.info(

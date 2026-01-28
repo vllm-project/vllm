@@ -406,3 +406,285 @@ def test_trace_id_preserved_through_chain():
 
                 # Verify get_span_context was actually called by injection logic
                 mock_api_span.get_span_context.assert_called()
+
+
+# ========== Diagnostic Tests: Real OpenTelemetry SDK (No Mocks) ==========
+# These tests use actual OpenTelemetry SDK to verify inject/extract roundtrip
+# for diagnosing GitHub issue #21 (separate trace IDs between API and engine)
+
+
+def test_inject_extract_roundtrip_real_otel():
+    """
+    DIAGNOSTIC TEST for GitHub issue #21.
+
+    Verify that inject_trace_context + extract_trace_context roundtrip correctly
+    using REAL OpenTelemetry SDK (no mocks).
+
+    This test proves whether the fundamental inject/extract mechanism works,
+    isolating it from any production environment issues.
+
+    Asserts:
+    1. traceparent header is injected with valid W3C format
+    2. Child span has same trace_id as parent span
+    3. Child span has parent linkage to parent span
+    """
+    # Import real OpenTelemetry SDK
+    try:
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.trace import SpanKind
+    except ImportError:
+        pytest.skip("OpenTelemetry SDK not available")
+
+    from vllm.tracing import extract_trace_context, inject_trace_context
+
+    # Create local TracerProvider (isolated from global state)
+    provider = TracerProvider()
+    tracer = provider.get_tracer("test.diagnostic")
+
+    # Create parent span
+    parent_span = tracer.start_span(
+        name="parent_span",
+        kind=SpanKind.SERVER,
+    )
+
+    try:
+        # Get parent span's trace_id and span_id for verification
+        parent_context = parent_span.get_span_context()
+        parent_trace_id = parent_context.trace_id
+        parent_span_id = parent_context.span_id
+
+        # Inject parent span context into carrier
+        carrier: dict[str, str] = {}
+        result = inject_trace_context(parent_span, carrier)
+
+        # ASSERTION 1: traceparent header exists and matches W3C format
+        assert result is not None, "inject_trace_context returned None"
+        assert "traceparent" in result, "traceparent header not injected"
+
+        traceparent = result["traceparent"]
+        # W3C format: version-traceid-spanid-flags
+        # Example: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+        w3c_pattern = r"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        assert re.match(w3c_pattern, traceparent), \
+            f"traceparent format invalid: {traceparent}"
+
+        # Extract trace_id from traceparent to verify it matches
+        parts = traceparent.split("-")
+        injected_trace_id_hex = parts[1]
+        injected_span_id_hex = parts[2]
+
+        # Convert parent trace_id to hex for comparison
+        parent_trace_id_hex = f"{parent_trace_id:032x}"
+        parent_span_id_hex = f"{parent_span_id:016x}"
+
+        assert injected_trace_id_hex == parent_trace_id_hex, \
+            f"Injected trace_id {injected_trace_id_hex} != parent {parent_trace_id_hex}"
+        assert injected_span_id_hex == parent_span_id_hex, \
+            f"Injected span_id {injected_span_id_hex} != parent {parent_span_id_hex}"
+
+        # Extract context from carrier
+        extracted_context = extract_trace_context(result)
+
+        assert extracted_context is not None, \
+            "extract_trace_context returned None"
+
+        # Create child span with extracted context
+        child_span = tracer.start_span(
+            name="child_span",
+            kind=SpanKind.INTERNAL,
+            context=extracted_context,
+        )
+
+        try:
+            child_context = child_span.get_span_context()
+            child_trace_id = child_context.trace_id
+
+            # ASSERTION 2: Child span has SAME trace_id as parent
+            assert child_trace_id == parent_trace_id, \
+                f"Child trace_id {child_trace_id:032x} != parent {parent_trace_id:032x}"
+
+            # ASSERTION 3: Child span has parent linkage
+            # Use the span.parent API to verify parent-child relationship
+            # directly instead of re-parsing the traceparent header
+            assert child_span.parent is not None, \
+                "Child span should have parent reference"
+            assert child_span.parent.span_id == parent_span_id, \
+                f"Child span's parent span_id {child_span.parent.span_id:016x} != " \
+                f"original parent span_id {parent_span_id:016x}"
+
+        finally:
+            child_span.end()
+
+    finally:
+        parent_span.end()
+
+
+def test_inject_with_none_carrier():
+    """
+    DIAGNOSTIC TEST: Verify inject_trace_context works with None carrier.
+
+    When carrier is None, inject_trace_context should create a new dict
+    with traceparent header.
+    """
+    try:
+        from opentelemetry.sdk.trace import TracerProvider
+    except ImportError:
+        pytest.skip("OpenTelemetry SDK not available")
+
+    from vllm.tracing import inject_trace_context
+
+    # Create local TracerProvider
+    provider = TracerProvider()
+    tracer = provider.get_tracer("test.diagnostic")
+
+    # Create span
+    span = tracer.start_span(name="test_span")
+
+    try:
+        # Inject with None carrier
+        result = inject_trace_context(span, None)
+
+        # Should return a new dict with traceparent
+        assert result is not None, "inject_trace_context returned None"
+        assert isinstance(result, dict), "Result is not a dict"
+        assert "traceparent" in result, "traceparent not in result"
+
+        # Verify W3C format
+        w3c_pattern = r"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        assert re.match(w3c_pattern, result["traceparent"]), \
+            f"traceparent format invalid: {result['traceparent']}"
+
+    finally:
+        span.end()
+
+
+@pytest.mark.asyncio
+async def test_api_layer_span_creation_and_injection():
+    """
+    DIAGNOSTIC TEST for GitHub issue #21: API layer path.
+
+    Test the actual API serving layer code path that:
+    1. Creates API span via _create_api_span()
+    2. Injects trace context into trace_headers
+    3. Ensures trace_headers contains valid traceparent
+
+    This isolates the API-layer span creation from the full server stack.
+    """
+    try:
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.trace import SpanKind
+    except ImportError:
+        pytest.skip("OpenTelemetry SDK not available")
+
+    from unittest.mock import AsyncMock, MagicMock, Mock, patch
+    from vllm.entrypoints.openai.engine.serving import OpenAIServing
+    from vllm.tracing import inject_trace_context
+
+    # Create real TracerProvider for this test
+    provider = TracerProvider()
+
+    # Mock the minimal dependencies for OpenAIServing
+    mock_engine_client = AsyncMock()
+    mock_engine_client.is_tracing_enabled = AsyncMock(return_value=True)
+
+    mock_models = MagicMock()
+    mock_models.input_processor = MagicMock()
+    mock_models.io_processor = MagicMock()
+    mock_models.renderer = MagicMock()
+    mock_models.model_config = MagicMock()
+    mock_models.model_config.max_model_len = 4096
+
+    # Create OpenAIServing instance
+    serving = OpenAIServing(
+        engine_client=mock_engine_client,
+        models=mock_models,
+        request_logger=None,
+    )
+
+    # Patch trace.get_tracer_provider to return our real provider
+    with patch("opentelemetry.trace.get_tracer_provider", return_value=provider):
+        # Create API span
+        request_id = "test-request-123"
+        trace_headers = {}  # Start with empty headers
+
+        api_span = await serving._create_api_span(request_id, trace_headers)
+
+        # ASSERTION 1: API span was created successfully
+        assert api_span is not None, \
+            "_create_api_span returned None - span creation failed"
+
+        # Get span context for verification
+        span_context = api_span.get_span_context()
+        assert span_context.trace_id != 0, "Span has invalid trace_id"
+        assert span_context.span_id != 0, "Span has invalid span_id"
+
+        # ASSERTION 2: Inject trace context into trace_headers
+        trace_headers_after = inject_trace_context(api_span, trace_headers)
+
+        assert trace_headers_after is not None, \
+            "inject_trace_context returned None"
+        assert "traceparent" in trace_headers_after, \
+            "traceparent not in trace_headers after injection"
+
+        # ASSERTION 3: Verify traceparent format
+        traceparent = trace_headers_after["traceparent"]
+        w3c_pattern = r"^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        assert re.match(w3c_pattern, traceparent), \
+            f"traceparent format invalid: {traceparent}"
+
+        # ASSERTION 4: Verify trace_id in traceparent matches span
+        parts = traceparent.split("-")
+        injected_trace_id_hex = parts[1]
+        span_trace_id_hex = f"{span_context.trace_id:032x}"
+
+        assert injected_trace_id_hex == span_trace_id_hex, \
+            f"Injected trace_id {injected_trace_id_hex} != " \
+            f"span trace_id {span_trace_id_hex}"
+
+        # Clean up span
+        api_span.end()
+
+
+@pytest.mark.asyncio
+async def test_api_layer_span_creation_with_none_tracer_provider():
+    """
+    DIAGNOSTIC TEST for GitHub issue #21: Test when TracerProvider unavailable.
+
+    This is the most common production failure mode - when the global
+    TracerProvider is not initialized (e.g., init_tracer never called).
+    """
+    from unittest.mock import AsyncMock, MagicMock
+    from vllm.entrypoints.openai.engine.serving import OpenAIServing
+
+    # Mock minimal dependencies
+    mock_engine_client = AsyncMock()
+    mock_engine_client.is_tracing_enabled = AsyncMock(return_value=True)
+
+    mock_models = MagicMock()
+    mock_models.input_processor = MagicMock()
+    mock_models.io_processor = MagicMock()
+    mock_models.renderer = MagicMock()
+    mock_models.model_config = MagicMock()
+    mock_models.model_config.max_model_len = 4096
+
+    serving = OpenAIServing(
+        engine_client=mock_engine_client,
+        models=mock_models,
+        request_logger=None,
+    )
+
+    # Don't patch anything - use default TracerProvider (ProxyTracerProvider)
+    # which has no real tracer configured
+    # This simulates production when init_tracer() was never called
+    api_span = await serving._create_api_span("test-req-no-provider", {})
+
+    # When TracerProvider is not initialized (ProxyTracerProvider is default),
+    # _create_api_span should still return a span (graceful degradation).
+    # However, this span will be a NonRecordingSpan with invalid span context.
+    assert api_span is not None, \
+        "Should return NonRecordingSpan for graceful degradation"
+
+    # Verify the span has invalid context (characteristic of ProxyTracerProvider)
+    span_context = api_span.get_span_context()
+    assert not span_context.is_valid, \
+        "ProxyTracerProvider produces spans with invalid context"
