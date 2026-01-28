@@ -12,6 +12,64 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from .utils import supports_pdl
 
+
+@triton.jit
+def _get_lora_id(
+    lora_ids,
+    token_lora_mapping_ptr,
+    lora_idx,
+    pid_m,
+    top_k_num,
+    naive_block_assignment: tl.constexpr,
+):
+    """Returns lora_id"""
+    if naive_block_assignment:
+        token_idx = pid_m // top_k_num
+        return tl.load(token_lora_mapping_ptr + token_idx)
+    else:
+        return tl.load(lora_ids + lora_idx)
+
+
+@triton.jit
+def _get_expert_id(
+    expert_ids_ptr,
+    lora_id,
+    pid_m,
+    stride_el,
+    max_loras,
+    naive_block_assignment: tl.constexpr,
+):
+    """Returns expert_id"""
+    if naive_block_assignment:
+        return tl.load(expert_ids_ptr + pid_m)
+    else:
+        ind = lora_id * stride_el + pid_m
+        return tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, -1)
+
+
+@triton.jit
+def _get_token_offs(
+    sorted_token_ids_ptr,
+    lora_id,
+    pid_m,
+    offs,
+    stride_tl,
+    max_loras,
+    num_valid_tokens,
+    naive_block_assignment: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+):
+    """Returns token offsets"""
+    if naive_block_assignment:
+        return tl.where(offs == 0, pid_m, num_valid_tokens)
+    else:
+        offs_token_id = pid_m * BLOCK_SIZE_M + offs
+        token_ind = stride_tl * lora_id + offs_token_id
+        return tl.load(
+            sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
+        )
+
+
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
@@ -139,47 +197,54 @@ def _fused_moe_lora_kernel(
     pid_n = (pid_m_n % num_pid_in_group) // group_size_m
 
     offs = tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
+
+    # Get lora_id
+    lora_id = _get_lora_id(
+        lora_ids,
+        token_lora_mapping_ptr,
+        lora_idx,
+        pid_m,
+        top_k_num,
+        naive_block_assignment,
+    )
+    if lora_id == -1:
+        return
+    moe_enabled = tl.load(adapter_enabled + lora_id)
+    if moe_enabled == 0:
+        return
+    if lora_id >= max_loras:
+        return
+
+    # Non-naive only: check num_tokens_post_padded
     if not naive_block_assignment:
-        lora_id = tl.load(lora_ids + lora_idx)
-        if lora_id == -1:
-            # Early exit for the no-lora case.
-            return
-        moe_enabled = tl.load(adapter_enabled + lora_id)
-        if moe_enabled == 0:
-            # Early exit for the no moe lora case.
-            return
-        # The grid's axis-2 dimension is max_loras + 1 to accommodate the -1 sentinel.
-        # This guard ensures we don't access sorted_token_ids / expert_ids /
-        # num_tokens_post_padded beyond their allocated bounds if an invalid
-        # lora_id somehow appears. Although the caller should pass correct
-        # max_loras, defensive programming prevents accidental out-of-bounds.
-        if lora_id >= max_loras:
-            return
         num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr + lora_id)
         if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
             return
-        # get the expert_id to process curr shard
-        ind = lora_id * stride_el + pid_m
-        expert_id = tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, -1)
-        offs_token_id = pid_m * BLOCK_SIZE_M + offs
-        token_ind = stride_tl * lora_id + offs_token_id
-        offs_token = tl.load(
-            sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
-        )
-    else:
-        offs_token = tl.where(offs == 0, pid_m, num_valid_tokens)
-        token_idx = pid_m // top_k_num
-        lora_id = tl.load(token_lora_mapping_ptr + token_idx)
-        if lora_id == -1:
-            return
-        moe_enabled = tl.load(adapter_enabled + lora_id)
-        if moe_enabled == 0:
-            return
-        if lora_id >= max_loras:
-            return
-        expert_id = tl.load(expert_ids_ptr + pid_m)
+
+    # Get expert_id
+    expert_id = _get_expert_id(
+        expert_ids_ptr,
+        lora_id,
+        pid_m,
+        stride_el,
+        max_loras,
+        naive_block_assignment,
+    )
     if expert_id == -1:
         return
+
+    # Get token offsets
+    offs_token = _get_token_offs(
+        sorted_token_ids_ptr,
+        lora_id,
+        pid_m,
+        offs,
+        stride_tl,
+        max_loras,
+        num_valid_tokens,
+        naive_block_assignment,
+        BLOCK_SIZE_M,
+    )
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
     cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
