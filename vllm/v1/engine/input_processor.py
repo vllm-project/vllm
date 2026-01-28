@@ -75,8 +75,7 @@ class InputProcessor:
                 self.model_config
             )
             _, self.mm_encoder_cache_size = compute_mm_encoder_budget(
-                self.vllm_config.scheduler_config, 
-                max_tokens_by_modality
+                self.vllm_config.scheduler_config, max_tokens_by_modality
             )
 
         self.input_preprocessor = InputPreprocessor(
