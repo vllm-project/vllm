@@ -1922,7 +1922,14 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         activation_key: QuantKey | None,
     ) -> bool:
         p = current_platform
-        device_supports_fp8 = (p.is_rocm() and p.rocm.on_gfx9()) or (
+        if p.is_rocm():
+            from vllm.platforms.rocm import on_gfx9
+
+            is_rocm_on_gfx9 = on_gfx9()
+        else:
+            is_rocm_on_gfx9 = False
+
+        device_supports_fp8 = is_rocm_on_gfx9 or (
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 
@@ -1944,7 +1951,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
+        return not moe_parallel_config.use_fi_all2allv_kernels
 
     def supports_chunking(self) -> bool:
         return True

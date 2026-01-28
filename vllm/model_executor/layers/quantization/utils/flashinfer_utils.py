@@ -4,15 +4,8 @@ from enum import Enum
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
-)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
@@ -23,30 +16,6 @@ class FlashinferMoeBackend(Enum):
     TENSORRT_LLM = "TensorRT-LLM"
     CUTLASS = "CUTLASS"
     CUTEDSL = "CUTEDSL"
-
-
-def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
-    from flashinfer import next_positive_power_of_2
-
-    # FlashInfer 0.2.10 has issues with larger tile sizes. Set to 8 for now.
-    # TODO: Revert this to dynamic calculation once a new version of FlashInfer
-    # with the necessary kernels is released.
-    tile_tokens_dim = 8
-
-    # A factor considering tokens are not perfectly balanced among experts.
-    imbalance_factor = 1.3
-    # Calculate the number of tokens per expert
-    # assuming perfect distribution.
-    num_tokens_per_expert = (num_tokens * top_k) // num_experts
-    # Apply the imbalance factor.
-    num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
-    # And pad the number to the next power of 2.
-    tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
-    # Cap to 8-max_tile_tokens_dim tokens per CTA tile
-    # as it's the range supported by the kernel.
-    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-
-    return tile_tokens_dim
 
 
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
@@ -185,18 +154,6 @@ def make_fp8_moe_alpha_scales_for_fi(
     g2_alphas = (w2_scale * w2_input_scale).squeeze()
 
     return g1_alphas, g2_alphas
-
-
-def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-    moe: FusedMoEConfig | None, use_deepseek_fp8_block_scale: bool = False
-) -> mk.FusedMoEPrepareAndFinalize:
-    """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
-    use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
-    # Propagate block-scale flag so prepare/finalize can skip act quantization
-    # and inform the kernel to consume per-block weight scales.
-    return create_flashinfer_prepare_finalize(
-        use_dp, use_deepseek_fp8_block_scale=use_deepseek_fp8_block_scale
-    )
 
 
 def get_flashinfer_moe_backend() -> FlashinferMoeBackend:

@@ -29,7 +29,6 @@ QuantizationMethods = Literal[
     "quark",
     "moe_wna16",
     "torchao",
-    "rtn",
     "inc",
     "mxfp4",
     "petit_nvfp4",
@@ -45,7 +44,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "gptq_marlin_24",
     "experts_int8",
     "ipex",
-    "rtn",
     "petit_nvfp4",
 ]
 
@@ -132,7 +130,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .mxfp4 import Mxfp4Config
     from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
-    from .rtn import RTNConfig
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
@@ -155,7 +152,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
         "torchao": TorchAOConfig,
-        "rtn": RTNConfig,
         "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
