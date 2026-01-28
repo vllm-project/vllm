@@ -1340,6 +1340,14 @@ class NixlConnectorWorker:
         # to better exploit the memory layout (ie num_blocks is the first dim).
         tensor_size_bytes = None
 
+        if self.kv_topo.cross_layers_blocks:
+            block_size_position = self.kv_topo.block_size_position
+        else:
+            if self.device_type == "cpu":
+                block_size_position = -2
+            else:
+                block_size_position = -2 if self.use_mla else -3
+
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
@@ -1352,7 +1360,7 @@ class NixlConnectorWorker:
                 if base_addr in seen_base_addresses:
                     continue
 
-                kernel_block_size = cache.shape[self.kv_topo.block_size_position]
+                kernel_block_size = cache.shape[block_size_position]
                 if self.block_size != kernel_block_size:
                     logger.info_once(
                         "User-specified logical block size (%s) does not match"
