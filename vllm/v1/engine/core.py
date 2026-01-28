@@ -935,6 +935,17 @@ class EngineCoreProc(EngineCore):
                 set_process_title("EngineCore")
             decorate_logs()
 
+            if data_parallel and vllm_config.kv_transfer_config is not None:
+                # modify the engine_id and append the local_dp_rank to it to ensure
+                # that the kv_transfer_config is unique for each DP rank.
+                vllm_config.kv_transfer_config.engine_id = (
+                    f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+                )
+                logger.debug(
+                    "Setting kv_transfer_config.engine_id to %s",
+                    vllm_config.kv_transfer_config.engine_id,
+                )
+
             parallel_config.data_parallel_index = dp_rank
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
@@ -1327,17 +1338,6 @@ class DPEngineCoreProc(EngineCoreProc):
         assert dp_size > 1
         assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
-
-        if vllm_config.kv_transfer_config is not None:
-            # modify the engine_id and append the local_dp_rank to it to ensure
-            # that the kv_transfer_config is unique for each DP rank.
-            vllm_config.kv_transfer_config.engine_id = (
-                f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
-            )
-            logger.debug(
-                "Setting kv_transfer_config.engine_id to %s",
-                vllm_config.kv_transfer_config.engine_id,
-            )
 
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()

@@ -19,13 +19,14 @@ void onednn_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
                       const std::optional<torch::Tensor>& azp,
                       const std::optional<torch::Tensor>& azp_adj,
                       const std::optional<torch::Tensor>& bias,
-                      int64_t handler);
+                      const torch::Tensor& handler_tensor);
 
 int64_t create_onednn_mm_handler(const torch::Tensor& b,
                                  int64_t primitive_cache_size);
 
 void onednn_mm(torch::Tensor& c, const torch::Tensor& a,
-               const std::optional<torch::Tensor>& bias, int64_t handler);
+               const std::optional<torch::Tensor>& bias,
+               const torch::Tensor& handler_tensor);
 
 bool is_onednn_acl_supported();
 
@@ -196,7 +197,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // oneDNN GEMM
   ops.def(
       "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
-      "int handler) -> ()");
+      "Tensor handler_tensor) -> ()");
   ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
 
   // Check if oneDNN was built with ACL backend
@@ -212,7 +213,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // oneDNN scaled_mm for W8A8 with static per-tensor activation quantization
   ops.def(
       "onednn_scaled_mm(Tensor! c, Tensor a, Tensor a_scales, Tensor? azp, "
-      "Tensor? azp_adj, Tensor? bias, int handler) -> ()");
+      "Tensor? azp_adj, Tensor? bias, Tensor handler_tensor) -> ()");
   ops.impl("onednn_scaled_mm", torch::kCPU, &onednn_scaled_mm);
 
   // Compute int8 quantized tensor for given scaling factor.
