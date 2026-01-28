@@ -9,7 +9,7 @@ requires = [
     "torch == 2.9.1",
     "wheel",
     "jinja2",
-    "grpcio-tools>=1.76.0",
+    "grpcio-tools",
 ]
 build-backend = "setuptools.build_meta"
 
@@ -72,6 +72,8 @@ select = [
     "UP",
     # flake8-bugbear
     "B",
+    # flake8-implicit-str-concat
+    "ISC",
     # flake8-simplify
     "SIM",
     # isort
