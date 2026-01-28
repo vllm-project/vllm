@@ -594,7 +594,14 @@ class AttentionLayer(Protocol):
     ) -> torch.Tensor: ...
 
 
-class AttentionImpl(ABC, Generic[T]):
+class AttentionImplBase(ABC, Generic[T]):
+    """Base class for attention implementations.
+
+    Contains common attributes and initialization logic shared by both
+    standard AttentionImpl and MLAAttentionImpl. Does not define a forward
+    method - subclasses define their own forward interfaces.
+    """
+
     # Required attributes that all impls should have
     num_heads: int
     head_size: int
@@ -662,6 +669,10 @@ class AttentionImpl(ABC, Generic[T]):
         )
         return self
 
+
+class AttentionImpl(AttentionImplBase[T], Generic[T]):
+    """Standard attention implementation with forward method."""
+
     @abstractmethod
     def __init__(
         self,
@@ -708,7 +719,9 @@ class AttentionImpl(ABC, Generic[T]):
         pass
 
 
-class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
+class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
+    """MLA attention implementation with forward_mqa and forward_mha methods."""
+
     @abstractmethod
     def __init__(
         self,
@@ -736,18 +749,28 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         raise NotImplementedError
 
     @abstractmethod
-    def forward(
+    def forward_mha(
         self,
-        layer: AttentionLayer,
-        hidden_states_or_cq: torch.Tensor,
+        q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: T,
-        output: torch.Tensor | None = None,
-        output_scale: torch.Tensor | None = None,
-        output_block_scale: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """MHA-style prefill forward pass."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """MQA-style decode forward pass."""
         raise NotImplementedError
 
 
