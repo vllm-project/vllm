@@ -77,10 +77,6 @@ EAGLE3_MODEL_CONFIGS = [
         id="qwen3-30b-moe-vl-eagle3",
         marks=[
             pytest.mark.slow_test,
-            pytest.mark.skipif(
-                current_platform.is_rocm(),
-                reason="The tests are skipped on rocm platform.",
-            ),
         ],
         rtol=0.15,  # Higher tolerance due to small absolute values at position 2
     ),
