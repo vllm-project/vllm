@@ -504,18 +504,13 @@ def test_inject_extract_roundtrip_real_otel():
                 f"Child trace_id {child_trace_id:032x} != parent {parent_trace_id:032x}"
 
             # ASSERTION 3: Child span has parent linkage
-            # Extract span context to verify parent relationship
-            # The extracted_context should have propagated the parent span info
-            # Parse traceparent header to verify parent span_id was preserved
-            traceparent_parts = traceparent.split("-")
-            extracted_parent_span_id_hex = traceparent_parts[2]
-
-            # When child span is created with extracted context, the parent
-            # span_id from traceparent becomes the parent of the child span
-            # Verify the traceparent contained the correct parent span_id
-            assert extracted_parent_span_id_hex == parent_span_id_hex, \
-                f"Traceparent parent span_id {extracted_parent_span_id_hex} != " \
-                f"original parent {parent_span_id_hex}"
+            # Use the span.parent API to verify parent-child relationship
+            # directly instead of re-parsing the traceparent header
+            assert child_span.parent is not None, \
+                "Child span should have parent reference"
+            assert child_span.parent.span_id == parent_span_id, \
+                f"Child span's parent span_id {child_span.parent.span_id:016x} != " \
+                f"original parent span_id {parent_span_id:016x}"
 
         finally:
             child_span.end()
@@ -683,10 +678,13 @@ async def test_api_layer_span_creation_with_none_tracer_provider():
     # This simulates production when init_tracer() was never called
     api_span = await serving._create_api_span("test-req-no-provider", {})
 
-    # In this case, span creation may succeed with ProxyTracerProvider
-    # but spans won't be exported. This test documents the behavior.
-    # If api_span is None, it means _create_api_span detected the issue.
-    # If api_span is not None, it means a span was created but won't export.
-    # Either case is valid behavior - what matters is that it doesn't crash.
-    # The actual bug is likely that API and scheduler have different providers.
-    pass  # Test passes if no exception raised
+    # When TracerProvider is not initialized (ProxyTracerProvider is default),
+    # _create_api_span should still return a span (graceful degradation).
+    # However, this span will be a NonRecordingSpan with invalid span context.
+    assert api_span is not None, \
+        "Should return NonRecordingSpan for graceful degradation"
+
+    # Verify the span has invalid context (characteristic of ProxyTracerProvider)
+    span_context = api_span.get_span_context()
+    assert not span_context.is_valid, \
+        "ProxyTracerProvider produces spans with invalid context"
