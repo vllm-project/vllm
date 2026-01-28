@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
 )
@@ -331,6 +332,27 @@ class MultiConnector(KVConnectorBase_V1):
     def update_connector_output(self, connector_output: KVConnectorOutput):
         for c in self._connectors:
             c.update_connector_output(connector_output)
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """
+        Get the KVConnector handshake metadata from sub-connectors.
+        Returns the first non-None metadata from sub-connectors.
+        """
+        for c in self._connectors:
+            metadata = c.get_handshake_metadata()
+            if metadata is not None:
+                return metadata
+        return None
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set the KV connector handshake metadata for all sub-connectors.
+        This is needed to start the NIXL listener thread for NixlConnector.
+        """
+        for c in self._connectors:
+            c.set_xfer_handshake_metadata(metadata)
 
     def request_finished(
         self,
