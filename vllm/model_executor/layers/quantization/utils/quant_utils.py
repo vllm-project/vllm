@@ -330,6 +330,9 @@ def get_and_maybe_dequant_weights(
     """Return layer's unquantized weights in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+    from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (
+        FP8W8A16LinearKernel,
+    )
 
     weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
 
@@ -345,6 +348,7 @@ def get_and_maybe_dequant_weights(
         # DeepGEMM transforms the scales using `transform_sf_into_required_layout` into
         # a layout that is not compatible with `scaled_dequantize`.
         and not is_deep_gemm_supported()
+        and not isinstance(layer.quant_method.kernel, FP8W8A16LinearKernel)
     ):
         weight_scales = get_attribute_fallback(
             layer, ["weight_scale", "weight_scale_inv"]
