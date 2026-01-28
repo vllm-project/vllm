@@ -703,7 +703,8 @@ class DefaultMoERunner(MoERunner):
                     # sync end point immediately after it is done. This is
                     # important to avoid excessive stream allocations by the cuda
                     # graph replay later.
-                    with torch.cuda.stream(self.shared_experts_stream):
+                    assert self.shared_experts_stream is not None
+                    with self.shared_experts_stream:
                         # Note that hidden_states clone() is necessary here to avoid
                         # conflict with the main stream
                         shared_output = self.shared_experts(shared_experts_input)
