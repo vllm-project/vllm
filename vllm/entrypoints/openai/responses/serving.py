@@ -937,7 +937,8 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Use parser to extract and create response output items
         if self.parser:
-            return self.parser.extract_response_outputs(
+            parser = self.parser(tokenizer)
+            return parser.extract_response_outputs(
                 model_output=final_output.text,
                 request=request,
                 enable_auto_tools=self.enable_auto_tools,
