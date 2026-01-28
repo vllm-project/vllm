@@ -5,7 +5,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator, Sequence
-from typing import Final, cast
+from typing import Any, Final, cast
 
 import jinja2
 from fastapi import Request
@@ -195,9 +195,9 @@ class OpenAIServingPooling(OpenAIServing):
                 )
 
                 if is_io_processor_request:
-                    tokenization_kwargs = {}
+                    tokenization_kwargs: dict[str, Any] = {}
                 else:
-                    tok_params = request.build_tok_params(self.model_config)
+                    tok_params = request.build_tok_params(self.model_config)  # type: ignore
                     tokenization_kwargs = tok_params.get_encode_kwargs()
 
                 generator = self.engine_client.encode(
