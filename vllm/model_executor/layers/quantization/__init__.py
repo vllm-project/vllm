@@ -17,10 +17,8 @@ QuantizationMethods = Literal[
     "fp_quant",
     "modelopt",
     "modelopt_fp4",
-    "bitblas",
     "gguf",
     "gptq_marlin",
-    "gptq_bitblas",
     "awq_marlin",
     "gptq",
     "compressed-tensors",
@@ -42,8 +40,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
-    "bitblas",
-    "gptq_bitblas",
     "experts_int8",
     "ipex",
     "petit_nvfp4",
@@ -112,7 +108,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
-    from .bitblas import BitBLASConfig
     from .bitsandbytes import BitsAndBytesConfig
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
@@ -124,7 +119,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .fp_quant import FPQuantConfig
     from .gguf import GGUFConfig
     from .gptq import GPTQConfig
-    from .gptq_bitblas import GPTQBitBLASConfig
     from .gptq_marlin import GPTQMarlinConfig
     from .inc import INCConfig
     from .ipex_quant import IPEXConfig
@@ -142,10 +136,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
-        "bitblas": BitBLASConfig,
         "gguf": GGUFConfig,
         "gptq_marlin": GPTQMarlinConfig,
-        "gptq_bitblas": GPTQBitBLASConfig,
         "awq_marlin": AWQMarlinConfig,
         "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
