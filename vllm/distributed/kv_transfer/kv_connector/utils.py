@@ -347,10 +347,16 @@ class TpKVTopology:
             except (AttributeError, NotImplementedError):
                 kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
 
+            logger.info("XXX shape: %s", kv_cache_shape)
             # permute kv_cache_shape according to stride_order
             kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
             physical_block_size_position = kv_cache_shape.index(16)
+            logger.info(
+                "XXX shape %s blk_size_pos %d",
+                kv_cache_shape,
+                physical_block_size_position,
+            )
             assert physical_block_size_position is not None
             self._physical_block_size_position = -(
                 len(kv_cache_shape) - physical_block_size_position
