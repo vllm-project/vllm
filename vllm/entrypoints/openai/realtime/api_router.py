@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import TYPE_CHECKING
+
 from fastapi import APIRouter, FastAPI, WebSocket
 
 from vllm.entrypoints.openai.realtime.connection import RealtimeConnection
@@ -43,11 +44,6 @@ async def realtime_endpoint(websocket: WebSocket):
     app = websocket.app
     serving = app.state.openai_serving_realtime
 
-    if serving is None:
-        logger.warning("Realtime transcription not supported - closing WebSocket")
-        await websocket.close(code=1011, reason="Realtime transcription not supported")
-        return
-
     connection = RealtimeConnection(websocket, serving)
     await connection.handle_connection()
 
@@ -56,6 +52,7 @@ def attach_router(app: FastAPI):
     """Attach the realtime router to the FastAPI app."""
     app.include_router(router)
     logger.info("Realtime API router attached")
+
 
 def init_realtime_state(
     engine_client: "EngineClient",
