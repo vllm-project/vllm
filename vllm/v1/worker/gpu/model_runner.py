@@ -30,7 +30,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_kv_cache,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import UvaBufferPool
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.dp_utils import (
     get_cudagraph_and_dp_padding,
@@ -168,14 +168,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.structured_outputs_worker = StructuredOutputsWorker(
             max_num_logits=self.max_num_reqs * (self.num_speculative_steps + 1),
             vocab_size=self.vocab_size,
+            device=self.device,
         )
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
-
-        # Buffers for CPU-to-GPU copies.
-        self.tmp_idx_mapping = UvaBufferPool(self.max_num_reqs, torch.int32)
-        self.tmp_cu_num_logits = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
-        self.tmp_query_start_loc = UvaBufferPool(self.max_num_reqs + 1, torch.int32)
 
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
@@ -518,7 +514,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.req_id_to_index[req_id] for req_id in req_ids
         ]
         idx_mapping_np = np.array(idx_mapping_list, dtype=np.int32)
-        idx_mapping = self.tmp_idx_mapping.copy_to_gpu(idx_mapping_np)
+        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
         # Get the number of draft tokens for each request.
         if not scheduler_output.scheduled_spec_decode_tokens:
@@ -546,7 +542,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np = np.empty(num_reqs + 1, dtype=np.int32)
             cu_num_logits_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
-            cu_num_logits = self.tmp_cu_num_logits.copy_to_gpu(cu_num_logits_np)
+            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
             expanded_idx_mapping = expand_idx_mapping(
                 idx_mapping,
@@ -565,10 +561,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
-        self.tmp_query_start_loc.copy_to_gpu(
-            query_start_loc_np,
-            out=self.input_buffers.query_start_loc,
-        )
+        async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
+
         query_start_loc_np = query_start_loc_np[: num_reqs + 1]
         query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
