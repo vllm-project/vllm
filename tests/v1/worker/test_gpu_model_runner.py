@@ -789,8 +789,10 @@ def test_hybrid_attention_mamba_tensor_shapes():
             "MASTER_PORT": "12345",
         }
     )
-    init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=1)
+    from tests.utils import ensure_current_vllm_config
+    with ensure_current_vllm_config():
+        init_distributed_environment()
+        initialize_model_parallel(tensor_model_parallel_size=1)
     torch.set_default_dtype(torch.float16)
 
     model_config = ModelConfig(
