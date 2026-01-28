@@ -180,7 +180,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
             scheduler_metadata=scheduler_metadata,
-            dcp_tot_seq_lens=cp_tot_seq_lens_device,
+            cp_tot_seq_lens=cp_tot_seq_lens_device,
         )
 
 

@@ -1288,7 +1288,7 @@ class GPUModelRunner(
     def _prepare_input_ids(
         self,
         scheduler_output: "SchedulerOutput",
-        total_num_scheduled_tokens: int,
+        local_total_num_tokens: int,
         cu_num_tokens: np.ndarray,
     ) -> None:
         """Prepare the input IDs for the current batch.
@@ -1299,10 +1299,10 @@ class GPUModelRunner(
 
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
-            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            self.input_ids.copy_to_gpu(local_total_num_tokens)
             if self.enable_prompt_embeds:
-                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
-                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+                self.inputs_embeds.copy_to_gpu(local_total_num_tokens)
+                self.is_token_ids.copy_to_gpu(local_total_num_tokens)
             return
 
         # Async scheduling case, where some decode requests from the previous
@@ -1345,14 +1345,14 @@ class GPUModelRunner(
                 indices_match &= prev_index == flattened_index
                 max_flattened_index = max(max_flattened_index, flattened_index)
         num_commmon_tokens = len(sample_flattened_indices)
-        total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
+        total_without_spec = local_total_num_tokens - total_num_spec_tokens
         if num_commmon_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
             # We need to copy the input_ids_cpu to the GPU first.
-            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+            self.input_ids.copy_to_gpu(local_total_num_tokens)
             if self.enable_prompt_embeds:
-                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
-                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
+                self.inputs_embeds.copy_to_gpu(local_total_num_tokens)
+                self.is_token_ids.copy_to_gpu(local_total_num_tokens)
         if num_commmon_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids.cpu will have all the input ids.
@@ -1459,7 +1459,7 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
         local_num_scheduled_tokens: np.ndarray,
-        local_num_tokens: int,
+        local_total_num_tokens: int,
         local_token_indices: np.ndarray | None = None,
     ) -> tuple[
         torch.Tensor,
@@ -1470,7 +1470,7 @@ class GPUModelRunner(
             logits_indices, spec_decode_metadata,
         ]
         """
-        assert local_num_tokens > 0
+        assert local_total_num_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
@@ -1486,10 +1486,10 @@ class GPUModelRunner(
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
 
-        total_num_tokens = scheduler_output.total_num_scheduled_tokens
+        global_total_num_tokens = scheduler_output.total_num_scheduled_tokens
 
         # Get positions.
-        positions_np = self.positions.np[:total_num_tokens]
+        positions_np = self.positions.np[:global_total_num_tokens]
         np.add(
             self.input_batch.num_computed_tokens_cpu[req_indices],
             arange,
@@ -1497,7 +1497,7 @@ class GPUModelRunner(
         )
 
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
-        self.input_batch.block_table.commit_slot_mapping(total_num_tokens)
+        self.input_batch.block_table.commit_slot_mapping(global_total_num_tokens)
 
         logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
             self.device, non_blocking=True
@@ -1506,11 +1506,11 @@ class GPUModelRunner(
         # For PCP: gather positions and recompute local indices
         if local_token_indices is not None:
             cu_num_tokens, _ = self._get_cumsum_and_arange(local_num_scheduled_tokens)
-            positions_np[:local_num_tokens] = positions_np[local_token_indices]
-            req_indices[:local_num_tokens] = req_indices[local_token_indices]
+            positions_np[:local_total_num_tokens] = positions_np[local_token_indices]
+            req_indices[:local_total_num_tokens] = req_indices[local_token_indices]
             # Slice to local length for subsequent use
-            positions_np = positions_np[:local_num_tokens]
-            req_indices = req_indices[:local_num_tokens]
+            positions_np = positions_np[:local_total_num_tokens]
+            req_indices = req_indices[:local_total_num_tokens]
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1538,7 +1538,7 @@ class GPUModelRunner(
             self.input_batch.token_ids_cpu_tensor.flatten(),
             0,
             token_indices_tensor,
-            out=self.input_ids.cpu[:local_num_tokens],
+            out=self.input_ids.cpu[:local_total_num_tokens],
         )
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
@@ -1546,7 +1546,7 @@ class GPUModelRunner(
                 is_token_ids,
                 0,
                 token_indices_tensor,
-                out=self.is_token_ids.cpu[:local_num_tokens],
+                out=self.is_token_ids.cpu[:local_total_num_tokens],
             )
 
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
@@ -1615,25 +1615,25 @@ class GPUModelRunner(
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
             scheduler_output,
-            local_num_tokens,
+            local_total_num_tokens,
             cu_num_tokens,
         )
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            self.mrope_positions.gpu[:, :local_num_tokens].copy_(
-                self.mrope_positions.cpu[:, :local_num_tokens],
+            self.mrope_positions.gpu[:, :local_total_num_tokens].copy_(
+                self.mrope_positions.cpu[:, :local_total_num_tokens],
                 non_blocking=True,
             )
         elif self.uses_xdrope_dim > 0:
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :local_num_tokens].copy_(
-                self.xdrope_positions.cpu[:, :local_num_tokens],
+            self.xdrope_positions.gpu[:, :local_total_num_tokens].copy_(
+                self.xdrope_positions.cpu[:, :local_total_num_tokens],
                 non_blocking=True,
             )
         else:
             # Common case (1D positions)
-            self.positions.copy_to_gpu(local_num_tokens)
+            self.positions.copy_to_gpu(local_total_num_tokens)
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
