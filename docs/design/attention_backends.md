@@ -161,8 +161,8 @@ Priority is **1 = highest** (tried first).
 |---------|---------|--------|-----------------|-------------|------------|------|-----------|-----------------|--------------|
 | CPU_ATTN |  | fp16, bf16, fp32 | auto | Any | 32, 64, 80, 96, 112, 128, 160, 192, 224, 256 | ❌ | ❌ | All | N/A |
 | FLASHINFER |  | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3, fp8_e5m2 | 16, 32, 64 | 64, 128, 256 | ❌ | ❌ | Decoder | 7.x-12.x |
-| FLASH_ATTN | FA2* | fp16, bf16 | auto | %16 | Any | ❌ | ❌ | All | ≥8.0 |
-| FLASH_ATTN | FA3* | fp16, bf16 | auto, fp8 | %16 | Any | ✅ | ❌ | All | 9.x |
+| FLASH_ATTN | FA2* | fp16, bf16 | auto, bfloat16 | %16 | Any | ❌ | ❌ | All | ≥8.0 |
+| FLASH_ATTN | FA3* | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3, fp8_e5m2 | %16 | Any | ✅ | ❌ | All | 9.x |
 | FLASH_ATTN_DIFFKV |  | fp16, bf16 | auto | Any | Any | ❌ | ❌ | Decoder | Any |
 | FLEX_ATTENTION |  | fp16, bf16, fp32 | auto, bfloat16 | Any | Any | ❌ | ✅ | Decoder, Encoder Only | Any |
 | ROCM_AITER_FA |  | fp16, bf16 | auto | %16 | 64, 128, 256 | ❌ | ❌ | Decoder | N/A |

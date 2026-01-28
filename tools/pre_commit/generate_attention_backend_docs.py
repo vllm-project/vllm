@@ -100,8 +100,7 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
     # Analyze the functions to determine FA3-specific features
     fa3_supports_fp8 = False
     fa3_supports_sinks = False
-    fa3_compute_cap = "9.x"  # FA3 requires Hopper (CC 9.0)
-    fa2_compute_cap = "≥8.0"  # FA2 works on Ampere+
+    fa3_compute_cap: str | None = None
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
@@ -153,7 +152,6 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
 
     return {
         "fa2": {
-            "compute_capability": fa2_compute_cap,
             "supports_fp8": False,
             "supports_sink": False,
         },
@@ -224,9 +222,33 @@ def parse_supported_dtypes(node: ast.ClassDef) -> str:
 
 
 def parse_kv_cache_dtypes(node: ast.ClassDef) -> str:
-    """Parse supported_kv_cache_dtypes class variable."""
+    """Parse supported_kv_cache_dtypes class var or supports_kv_cache_dtype method."""
+    # First try the class variable
     dtypes = _parse_list_class_var(node, "supported_kv_cache_dtypes")
-    return ", ".join(dtypes) if dtypes else "auto"
+    if dtypes:
+        return ", ".join(dtypes)
+
+    # Fall back to parsing the supports_kv_cache_dtype method
+    # Look for `kv_cache_dtype in ["auto", "bfloat16"]` pattern
+    method = find_method(node, "supports_kv_cache_dtype")
+    if method:
+        for n in ast.walk(method):
+            if (
+                isinstance(n, ast.Compare)
+                and len(n.ops) == 1
+                and isinstance(n.ops[0], ast.In)
+                and len(n.comparators) == 1
+                and isinstance(n.comparators[0], ast.List)
+            ):
+                dtypes = [
+                    e.value
+                    for e in n.comparators[0].elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)
+                ]
+                if dtypes:
+                    return ", ".join(dtypes)
+
+    return "auto"
 
 
 def _parse_return_list(
@@ -791,25 +813,29 @@ def generate_docs() -> str:
         expanded_backends = []
         for backend in all_backends:
             if backend["name"] == "FLASH_ATTN":
-                # Create FA2 entry
+                # Create FA2 entry (keeps base backend's compute_capability)
                 fa2 = backend.copy()
                 fa2["name"] = "FLASH_ATTN"
                 fa2["version"] = "FA2*"
                 fa2["_sort_key"] = "FLASH_ATTN"
                 fa2["_sort_order"] = 0
-                fa2["compute_capability"] = fa_features["fa2"]["compute_capability"]
                 fa2["supports_sink"] = fa_features["fa2"]["supports_sink"]
 
-                # Create FA3 entry
+                # Create FA3 entry (uses parsed compute_capability from fa_utils)
                 fa3 = backend.copy()
                 fa3["name"] = "FLASH_ATTN"
                 fa3["version"] = "FA3*"
                 fa3["_sort_key"] = "FLASH_ATTN"
                 fa3["_sort_order"] = 1
-                fa3["compute_capability"] = fa_features["fa3"]["compute_capability"]
+                if fa_features["fa3"]["compute_capability"]:
+                    fa3["compute_capability"] = fa_features["fa3"]["compute_capability"]
                 fa3["supports_sink"] = fa_features["fa3"]["supports_sink"]
                 if fa_features["fa3"]["supports_fp8"]:
-                    fa3["kv_cache_dtypes"] = "auto, fp8"
+                    # Add fp8 dtypes to the base backend's kv_cache_dtypes
+                    base_dtypes = backend["kv_cache_dtypes"].split(", ")
+                    fp8_dtypes = ["fp8", "fp8_e4m3", "fp8_e5m2"]
+                    new_dtypes = [d for d in fp8_dtypes if d not in base_dtypes]
+                    fa3["kv_cache_dtypes"] = ", ".join(base_dtypes + new_dtypes)
 
                 # Add FA2 first, then FA3
                 expanded_backends.append(fa2)
