@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Final
+from typing import Final, TypeAlias
 
 import jinja2
 import numpy as np
@@ -27,7 +27,7 @@ from vllm.pooling_params import PoolingParams
 logger = init_logger(__name__)
 
 
-ClassificationServeContext = ServeContext[ClassificationRequest]
+ClassificationServeContext: TypeAlias = ServeContext[ClassificationRequest]
 
 
 class ServingClassification(OpenAIServing):

@@ -390,8 +390,6 @@ class OpenAIServingChat(OpenAIServing):
                         sampling_params,
                     )
 
-                tok_params = request.build_tok_params(self.model_config)
-
                 self._log_inputs(
                     sub_request_id,
                     engine_prompt,
@@ -414,7 +412,9 @@ class OpenAIServingChat(OpenAIServing):
                         trace_headers=trace_headers,
                     )
                 else:
+                    tok_params = request.build_tok_params(self.model_config)
                     tokenization_kwargs = tok_params.get_encode_kwargs()
+
                     engine_request = self.input_processor.process_inputs(
                         sub_request_id,
                         engine_prompt,

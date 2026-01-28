@@ -186,8 +186,6 @@ class OpenAIServingCompletion(OpenAIServing):
                         sampling_params,
                     )
 
-                tok_params = request.build_tok_params(self.model_config)
-
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(
@@ -212,7 +210,9 @@ class OpenAIServingCompletion(OpenAIServing):
                         trace_headers=trace_headers,
                     )
                 else:
+                    tok_params = request.build_tok_params(self.model_config)
                     tokenization_kwargs = tok_params.get_encode_kwargs()
+
                     engine_request = self.input_processor.process_inputs(
                         request_id_item,
                         engine_prompt,

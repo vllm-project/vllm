@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final
+from typing import Any, Final, TypeAlias
 
 import torch
 from fastapi import Request
@@ -36,7 +36,7 @@ from vllm.utils.serial_utils import (
 logger = init_logger(__name__)
 
 
-EmbeddingServeContext = ServeContext[EmbeddingRequest]
+EmbeddingServeContext: TypeAlias = ServeContext[EmbeddingRequest]
 
 
 class OpenAIServingEmbedding(OpenAIServing):
@@ -229,14 +229,18 @@ class OpenAIServingEmbedding(OpenAIServing):
                 lora_request=ctx.lora_request,
             )
 
+            tok_params = ctx.request.build_tok_params(self.model_config)
+            tokenization_kwargs = tok_params.get_encode_kwargs()
+
             # Create generator for this chunk and wrap it to return indices
             original_generator = self.engine_client.encode(
                 chunk_engine_prompt,
                 pooling_params,
                 chunk_request_id,
                 lora_request=ctx.lora_request,
+                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
-                priority=getattr(ctx.request, "priority", 0),
+                priority=ctx.request.priority,
             )
 
             generators.append(original_generator)
@@ -336,14 +340,18 @@ class OpenAIServingEmbedding(OpenAIServing):
             lora_request=ctx.lora_request,
         )
 
+        tok_params = ctx.request.build_tok_params(self.model_config)
+        tokenization_kwargs = tok_params.get_encode_kwargs()
+
         # Return the original generator without wrapping
         return self.engine_client.encode(
             engine_prompt,
             pooling_params,
             request_id_item,
             lora_request=ctx.lora_request,
+            tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
-            priority=getattr(ctx.request, "priority", 0),
+            priority=ctx.request.priority,
         )
 
     async def _prepare_generators(

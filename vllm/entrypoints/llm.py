@@ -428,8 +428,8 @@ class LLM:
             params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=self._get_modality_specific_lora_reqs(prompts, lora_request),
-            priority=priority,
             tokenization_kwargs=tokenization_kwargs,
+            priority=priority,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -1648,8 +1648,8 @@ class LLM:
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest | None] | LoRARequest | None,
-        priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        priority: list[int] | None = None,
     ) -> None:
         in_prompts = self._normalize_prompts(prompts)
         num_requests = len(in_prompts)
@@ -1725,8 +1725,8 @@ class LLM:
                     prompt,
                     engine_params[i],
                     lora_request=engine_lora_requests[i],
-                    priority=priority[i],
                     tokenization_kwargs=tokenization_kwargs,
+                    priority=priority[i],
                 )
                 added_request_ids.append(request_id)
         except Exception as e:
@@ -1739,8 +1739,8 @@ class LLM:
         prompt: PromptType,
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
-        priority: int = 0,
         tokenization_kwargs: dict[str, Any] | None = None,
+        priority: int = 0,
     ) -> str:
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))

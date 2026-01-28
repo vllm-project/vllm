@@ -194,11 +194,18 @@ class OpenAIServingPooling(OpenAIServing):
                     else await self._get_trace_headers(raw_request.headers)
                 )
 
+                if is_io_processor_request:
+                    tokenization_kwargs = {}
+                else:
+                    tok_params = request.build_tok_params(self.model_config)
+                    tokenization_kwargs = tok_params.get_encode_kwargs()
+
                 generator = self.engine_client.encode(
                     engine_prompt,
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
                     trace_headers=trace_headers,
                     priority=request.priority,
                 )
