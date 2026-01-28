@@ -362,7 +362,7 @@ steps:
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
-    - pytest -v -s -m 'not optional' v1/spec_decode
+    - pytest -v -s v1/spec_decode
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
     - pytest -v -s v1/test_oracle.py
@@ -1424,7 +1424,7 @@ steps:
   timeout_in_minutes: 120
   gpu: h100
   optional: true
-  num_gpus: 2
+  num_gpus: 1
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/spec_decode/
@@ -1432,7 +1432,7 @@ steps:
   - tests/v1/spec_decode/test_acceptance_length.py
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-    - pytest -v -s v1/spec_decode/test_acceptance_length.py -m optional --optional
+    - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
 - label: LM Eval Large Models # optional
   gpu: a100

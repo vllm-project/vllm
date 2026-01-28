@@ -76,7 +76,7 @@ EAGLE3_MODEL_CONFIGS = [
         expected_acceptance_lengths_per_pos=[0.2900, 0.0620, 0.0115],
         id="qwen3-30b-moe-vl-eagle3",
         marks=[
-            pytest.mark.optional,
+            pytest.mark.slow_test,
             pytest.mark.skipif(
                 current_platform.is_rocm(),
                 reason="The tests are skipped on rocm platform.",
@@ -213,6 +213,10 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
 
 
 @large_gpu_mark(min_gb=40)
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test is only supported on CUDA platform.",
+)
 @pytest.mark.parametrize(
     "model_config",
     [
