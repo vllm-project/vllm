@@ -571,7 +571,7 @@ def generate_priority_section(priorities: dict[str, list[str]]) -> str:
         "",
         "Priority is **1 = highest** (tried first).",
         "",
-        "### Standard Attention (non-MLA)",
+        "### Standard Attention (MHA, MQA, GQA)",
         "",
     ]
 
@@ -666,9 +666,8 @@ def generate_docs() -> str:
 
     # Add legend and feature tables
     doc_lines.append(generate_legend())
-    doc_lines.append(
-        generate_markdown_table(non_mla_backends, "Standard Attention Backends")
-    )
+    standard_title = "Standard Attention (MHA, MQA, GQA) Backends"
+    doc_lines.append(generate_markdown_table(non_mla_backends, standard_title))
     mla_title = "MLA (Multi-head Latent Attention) Backends"
     doc_lines.append(generate_markdown_table(mla_backends, mla_title))
 

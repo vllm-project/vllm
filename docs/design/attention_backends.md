@@ -94,7 +94,7 @@ compatible backend from these priority-ordered lists.
 
 Priority is **1 = highest** (tried first).
 
-### Standard Attention (non-MLA)
+### Standard Attention (MHA, MQA, GQA)
 
 **Blackwell (SM 10.x):**
 
@@ -156,7 +156,7 @@ Priority is **1 = highest** (tried first).
 
 **Symbols:** ✓ = Supported, ✗ = Not supported
 
-## Standard Attention Backends
+## Standard Attention (MHA, MQA, GQA) Backends
 
 | Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes | MLA | Sink | Sparse | MM Prefix | Attention Types | Compute Cap. |
 |---------|--------|-----------------|-------------|------------|-----|------|--------|-----------|-----------------|--------------|
