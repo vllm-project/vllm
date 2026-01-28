@@ -20,7 +20,6 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import cdiv
 
@@ -862,6 +861,7 @@ class FusedMoEParallelConfig:
 
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
+    is_sequence_parallel: bool  # whether sequence parallelism is used
     enable_eplb: bool  # whether to enable expert load balancing
 
     @property
@@ -884,6 +884,12 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
     @property
+    def use_fi_all2allv_kernels(self):
+        return (
+            self.use_all2all_kernels and self.all2all_backend == "flashinfer_all2allv"
+        )
+
+    @property
     def use_batched_activation_format(self):
         return self.use_deepep_ll_kernels or self.use_pplx_kernels
 
@@ -892,6 +898,10 @@ class FusedMoEParallelConfig:
         return self.use_all2all_kernels and (
             self.all2all_backend in ["naive", "allgather_reducescatter"]
         )
+
+    @property
+    def use_mori_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "mori"
 
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
@@ -1010,6 +1020,7 @@ class FusedMoEParallelConfig:
                 ep_rank=0,
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
+                is_sequence_parallel=vllm_parallel_config.use_sequence_parallel_moe,
                 enable_eplb=vllm_parallel_config.enable_eplb,
             )
         # DP + EP / TP + EP / DP + TP + EP
@@ -1029,6 +1040,7 @@ class FusedMoEParallelConfig:
             ep_rank=ep_rank,
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
+            is_sequence_parallel=vllm_parallel_config.use_sequence_parallel_moe,
             enable_eplb=vllm_parallel_config.enable_eplb,
         )
 
@@ -1047,6 +1059,7 @@ class FusedMoEParallelConfig:
             use_ep=False,
             all2all_backend="naive",
             enable_eplb=False,
+            is_sequence_parallel=False,
         )
 
 
@@ -1137,12 +1150,13 @@ class FusedMoEConfig:
         return self.moe_parallel_config.use_deepep_ll_kernels
 
     @property
-    def use_flashinfer_cutlass_kernels(self):
-        """
-        Whether to use FlashInfer cutlass kernels for NVFP4 MoE.
-        """
-        return (
-            envs.VLLM_USE_FLASHINFER_MOE_FP4
-            and has_flashinfer_cutlass_fused_moe()
-            and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput"
-        )
+    def use_mori_kernels(self):
+        return self.moe_parallel_config.use_mori_kernels
+
+    @property
+    def use_fi_all2allv_kernels(self):
+        return self.moe_parallel_config.use_fi_all2allv_kernels
+
+    @property
+    def use_naive_all2all_kernels(self):
+        return self.moe_parallel_config.use_naive_all2all_kernels

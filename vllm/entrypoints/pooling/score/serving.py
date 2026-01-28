@@ -3,6 +3,7 @@
 import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import Request
@@ -62,6 +63,8 @@ class ServingScores(OpenAIServing):
             log_error_stack=log_error_stack,
         )
         self.score_template = score_template
+
+        self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
     async def _embedding_score(
         self,
@@ -283,8 +286,7 @@ class ServingScores(OpenAIServing):
         raw_request: Request | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         lora_request = self._maybe_get_adapters(request)
-
-        tokenizer = await self.engine_client.get_tokenizer()
+        tokenizer = self.renderer.get_tokenizer()
 
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
 

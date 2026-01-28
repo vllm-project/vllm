@@ -31,12 +31,12 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention.encoder_only_attention import (
+from vllm.model_executor.layers.attention import (
+    Attention,
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -404,6 +404,7 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        **extra_layer_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -422,7 +423,9 @@ class LlamaModel(nn.Module):
         ):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, **extra_layer_kwargs
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -465,8 +468,8 @@ class LlamaModel(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            if "scale" in name:
-                # Remapping the name of FP8 kv-scale.
+            if "scale" in name or "zero_point" in name:
+                # Remapping the name of FP8 kv-scale or zero point.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
@@ -578,7 +581,7 @@ class LlamaForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
