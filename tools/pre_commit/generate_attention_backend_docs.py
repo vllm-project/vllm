@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 RELEVANT_PATTERNS = [
     "vllm/v1/attention/backends/*.py",
     "vllm/v1/attention/backends/**/*.py",
+    "vllm/v1/attention/backends/fa_utils.py",
     "vllm/platforms/cuda.py",
     "tools/pre_commit/generate_attention_backend_docs.py",
     "docs/design/attention_backends.md",
@@ -47,6 +48,7 @@ def is_relevant_file(filepath: str) -> bool:
 BACKENDS_DIR = REPO_ROOT / "vllm" / "v1" / "attention" / "backends"
 REGISTRY_FILE = BACKENDS_DIR / "registry.py"
 CUDA_PLATFORM_FILE = REPO_ROOT / "vllm" / "platforms" / "cuda.py"
+FA_UTILS_FILE = BACKENDS_DIR / "fa_utils.py"
 
 
 def parse_registry() -> dict[str, str]:
@@ -79,6 +81,88 @@ def get_file_from_class_path(class_path: str) -> Path | None:
     module_path = class_path.rsplit(".", 1)[0].replace(".", "/")
     py_file = REPO_ROOT / f"{module_path}.py"
     return py_file if py_file.exists() else None
+
+
+def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
+    """Parse fa_utils.py to detect FA2 vs FA3 feature differences.
+
+    Returns a dict with 'fa2' and 'fa3' keys containing their respective
+    feature overrides for compute capability, KV cache dtypes, and sink support.
+    """
+    if not FA_UTILS_FILE.exists():
+        return {}
+
+    try:
+        tree = ast.parse(FA_UTILS_FILE.read_text())
+    except Exception:
+        return {}
+
+    # Analyze the functions to determine FA3-specific features
+    fa3_supports_fp8 = False
+    fa3_supports_sinks = False
+    fa3_compute_cap = "9.x"  # FA3 requires Hopper (CC 9.0)
+    fa2_compute_cap = "≥8.0"  # FA2 works on Ampere+
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+
+        # Check flash_attn_supports_fp8 - looks for `get_flash_attn_version() == 3`
+        if node.name == "flash_attn_supports_fp8":
+            for n in ast.walk(node):
+                if (
+                    isinstance(n, ast.Compare)
+                    and isinstance(n.left, ast.Call)
+                    and isinstance(n.left.func, ast.Name)
+                    and n.left.func.id == "get_flash_attn_version"
+                ):
+                    fa3_supports_fp8 = True
+                    break
+
+        # Check flash_attn_supports_sinks - looks for `get_flash_attn_version() == 3`
+        if node.name == "flash_attn_supports_sinks":
+            for n in ast.walk(node):
+                if (
+                    isinstance(n, ast.Compare)
+                    and isinstance(n.left, ast.Call)
+                    and isinstance(n.left.func, ast.Name)
+                    and n.left.func.id == "get_flash_attn_version"
+                ):
+                    fa3_supports_sinks = True
+                    break
+
+        # Check get_flash_attn_version for FA3 compute capability
+        # Look for the ternary: 3 if (device_capability.major == 9 ...) else 2
+        if node.name == "get_flash_attn_version":
+            for n in ast.walk(node):
+                # Look for IfExp (ternary) with `device_capability.major == 9`
+                if isinstance(n, ast.IfExp):
+                    test = n.test
+                    # Check if test is a BoolOp (and) containing the major check
+                    if isinstance(test, ast.BoolOp):
+                        for val in test.values:
+                            if (
+                                isinstance(val, ast.Compare)
+                                and isinstance(val.left, ast.Attribute)
+                                and val.left.attr == "major"
+                                and val.comparators
+                                and isinstance(val.comparators[0], ast.Constant)
+                            ):
+                                fa3_compute_cap = f"{val.comparators[0].value}.x"
+                                break
+
+    return {
+        "fa2": {
+            "compute_capability": fa2_compute_cap,
+            "supports_fp8": False,
+            "supports_sink": False,
+        },
+        "fa3": {
+            "compute_capability": fa3_compute_cap,
+            "supports_fp8": fa3_supports_fp8,
+            "supports_sink": fa3_supports_sinks,
+        },
+    }
 
 
 def find_class_in_ast(tree: ast.AST, class_name: str) -> ast.ClassDef | None:
@@ -359,6 +443,9 @@ def generate_markdown_table(
     if not backends:
         return f"## {title}\n\nNo backends found.\n"
 
+    # Check if any backend has a version (for FA2/FA3 split)
+    has_versions = any(b.get("version") for b in backends)
+
     if is_mla_table:
         header = (
             "| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes "
@@ -367,6 +454,15 @@ def generate_markdown_table(
         separator = (
             "|---------|--------|-----------------|-------------|------------"
             "|------|--------|-----------|-----------------|--------------|"
+        )
+    elif has_versions:
+        header = (
+            "| Backend | Version | Dtypes | KV Cache Dtypes | Block Sizes "
+            "| Head Sizes | Sink | MM Prefix | Attention Types | Compute Cap. |"
+        )
+        separator = (
+            "|---------|---------|--------|-----------------|-------------"
+            "|------------|------|-----------|-----------------|--------------|"
         )
     else:
         header = (
@@ -379,7 +475,11 @@ def generate_markdown_table(
         )
     lines = [f"## {title}", "", header, separator]
 
-    for info in sorted(backends, key=lambda x: x["name"]):
+    def sort_key(x: dict[str, Any]) -> tuple[str, int]:
+        """Sort key that keeps parent/child rows together in order."""
+        return (x.get("_sort_key", x["name"]), x.get("_sort_order", 0))
+
+    for info in sorted(backends, key=sort_key):
         if is_mla_table:
             row = "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 info["name"],
@@ -389,6 +489,19 @@ def generate_markdown_table(
                 info["head_sizes"],
                 bool_to_emoji(info["supports_sink"]),
                 bool_to_emoji(info["is_sparse"]),
+                bool_to_emoji(info["supports_mm_prefix"]),
+                info["attn_types"],
+                info["compute_capability"],
+            )
+        elif has_versions:
+            row = "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+                info["name"],
+                info.get("version", ""),
+                info["dtypes"],
+                info["kv_cache_dtypes"],
+                info["block_sizes"],
+                info["head_sizes"],
+                bool_to_emoji(info["supports_sink"]),
                 bool_to_emoji(info["supports_mm_prefix"]),
                 info["attn_types"],
                 info["compute_capability"],
@@ -661,6 +774,9 @@ def generate_docs() -> str:
     # Parse priority lists from cuda.py
     priorities = parse_cuda_priority_lists()
 
+    # Parse FlashAttention FA2/FA3 feature differences
+    fa_features = parse_flash_attn_features()
+
     # Collect backend info
     all_backends = []
     for backend_name, class_path in attention_backends_map.items():
@@ -669,6 +785,41 @@ def generate_docs() -> str:
         info = analyze_backend(backend_name, class_path)
         if info:
             all_backends.append(info)
+
+    # Expand FLASH_ATTN into FA2 and FA3 variants with different capabilities
+    if fa_features:
+        expanded_backends = []
+        for backend in all_backends:
+            if backend["name"] == "FLASH_ATTN":
+                # Create FA2 entry
+                fa2 = backend.copy()
+                fa2["name"] = "FLASH_ATTN"
+                fa2["version"] = "FA2*"
+                fa2["_sort_key"] = "FLASH_ATTN"
+                fa2["_sort_order"] = 0
+                fa2["compute_capability"] = fa_features["fa2"]["compute_capability"]
+                fa2["supports_sink"] = fa_features["fa2"]["supports_sink"]
+
+                # Create FA3 entry
+                fa3 = backend.copy()
+                fa3["name"] = "FLASH_ATTN"
+                fa3["version"] = "FA3*"
+                fa3["_sort_key"] = "FLASH_ATTN"
+                fa3["_sort_order"] = 1
+                fa3["compute_capability"] = fa_features["fa3"]["compute_capability"]
+                fa3["supports_sink"] = fa_features["fa3"]["supports_sink"]
+                if fa_features["fa3"]["supports_fp8"]:
+                    fa3["kv_cache_dtypes"] = "auto, fp8"
+
+                # Add FA2 first, then FA3
+                expanded_backends.append(fa2)
+                expanded_backends.append(fa3)
+            else:
+                backend["_sort_key"] = backend["name"]
+                backend["_sort_order"] = 0
+                backend["version"] = ""  # No version for other backends
+                expanded_backends.append(backend)
+        all_backends = expanded_backends
 
     # Split into MLA and non-MLA
     mla_backends = [b for b in all_backends if b["is_mla"]]
@@ -704,6 +855,13 @@ def generate_docs() -> str:
     doc_lines.append(
         generate_markdown_table(non_mla_backends, standard_title, is_mla_table=False)
     )
+    # Add footnote for FA2/FA3 version selection
+    if fa_features:
+        doc_lines.append(
+            "> **\\*** Specify the FlashAttention version via "
+            "`--attention-config.flash_attn_version=2` or `3`. Default is FA3 on SM90, "
+            "FA2 otherwise.\n"
+        )
     mla_title = "MLA (Multi-head Latent Attention) Backends"
     doc_lines.append(
         generate_markdown_table(mla_backends, mla_title, is_mla_table=True)

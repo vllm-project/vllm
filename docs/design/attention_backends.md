@@ -157,18 +157,21 @@ Priority is **1 = highest** (tried first).
 
 ## Standard Attention (MHA, MQA, GQA) Backends
 
-| Backend | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes | Sink | MM Prefix | Attention Types | Compute Cap. |
-|---------|--------|-----------------|-------------|------------|------|-----------|-----------------|--------------|
-| CPU_ATTN | fp16, bf16, fp32 | auto | Any | 32, 64, 80, 96, 112, 128, 160, 192, 224, 256 | ❌ | ❌ | All | N/A |
-| FLASHINFER | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3, fp8_e5m2 | 16, 32, 64 | 64, 128, 256 | ❌ | ❌ | Decoder | 7.x-12.x |
-| FLASH_ATTN | fp16, bf16 | auto | %16 | Any | ❌ | ❌ | All | ≥8.0 |
-| FLASH_ATTN_DIFFKV | fp16, bf16 | auto | Any | Any | ❌ | ❌ | Decoder | Any |
-| FLEX_ATTENTION | fp16, bf16, fp32 | auto, bfloat16 | Any | Any | ❌ | ✅ | Decoder, Encoder Only | Any |
-| ROCM_AITER_FA | fp16, bf16 | auto | %16 | 64, 128, 256 | ❌ | ❌ | Decoder | N/A |
-| ROCM_AITER_UNIFIED_ATTN | fp16, bf16 | auto | Any | Any | ❌ | ❌ | Decoder | N/A |
-| ROCM_ATTN | fp16, bf16, fp32 | auto | 16, 32, 544 | 32, 64, 96, 128, 160, 192, 224, 256 | ❌ | ❌ | Decoder | N/A |
-| TREE_ATTN | fp16, bf16 | auto | %16 | 32, 64, 96, 128, 160, 192, 224, 256 | ❌ | ❌ | Decoder | Any |
-| TRITON_ATTN | fp16, bf16, fp32 | auto, bfloat16, fp8, fp8_e4m3, fp8_e5m2 | %16 | Any | ✅ | ✅ | All | Any |
+| Backend | Version | Dtypes | KV Cache Dtypes | Block Sizes | Head Sizes | Sink | MM Prefix | Attention Types | Compute Cap. |
+|---------|---------|--------|-----------------|-------------|------------|------|-----------|-----------------|--------------|
+| CPU_ATTN |  | fp16, bf16, fp32 | auto | Any | 32, 64, 80, 96, 112, 128, 160, 192, 224, 256 | ❌ | ❌ | All | N/A |
+| FLASHINFER |  | fp16, bf16 | auto, bfloat16, fp8, fp8_e4m3, fp8_e5m2 | 16, 32, 64 | 64, 128, 256 | ❌ | ❌ | Decoder | 7.x-12.x |
+| FLASH_ATTN | FA2* | fp16, bf16 | auto | %16 | Any | ❌ | ❌ | All | ≥8.0 |
+| FLASH_ATTN | FA3* | fp16, bf16 | auto, fp8 | %16 | Any | ✅ | ❌ | All | 9.x |
+| FLASH_ATTN_DIFFKV |  | fp16, bf16 | auto | Any | Any | ❌ | ❌ | Decoder | Any |
+| FLEX_ATTENTION |  | fp16, bf16, fp32 | auto, bfloat16 | Any | Any | ❌ | ✅ | Decoder, Encoder Only | Any |
+| ROCM_AITER_FA |  | fp16, bf16 | auto | %16 | 64, 128, 256 | ❌ | ❌ | Decoder | N/A |
+| ROCM_AITER_UNIFIED_ATTN |  | fp16, bf16 | auto | Any | Any | ❌ | ❌ | Decoder | N/A |
+| ROCM_ATTN |  | fp16, bf16, fp32 | auto | 16, 32, 544 | 32, 64, 96, 128, 160, 192, 224, 256 | ❌ | ❌ | Decoder | N/A |
+| TREE_ATTN |  | fp16, bf16 | auto | %16 | 32, 64, 96, 128, 160, 192, 224, 256 | ❌ | ❌ | Decoder | Any |
+| TRITON_ATTN |  | fp16, bf16, fp32 | auto, bfloat16, fp8, fp8_e4m3, fp8_e5m2 | %16 | Any | ✅ | ✅ | All | Any |
+
+> **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2` or `3`. Default is FA3 on SM90, FA2 otherwise.
 
 ## MLA (Multi-head Latent Attention) Backends
 
