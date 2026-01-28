@@ -1074,6 +1074,14 @@ class EngineArgs:
             "--enable-journey-tracing",
             **observability_kwargs["enable_journey_tracing"],
         )
+        observability_group.add_argument(
+            "--step-tracing-enabled",
+            **observability_kwargs["step_tracing_enabled"],
+        )
+        observability_group.add_argument(
+            "--step-tracing-sample-rate",
+            **observability_kwargs["step_tracing_sample_rate"],
+        )
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)

@@ -84,6 +84,15 @@ class ObservabilityConfig:
     with full progress snapshots. Disabled by default. Near-zero overhead when off.
     Events are delivered via EngineCoreOutputs.journey_events."""
 
+    step_tracing_enabled: bool = False
+    """Enable step-level batch summary tracing. When enabled, emits probabilistically
+    sampled batch summary events for each scheduler step with queue depths, token counts,
+    and KV cache metrics. Disabled by default. Near-zero overhead when off."""
+
+    step_tracing_sample_rate: float = Field(default=0.01, ge=0.0, le=1.0)
+    """Sampling rate for step batch summary events. Range [0.0, 1.0].
+    Default 0.01 = 1% of steps. Only applies when step_tracing_enabled is True."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""

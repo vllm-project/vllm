@@ -173,6 +173,23 @@ class SpanAttributes:
     JOURNEY_SCHEDULER_STEP = "scheduler.step"
     JOURNEY_SCHEDULE_KIND = "schedule.kind"
     JOURNEY_FINISH_STATUS = "finish.status"
+    # Step batch summary attributes (for step-level tracing)
+    STEP_ID = "step.id"
+    STEP_TS_START_NS = "step.ts_start_ns"
+    STEP_TS_END_NS = "step.ts_end_ns"
+    STEP_DURATION_US = "step.duration_us"
+    QUEUE_RUNNING_DEPTH = "queue.running_depth"
+    QUEUE_WAITING_DEPTH = "queue.waiting_depth"
+    BATCH_NUM_PREFILL_REQS = "batch.num_prefill_reqs"
+    BATCH_NUM_DECODE_REQS = "batch.num_decode_reqs"
+    BATCH_SCHEDULED_TOKENS = "batch.scheduled_tokens"
+    BATCH_PREFILL_TOKENS = "batch.prefill_tokens"
+    BATCH_DECODE_TOKENS = "batch.decode_tokens"
+    BATCH_NUM_FINISHED = "batch.num_finished"
+    BATCH_NUM_PREEMPTED = "batch.num_preempted"
+    KV_USAGE_GPU_RATIO = "kv.usage_gpu_ratio"
+    KV_BLOCKS_TOTAL_GPU = "kv.blocks_total_gpu"
+    KV_BLOCKS_FREE_GPU = "kv.blocks_free_gpu"
 
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:

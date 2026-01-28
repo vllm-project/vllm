@@ -60,6 +60,8 @@ def create_scheduler(
     ec_role: str | None = None,
     enable_journey_tracing: bool = False,
     otlp_traces_endpoint: str | None = None,
+    step_tracing_enabled: bool = False,
+    step_tracing_sample_rate: float = 0.01,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -137,6 +139,8 @@ def create_scheduler(
     observability_config = ObservabilityConfig(
         enable_journey_tracing=enable_journey_tracing,
         otlp_traces_endpoint=otlp_traces_endpoint,
+        step_tracing_enabled=step_tracing_enabled,
+        step_tracing_sample_rate=step_tracing_sample_rate,
     )
 
     vllm_config = VllmConfig(

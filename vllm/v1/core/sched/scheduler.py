@@ -146,6 +146,53 @@ class Scheduler(SchedulerInterface):
         # Lifecycle: Created in add_request(), ended in finish_requests() or update_from_output()
         self._core_spans: dict[str, Any] = {}
 
+        # Step tracing: Batch summary tracing for scheduler steps
+        # INVARIANT: When _enable_step_tracing is True, ALL step tracing
+        # data structures are initialized and ready.
+        self._enable_step_tracing = (
+            self.observability_config.step_tracing_enabled
+        )
+        self._step_tracing_sample_rate = (
+            self.observability_config.step_tracing_sample_rate
+        )
+        self._step_span: Any | None = None
+        # Injectable sampler for deterministic testing
+        # Production: uses random.random() < rate
+        # Tests: can inject deterministic hash-based sampler
+        import random
+        self._step_sampler: Any = lambda step_id, rate: random.random() < rate
+
+        if self._enable_step_tracing:
+            # Initialize tracer if not already done
+            if self.tracer is None:
+                endpoint = self.observability_config.otlp_traces_endpoint
+                if endpoint is None:
+                    # Explicitly disable step tracing if no OTEL endpoint configured
+                    self._enable_step_tracing = False
+                else:
+                    try:
+                        from vllm.tracing import init_tracer
+                        self.tracer = init_tracer("vllm.scheduler", endpoint)
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to initialize tracer for step tracing: %s", e
+                        )
+                        self._enable_step_tracing = False
+
+            # Create long-lived scheduler_steps span
+            if self._enable_step_tracing and self.tracer is not None:
+                try:
+                    from vllm.tracing import SpanKind
+                    self._step_span = self.tracer.start_span(
+                        "scheduler_steps",
+                        kind=SpanKind.INTERNAL,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to create scheduler_steps span: %s", e
+                    )
+                    self._enable_step_tracing = False
+
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
@@ -297,12 +344,109 @@ class Scheduler(SchedulerInterface):
                 vllm_config=self.vllm_config,
             )
 
+    def _emit_step_batch_summary(
+        self,
+        output: SchedulerOutput,
+        curr_step: int,
+        step_start_ns: int,
+    ) -> None:
+        """Emit step batch summary event for observability.
+
+        Emits a single OTEL span event with batch-level aggregates:
+        - Queue depths (running, waiting)
+        - Batch composition (prefill/decode request counts)
+        - Token counts (scheduled, prefill, decode)
+        - Request lifecycle counts (finished, preempted)
+        - KV cache pressure signals
+
+        Args:
+            output: The SchedulerOutput for this step
+            curr_step: The scheduler step ID
+            step_start_ns: Monotonic timestamp at step start (nanoseconds)
+        """
+        if not self._enable_step_tracing or self._step_span is None:
+            return
+
+        try:
+            step_end_ns = time.monotonic_ns()
+            step_duration_us = (step_end_ns - step_start_ns) // 1000
+
+            # Queue depths at SchedulerOutput construction point
+            queue_running_depth = len(self.running)
+            queue_waiting_depth = len(self.waiting)
+
+            # Batch composition: count prefill vs decode requests
+            # Use scheduler's logic: num_output_tokens == 0 means prefill phase
+            # Build running_by_id dict once for O(1) lookups (avoids O(n²) complexity)
+            running_by_id = {req.request_id: req for req in self.running}
+
+            batch_num_prefill_reqs = 0
+            batch_num_decode_reqs = 0
+            batch_prefill_tokens = 0
+            batch_decode_tokens = 0
+
+            for req_id, num_tokens in output.num_scheduled_tokens.items():
+                request = running_by_id.get(req_id)
+                if request is not None:
+                    if request.num_output_tokens == 0:
+                        # Prefill phase
+                        batch_num_prefill_reqs += 1
+                        batch_prefill_tokens += num_tokens
+                    else:
+                        # Decode phase
+                        batch_num_decode_reqs += 1
+                        batch_decode_tokens += num_tokens
+
+            # Batch totals
+            batch_scheduled_tokens = output.total_num_scheduled_tokens
+            batch_num_finished = len(output.finished_req_ids)
+            batch_num_preempted = (
+                len(output.preempted_req_ids) if output.preempted_req_ids else 0
+            )
+
+            # KV cache metrics from BlockPool
+            block_pool = self.kv_cache_manager.block_pool
+            kv_usage_gpu_ratio = block_pool.get_usage()
+            kv_blocks_free_gpu = block_pool.get_num_free_blocks()
+            # Total GPU blocks (subtract 1 for null block)
+            kv_blocks_total_gpu = block_pool.num_gpu_blocks - 1
+
+            # Build attributes dict
+            attributes = {
+                SpanAttributes.STEP_ID: curr_step,
+                SpanAttributes.STEP_TS_START_NS: step_start_ns,
+                SpanAttributes.STEP_TS_END_NS: step_end_ns,
+                SpanAttributes.STEP_DURATION_US: step_duration_us,
+                SpanAttributes.QUEUE_RUNNING_DEPTH: queue_running_depth,
+                SpanAttributes.QUEUE_WAITING_DEPTH: queue_waiting_depth,
+                SpanAttributes.BATCH_NUM_PREFILL_REQS: batch_num_prefill_reqs,
+                SpanAttributes.BATCH_NUM_DECODE_REQS: batch_num_decode_reqs,
+                SpanAttributes.BATCH_SCHEDULED_TOKENS: batch_scheduled_tokens,
+                SpanAttributes.BATCH_PREFILL_TOKENS: batch_prefill_tokens,
+                SpanAttributes.BATCH_DECODE_TOKENS: batch_decode_tokens,
+                SpanAttributes.BATCH_NUM_FINISHED: batch_num_finished,
+                SpanAttributes.BATCH_NUM_PREEMPTED: batch_num_preempted,
+                SpanAttributes.KV_USAGE_GPU_RATIO: kv_usage_gpu_ratio,
+                SpanAttributes.KV_BLOCKS_TOTAL_GPU: kv_blocks_total_gpu,
+                SpanAttributes.KV_BLOCKS_FREE_GPU: kv_blocks_free_gpu,
+            }
+
+            # Emit event on long-lived scheduler_steps span
+            self._step_span.add_event("step.BATCH_SUMMARY", attributes=attributes)
+
+        except Exception as e:
+            # Tracing failures must not crash the scheduler
+            logger.debug("Failed to emit step batch summary: %s", e)
+
     def schedule(self) -> SchedulerOutput:
         # Increment the scheduler step counter at the start of each schedule call.
         # This ensures every scheduling iteration increments the counter,
         # including early returns and empty schedules.
         self.scheduler_step_counter += 1
         curr_step = self.scheduler_step_counter
+
+        # Capture step start timestamp for step tracing (only if enabled for zero overhead)
+        step_start_ns = time.monotonic_ns() if self._enable_step_tracing else 0
 
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -881,8 +1025,15 @@ class Scheduler(SchedulerInterface):
             )
             scheduler_output.ec_connector_metadata = ec_meta
 
+        # Emit step batch summary event if step tracing enabled and sampled
+        # IMPORTANT: Emit BEFORE _update_after_schedule() to capture state at
+        # SchedulerOutput construction point (as specified in plan)
+        if self._enable_step_tracing and self._step_sampler(curr_step, self._step_tracing_sample_rate):
+            self._emit_step_batch_summary(scheduler_output, curr_step, step_start_ns)
+
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
+
         return scheduler_output
 
     def _preempt_request(
