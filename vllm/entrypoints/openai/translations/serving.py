@@ -10,7 +10,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.translations.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,

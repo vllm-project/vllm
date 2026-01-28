@@ -4,7 +4,10 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     DeepGemmExperts,
     _valid_deep_gemm,
@@ -20,11 +23,18 @@ from vllm.utils.deep_gemm import (
 class TritonOrDeepGemmExperts(FallbackExperts):
     """DeepGemm with fallback to Triton for low latency shapes."""
 
-    def __init__(self, quant_config: FusedMoEQuantConfig):
+    def __init__(self, moe_config: FusedMoEConfig, quant_config: FusedMoEQuantConfig):
         super().__init__(
-            experts=DeepGemmExperts(quant_config),
-            fallback_experts=TritonExperts(quant_config),
+            experts=DeepGemmExperts(moe_config, quant_config),
+            fallback_experts=TritonExperts(moe_config, quant_config),
         )
+
+    @staticmethod
+    def get_clses() -> tuple[
+        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEPermuteExpertsUnpermute],
+    ]:
+        return (DeepGemmExperts, TritonExperts)
 
     def workspace_shapes(
         self,

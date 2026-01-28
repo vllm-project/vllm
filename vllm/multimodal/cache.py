@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
     from .processing.processor import ResolvedPromptUpdate
-    from .registry import MultiModalRegistry
 
 logger = init_logger(__name__)
 
@@ -296,6 +295,10 @@ class BaseMultiModalProcessorCache(
         """
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
 
+    def close(self) -> None:
+        """Close the underlying cache, if needed."""
+        pass
+
     @abstractmethod
     def touch_sender_cache_item(self, mm_hash: str) -> None:
         """
@@ -535,6 +538,10 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         return self._stat(delta=delta)
 
+    @override
+    def close(self) -> None:
+        self._shm_cache.close()
+
     def remove_dangling_items(self) -> None:
         """Remove items that are no longer in the shared memory cache."""
         cached_hashes = self._shm_cache.key_index.keys()
@@ -559,67 +566,6 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         )
         mm_item = MultiModalKwargsItem.from_elems([addr_elem, id_elem])
         return mm_item
-
-
-def _enable_processor_cache(
-    model_config: "ModelConfig",
-    mm_registry: "MultiModalRegistry",
-) -> bool:
-    if not mm_registry.supports_multimodal_inputs(model_config):
-        return False
-
-    mm_config = model_config.get_multimodal_config()
-    return mm_config.mm_processor_cache_gb > 0
-
-
-def _enable_ipc_cache(vllm_config: "VllmConfig") -> bool:
-    parallel_config = vllm_config.parallel_config
-    supports_ipc_cache = (
-        parallel_config._api_process_count == 1
-        and parallel_config.data_parallel_size == 1
-    ) or parallel_config.data_parallel_external_lb
-
-    return supports_ipc_cache
-
-
-def _enable_mm_input_shm_cache(vllm_config: "VllmConfig") -> bool:
-    """Whether the shared memory based cache should be enabled."""
-
-    if not _enable_ipc_cache(vllm_config):
-        return False
-
-    mm_config = vllm_config.model_config.get_multimodal_config()
-
-    return mm_config.mm_processor_cache_type == "shm"
-
-
-def processor_cache_from_config(
-    vllm_config: "VllmConfig",
-    mm_registry: "MultiModalRegistry",
-) -> BaseMultiModalProcessorCache | None:
-    """Return a `BaseMultiModalProcessorCache`, if enabled."""
-    model_config = vllm_config.model_config
-
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
-
-    if not _enable_ipc_cache(vllm_config):
-        return MultiModalProcessorOnlyCache(model_config)
-
-    if not _enable_mm_input_shm_cache(vllm_config):
-        return MultiModalProcessorSenderCache(model_config)
-    return ShmObjectStoreSenderCache(vllm_config)
-
-
-def processor_only_cache_from_config(
-    model_config: "ModelConfig",
-    mm_registry: "MultiModalRegistry",
-):
-    """Return a `MultiModalProcessorOnlyCache`, if enabled."""
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
-
-    return MultiModalProcessorOnlyCache(model_config)
 
 
 class BaseMultiModalReceiverCache(
@@ -780,50 +726,3 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
     @override
     def clear_cache(self) -> None:
         self._shm_cache.clear()
-
-
-def engine_receiver_cache_from_config(
-    vllm_config: "VllmConfig",
-    mm_registry: "MultiModalRegistry",
-) -> BaseMultiModalReceiverCache | None:
-    """
-    This is used in the engine process.
-    Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and
-    mm_processor_cache_type=="lru".
-    """
-    model_config = vllm_config.model_config
-
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
-
-    if not _enable_ipc_cache(vllm_config):
-        return None
-
-    if not _enable_mm_input_shm_cache(vllm_config):
-        return MultiModalReceiverCache(model_config)
-
-    return None
-
-
-def worker_receiver_cache_from_config(
-    vllm_config: "VllmConfig",
-    mm_registry: "MultiModalRegistry",
-    shared_worker_lock: LockType,
-) -> BaseMultiModalReceiverCache | None:
-    """
-    This is used in the worker process.
-    Return a `BaseMultiModalReceiverCache` only when IPC caching is enabled and
-    mm_processor_cache_type=="shm".
-    """
-    model_config = vllm_config.model_config
-
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
-
-    if not _enable_ipc_cache(vllm_config):
-        return None
-
-    if not _enable_mm_input_shm_cache(vllm_config):
-        return None
-
-    return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)

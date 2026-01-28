@@ -19,8 +19,6 @@ from vllm.multimodal.cache import (
     MultiModalReceiverCache,
     ShmObjectStoreReceiverCache,
     ShmObjectStoreSenderCache,
-    engine_receiver_cache_from_config,
-    processor_cache_from_config,
 )
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (
@@ -132,10 +130,10 @@ def _compare_caches(
     n_iter: int = 100,
     seed: int = 0,
 ):
-    cache_0_p0 = processor_cache_from_config(config_0, MULTIMODAL_REGISTRY)
-    cache_0_p1 = engine_receiver_cache_from_config(config_0, MULTIMODAL_REGISTRY)
-    cache_1_p0 = processor_cache_from_config(config_1, MULTIMODAL_REGISTRY)
-    cache_1_p1 = engine_receiver_cache_from_config(config_1, MULTIMODAL_REGISTRY)
+    cache_0_p0 = MULTIMODAL_REGISTRY.processor_cache_from_config(config_0)
+    cache_0_p1 = MULTIMODAL_REGISTRY.engine_receiver_cache_from_config(config_0)
+    cache_1_p0 = MULTIMODAL_REGISTRY.processor_cache_from_config(config_1)
+    cache_1_p1 = MULTIMODAL_REGISTRY.engine_receiver_cache_from_config(config_1)
 
     cache_size_gb = max(
         config_0.model_config.multimodal_config.mm_processor_cache_gb,

@@ -7,12 +7,11 @@ from dataclasses import dataclass, field
 import torch
 from typing_extensions import deprecated
 
-from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
@@ -28,16 +27,15 @@ class MultiModalBudget:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        scheduler_config: SchedulerConfig,
+        vllm_config: VllmConfig,
         mm_registry: MultiModalRegistry,
     ) -> None:
         super().__init__()
 
-        self.model_config = model_config
-        self.scheduler_config = scheduler_config
+        self.model_config = model_config = vllm_config.model_config
+        self.scheduler_config = scheduler_config = vllm_config.scheduler_config
         self.mm_registry = mm_registry
-        self.cache = cache = processor_only_cache_from_config(model_config, mm_registry)
+        self.cache = cache = mm_registry.processor_only_cache_from_config(vllm_config)
 
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -354,8 +352,8 @@ def bind_kv_cache(
                 pass
             else:
                 raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():

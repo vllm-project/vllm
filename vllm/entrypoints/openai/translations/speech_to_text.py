@@ -4,6 +4,7 @@ import asyncio
 import io
 import math
 import time
+import zlib
 from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
 from typing import Literal, TypeAlias, TypeVar, cast
@@ -22,7 +23,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.translations.protocol import (
     TranscriptionResponse,
     TranscriptionResponseStreamChoice,
@@ -38,6 +39,7 @@ from vllm.entrypoints.openai.translations.protocol import (
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
+from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription, supports_transcription
 from vllm.outputs import RequestOutput
 from vllm.tokenizers import get_tokenizer
@@ -317,6 +319,7 @@ class OpenAISpeechToText(OpenAIServing):
     def _get_verbose_segments(
         self,
         tokens: tuple,
+        log_probs: FlatLogprobs | list[dict[int, Logprob]],
         request: SpeechToTextRequest,
         segment_class: type[SpeechToTextSegment],
         start_time: float = 0,
@@ -329,8 +332,7 @@ class OpenAISpeechToText(OpenAIServing):
         If the tokens do not include timestamp information,
         the segments may not be generated correctly.
 
-        Note: Fields like avg_logprob, compression_ratio,
-        and no_speech_prob are not supported
+        Note: No_speech_prob field is not supported
         in this implementation and will be None. See docs for details.
         """
         BASE_OFFSET = 0.02
@@ -344,17 +346,17 @@ class OpenAISpeechToText(OpenAIServing):
 
         if tokens_with_start[-2] < init_token and tokens_with_start[-1] >= init_token:
             tokens_with_start = tokens_with_start + (tokens_with_start[-1],)
-        for idx, token in enumerate(tokens_with_start):
+        avg_logprob = 0.0
+        for idx in range(1, len(tokens_with_start)):
             # Timestamp tokens (e.g., <|0.00|>) are assumed to be sorted.
             # If the ordering is violated, this slicing may produce incorrect results.
-            if (
-                token >= init_token
-                and idx != 0
-                and tokens_with_start[idx - 1] >= init_token
-            ):
+            token = tokens_with_start[idx]
+            if token >= init_token and tokens_with_start[idx - 1] >= init_token:
                 sliced_timestamp_tokens = tokens_with_start[last_timestamp_start:idx]
                 start_timestamp = sliced_timestamp_tokens[0] - init_token
                 end_timestamp = sliced_timestamp_tokens[-1] - init_token
+                text = self.tokenizer.decode(sliced_timestamp_tokens[1:-1])
+                text_bytes = text.encode("utf-8")
 
                 casting_segment = cast(
                     SpeechToTextSegment,
@@ -364,12 +366,22 @@ class OpenAISpeechToText(OpenAIServing):
                         start=start_time + BASE_OFFSET * start_timestamp,
                         end=start_time + BASE_OFFSET * end_timestamp,
                         temperature=request.temperature,
-                        text=self.tokenizer.decode(sliced_timestamp_tokens[1:-1]),
+                        text=text,
+                        # The compression ratio measures
+                        # how compressible the generated text is.
+                        # A higher ratio indicates more repetitive content,
+                        # which is a strong sign of hallucination in outputs.
+                        compression_ratio=len(text_bytes)
+                        / len(zlib.compress(text_bytes)),
                         tokens=sliced_timestamp_tokens[1:-1],
+                        avg_logprob=avg_logprob / (idx - last_timestamp_start),
                     ),
                 )
                 segments.append(casting_segment)
                 last_timestamp_start = idx
+                avg_logprob = 0
+            else:
+                avg_logprob += log_probs[idx - 1][token].logprob
         return segments
 
     async def _create_speech_to_text(
@@ -394,8 +406,8 @@ class OpenAISpeechToText(OpenAIServing):
 
         if request.response_format not in ["text", "json", "verbose_json"]:
             return self.create_error_response(
-                ("Currently only support response_format")
-                + ("`text`, `json` or `verbose_json`")
+                "Currently only support response_format: "
+                "`text`, `json` or `verbose_json`"
             )
 
         if (
@@ -443,6 +455,8 @@ class OpenAISpeechToText(OpenAIServing):
             sampling_params = request.to_sampling_params(
                 default_max_tokens, self.default_sampling_params
             )
+            if request.response_format == "verbose_json":
+                sampling_params.logprobs = 1
 
             self._log_inputs(
                 request_id,
@@ -490,12 +504,14 @@ class OpenAISpeechToText(OpenAIServing):
                 )
                 async for op in result_generator:
                     if request.response_format == "verbose_json":
+                        assert op.outputs[0].logprobs
                         segments: list[SpeechToTextSegment] = (
                             self._get_verbose_segments(
                                 tokens=tuple(op.outputs[0].token_ids),
                                 segment_class=segment_class,
                                 request=request,
                                 start_time=start_time,
+                                log_probs=op.outputs[0].logprobs,
                             )
                         )
 
