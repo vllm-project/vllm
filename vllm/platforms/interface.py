@@ -270,10 +270,6 @@ class Platform:
         return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
-    def use_fp8_woq(cls) -> bool:
-        return False
-
-    @classmethod
     def get_device_capability(
         cls,
         device_id: int = 0,

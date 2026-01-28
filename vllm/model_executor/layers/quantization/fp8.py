@@ -45,9 +45,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.kernels.fp8_w8a16 import (
-    init_wfp8a16_kernels,
-)
+
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
@@ -63,7 +61,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     maybe_post_process_fp8_weight_block,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_block_strategy,
-    process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
     validate_fp8_block_shape,
 )
@@ -306,32 +303,16 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
-        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-        self.out_dtype = torch.get_default_dtype()
-
-        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
-        # kernel for fast weight-only FP8 quantization
-        self.marlin_input_dtype = None
-        self.use_fp8_woq = current_platform.use_fp8_woq()
-        if vllm_is_batch_invariant():
-            self.use_fp8_woq = False
-
-        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
-        self.use_deep_gemm = is_deep_gemm_supported()
 
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
 
-        if self.use_fp8_woq:
-            self.fp8_w8a16_linear = init_wfp8a16_kernels(
-                weight_quant_key=kFp8StaticTensorSym,
-                input_dtype=self.marlin_input_dtype,
-                module_name=self.__class__.__name__,
-            )
-        elif self.block_quant:
+        if self.block_quant:
             assert not self.act_q_static
             assert self.weight_block_size is not None
+            self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
+            self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
                 weight_group_shape=GroupShape(*self.weight_block_size),
                 act_quant_group_shape=GroupShape(1, self.weight_block_size[0]),
@@ -346,8 +327,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 activation_quant_key = kFp8DynamicTokenSym
             else:
                 activation_quant_key = kFp8DynamicTensorSym
-
-            self.fp8_linear = init_fp8_linear_kernel(
+            self.kernel = init_fp8_linear_kernel(
                 activation_quant_key=activation_quant_key,
                 weight_quant_key=kFp8StaticTensorSym,
                 out_dtype=torch.get_default_dtype(),
@@ -421,7 +401,6 @@ class Fp8LinearMethod(LinearMethodBase):
             layer.register_parameter("input_scale", scale)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        input_scale = None
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
             assert not self.act_q_static
@@ -433,45 +412,9 @@ class Fp8LinearMethod(LinearMethodBase):
             # Update layer with new values
             replace_parameter(layer, "weight", weight.data)
             replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
-
-        # If checkpoint not serialized fp8, quantize the weights.
-        else:
-            # If checkpoint is fp8 per-tensor, handle that there are N scales for N
-            # shards in a fused module
-            weight = layer.weight
-            weight_scale = layer.weight_scale
-
-            # If using w8a8, torch._scaled_mm needs per tensor, so
-            # requantize the logical shards as a single weight.
-            if not self.use_fp8_woq:
-                weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
-                    weight,
-                    weight_scale,
-                    layer.logical_widths,
-                    getattr(layer, "input_scale", None),
-                )
-                if self.act_q_static:
-                    assert input_scale is not None
-                    input_scale = input_scale.max()
-            weight = weight.t()
-
-            # Update layer with new values.
-            replace_parameter(layer, "weight", weight.data)
-            replace_parameter(layer, "weight_scale", weight_scale.data)
-
-        if input_scale is not None:
-            replace_parameter(layer, "input_scale", input_scale)
-        else:
-            layer.input_scale = None
-
-        if self.use_fp8_woq:
-            self.fp8_w8a16_linear.process_weights_after_loading(layer)
-            # Activations not quantized for marlin.
-            del layer.input_scale
-            return
-
-        if self.block_quant:
             maybe_post_process_fp8_weight_block(layer)
+        else:
+            self.kernel.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -479,52 +422,8 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
-        # we will use BF16 dequant when DeepGEMM is not supported.
-        if vllm_is_batch_invariant():
-            if self.block_quant:
-                assert self.weight_block_size is not None
-                return self.w8a8_block_fp8_linear.apply(
-                    input=x,
-                    weight=layer.weight,
-                    weight_scale=layer.weight_scale_inv,
-                    input_scale=layer.input_scale,
-                    bias=bias,
-                )
-            else:
-                # per-tensor/channel: dequant to BF16 and run GEMM
-                weight_fp8 = layer.weight.to(torch.bfloat16)
-                weight_scale = layer.weight_scale.to(torch.bfloat16)
-                if weight_scale.numel() == 1:
-                    # Per-tensor: simple scalar multiplication
-                    weight_bf16 = weight_fp8 * weight_scale
-                else:
-                    # Multiple scales (fused modules like QKV)
-                    # Try to infer correct broadcasting
-                    # weight is [K, N], scale could be [num_logical_weights]
-                    # Need to figure out how to broadcast - for now just try
-                    # direct multiplication
-                    if (
-                        weight_scale.dim() == 1
-                        and weight_scale.shape[0] == weight_fp8.shape[0]
-                    ):
-                        # Per-row scaling
-                        weight_bf16 = weight_fp8 * weight_scale.unsqueeze(1)
-                    else:
-                        # Fallback
-                        weight_bf16 = weight_fp8 * weight_scale
-                return torch.nn.functional.linear(x, weight_bf16.t(), bias)
-
-        if self.use_fp8_woq:
-            return self.fp8_w8a16_linear.apply_weights(
-                layer,
-                x,
-                bias,
-            )
-
         if self.block_quant:
             assert self.weight_block_size is not None
-
             return self.w8a8_block_fp8_linear.apply(
                 input=x,
                 weight=layer.weight,
@@ -533,7 +432,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias,
             )
 
-        return self.fp8_linear.apply_weights(layer, x, bias)
+        return self.kernel.apply_weights(layer, x, bias)
 
 
 class Fp8OnlineLinearMethod(Fp8LinearMethod):
@@ -610,10 +509,6 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         # Update layer with new values.
         replace_parameter(layer, "weight", weight.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
-
-        if self.use_fp8_woq:
-            # Activations not quantized for woq.
-            self.fp8_w8a16_linear.process_weights_after_loading(layer)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -938,9 +833,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # TODO(rob): convert this to MK.
         if layer.enable_eplb:
             raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
-        assert layer.activation == "silu", (
-            f"Expected 'silu' activation but got {layer.activation}"
-        )
+        assert (
+            layer.activation == "silu"
+        ), f"Expected 'silu' activation but got {layer.activation}"
 
         if self.block_quant:
             import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
@@ -952,9 +847,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
             routing_method_type = layer.routing_method_type
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                routing_logits=router_logits.to(torch.float32)
-                if routing_method_type == RoutingMethodType.DeepSeekV3
-                else router_logits,
+                routing_logits=(
+                    router_logits.to(torch.float32)
+                    if routing_method_type == RoutingMethodType.DeepSeekV3
+                    else router_logits
+                ),
                 routing_bias=e_score_correction_bias,
                 x=x,
                 w13_weight=layer.w13_weight,
