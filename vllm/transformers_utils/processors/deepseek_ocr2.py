@@ -4,138 +4,20 @@
 import math
 
 import torch
-import torchvision.transforms as T
 from PIL import Image, ImageOps
 from transformers import AutoProcessor, BatchFeature, LlamaTokenizerFast
 from transformers.processing_utils import ProcessorMixin
 
-# TODO(Isotr0py): change modes for variants
-# see: https://github.com/deepseek-ai/DeepSeek-OCR/blob/8cf003d38821fa1b19c73da3bd1b0dc262ea8136/DeepSeek-OCR-master/DeepSeek-OCR-vllm/config.py#L1-L6
-# Tiny: base_size = 512, image_size = 512, crop_mode = False
-# Small: base_size = 768, image_size = 768, crop_mode = False
-# Base: base_size = 1024, image_size = 1024, crop_mode = False
-# Large: base_size = 1280, image_size = 1280, crop_mode = False
-# Gundam: base_size = 1024, image_size = 768, crop_mode = True
+from vllm.transformers_utils.processors.deepseek_ocr import (
+    ImageTransform,
+    dynamic_preprocess,
+)
+
 BASE_SIZE = 1024
 IMAGE_SIZE = 768
 CROP_MODE = True
-
-# TODO(Isotr0py): Expose as mm_kwargs
 MIN_CROPS = 2
-MAX_CROPS = 6  # max:9; If your GPU memory is small, it is recommended to set it to 6.
-
-
-def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height, image_size):
-    best_ratio_diff = float("inf")
-    best_ratio = (1, 1)
-    area = width * height
-    for ratio in target_ratios:
-        target_aspect_ratio = ratio[0] / ratio[1]
-        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
-        if ratio_diff < best_ratio_diff:
-            best_ratio_diff = ratio_diff
-            best_ratio = ratio
-        elif ratio_diff == best_ratio_diff:
-            if area > 0.5 * image_size * image_size * ratio[0] * ratio[1]:
-                best_ratio = ratio
-    return best_ratio
-
-
-def calculate_aspect_ratios(
-    min_num: int = MIN_CROPS, max_num: int = MAX_CROPS
-) -> list[tuple[int, int]]:
-    target_ratios: set[tuple[int, int]] = set(
-        (i, j)
-        for n in range(min_num, max_num + 1)
-        for i in range(1, n + 1)
-        for j in range(1, n + 1)
-        if i * j <= max_num and i * j >= min_num
-    )
-    sorted_target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
-    return sorted_target_ratios
-
-
-def count_tiles(
-    orig_width,
-    orig_height,
-    min_num=MIN_CROPS,
-    max_num=MAX_CROPS,
-    image_size=768,
-    use_thumbnail=False,
-):
-    aspect_ratio = orig_width / orig_height
-
-    # calculate the existing image aspect ratio
-    target_ratios = calculate_aspect_ratios(min_num, max_num)
-
-    # find the closest aspect ratio to the target
-    target_aspect_ratio = find_closest_aspect_ratio(
-        aspect_ratio, target_ratios, orig_width, orig_height, image_size
-    )
-
-    return target_aspect_ratio
-
-
-def dynamic_preprocess(
-    image, min_num=MIN_CROPS, max_num=MAX_CROPS, image_size=768, use_thumbnail=False
-):
-    orig_width, orig_height = image.size
-    aspect_ratio = orig_width / orig_height
-
-    # calculate the existing image aspect ratio
-    target_ratios = calculate_aspect_ratios(min_num, max_num)
-
-    # find the closest aspect ratio to the target
-    target_aspect_ratio = find_closest_aspect_ratio(
-        aspect_ratio, target_ratios, orig_width, orig_height, image_size
-    )
-
-    # calculate the target width and height
-    target_width = image_size * target_aspect_ratio[0]
-    target_height = image_size * target_aspect_ratio[1]
-    blocks = target_aspect_ratio[0] * target_aspect_ratio[1]
-
-    # resize the image
-    resized_img = image.resize((target_width, target_height))
-    processed_images = []
-    for i in range(blocks):
-        box = (
-            (i % (target_width // image_size)) * image_size,
-            (i // (target_width // image_size)) * image_size,
-            ((i % (target_width // image_size)) + 1) * image_size,
-            ((i // (target_width // image_size)) + 1) * image_size,
-        )
-        # split the image
-        split_img = resized_img.crop(box)
-        processed_images.append(split_img)
-    assert len(processed_images) == blocks
-    if use_thumbnail and len(processed_images) != 1:
-        thumbnail_img = image.resize((image_size, image_size))
-        processed_images.append(thumbnail_img)
-    return processed_images, target_aspect_ratio
-
-
-class ImageTransform:
-    def __init__(
-        self,
-        mean: tuple[float, float, float] = (0.5, 0.5, 0.5),
-        std: tuple[float, float, float] = (0.5, 0.5, 0.5),
-        normalize: bool = True,
-    ):
-        self.mean = mean
-        self.std = std
-        self.normalize = normalize
-
-        transform_pipelines = [T.ToTensor()]
-
-        if normalize:
-            transform_pipelines.append(T.Normalize(mean, std))
-
-        self.transform = T.Compose(transform_pipelines)
-
-    def __call__(self, pil_img: Image.Image):
-        x = self.transform(pil_img)
-        return x
+MAX_CROPS = 6
 
 
 class DeepseekOCR2Processor(ProcessorMixin):
