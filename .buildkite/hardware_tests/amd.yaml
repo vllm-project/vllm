@@ -1,7 +1,7 @@
 group: Hardware
 steps:
   - label: "AMD: :docker: build image"
-    depends_on: ~
+    depends_on: []
     device: amd_cpu
     no_plugin: true
     commands:

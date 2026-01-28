@@ -14,7 +14,8 @@ steps:
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
 - label: Multi-Modal Processor Test (CPU)
-  depends_on: image-build-cpu
+  depends_on: 
+  - image-build-cpu
   timeout_in_minutes: 60
   source_file_dependencies:
   - vllm/
