@@ -23,9 +23,7 @@ class StructuredOutputsWorker:
             (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
         )
         self.device = device
-
         self.copy_stream = torch.cuda.Stream()
-        self.event = torch.cuda.Event()
 
     def apply_grammar_bitmask(
         self,
@@ -36,10 +34,6 @@ class StructuredOutputsWorker:
     ) -> None:
         if not grammar_req_ids:
             return
-
-        # NOTE: We should wait for any previous kernel using the bitmask buffer
-        # to complete before overwriting it.
-        self.copy_stream.wait_event(self.event)
 
         # Asynchronously copy the bitmask to GPU.
         with torch.cuda.stream(self.copy_stream):
