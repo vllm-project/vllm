@@ -17,6 +17,7 @@ import torch
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -568,6 +569,35 @@ class BaseProcessingInfo:
         specific kwargs from model config or user inputs.
         """
         return self.ctx.get_hf_processor(**kwargs)
+
+    def _get_expected_hidden_size(self) -> int | None:
+        """
+        Get expected hidden size for embedding validation if `mm_embeds` are enabled.
+
+        This validates hidden dimensions to prevent a vulnerability where embeddings
+        with correct `ndim` but wrong `shape` could cause crashes at inference time.
+        """
+        model_config = self.ctx.model_config
+        mm_config = model_config.get_multimodal_config()
+
+        if mm_config.enable_mm_embeds:
+            return model_config.get_inputs_embeds_size()
+
+        return None
+
+    def get_data_parser(self) -> MultiModalDataParser:
+        """
+        Constructs a parser to preprocess multi-modal data items
+        before passing them to
+        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+
+        You can support additional modalities by creating a subclass
+        of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
+        that has additional subparsers.
+        """
+        return MultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
 
     @property
     def skip_prompt_length_check(self) -> bool:

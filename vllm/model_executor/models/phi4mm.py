@@ -568,6 +568,15 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
     def get_feature_extractor(self, **kwargs: object) -> SequenceFeatureExtractor:
         return self.get_hf_processor(**kwargs).audio_processor
 
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            audio_resample_method="scipy",
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None}
 
@@ -844,12 +853,6 @@ class Phi4MMDummyInputsBuilder(BaseDummyInputsBuilder[Phi4MMProcessingInfo]):
 
 
 class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate, audio_resample_method="scipy"
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,

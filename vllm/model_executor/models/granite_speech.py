@@ -109,6 +109,14 @@ class GraniteSpeechAudioInputs(TensorSchema):
 
 
 class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
+    def get_data_parser(self):
+        feature_extractor = self.get_hf_processor().audio_processor
+
+        return MultiModalDataParser(
+            target_sr=feature_extractor.melspec_kwargs["sample_rate"],
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
@@ -127,11 +135,6 @@ class GraniteSpeechMultiModalProcessingInfo(BaseProcessingInfo):
 class GraniteSpeechMultiModalProcessor(
     BaseMultiModalProcessor[GraniteSpeechMultiModalProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_hf_processor().audio_processor
-        sampling_rate = feature_extractor.melspec_kwargs["sample_rate"]
-        return MultiModalDataParser(target_sr=sampling_rate)
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

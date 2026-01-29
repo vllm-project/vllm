@@ -984,6 +984,11 @@ class KeyeProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_data_parser(self):
+        return KeyeMultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(
         self,
     ) -> Mapping[str, int | None]:
@@ -1183,13 +1188,11 @@ class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         return mm_data
 
 
-class KeyeDummyInputsBuilder(KeyeBaseDummyInputsBuilder[KeyeProcessingInfo]): ...
+class KeyeDummyInputsBuilder(KeyeBaseDummyInputsBuilder[KeyeProcessingInfo]):
+    pass
 
 
 class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return KeyeMultiModalDataParser()
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,

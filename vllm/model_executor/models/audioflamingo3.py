@@ -192,6 +192,22 @@ class AudioFlamingo3MultiModalProjector(nn.Module):
         return hidden_states
 
 
+class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
+    def _parse_audio_data(
+        self,
+        data: dict[str, torch.Tensor] | ModalityData[Any],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="audio",
+                required_fields={"audio_embeds"},
+                fields_factory=_audioflamingo3_field_config,
+            )
+
+        return super()._parse_audio_data(data)
+
+
 class AudioFlamingo3ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(AudioFlamingo3Config)
@@ -203,6 +219,14 @@ class AudioFlamingo3ProcessingInfo(BaseProcessingInfo):
         hf_processor = self.get_hf_processor(**kwargs)
         feature_extractor = hf_processor.feature_extractor
         return feature_extractor
+
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return AudioFlamingo3MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
@@ -259,30 +283,9 @@ def _audioflamingo3_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     )
 
 
-class AudioFlamingo3MultiModalDataParser(MultiModalDataParser):
-    def _parse_audio_data(
-        self,
-        data: dict[str, torch.Tensor] | ModalityData[Any],
-    ) -> ModalityDataItems[Any, Any] | None:
-        if isinstance(data, dict):
-            return DictEmbeddingItems(
-                data,
-                modality="audio",
-                required_fields={"audio_embeds"},
-                fields_factory=_audioflamingo3_field_config,
-            )
-        return super()._parse_audio_data(data)
-
-
 class AudioFlamingo3MultiModalProcessor(
     BaseMultiModalProcessor[AudioFlamingo3ProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return AudioFlamingo3MultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,

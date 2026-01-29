@@ -806,6 +806,12 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_data_parser(self):
+        return Qwen2VLMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
@@ -1039,11 +1045,6 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
 
 
 class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return Qwen2VLMultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size
-        )
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
