@@ -1698,6 +1698,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
     forward_includes_kv_cache_update: bool = True
 
     def __init__(self, *args, **kwargs) -> None:
