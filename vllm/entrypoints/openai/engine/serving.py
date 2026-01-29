@@ -446,7 +446,7 @@ class OpenAIServing:
                 context=parent_context,
                 start_time=time.time_ns(),
             )
-            logger.info(
+            logger.debug(
                 "Created API span 'llm_request' for request %s (scope=vllm.api)",
                 request_id
             )

@@ -140,10 +140,7 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
     headers = headers or {}
 
     if "traceparent" in headers:
-        logger.debug(
-            "Extracting trace context from headers: traceparent=%s",
-            headers.get("traceparent", "N/A")
-        )
+        logger.debug("Extracting trace context from headers (traceparent present)")
     else:
         logger.debug("No traceparent header found in request")
 
@@ -191,10 +188,7 @@ def inject_trace_context(span, carrier: dict[str, str] | None = None) -> dict[st
         context = trace.set_span_in_context(span)
         TraceContextTextMapPropagator().inject(carrier, context=context)
 
-        logger.debug(
-            "Injected trace context into carrier: traceparent=%s",
-            carrier.get("traceparent", "N/A")
-        )
+        logger.debug("Injected trace context into carrier (traceparent set)")
 
         return carrier
     except Exception as e:

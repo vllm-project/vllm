@@ -1853,7 +1853,7 @@ class Scheduler(SchedulerInterface):
                 start_time=time.time_ns(),
             )
 
-            logger.info(
+            logger.debug(
                 "Created core span 'llm_core' for request %s (scope=vllm.scheduler, parent_context=%s)",
                 request.request_id,
                 parent_context is not None
