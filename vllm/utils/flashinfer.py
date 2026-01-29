@@ -409,7 +409,7 @@ if has_flashinfer():
         use_8x4_sf_layout: bool,
         backend: str,
     ) -> torch.Tensor:
-        from flashinfer.gemm import mm_fp4 as flashinfer_mm_fp4_
+        from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
         return flashinfer_mm_fp4_(
             A,
