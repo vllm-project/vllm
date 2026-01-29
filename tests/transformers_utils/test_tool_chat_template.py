@@ -66,23 +66,25 @@ class TestToolChatTemplate:
 
         # Test with a tool that has parentheses in the description
         # This is the exact case from issue #32827
-        tools = [{
-            "type": "function",
-            "function": {
-                "name": "test",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The complete command to execute "
-                                         "(e.g. ls -la, ssh user@host, cat file.txt)"
-                        }
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "test",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "description": "The complete command to execute "
+                                "(e.g. ls -la, ssh user@host, cat file.txt)",
+                            }
+                        },
+                        "required": ["command"],
                     },
-                    "required": ["command"]
-                }
+                },
             }
-        }]
+        ]
 
         messages = [{"role": "user", "content": "hello"}]
 
