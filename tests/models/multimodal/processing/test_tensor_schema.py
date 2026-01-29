@@ -119,7 +119,11 @@ def create_batched_mm_kwargs(
     )["mm_kwargs"].require_data()
 
     return group_mm_kwargs_by_modality(
-        [item for modality in supported_mm_limits for item in mm_kwargs[modality]]
+        [
+            (modality, item)
+            for modality in supported_mm_limits
+            for item in mm_kwargs[modality]
+        ]
     )
 
 
