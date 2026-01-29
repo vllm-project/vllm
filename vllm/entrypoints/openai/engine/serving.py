@@ -405,7 +405,7 @@ class OpenAIServing:
             from vllm.tracing import SpanAttributes, extract_trace_context
             from opentelemetry.trace import SpanKind, get_tracer_provider
         except ImportError as e:
-            logger.warning(
+            logger.debug(
                 "Failed to import OpenTelemetry for request %s: %s",
                 request_id,
                 e
