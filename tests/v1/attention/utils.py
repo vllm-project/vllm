@@ -352,7 +352,6 @@ full_cg_backend_configs = {
         name="RocmAttn",
         attention_config={
             "backend": "ROCM_ATTN",
-            "use_prefill_decode_attention": True,
         },
         comp_config={
             "cudagraph_mode": "FULL",

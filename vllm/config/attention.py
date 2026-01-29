@@ -22,10 +22,6 @@ class AttentionConfig:
     """Force vllm to use a specific flash-attention version (2 or 3).
     Only valid when using the flash-attention backend."""
 
-    use_prefill_decode_attention: bool = False
-    """Use separate prefill and decode kernels for attention instead of
-    the unified triton kernel."""
-
     flash_attn_max_num_splits_for_cuda_graph: int = 32
     """Flash Attention max number splits for cuda graph decode."""
 

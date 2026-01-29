@@ -330,8 +330,6 @@ def test_attention_config():
             "FLASH_ATTN",
             "--attention-config.flash_attn_version",
             "3",
-            "--attention-config.use_prefill_decode_attention",
-            "true",
             "--attention-config.flash_attn_max_num_splits_for_cuda_graph",
             "16",
             "--attention-config.use_cudnn_prefill",
@@ -351,7 +349,6 @@ def test_attention_config():
     assert engine_args.attention_config.backend is not None
     assert engine_args.attention_config.backend.name == "FLASH_ATTN"
     assert engine_args.attention_config.flash_attn_version == 3
-    assert engine_args.attention_config.use_prefill_decode_attention is True
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 16
     assert engine_args.attention_config.use_cudnn_prefill is True
     assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is True
@@ -364,7 +361,6 @@ def test_attention_config():
         [
             "--attention-config="
             '{"backend": "FLASHINFER", "flash_attn_version": 2, '
-            '"use_prefill_decode_attention": false, '
             '"flash_attn_max_num_splits_for_cuda_graph": 8, '
             '"use_cudnn_prefill": false, '
             '"use_trtllm_ragged_deepseek_prefill": false, '
@@ -378,7 +374,6 @@ def test_attention_config():
     assert engine_args.attention_config.backend is not None
     assert engine_args.attention_config.backend.name == "FLASHINFER"
     assert engine_args.attention_config.flash_attn_version == 2
-    assert engine_args.attention_config.use_prefill_decode_attention is False
     assert engine_args.attention_config.flash_attn_max_num_splits_for_cuda_graph == 8
     assert engine_args.attention_config.use_cudnn_prefill is False
     assert engine_args.attention_config.use_trtllm_ragged_deepseek_prefill is False
