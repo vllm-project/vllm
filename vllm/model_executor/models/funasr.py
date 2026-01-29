@@ -1260,4 +1260,5 @@ def _create_fake_bias_for_k_proj(
             bias = torch.zeros(weight.size(0))
             bias_name = name.replace("weight", "bias")
             yield from [(name, weight), (bias_name, bias)]
-        yield name, weight
+        else:
+            yield name, weight
