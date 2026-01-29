@@ -384,6 +384,33 @@ class W8A8BlockFp8LinearOp:
             else None
         )
 
+    def _pad_k_to_block_size(
+        self,
+        input_2d: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Pad K dimension to multiple of block size if needed.
+
+        This handles models like DeepSeek-V2-Lite where intermediate_size
+        (10944) is not divisible by the block size (128).
+        """
+        block_k = self.act_quant_group_shape.col
+        k = input_2d.shape[-1]
+        if k % block_k != 0:
+            pad_k = block_k - (k % block_k)
+            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
+            weight = torch.nn.functional.pad(weight, (0, pad_k))
+            # Pad weight scale for the new K blocks
+            orig_k_blocks = triton.cdiv(k, block_k)
+            new_k_blocks = triton.cdiv(k + pad_k, block_k)
+            extra_k_blocks = new_k_blocks - orig_k_blocks
+            if extra_k_blocks > 0:
+                weight_scale = torch.nn.functional.pad(
+                    weight_scale, (0, extra_k_blocks)
+                )
+        return input_2d, weight, weight_scale
+
     def apply(
         self,
         input: torch.Tensor,
@@ -424,23 +451,9 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
-        # Pad K dimension to multiple of block size if needed.
-        # This handles models like DeepSeek-V2-Lite where intermediate_size
-        # (10944) is not divisible by the block size (128).
-        block_k = self.act_quant_group_shape.col
-        k = input_2d.shape[-1]
-        if k % block_k != 0:
-            pad_k = block_k - (k % block_k)
-            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
-            weight = torch.nn.functional.pad(weight, (0, pad_k))
-            # Pad weight scale for the new K blocks
-            orig_k_blocks = triton.cdiv(k, block_k)
-            new_k_blocks = triton.cdiv(k + pad_k, block_k)
-            extra_k_blocks = new_k_blocks - orig_k_blocks
-            if extra_k_blocks > 0:
-                weight_scale = torch.nn.functional.pad(
-                    weight_scale, (0, extra_k_blocks)
-                )
+        input_2d, weight, weight_scale = self._pad_k_to_block_size(
+            input_2d, weight, weight_scale
+        )
 
         if DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0:
             q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
@@ -471,21 +484,9 @@ class W8A8BlockFp8LinearOp:
         assert input_scale is None
         assert self.input_quant_op is not None
 
-        # Pad K dimension to multiple of block size if needed.
-        block_k = self.act_quant_group_shape.col
-        k = input_2d.shape[-1]
-        if k % block_k != 0:
-            pad_k = block_k - (k % block_k)
-            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
-            weight = torch.nn.functional.pad(weight, (0, pad_k))
-            # Pad weight scale for the new K blocks
-            orig_k_blocks = triton.cdiv(k, block_k)
-            new_k_blocks = triton.cdiv(k + pad_k, block_k)
-            extra_k_blocks = new_k_blocks - orig_k_blocks
-            if extra_k_blocks > 0:
-                weight_scale = torch.nn.functional.pad(
-                    weight_scale, (0, extra_k_blocks)
-                )
+        input_2d, weight, weight_scale = self._pad_k_to_block_size(
+            input_2d, weight, weight_scale
+        )
 
         q_input, input_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
@@ -559,24 +560,9 @@ class W8A8BlockFp8LinearOp:
         assert input_scale is None
         assert self.input_quant_op is not None
 
-        # Pad K dimension to multiple of block size if needed for Triton kernel.
-        # This handles models like DeepSeek-V2-Lite where intermediate_size
-        # (10944) is not divisible by the block size (128).
-        block_k = self.act_quant_group_shape.col
-        k = input_2d.shape[-1]
-        if k % block_k != 0:
-            pad_k = block_k - (k % block_k)
-            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
-            weight = torch.nn.functional.pad(weight, (0, pad_k))
-            # Compute how many additional K-blocks we need after padding.
-            # Original: ceil(k/block_k), padded: ceil((k+pad_k)/block_k)
-            orig_k_blocks = triton.cdiv(k, block_k)
-            new_k_blocks = triton.cdiv(k + pad_k, block_k)
-            extra_k_blocks = new_k_blocks - orig_k_blocks
-            if extra_k_blocks > 0:
-                weight_scale = torch.nn.functional.pad(
-                    weight_scale, (0, extra_k_blocks)
-                )
+        input_2d, weight, weight_scale = self._pad_k_to_block_size(
+            input_2d, weight, weight_scale
+        )
 
         q_input, input_scale = self.input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
@@ -600,21 +586,9 @@ class W8A8BlockFp8LinearOp:
         This backend uses TensorRT-LLM's FP8 block-scale GEMM kernels
         and supports FP8+FP8 (W8A8 full quantization) on SM90+ (Hopper).
         """
-        # Pad K dimension to multiple of block size if needed.
-        block_k = self.act_quant_group_shape.col
-        k = input_2d.shape[-1]
-        if k % block_k != 0:
-            pad_k = block_k - (k % block_k)
-            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
-            weight = torch.nn.functional.pad(weight, (0, pad_k))
-            # Pad weight scale for the new K blocks
-            orig_k_blocks = triton.cdiv(k, block_k)
-            new_k_blocks = triton.cdiv(k + pad_k, block_k)
-            extra_k_blocks = new_k_blocks - orig_k_blocks
-            if extra_k_blocks > 0:
-                weight_scale = torch.nn.functional.pad(
-                    weight_scale, (0, extra_k_blocks)
-                )
+        input_2d, weight, weight_scale = self._pad_k_to_block_size(
+            input_2d, weight, weight_scale
+        )
 
         # Now call FlashInfer with BF16 input + FP8 weight, input will be
         # quantized with FlashInfer kernel (W8A8)
