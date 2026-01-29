@@ -152,6 +152,8 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.14.1/rocm700
             huggingface-hub[cli,hf_transfer] \
             setuptools_scm
         pip install -r requirements/rocm.txt
+        # Optional: if plan to use --distributed-executor-backend ray
+        pip install ray[cgraph]
 
         # To build for a single architecture (e.g., MI300) for faster installation (recommended):
         export PYTORCH_ROCM_ARCH="gfx942"
