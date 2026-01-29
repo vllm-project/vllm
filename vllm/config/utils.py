@@ -9,7 +9,7 @@ import inspect
 import json
 import pathlib
 import textwrap
-from collections.abc import Callable, Iterable, Mapping, Sequence, Set
+from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import MISSING, Field, dataclass, field, fields, is_dataclass, replace
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
@@ -75,7 +75,7 @@ def get_field(cls: ConfigType, name: str) -> Field:
 
 def getattr_iter(
     object: object,
-    names: Iterable[str],
+    names: Sequence[str],
     default: Any | None = None,
     default_factory: Callable[[], Any] | None = None,
     warn: bool = False,
