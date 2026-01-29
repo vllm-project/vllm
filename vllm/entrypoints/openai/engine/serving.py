@@ -1360,7 +1360,7 @@ class OpenAIServing:
                 "Unable to get tokenizer because `skip_tokenizer_init=True`"
             )
 
-        return tokenizer.decode(token_id)
+        return tokenizer.decode([token_id])
 
     def _is_model_supported(self, model_name: str | None) -> bool:
         if not model_name:
