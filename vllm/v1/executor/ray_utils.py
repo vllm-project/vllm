@@ -170,7 +170,7 @@ def assert_ray_available():
     if ray is None:
         raise ValueError(
             f"Failed to import Ray: {ray_import_err}."
-            "Please install Ray with `pip install ray`."
+            "Please install Ray with `pip install vllm[ray]`."
         )
 
 
