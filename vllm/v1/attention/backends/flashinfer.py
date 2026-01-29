@@ -1224,7 +1224,7 @@ class FlashInferImpl(AttentionImpl):
         """
         # Skip if sharing KV cache with an earlier attention layer
         if self.kv_sharing_target_layer_name is not None:
-            return kv_cache
+            return
 
         # NOTE(woosuk): Here, key and value are padded while slot_mapping is
         # not padded. However, we don't need to do key[:num_actual_tokens]
