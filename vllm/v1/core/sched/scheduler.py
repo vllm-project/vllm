@@ -129,34 +129,38 @@ class Scheduler(SchedulerInterface):
             # request_id → number of prompt tokens processed
             self._journey_prefill_hiwater: dict[str, int] = {}
 
-        # Initialize tracer for OTEL span creation (scheduler process)
-        self.tracer: Any | None = None
-        if self._enable_journey_tracing:
-            endpoint = self.observability_config.otlp_traces_endpoint
-            if endpoint is not None:
-                try:
-                    from vllm.tracing import init_tracer
-                    logger.info(
-                        "Initializing vllm.scheduler tracer with endpoint: %s",
-                        endpoint
-                    )
-                    self.tracer = init_tracer("vllm.scheduler", endpoint)
-                    logger.info(
-                        "Successfully initialized vllm.scheduler tracer: %s",
-                        type(self.tracer).__name__
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Failed to initialize tracer for journey tracing: %s",
-                        e,
-                        exc_info=True
-                    )
+        # Initialize tracers for OTEL span creation (scheduler process)
+        # Each feature gets its own tracer with distinct scope for clean separation in Jaeger
+        # First call to init_tracer sets up singleton provider, subsequent calls reuse it
+        endpoint = self.observability_config.otlp_traces_endpoint
+
+        # Journey tracing: vllm.scheduler scope for llm_core spans
+        self.journey_tracer: Any | None = None
+        if self._enable_journey_tracing and endpoint is not None:
+            try:
+                from vllm.tracing import init_tracer
+                logger.info(
+                    "Initializing vllm.scheduler tracer for journey tracing with endpoint: %s",
+                    endpoint
+                )
+                self.journey_tracer = init_tracer("vllm.scheduler", endpoint)
+                logger.info(
+                    "Successfully initialized vllm.scheduler tracer: %s",
+                    type(self.journey_tracer).__name__
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to initialize tracer for journey tracing: %s",
+                    e,
+                    exc_info=True
+                )
 
         # Core spans: Track active "llm_core" spans for each request
         # Lifecycle: Created in add_request(), ended in finish_requests() or update_from_output()
         self._core_spans: dict[str, Any] = {}
 
         # Step tracing: Batch summary tracing for scheduler steps
+        # Uses separate scope (vllm.scheduler.step) to appear as distinct service in Jaeger
         # INVARIANT: When _enable_step_tracing is True, ALL step tracing
         # data structures are initialized and ready.
         self._enable_step_tracing = (
@@ -166,6 +170,7 @@ class Scheduler(SchedulerInterface):
             self.observability_config.step_tracing_sample_rate
         )
         self._step_span: Any | None = None
+        self.step_tracer: Any | None = None
         # Injectable sampler for deterministic testing
         # Production: uses random.random() < rate
         # Tests: can inject deterministic hash-based sampler
@@ -173,39 +178,37 @@ class Scheduler(SchedulerInterface):
         self._step_sampler: Any = lambda step_id, rate: random.random() < rate
 
         if self._enable_step_tracing:
-            # Initialize tracer if not already done
-            if self.tracer is None:
-                endpoint = self.observability_config.otlp_traces_endpoint
-                if endpoint is None:
-                    # Explicitly disable step tracing if no OTEL endpoint configured
-                    logger.warning(
-                        "Step tracing enabled but no OTLP endpoint configured, disabling"
+            if endpoint is None:
+                # Explicitly disable step tracing if no OTEL endpoint configured
+                logger.warning(
+                    "Step tracing enabled but no OTLP endpoint configured, disabling"
+                )
+                self._enable_step_tracing = False
+            else:
+                try:
+                    from vllm.tracing import init_tracer
+                    logger.info(
+                        "Initializing vllm.scheduler.step tracer for step tracing with endpoint: %s",
+                        endpoint
+                    )
+                    self.step_tracer = init_tracer("vllm.scheduler.step", endpoint)
+                    logger.info(
+                        "Successfully initialized vllm.scheduler.step tracer for step tracing: %s",
+                        type(self.step_tracer).__name__
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to initialize tracer for step tracing: %s",
+                        e,
+                        exc_info=True
                     )
                     self._enable_step_tracing = False
-                else:
-                    try:
-                        from vllm.tracing import init_tracer
-                        logger.info(
-                            "Initializing vllm.scheduler tracer for step tracing with endpoint: %s",
-                            endpoint
-                        )
-                        self.tracer = init_tracer("vllm.scheduler", endpoint)
-                        logger.info(
-                            "Successfully initialized vllm.scheduler tracer for step tracing"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            "Failed to initialize tracer for step tracing: %s",
-                            e,
-                            exc_info=True
-                        )
-                        self._enable_step_tracing = False
 
             # Create long-lived scheduler_steps span
-            if self._enable_step_tracing and self.tracer is not None:
+            if self._enable_step_tracing and self.step_tracer is not None:
                 try:
                     from vllm.tracing import SpanKind
-                    self._step_span = self.tracer.start_span(
+                    self._step_span = self.step_tracer.start_span(
                         "scheduler_steps",
                         kind=SpanKind.INTERNAL,
                     )
@@ -1809,9 +1812,9 @@ class Scheduler(SchedulerInterface):
         Returns:
             The created span, or None if tracing is disabled or creation fails
         """
-        if not self.tracer:
+        if not self.journey_tracer:
             logger.debug(
-                "Skipping core span creation for request %s (tracer not initialized)",
+                "Skipping core span creation for request %s (journey tracer not initialized)",
                 request.request_id
             )
             return None
@@ -1843,7 +1846,7 @@ class Scheduler(SchedulerInterface):
                 )
 
             # Create child span with explicit timing and kind
-            span = self.tracer.start_span(
+            span = self.journey_tracer.start_span(
                 name="llm_core",
                 kind=SpanKind.INTERNAL,
                 context=parent_context,
