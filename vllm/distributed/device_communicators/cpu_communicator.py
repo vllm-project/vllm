@@ -205,17 +205,16 @@ class _CPUSHMDistributed:
         self.handle = self._init_cpu_shm()
 
     def _init_cpu_shm(self) -> int:
-        thread_num = torch.get_num_threads()
-        thread_num_list = [0] * self.communicator.world_size
-        thread_num_list[self.communicator.rank] = thread_num
         thread_num_tensor = torch.tensor(
-            thread_num_list,
+            [torch.get_num_threads()],
             dtype=torch.int64,
         )
         torch.distributed.all_reduce(
-            thread_num_tensor, group=self.communicator.device_group
+            thread_num_tensor,
+            op=torch.distributed.ReduceOp.MIN,
+            group=self.communicator.device_group,
         )
-        thread_num = thread_num_tensor.min().item()
+        thread_num = thread_num_tensor.item()
 
         handle = torch.ops._C.init_shm_manager(
             self.group_name,
