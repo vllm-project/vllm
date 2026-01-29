@@ -3,8 +3,8 @@
 
 import dataclasses
 import io
-import pickle
 import json
+import pickle
 from collections.abc import Callable
 from pickle import Pickler
 from typing import Any
@@ -134,7 +134,7 @@ class PiecewiseBackend:
             self.range_entries[range] = RangeEntry(
                 compile_range=range,
             )
-        
+
         # Track whether we've logged the graph for this subgraph (only log once)
         self._graph_logged = False
 
@@ -230,7 +230,9 @@ class PiecewiseBackend:
 
     def _log_compile_start(self, compile_range: Range):
         """Log compilation event for TORCH_TRACE/tlparse."""
-        is_cudagraph_size = compile_range.start in self.compile_sizes
+        is_cudagraph_size = (
+            self.compile_sizes is not None and compile_range.start in self.compile_sizes
+        )
         subgraph_index = self.piecewise_compile_index
         submod_name = self.submod_name
         trace_structured(
@@ -256,6 +258,7 @@ class PiecewiseBackend:
         # to reduce log file size. The graph code is the same for all sizes.
         if not self._graph_logged:
             self._graph_logged = True
+            assert self.graph is not None
             trace_structured(
                 "graph_dump",
                 metadata_fn=lambda: {
