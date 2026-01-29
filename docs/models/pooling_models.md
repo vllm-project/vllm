@@ -327,7 +327,7 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 }'
 ```
 
-Due to limitations in the the output schema, the output consists of a list of
+Due to limitations in the output schema, the output consists of a list of
 token scores for each token for each input. This means that you'll have to call
 `/tokenize` as well to be able to pair tokens with scores.
 Refer to the tests in  `tests/models/language/pooling/test_bge_m3.py` to see how

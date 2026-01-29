@@ -292,7 +292,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
       "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
-      "float softcap, Tensor sheduler_metadata, Tensor? s_aux) -> ()",
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
       &cpu_attention_with_kv_cache);
 
   // placeholders

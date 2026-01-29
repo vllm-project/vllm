@@ -693,7 +693,7 @@ class OpenAIServingResponses(OpenAIServing):
             except ValueError as e:
                 return self.create_error_response(e)
 
-        # NOTE: Implementation of stauts is still WIP, but for now
+        # NOTE: Implementation of status is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
