@@ -751,11 +751,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 model_compression_config=model_compression_config,
             )
         elif weight_quant is None:
-            logger.warning_once(
-                "Acceleration for non-quantized schemes is "
-                "not supported by Compressed Tensors. "
-                "Falling back to UnquantizedLinearMethod"
-            )
+            # Falling back to UnquantizedLinearMethod
             return None
 
         else:
