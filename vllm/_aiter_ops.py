@@ -8,7 +8,7 @@ from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
@@ -790,6 +790,41 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     return x_fp8, out_bs
 
 
+def _rocm_aiter_triton_add_rmsnorm_pad_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    residual: torch.Tensor,
+    x_pad_to_multiple: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.triton.fused_add_rmsnorm_pad import fused_add_rmsnorm_pad
+
+    return fused_add_rmsnorm_pad(
+        x,
+        weight,
+        variance_epsilon,
+        residual,
+        x_pad_to_multiple=x_pad_to_multiple,
+    )
+
+
+def _rocm_aiter_triton_add_rmsnorm_pad_fake(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    residual: torch.Tensor,
+    x_pad_to_multiple: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    M, N = x.shape
+    if x_pad_to_multiple > 0:
+        N_out = (N + x_pad_to_multiple - 1) // x_pad_to_multiple * x_pad_to_multiple
+    else:
+        N_out = N
+    out = torch.empty((M, N_out), dtype=x.dtype, device=x.device)
+    residual_out = torch.empty_like(residual)
+    return out, residual_out
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -980,12 +1015,6 @@ class rocm_aiter_ops:
     def register_ops_once() -> None:
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
-            tags = (
-                tuple()
-                if is_torch_equal_or_newer("2.7.0")
-                else (torch.Tag.needs_fixed_stride_order,)
-            )
-
             # register all the custom ops here
             direct_register_custom_op(
                 op_name="rocm_aiter_asm_moe_tkw1",
@@ -1040,7 +1069,6 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_mla_decode_fwd_impl,
                 mutates_args=["o"],
                 fake_impl=_rocm_aiter_mla_decode_fwd_fake,
-                tags=tags,
             )
 
             direct_register_custom_op(
@@ -1109,6 +1137,13 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_triton_add_rmsnorm_pad",
+                op_func=_rocm_aiter_triton_add_rmsnorm_pad_impl,
+                fake_impl=_rocm_aiter_triton_add_rmsnorm_pad_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_group_fp8_quant",
                 op_func=_rocm_aiter_group_fp8_quant_impl,
                 fake_impl=_rocm_aiter_group_fp8_quant_fake,
@@ -1174,6 +1209,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_act_mul_fused_fp8_group_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+
+    @staticmethod
+    def get_triton_add_rmsnorm_pad_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_triton_add_rmsnorm_pad.default
 
     @staticmethod
     def rms_norm(
