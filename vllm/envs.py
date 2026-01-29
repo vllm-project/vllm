@@ -240,6 +240,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
+    VLLM_TRITON_AUTOTUNE: bool = False
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
@@ -1570,6 +1571,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING": lambda: bool(
         int(os.getenv("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING", "1"))
     ),
+    # If set to 1, enable Triton kernel autotuning at runtime.
+    # By default, this is disabled (0) for deterministic behavior and
+    # faster startup. Enable for benchmarking or calibrating kernel configs.
+    # See: https://github.com/vllm-project/vllm/issues/33279
+    "VLLM_TRITON_AUTOTUNE": lambda: bool(int(os.getenv("VLLM_TRITON_AUTOTUNE", "0"))),
     # Flag to enable NCCL symmetric memory allocation and registration
     "VLLM_USE_NCCL_SYMM_MEM": lambda: bool(
         int(os.getenv("VLLM_USE_NCCL_SYMM_MEM", "0"))
