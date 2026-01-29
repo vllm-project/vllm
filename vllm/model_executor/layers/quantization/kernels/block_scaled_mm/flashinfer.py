@@ -165,6 +165,9 @@ class FlashInferDeepGEMMDynamicBlockScaledKernel(
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
+        # deepgemm might require post processing.
+        # both flashinfer and deepgemm kernels
+        # work on the same layer parameter tensor layouts
         self.fallback.process_weights_after_loading(layer)
 
     def predicate(
