@@ -164,21 +164,62 @@ uv pip install dist/*.whl
 [https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo](https://gallery.ecr.aws/q9t5s3a7/vllm-cpu-release-repo)
 
 !!! warning
-    If deploying the pre-built images on machines without `avx512f`, `avx512_bf16`, or `avx512_vnni` support, an `Illegal instruction` error may be raised. It is recommended to build images for these machines with the appropriate build arguments (e.g., `--build-arg VLLM_CPU_DISABLE_AVX512=true`, `--build-arg VLLM_CPU_AVX512BF16=false`, or `--build-arg VLLM_CPU_AVX512VNNI=false`) to disable unsupported features. Please note that without `avx512f`, AVX2 will be used and this version is not recommended because it only has basic feature support.
+    If deploying the pre-built images on machines without `avx512f`, `avx512_bf16`, or `avx512_vnni` support, an `Illegal instruction` error may be raised. See the build-image-from-source section below for build arguments to match your target CPU capabilities.
 
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 
+## Building for your target CPU
+
 ```bash
 docker build -f docker/Dockerfile.cpu \
-        --build-arg VLLM_CPU_AVX512BF16=false (default)|true \
-        --build-arg VLLM_CPU_AVX512VNNI=false (default)|true \
-        --build-arg VLLM_CPU_AMXBF16=false|true (default) \
-        --build-arg VLLM_CPU_DISABLE_AVX512=false (default)|true \ 
+        --build-arg VLLM_CPU_DISABLE_AVX512=<false (default)|true> \
+        --build-arg VLLM_CPU_AVX2=<false (default)|true> \
+        --build-arg VLLM_CPU_AVX512=<false (default)|true> \
+        --build-arg VLLM_CPU_AVX512BF16=<false (default)|true> \
+        --build-arg VLLM_CPU_AVX512VNNI=<false (default)|true> \
+        --build-arg VLLM_CPU_AMXBF16=<false|true (default)> \
         --tag vllm-cpu-env \
         --target vllm-openai .
+```
 
-# Launching OpenAI server
+!!! note "Auto-detection by default"
+    By default, CPU instruction sets (AVX512, AVX2, etc.) are automatically detected from the build system's CPU flags. Build arguments like `VLLM_CPU_AVX2`, `VLLM_CPU_AVX512`, `VLLM_CPU_AVX512BF16`, `VLLM_CPU_AVX512VNNI`, and `VLLM_CPU_AMXBF16` are used for cross-compilation:
+
+    - `VLLM_CPU_{ISA}=true` - Force-enable the instruction set (build with ISA regardless of build system capabilities)
+    - `VLLM_CPU_{ISA}=false` - Rely on auto-detection (default)
+
+### Examples
+
+**Auto-detection build (default)**
+
+```bash
+docker build -f docker/Dockerfile.cpu --tag vllm-cpu-env --target vllm-openai .
+```
+
+**Cross-compile for AVX512**
+
+```bash
+docker build -f docker/Dockerfile.cpu \
+        --build-arg VLLM_CPU_AVX512=true \
+        --build-arg VLLM_CPU_AVX512BF16=true \
+        --build-arg VLLM_CPU_AVX512VNNI=true \
+        --tag vllm-cpu-avx512 \
+        --target vllm-openai .
+```
+
+**Cross-compile for AVX2**
+
+```bash
+docker build -f docker/Dockerfile.cpu \
+        --build-arg VLLM_CPU_AVX2=true \
+        --tag vllm-cpu-avx2 \
+        --target vllm-openai .
+```
+
+## Launching the OpenAI server
+
+```bash
 docker run --rm \
             --security-opt seccomp=unconfined \
             --cap-add SYS_NICE \

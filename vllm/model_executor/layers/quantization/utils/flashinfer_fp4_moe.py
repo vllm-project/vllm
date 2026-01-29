@@ -8,14 +8,12 @@ import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     RoutingMethodType,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -41,7 +39,6 @@ __all__ = [
     "is_flashinfer_fp4_cutlass_moe_available",
     "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
-    "build_flashinfer_fp4_cutlass_moe_prepare_finalize",
 ]
 
 #
@@ -159,17 +156,6 @@ def reorder_w1w3_to_w3w1(
     return (
         torch.cat([w3, w1], dim=dim).contiguous(),
         torch.cat([s3, s1], dim=dim).contiguous(),
-    )
-
-
-def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-    moe: FusedMoEConfig,
-) -> mk.FusedMoEPrepareAndFinalize:
-    """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
-    use_dp = moe.moe_parallel_config.dp_size > 1
-    enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
-    return create_flashinfer_prepare_finalize(
-        use_dp=use_dp, use_nvfp4=True, enable_alltoallv=enable_alltoallv
     )
 
 
@@ -341,10 +327,8 @@ def flashinfer_trtllm_fp4_moe(
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # hidden_states is the already quantized
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(
+            x, layer.a1_gscale, is_sf_swizzled_layout=False
         )
 
     # Determine routing method type
@@ -443,10 +427,8 @@ def flashinfer_trtllm_fp4_routed_moe(
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # Quantize input to FP4
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(
+            x, layer.a1_gscale, is_sf_swizzled_layout=False
         )
 
     # Call TRT-LLM FP4 block-scale MoE kernel

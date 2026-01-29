@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
+
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -33,6 +35,9 @@ class SuffixDecodingProposer:
         self,
         input_batch: InputBatch,
         sampled_token_ids: list[list[int]],
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,  # unused
     ) -> list[list[int]]:
         """
         Propose speculative tokens for each request in the input batch. Suffix Decoding
