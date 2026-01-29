@@ -167,7 +167,7 @@ class InternParallelAttention(nn.Module):
         # we also disable Attention's TP
         tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
         use_data_parallel = (
-            use_data_parallel or (self.num_heads + num_dummy_heads) % self.tp_size != 0
+            use_data_parallel or (self.num_heads + num_dummy_heads) % tp_size != 0
         )
         self.tp_size = 1 if use_data_parallel else tp_size
         self.tp_rank = 0 if use_data_parallel else get_tensor_model_parallel_rank()
