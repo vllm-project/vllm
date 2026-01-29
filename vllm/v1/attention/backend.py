@@ -669,6 +669,9 @@ class AttentionImplBase(ABC, Generic[T]):
         )
         return self
 
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        pass
+
 
 class AttentionImpl(AttentionImplBase[T], Generic[T]):
     """Standard attention implementation with forward method."""
@@ -714,9 +717,6 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         :return: is fusion supported for this type of quantization
         """
         return False
-
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        pass
 
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
