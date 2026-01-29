@@ -627,6 +627,13 @@ class VllmConfig:
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
+            elif self.cache_config.mamba_cache_mode != "none":
+                logger.warning_once(
+                    "Async scheduling is not compatible with "
+                    "prefix caching for Mamba models and will be disabled.",
+                    scope="local",
+                )
+                self.scheduler_config.async_scheduling = False
             else:
                 self.scheduler_config.async_scheduling = True
 
