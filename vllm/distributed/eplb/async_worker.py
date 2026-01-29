@@ -65,6 +65,8 @@ async def transfer_run_periodically(
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
 ) -> None:
+    from .eplb_state import TransferPhase
+
     while True:
         await asyncio.to_thread(state.rearrange_event.wait)
         logger.info("async worker woke up for EPLB transfer")
@@ -73,12 +75,11 @@ async def transfer_run_periodically(
         for model_state in state.model_states.values():
             current_num_layers = model_state.model.num_moe_layers
             while (
-                model_state.rebalanced
+                model_state.transfer_phase != TransferPhase.IDLE
                 and model_state.layer_to_transfer < current_num_layers
             ):
                 if (
-                    not model_state.ep_buffer_ready
-                    and model_state.rebalanced
+                    model_state.transfer_phase == TransferPhase.PRODUCING
                     and model_state.new_physical_to_logical_map is not None
                 ):
                     await asyncio.to_thread(model_state.buffer_lock.acquire)
@@ -104,11 +105,11 @@ async def transfer_run_periodically(
                         event = torch.cuda.Event(blocking=False)
                         cuda_stream.record_event(event)
                         model_state.buffer_ready_event = event
-                        model_state.ep_buffer_ready = 1
+                        model_state.transfer_phase = TransferPhase.CONSUMING
                     finally:
                         model_state.buffer_lock.release()
                 else:
-                    if not model_state.rebalanced:
+                    if model_state.transfer_phase == TransferPhase.IDLE:
                         break
                     await asyncio.sleep(0.001)
 

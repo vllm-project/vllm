@@ -29,6 +29,7 @@ physical experts.
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import IntEnum, auto
 
 import numpy as np
 import torch
@@ -44,7 +45,6 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
-from .async_worker import start_async_worker
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     RecvMetadata,
@@ -53,6 +53,24 @@ from .rebalance_execute import (
 )
 
 logger = init_logger(__name__)
+
+
+class TransferPhase(IntEnum):
+    """EPLB async transfer phase for producer-consumer handshake.
+
+    State transitions:
+        IDLE -> PRODUCING: rearrange() computes new layout, signals worker
+        PRODUCING -> CONSUMING: worker fills buffer, sets buffer_ready
+        CONSUMING -> PRODUCING: main thread consumes, more layers remain
+        CONSUMING -> IDLE: main thread consumes final layer
+    """
+
+    IDLE = auto()
+    PRODUCING = auto()
+    CONSUMING = auto()
+
+    def __str__(self) -> str:
+        return self.name
 
 
 @dataclass
@@ -151,22 +169,14 @@ class EplbModelState:
     CUDA event recorded when the async worker finishes filling the buffer.
     The main thread waits on this before consuming the buffer.
     """
-    ep_buffer_ready: int
+    transfer_phase: TransferPhase
     """
-    The flag indicates whether the expert buffer is ready for transfer.
-    0 or 1.
+    Current phase of the async transfer state machine.
+    See TransferPhase docstring for state transitions.
     """
     layer_to_transfer: int
     """
     The layer index to transfer in async mode.
-    """
-    rebalanced: bool
-    """
-    The flag indicates whether the experts rebalance have been computed.
-    """
-    pending_global_ready_check: bool
-    """
-    Whether the async EPLB needs to poll peers for buffer readiness.
     """
     is_unchanged: np.ndarray
     """
@@ -502,10 +512,8 @@ class EplbState:
             expert_buffer=expert_buffer,
             buffer_lock=threading.Lock(),
             buffer_ready_event=None,
-            ep_buffer_ready=0,
+            transfer_phase=TransferPhase.IDLE,
             layer_to_transfer=0,
-            rebalanced=False,
-            pending_global_ready_check=False,
             is_unchanged=np.array([]),
             is_received_locally=np.array([]),
             recv_metadata=RecvMetadata(
@@ -626,11 +634,14 @@ class EplbState:
         if self.is_async:
             for eplb_model_state in self.model_states.values():
                 all_ranks_buffer_ready = False
-                if eplb_model_state.pending_global_ready_check:
+                if eplb_model_state.transfer_phase != TransferPhase.IDLE:
                     all_ranks_buffer_ready = self._all_ranks_buffer_ready(
                         eplb_model_state
                     )
-                if eplb_model_state.ep_buffer_ready and all_ranks_buffer_ready:
+                if (
+                    eplb_model_state.transfer_phase == TransferPhase.CONSUMING
+                    and all_ranks_buffer_ready
+                ):
                     self.move_to_workspace(
                         model_state=eplb_model_state,
                         ep_group=ep_group,
@@ -641,9 +652,8 @@ class EplbState:
                         >= eplb_model_state.model.num_moe_layers
                     ):
                         self.post_eplb(eplb_model_state, is_profile)
-                        eplb_model_state.rebalanced = False
+                        eplb_model_state.transfer_phase = TransferPhase.IDLE
                         eplb_model_state.layer_to_transfer = 0
-                        eplb_model_state.pending_global_ready_check = False
                         logger.info(
                             "finish async transfer for model %s rank %d layer %d",
                             eplb_model_state.model_name,
@@ -653,7 +663,7 @@ class EplbState:
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if self.is_async and any(
-                eplb_model_state.rebalanced
+                eplb_model_state.transfer_phase != TransferPhase.IDLE
                 for eplb_model_state in self.model_states.values()
             ):
                 # Still performing asynchronous rearrangement
@@ -884,9 +894,8 @@ class EplbState:
                 eplb_model_state.new_logical_to_physical_map = padded_logical
                 eplb_model_state.new_logical_replica_count = new_replica
 
-                eplb_model_state.rebalanced = True
+                eplb_model_state.transfer_phase = TransferPhase.PRODUCING
                 eplb_model_state.layer_to_transfer = 0
-                eplb_model_state.pending_global_ready_check = True
 
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
@@ -898,6 +907,8 @@ class EplbState:
         rank_mapping: dict[int, int] | None = None,
         is_profile: bool = False,
     ):
+        from .async_worker import start_async_worker
+
         if not self.is_async:
             return
         if self.async_worker is None:
@@ -942,25 +953,22 @@ class EplbState:
         )
 
     def _all_ranks_buffer_ready(self, model_state: EplbModelState) -> bool:
+        is_consuming = model_state.transfer_phase == TransferPhase.CONSUMING
         parallel_state = get_ep_group()
         cpu_group = getattr(parallel_state, "cpu_group", None)
         if cpu_group is not None and cpu_group.size() > 1:
-            flag = torch.tensor(
-                (int(model_state.ep_buffer_ready),), dtype=torch.int32, device="cpu"
-            )
+            flag = torch.tensor((int(is_consuming),), dtype=torch.int32, device="cpu")
             all_reduce(flag, group=cpu_group)
             return int(flag.item()) == cpu_group.size()
 
         device_group = parallel_state.device_group
         if device_group.size() <= 1:
-            return bool(model_state.ep_buffer_ready)
+            return is_consuming
 
         device = getattr(
             parallel_state, "device", model_state.physical_to_logical_map.device
         )
-        flag = torch.tensor(
-            (int(model_state.ep_buffer_ready),), dtype=torch.int32, device=device
-        )
+        flag = torch.tensor((int(is_consuming),), dtype=torch.int32, device=device)
         all_reduce(flag, group=device_group)
         return int(flag.item()) == device_group.size()
 
@@ -1016,7 +1024,7 @@ class EplbState:
             self._update_layer_mapping_from_new(model_state, transferred_layer)
             # After the main thread consumes, advance layer_to_transfer
             model_state.layer_to_transfer += 1
-            model_state.ep_buffer_ready = 0
+            model_state.transfer_phase = TransferPhase.PRODUCING
             logger.debug(
                 "model %s successfully move_to_workspace layer %d",
                 model_state.model_name,
