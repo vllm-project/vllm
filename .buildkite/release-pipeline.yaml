@@ -176,23 +176,6 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
-      - block: "Build release image for x86_64 ROCm"
-        key: block-rocm-release-image-build
-        depends_on: ~
-
-      - label: "Build release image - x86_64 - ROCm"
-        depends_on: block-rocm-release-image-build
-        id: build-release-image-rocm
-        agents:
-          queue: cpu_queue_postmerge
-        commands:
-          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-          # Build base image first
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --tag rocm/vllm-dev:base-$BUILDKITE_COMMIT --target final --progress plain -f docker/Dockerfile.rocm_base ."
-          # Build vLLM ROCm image using the base
-          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg BASE_IMAGE=rocm/vllm-dev:base-$BUILDKITE_COMMIT --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm --target vllm-openai --progress plain -f docker/Dockerfile.rocm ."
-          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm"
-
   - group: "Publish release images"
     key: "publish-release-images"
     steps:
@@ -476,7 +459,7 @@ steps:
       S3_BUCKET: "vllm-wheels"
 
   # ROCm Job 2: Build vLLM ROCm Wheel
-  - label: ":python: Build vLLM ROCm Wheel"
+  - label: ":python: Build vLLM ROCm Wheel - x86_64"
     id: build-rocm-vllm-wheel
     depends_on:
       - step: build-rocm-base-wheels
@@ -638,9 +621,93 @@ steps:
     depends_on:
       - step: upload-rocm-wheels
         allow_failure: true
+      - step: input-release-version
+        allow_failure: true
     agents:
       queue: cpu_queue_postmerge
     commands:
       - "bash .buildkite/scripts/annotate-rocm-release.sh"
     env:
+      S3_BUCKET: "vllm-wheels"
+
+  # ROCm Job 5: Generate Root Index for ROCm Wheels (for release only)
+  # This is the job to create https://wheels.vllm.ai/rocm/ index allowing
+  # users to install with `uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/`
+  - block: "Generate Root Index for ROCm Wheels for Release"
+    key: block-generate-root-index-rocm-wheels
+    depends_on: upload-rocm-wheels
+
+  - label: ":package: Generate Root Index for ROCm Wheels for Release"
+    depends_on: block-generate-root-index-rocm-wheels
+    id: generate-root-index-rocm-wheels
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
+    env:
+      S3_BUCKET: "vllm-wheels"
+      VARIANT: "rocm700"
+
+  # ROCm Job 5: Build ROCm Release Docker Image
+  - label: ":docker: Build release image - x86_64 - ROCm"
+    id: build-rocm-release-image
+    depends_on:
+      - step: build-rocm-base-wheels
+        allow_failure: false
+    agents:
+      queue: cpu_queue_postmerge
+    timeout_in_minutes: 60
+    commands:
+      - |
+        set -euo pipefail
+
+        # Login to ECR
+        aws ecr-public get-login-password --region us-east-1 | \
+          docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7
+
+        # Download Docker image from S3 (set by build-rocm-base-wheels)
+        DOCKER_IMAGE_S3_PATH="$$(buildkite-agent meta-data get rocm-docker-image-s3-path 2>/dev/null || echo '')"
+        if [ -z "$${DOCKER_IMAGE_S3_PATH}" ]; then
+          echo "ERROR: rocm-docker-image-s3-path metadata not found"
+          exit 1
+        fi
+
+        echo "Downloading base image from $${DOCKER_IMAGE_S3_PATH}"
+        mkdir -p artifacts/rocm-docker-image
+        aws s3 cp "$${DOCKER_IMAGE_S3_PATH}" artifacts/rocm-docker-image/rocm-base-image.tar.gz
+
+        # Load base Docker image
+        echo "Loading base Docker image..."
+        LOAD_OUTPUT=$$(gunzip -c artifacts/rocm-docker-image/rocm-base-image.tar.gz | docker load)
+        BASE_IMAGE_TAG=$$(echo "$${LOAD_OUTPUT}" | grep "Loaded image:" | sed 's/Loaded image: //')
+        echo "Loaded base image: $${BASE_IMAGE_TAG}"
+
+        # Tag and push the base image to ECR
+        docker tag "$${BASE_IMAGE_TAG}" public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
+        docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base
+        echo "Pushed base image: public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm-base"
+
+        # Get GPU architectures from meta-data
+        PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
+        PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
+
+        # Build vLLM ROCm release image using cached base
+        DOCKER_BUILDKIT=1 docker build \
+          --build-arg max_jobs=16 \
+          --build-arg BASE_IMAGE="$${BASE_IMAGE_TAG}" \
+          --build-arg ARG_PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH}" \
+          --build-arg USE_SCCACHE=1 \
+          --build-arg SCCACHE_BUCKET_NAME=vllm-build-sccache \
+          --build-arg SCCACHE_REGION_NAME=us-west-2 \
+          --build-arg SCCACHE_S3_NO_CREDENTIALS=0 \
+          --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm \
+          --target vllm-openai \
+          --progress plain \
+          -f docker/Dockerfile.rocm .
+
+        # Push to ECR
+        docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm
+        echo "Pushed: public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-rocm"
+    env:
+      DOCKER_BUILDKIT: "1"
       S3_BUCKET: "vllm-wheels"

@@ -491,7 +491,7 @@ mbstrdecoder==1.1.3
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.8.8
+mistral-common==1.9.0
     # via -r requirements/test.in
 mlflow==2.22.0
     # via terratorch
