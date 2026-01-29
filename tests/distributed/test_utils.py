@@ -34,9 +34,7 @@ def test_cuda_device_count_stateless():
     """Test that cuda_device_count_stateless changes return value if
     CUDA_VISIBLE_DEVICES is changed."""
     if current_platform.is_rocm():
-        pytest.skip(
-            "Skip for ROCm because Ray uses HIP_VISIBLE_DEVICES."
-        )
+        pytest.skip("Skip for ROCm because Ray uses HIP_VISIBLE_DEVICES.")
     actor = _CUDADeviceCountStatelessTestActor.options(  # type: ignore
         num_gpus=2
     ).remote()

@@ -41,7 +41,6 @@ from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm import LLM
 
-
 if torch.version.hip is not None:
     print("Skipping test for ROCm. Ray is unsupported on vLLM ROCm.")
     sys.exit(0)
