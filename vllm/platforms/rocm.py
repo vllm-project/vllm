@@ -105,8 +105,7 @@ def on_gfx9_amdsmi() -> bool:
     # amdsmi circumvents torch caching CUDA_VISIBLE_DEVICES.
     h = amdsmi_get_processor_handles()[0]
     asic = amdsmi_get_gpu_asic_info(h)
-    GPU_ARCH = asic["target_graphics_version"]
-    return any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+    return asic["target_graphics_version"]
 
 
 @cache
