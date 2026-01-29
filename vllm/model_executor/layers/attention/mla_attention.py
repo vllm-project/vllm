@@ -405,7 +405,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
 
-        # Attributes for _forward method
+        # Attributes for forward_impl method
         self.chunked_prefill_workspace_size = (
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
                 get_current_vllm_config()
@@ -436,7 +436,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                self._forward(
+                self.forward_impl(
                     q,
                     kv_c_normed,
                     k_pe,
@@ -446,7 +446,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 return output
             else:
-                return self._forward(q, kv_c_normed, k_pe, self_kv_cache, attn_metadata)
+                return self.forward_impl(
+                    q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                )
         else:
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
@@ -466,7 +468,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self.layer_name,
                 )
 
-    def _forward(
+    def forward_impl(
         self,
         q: torch.Tensor,
         k_c_normed: torch.Tensor,  # key in unified attn
@@ -835,7 +837,7 @@ def unified_mla_attention(
     layer_name: str,
 ) -> torch.Tensor:
     attn_metadata, layer, kv_cache = get_attention_context(layer_name)
-    output = layer._forward(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
 
     return output
 
@@ -869,7 +871,7 @@ def unified_mla_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, layer, kv_cache = get_attention_context(layer_name)
-    layer._forward(
+    layer.forward_impl(
         q,
         kv_c_normed,
         k_pe,
