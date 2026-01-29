@@ -282,8 +282,18 @@ class SHMConnector(ECConnectorBase):
         while True:
             try:
                 feat_key, tensor = self.send_queue.get()
-                shared_handle = reduce_tensor(tensor.detach().clone())
-                send_data = {"key": feat_key,"value": shared_handle}
+                tensor_clone = tensor.detach().clone()
+                storage = tensor_clone.untyped_storage()
+                device, handle, size, offset, view_metadata = storage._share_cuda_()
+                send_data = {
+                "k": feat_key,
+                "h": bytes(handle),
+                "shape": list(tensor_clone.shape), 
+                "stride": list(tensor_clone.stride()),  
+                "dtype": str(tensor_clone.dtype),     
+                "size": size,
+                "offset": offset
+            }
                 payload = msgpack.packb(send_data, use_bin_type=True)
                 future_list = []
                 for path in self.zmq_paths:
@@ -322,9 +332,17 @@ class SHMConnector(ECConnectorBase):
             try:
                 payload = self.recv_queue.get()
                 data = msgpack.unpackb(payload, raw=False)
-                feat_key = data["key"]
-                share_handle = data["value"]
-                self.handle_caches[feat_key] = share_handle
+                feat_key = data["k"]
+                dtype = getattr(torch, data["dtype"].split(".")[-1])
+                def manual_rebuild(local_rank_ignored):
+                    # 使用 PyTorch 内部 API 根据句柄重建存储
+                    storage = torch.UntypedStorage._new_shared_cuda(
+                        data["h"], data["size"], data["offset"]
+                    )
+                    t = torch.tensor([], dtype=dtype, device='cuda')
+                    t.set_(storage, 0, tuple(data["shape"]), tuple(data["stride"]))
+                    return t
+                self.handle_caches[feat_key] = (manual_rebuild, (None,))
                 self.recv_queue.task_done()
             except Exception as e:
                 logger.error(
