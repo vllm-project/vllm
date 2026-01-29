@@ -260,7 +260,6 @@ def maybe_roundup_hidden_size(
             get_mxfp4_backend,
         )
 
-        original_hidden_size = hidden_size
         current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
         if (
             current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
@@ -273,9 +272,9 @@ def maybe_roundup_hidden_size(
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
         ):
             hidden_size = round_up(hidden_size, 256)
-        return hidden_size, hidden_size != original_hidden_size
+        return hidden_size
 
-    return hidden_size, False
+    return hidden_size
 
 
 # --8<-- [start:fused_moe]
@@ -546,27 +545,58 @@ class FusedMoE(CustomOp):
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
-        self.quant_config = quant_config
 
-        def _create_moe_config(hidden_dim: int) -> FusedMoEConfig:
-            """Helper to create FusedMoEConfig with given hidden_dim."""
-            return FusedMoEConfig(
-                num_experts=self.global_num_experts,
-                experts_per_token=top_k,
-                hidden_dim=hidden_dim,
-                intermediate_size_per_partition=self.intermediate_size_per_partition,
-                num_local_experts=self.local_num_experts,
-                moe_parallel_config=self.moe_parallel_config,
-                in_dtype=moe_in_dtype,
-                router_logits_dtype=router_logits_dtype,
-                max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
-                has_bias=has_bias,
-                is_act_and_mul=is_act_and_mul,
-                is_lora_enabled=vllm_config.lora_config is not None,
-                activation=activation,
-                device=vllm_config.device_config.device,
-                routing_method=self.routing_method_type,
+        self.model_type = (
+            self.vllm_config.model_config.hf_config.model_type
+            if self.vllm_config.model_config is not None
+            else None
+        )
+
+        # Determine is_mxfp4_quant by inspecting quant_config directly,
+        # without creating quant_method first.
+        # This is used for proper hidden_size rounding before moe_config creation.
+        self.is_mxfp4_quant = self._is_mxfp4_quant(quant_config, prefix)
+
+        # Round up hidden size BEFORE creating moe_config.
+        # This way moe_config is created with the correct hidden_size from the start.
+        hidden_size = maybe_roundup_hidden_size(
+            hidden_size,
+            moe_in_dtype,
+            self.moe_parallel_config,
+            self.model_type,
+            self.is_mxfp4_quant,
+            is_lora_enabled=self.vllm_config.lora_config is not None,
+        )
+        self.hidden_size = hidden_size
+
+        self.moe_config: FusedMoEConfig = FusedMoEConfig(
+            num_experts=self.global_num_experts,
+            experts_per_token=top_k,
+            hidden_dim=hidden_size,
+            intermediate_size_per_partition=self.intermediate_size_per_partition,
+            num_local_experts=self.local_num_experts,
+            moe_parallel_config=self.moe_parallel_config,
+            in_dtype=moe_in_dtype,
+            router_logits_dtype=router_logits_dtype,
+            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+            has_bias=has_bias,
+            is_act_and_mul=is_act_and_mul,
+            is_lora_enabled=vllm_config.lora_config is not None,
+            activation=activation,
+            device=vllm_config.device_config.device,
+            routing_method=self.routing_method_type,
+        )
+
+        if self.use_mori_kernels:
+            assert self.rocm_aiter_fmoe_enabled, (
+                "Mori needs to be used with aiter fused_moe for now."
             )
+            assert not self.aiter_fmoe_shared_expert_enabled, (
+                "Mori does not support fusion shared expert now. "
+                "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
+            )
+
+        self.quant_config = quant_config
 
         def _get_quant_method() -> FusedMoEMethodBase:
             """
@@ -581,46 +611,9 @@ class FusedMoE(CustomOp):
             assert isinstance(quant_method, FusedMoEMethodBase)
             return quant_method
 
-        # Create initial moe_config with original hidden_size
-        # This is needed to determine is_mxfp4_quant for rounding decision
-        self.moe_config: FusedMoEConfig = _create_moe_config(hidden_size)
-
-        if self.use_mori_kernels:
-            assert self.rocm_aiter_fmoe_enabled, (
-                "Mori needs to be used with aiter fused_moe for now."
-            )
-            assert not self.aiter_fmoe_shared_expert_enabled, (
-                "Mori does not support fusion shared expert now. "
-                "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
-            )
-
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         self.quant_method: FusedMoEMethodBase = _get_quant_method()
-
-        self.model_type = (
-            self.vllm_config.model_config.hf_config.model_type
-            if self.vllm_config.model_config is not None
-            else None
-        )
-        self.is_mxfp4_quant = self._is_mxfp4_quant(quant_config, self.quant_method)
-
-        # Round up hidden size if needed.
-        hidden_size, is_rounded_hidden_size = maybe_roundup_hidden_size(
-            hidden_size,
-            moe_in_dtype,
-            self.moe_parallel_config,
-            self.model_type,
-            self.is_mxfp4_quant,
-            is_lora_enabled=self.vllm_config.lora_config is not None,
-        )
-
-        # If hidden_size was rounded, recreate moe_config and quant_method
-        # with the updated hidden_size to ensure consistency
-        if is_rounded_hidden_size:
-            self.hidden_size = hidden_size
-            self.moe_config = _create_moe_config(hidden_size)
-            self.quant_method = _get_quant_method()
 
         if not self.moe_config.is_act_and_mul and not current_platform.is_cuda_alike():
             raise NotImplementedError(
@@ -874,12 +867,13 @@ class FusedMoE(CustomOp):
     def _is_mxfp4_quant(
         self,
         quant_config: QuantizationConfig | None,
-        quant_method: FusedMoEMethodBase,
+        prefix: str,
     ) -> bool:
-        from vllm.model_executor.layers.quantization.quark.quark_moe import (
-            QuarkOCP_MX_MoEMethod,
-        )
-
+        """
+        Determine if mxfp4 quantization will be used by inspecting quant_config
+        directly, WITHOUT needing to instantiate quant_method first.
+        This allows hidden_size rounding to happen before moe_config creation.
+        """
         if not quant_config:
             return False
 
@@ -887,11 +881,24 @@ class FusedMoE(CustomOp):
         if name == "mxfp4":
             return True
 
-        if name == "quark" and isinstance(quant_method, QuarkOCP_MX_MoEMethod):
-            return (
-                quant_method.weight_dtype == "mxfp4"
-                and quant_method.fp4_dtype == getattr(torch, "float4_e2m1fn_x2", None)
+        if name == "quark":
+            # For Quark, determine if it's OCP MXFP4 by checking config directly
+            from vllm.model_executor.layers.quantization.quark.quark import (
+                QuarkConfig,
             )
+
+            if isinstance(quant_config, QuarkConfig):
+                layer_quant_config = quant_config._find_matched_config(prefix, self)
+                weight_config = layer_quant_config.get("weight")
+                input_config = layer_quant_config.get("input_tensors")
+
+                if (
+                    quant_config._is_w_ocp_mx_a_x(weight_config, input_config)
+                    and weight_config
+                    and weight_config.get("dtype") == "fp4"
+                    and getattr(torch, "float4_e2m1fn_x2", None) is not None
+                ):
+                    return True
 
         return False
 

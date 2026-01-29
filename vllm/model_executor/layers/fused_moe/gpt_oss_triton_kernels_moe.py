@@ -95,45 +95,23 @@ def triton_kernel_moe_forward(
         gating_output, topk, sm_first=not renormalize
     )
 
-    if (
-        quant_config is not None
-        and quant_config.use_mxfp4_w4a16
-        and quant_config.ocp_mx_scheme == "w_mxfp4"
-    ):
-        output = torch.empty_like(hidden_states)
+    output = torch.empty_like(hidden_states)
 
-        return triton_kernel_fused_experts(
-            output,
-            hidden_states,
-            w1,
-            w2,
-            routing_data,
-            gather_idx,
-            scatter_idx,
-            topk=topk,
-            activation=activation,
-            quant_config=quant_config,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-        )
-
-    elif (
-        quant_config is not None
-        and quant_config.use_mxfp4_w4a8
-        and quant_config.ocp_mx_scheme is not None
-        and quant_config.ocp_mx_scheme.startswith("w_mxfp4")
-    ):
-        raise NotImplementedError(
-            "Native kernel for weight in ocp_mx_scheme (MXFP4) and activation in FP8 "
-            "is currently not provided or integrated. Please open an issue."
-        )
-
-    else:
-        raise NotImplementedError(
-            f"The quant_config={quant_config} for fused experts with triton kernel "
-            "is currently not provided or integrated. Please open an issue."
-        )
+    return triton_kernel_fused_experts(
+        output,
+        hidden_states,
+        w1,
+        w2,
+        routing_data,
+        gather_idx,
+        scatter_idx,
+        topk=topk,
+        activation=activation,
+        quant_config=quant_config,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+    )
 
 
 # This is a triton implementation of the fused_experts function
