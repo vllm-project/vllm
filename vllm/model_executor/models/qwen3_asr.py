@@ -90,7 +90,6 @@ from vllm.transformers_utils.processors.qwen3_asr import (
 )
 
 logger = init_logger(__name__)
-_ASR_TEXT_TAG = "<asr_text>"
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
@@ -557,7 +556,7 @@ class Qwen3ASRForConditionalGeneration(
         else:
             prompt = (
                 f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\nlanguage {full_lang_name_to}{_ASR_TEXT_TAG}"
+                f"<|im_start|>assistant\nlanguage {full_lang_name_to}<asr_text>"
             )
 
         prompt_token_ids = tokenizer.encode(prompt)
@@ -566,21 +565,3 @@ class Qwen3ASRForConditionalGeneration(
             "multi_modal_data": {"audio": audio},
         }
         return cast(PromptType, prompt_dict)
-
-    @classmethod
-    def post_process_output(cls, text: str) -> str:
-        """
-        Post-process Qwen3-ASR raw output to extract clean transcription.
-
-        The model outputs in format: "language {lang}<asr_text>{transcription}"
-        This method strips the language prefix and asr_text tags.
-        """
-        if not text:
-            return ""
-
-        if _ASR_TEXT_TAG not in text:
-            return text
-
-        # Split on <asr_text> tag and take the transcription part
-        _, text_part = text.rsplit(_ASR_TEXT_TAG, 1)
-        return text_part

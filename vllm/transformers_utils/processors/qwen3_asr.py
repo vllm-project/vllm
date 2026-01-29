@@ -213,7 +213,6 @@ class Qwen3ASRProcessor(ProcessorMixin):
         return list(_iter())
 
     def apply_chat_template(self, conversations, chat_template=None, **kwargs):
-        kwargs["return_dict"] = False
         return super().apply_chat_template(conversations, chat_template, **kwargs)
 
     @property
