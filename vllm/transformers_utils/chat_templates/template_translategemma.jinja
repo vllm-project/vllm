@@ -1,0 +1,44 @@
+{#- TranslateGemma Chat Template -#}
+{#- Supports structured translation input with source_lang_code and target_lang_code -#}
+{#- Converts structured format to Gemma 3 compatible prompt -#}
+{{ bos_token }}
+{%- for message in messages -%}
+    {%- if message['role'] == 'user' -%}
+        {{- '<start_of_turn>user\n' -}}
+        {%- if message['content'] is string -%}
+            {{- message['content'] -}}
+        {%- elif message['content'] is iterable -%}
+            {%- for part in message['content'] -%}
+                {%- if part['type'] == 'text' -%}
+                    {%- if part.source_lang_code is defined and part.target_lang_code is defined -%}
+                        {{- 'Translate from ' + part['source_lang_code'] + ' to ' + part['target_lang_code'] + ':\n' -}}
+                        {{- part['text'] -}}
+                    {%- else -%}
+                        {{- part['text'] -}}
+                    {%- endif -%}
+                {%- elif part['type'] == 'image' -%}
+                    {{- '<start_of_image>' -}}
+                    {%- if part.source_lang_code is defined and part.target_lang_code is defined -%}
+                        {{- '\nExtract text and translate from ' + part['source_lang_code'] + ' to ' + part['target_lang_code'] -}}
+                    {%- endif -%}
+                {%- endif -%}
+            {%- endfor -%}
+        {%- endif -%}
+        {{- '<end_of_turn>\n' -}}
+    {%- elif message['role'] == 'assistant' -%}
+        {{- '<start_of_turn>model\n' -}}
+        {%- if message['content'] is string -%}
+            {{- message['content'] -}}
+        {%- elif message['content'] is iterable -%}
+            {%- for part in message['content'] -%}
+                {%- if part['type'] == 'text' -%}
+                    {{- part['text'] -}}
+                {%- endif -%}
+            {%- endfor -%}
+        {%- endif -%}
+        {{- '<end_of_turn>\n' -}}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- '<start_of_turn>model\n' -}}
+{%- endif -%}

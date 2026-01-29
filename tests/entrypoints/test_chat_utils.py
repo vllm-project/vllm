@@ -2151,3 +2151,133 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     ]
     _assert_mm_data_inputs(mm_data, {"audio": 1})
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[audio_uuid])
+
+
+# TranslateGemma tests
+def test_translategemma_translation_fields_preserved(phi3v_model_config):
+    """Test that source_lang_code and target_lang_code are preserved in parsing.
+
+    TranslateGemma requires structured input with language codes that must
+    flow through the parsing pipeline to the chat template.
+    """
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "source_lang_code": "cs",
+                    "target_lang_code": "de-DE",
+                    "text": "V nejhorším případě i k prasknutí čočky.",
+                }
+            ],
+        }
+    ]
+
+    # Use openai format to preserve structured content
+    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+        messages,
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert len(conversation) == 1
+    assert conversation[0]["role"] == "user"
+
+    content = conversation[0]["content"]
+    assert isinstance(content, list)
+    assert len(content) == 1
+
+    text_part = content[0]
+    assert text_part["type"] == "text"
+    assert text_part["text"] == "V nejhorším případě i k prasknutí čočky."
+    # Verify translation fields are preserved
+    assert text_part["source_lang_code"] == "cs"
+    assert text_part["target_lang_code"] == "de-DE"
+
+
+def test_translategemma_chat_template_format():
+    """Test TranslateGemma chat template produces expected output format."""
+    from vllm.entrypoints.chat_utils import load_chat_template
+
+    template_path = (
+        VLLM_PATH
+        / "vllm"
+        / "transformers_utils"
+        / "chat_templates"
+        / "template_translategemma.jinja"
+    )
+    chat_template = load_chat_template(template_path)
+    assert isinstance(chat_template, str)
+
+    # Verify template contains expected Gemma 3 tokens
+    assert "<start_of_turn>" in chat_template
+    assert "<end_of_turn>" in chat_template
+    assert "source_lang_code" in chat_template
+    assert "target_lang_code" in chat_template
+
+
+def test_translategemma_registry_fallback():
+    """Test that TranslateGemma models get the correct chat template."""
+    from vllm.transformers_utils.chat_templates.registry import (
+        get_chat_template_fallback_path,
+    )
+
+    # TranslateGemma should get specialized template
+    translategemma_path = get_chat_template_fallback_path(
+        "gemma3", "google/translategemma-27b-it"
+    )
+    assert translategemma_path is not None
+    assert "template_translategemma.jinja" in str(translategemma_path)
+
+    # Regular Gemma 3 should return None (use HF template)
+    gemma3_path = get_chat_template_fallback_path("gemma3", "google/gemma-3-27b-it")
+    assert gemma3_path is None
+
+
+@pytest.mark.asyncio
+async def test_translategemma_image_translation_fields_preserved(
+    phi3v_model_config,
+    image_url,
+):
+    """Test that translation fields are preserved for image inputs.
+
+    TranslateGemma supports image-to-text translation where an image
+    containing text is translated to a target language.
+    """
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                    "source_lang_code": "en",
+                    "target_lang_code": "es",
+                },
+            ],
+        }
+    ]
+
+    # Use openai format to preserve structured content
+    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+        messages,
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert len(conversation) == 1
+    assert conversation[0]["role"] == "user"
+
+    content = conversation[0]["content"]
+    assert isinstance(content, list)
+    assert len(content) == 1
+
+    image_part = content[0]
+    assert image_part["type"] == "image"
+    # Verify translation fields are preserved on image parts
+    assert image_part["source_lang_code"] == "en"
+    assert image_part["target_lang_code"] == "es"
+
+    # Verify image data is processed correctly
+    _assert_mm_data_is_image_input(await mm_future, 1)
