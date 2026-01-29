@@ -81,11 +81,26 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
 
 def adjust_block_scale_shard(weight_block_size, shard_size, shard_offset):
+    """Adjust shard offset and size for block-quantized scale tensors.
+
+    For merged weights (e.g., gate_up_proj), we need to compute scale boundaries
+    based on the merged tensor alignment. Using ceil(offset) and ceil(size)
+    independently can exceed the merged scale tensor size when partitions
+    aren't block-aligned, since ceil(A) + ceil(B) >= ceil(A+B).
+
+    Instead, we compute:
+    - scale_offset = ceil(offset / block_n)
+    - scale_end = ceil((offset + size) / block_n)
+    - scale_size = scale_end - scale_offset
+
+    This ensures scale regions fit within ceil(total / block_n) for merged tensors.
+    """
     assert weight_block_size is not None
     block_n = weight_block_size[0]
-    shard_offset = (shard_offset + block_n - 1) // block_n
-    shard_size = (shard_size + block_n - 1) // block_n
-    return shard_size, shard_offset
+    scale_offset = (shard_offset + block_n - 1) // block_n
+    scale_end = (shard_offset + shard_size + block_n - 1) // block_n
+    scale_size = scale_end - scale_offset
+    return scale_size, scale_offset
 
 
 def adjust_bitsandbytes_4bit_shard(
