@@ -78,7 +78,6 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -106,15 +105,6 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import get_vit_attn_backend
-
-is_gfx1x = False
-if current_platform.is_rocm():
-    try:
-        from vllm.platforms.rocm import on_gfx1x
-
-        is_gfx1x = on_gfx1x()
-    except ImportError:
-        is_gfx1x = False
 
 logger = init_logger(__name__)
 
@@ -917,13 +907,22 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             hidden_states = hidden_states + pos_embeds
         rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw)
 
-        # Workaround for a ROCm RDNA3 (gfx11)
-        # specific bug where torch.repeat_interleave
-        # causes hipErrorIllegalState/kernel crashes.
-        # This does not affect CDNA (MI300+).
-        # We use a vectorized cumsum + searchsorted
-        # approach to avoid the faulty kernel.
-        if is_gfx1x:
+        # RDNA3 (gfx11) specific bug workaround: torch.repeat_interleave triggers
+        # kernel crashes. We attempt the operation and catch the RuntimeError
+        # to switch to a vectorized cumsum + searchsorted approach.
+        try:
+            cu_seqlens = torch.repeat_interleave(
+                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+            ).cumsum(
+                dim=0,
+                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+            )
+            cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+        except RuntimeError:
+            logger.warning(
+                "torch.repeat_interleave not executable, "
+                "switching to vectorized searchsorted implementation."
+            )
             repeat_counts = grid_thw[:, 0]
             values = grid_thw[:, 1] * grid_thw[:, 2]
             repeat_cumsum = repeat_counts.cumsum(0)
@@ -939,15 +938,6 @@ class Qwen3Omni_VisionTransformer(nn.Module):
                 dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
             )
             cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
-        else:
-            cu_seqlens = torch.repeat_interleave(
-                grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
-            ).cumsum(
-                dim=0,
-                dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-            )
-
-        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         hidden_states = hidden_states.unsqueeze(1)
         rotary_pos_emb_cos = rotary_pos_emb_cos.to(hidden_states.device)
