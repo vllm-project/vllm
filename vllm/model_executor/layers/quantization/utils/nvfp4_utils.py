@@ -56,7 +56,7 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
         backend = NvFp4LinearBackend.EMULATION
     elif envs.VLLM_NVFP4_GEMM_BACKEND is None:
         # Auto-select best available backend
-        if has_flashinfer():
+        if current_platform.has_device_capability(100) and has_flashinfer():
             backend = NvFp4LinearBackend.FLASHINFER_CUTLASS
         elif cutlass_fp4_supported():
             backend = NvFp4LinearBackend.VLLM_CUTLASS
