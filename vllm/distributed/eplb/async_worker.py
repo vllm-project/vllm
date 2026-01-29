@@ -86,6 +86,12 @@ async def transfer_run_periodically(
                         if model_state.layer_to_transfer >= current_num_layers:
                             break
 
+                        # Wait for the main thread to finish consuming the buffer
+                        # before overwriting it
+                        if model_state.buffer_consumed_event is not None:
+                            cuda_stream.wait_event(model_state.buffer_consumed_event)
+                            model_state.buffer_consumed_event = None
+
                         (
                             model_state.is_unchanged,
                             model_state.is_received_locally,

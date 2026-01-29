@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
@@ -195,6 +196,13 @@ class AudioResampler:
             raise RuntimeError(
                 "Audio resampling is not supported when `target_sr` is not provided"
             )
+        if math.isclose(
+            float(orig_sr),
+            float(self.target_sr),
+            rel_tol=0.0,
+            abs_tol=1e-6,
+        ):
+            return audio
         if self.method == "librosa":
             return resample_audio_librosa(
                 audio, orig_sr=orig_sr, target_sr=self.target_sr

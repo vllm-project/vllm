@@ -22,8 +22,6 @@ from .yarn_scaling_rope import YaRNScalingRotaryEmbedding
 
 _ROPE_DICT: dict[tuple[Any, ...], RotaryEmbedding] = {}
 
-__all__ = ["RotaryEmbedding"]
-
 
 def get_rope(
     head_size: int,

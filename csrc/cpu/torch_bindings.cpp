@@ -35,7 +35,7 @@ void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens);
 
 int64_t init_shm_manager(const std::string& name, const int64_t group_size,
-                         const int64_t rank);
+                         const int64_t rank, const int64_t thread_num);
 
 std::string join_shm_manager(int64_t handle, const std::string& name);
 
@@ -232,8 +232,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
 // SHM CCL
 #if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__))
-  ops.def("init_shm_manager(str name, int group_size, int rank) -> int",
-          &init_shm_manager);
+  ops.def(
+      "init_shm_manager(str name, int group_size, int rank, int thread_num) -> "
+      "int",
+      &init_shm_manager);
   ops.def("join_shm_manager(int handle, str name) -> str", &join_shm_manager);
   ops.def("shm_allreduce(int handle, Tensor! data) -> ()");
   ops.impl("shm_allreduce", torch::kCPU, &shm_allreduce);
@@ -292,7 +294,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
       "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
-      "float softcap, Tensor sheduler_metadata, Tensor? s_aux) -> ()",
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
       &cpu_attention_with_kv_cache);
 
   // placeholders

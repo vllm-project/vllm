@@ -57,6 +57,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from .vision import is_vit_use_data_parallel
 
 
 class Lfm2VLImagePixelInputs(TensorSchema):
@@ -354,10 +355,8 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
             tok_kwargs,
         )
 
-        parsed_images = (
-            self._get_data_parser()
-            .parse_mm_data({"image": images})
-            .get_items("image", ImageProcessorItems)
+        parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
+            "image", ImageProcessorItems
         )
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
@@ -428,10 +427,12 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
 
 class Lfm2VLMultiModalProjector(nn.Module):
     def __init__(
-        self, config: Lfm2VlConfig, use_data_parallel: bool = False, prefix: str = ""
+        self,
+        config: Lfm2VlConfig,
+        prefix: str = "",
     ):
         super().__init__()
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = is_vit_use_data_parallel()
 
         in_channels = config.vision_config.hidden_size * (config.downsample_factor**2)
         self.factor = config.downsample_factor
@@ -609,7 +610,6 @@ class Lfm2VLForConditionalGeneration(
 
             self.multi_modal_projector = Lfm2VLMultiModalProjector(
                 config=config,
-                use_data_parallel=self.use_data_parallel,
                 prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
