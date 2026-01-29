@@ -56,7 +56,8 @@ class SHMConnector(ECConnectorBase):
         self._mm_datas_need_loads: dict[str, int] = {}
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is not None:
-            self._storage_path = transfer_config.get_from_extra_config(
+            self._storage_path = \
+                transfer_config.get_from_extra_config(
                 "shared_storage_path", "/tmp"
             )
             logger.debug(transfer_config)
@@ -77,7 +78,8 @@ class SHMConnector(ECConnectorBase):
             ]
         logger.debug("Consumer addrs is: %s", self.consumer_sock_addrs)
 
-        self.thread_executor = ThreadPoolExecutor(
+        self.thread_executor = \
+            ThreadPoolExecutor(
             max_workers=getattr(transfer_config, "max_workers", 8) or 8
         )
         if transfer_config.ec_role == "ec_producer":
@@ -374,10 +376,12 @@ def ensure_zmq_send(socket: zmq.Socket, data: list, max_retries: int = 3):
             retries_left -= 1
             if retries_left > 0:
                 logger.warning(
-                    f"Send failed: {e}, retrying... ({retries_left} attempts left)")
+                    "Send failed: %s, retrying... (%s attempts left)", e, 
+                    retries_left
+                )
                 time.sleep(0.1)
             else:
-                logger.error(f"Send failed after all retries: {e}")
+                logger.error("Send failed after all retries: %s", e)
                 raise RuntimeError(
                     f"Failed to send data after {max_retries} retries: {e}")
 
@@ -398,3 +402,4 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+            
