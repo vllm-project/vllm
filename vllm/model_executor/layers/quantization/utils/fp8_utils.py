@@ -426,6 +426,24 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
+        # Pad K dimension to multiple of block size if needed.
+        # This handles models like DeepSeek-V2-Lite where intermediate_size
+        # (10944) is not divisible by the block size (128).
+        block_k = self.act_quant_group_shape.col
+        k = input_2d.shape[-1]
+        if k % block_k != 0:
+            pad_k = block_k - (k % block_k)
+            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
+            weight = torch.nn.functional.pad(weight, (0, pad_k))
+            # Pad weight scale for the new K blocks
+            orig_k_blocks = triton.cdiv(k, block_k)
+            new_k_blocks = triton.cdiv(k + pad_k, block_k)
+            extra_k_blocks = new_k_blocks - orig_k_blocks
+            if extra_k_blocks > 0:
+                weight_scale = torch.nn.functional.pad(
+                    weight_scale, (0, extra_k_blocks)
+                )
+
         if DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0:
             q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
                 input_2d,
@@ -547,6 +565,22 @@ class W8A8BlockFp8LinearOp:
         This backend uses TensorRT-LLM's FP8 block-scale GEMM kernels
         and supports FP8+FP8 (W8A8 full quantization) on SM90+ (Hopper).
         """
+        # Pad K dimension to multiple of block size if needed.
+        block_k = self.act_quant_group_shape.col
+        k = input_2d.shape[-1]
+        if k % block_k != 0:
+            pad_k = block_k - (k % block_k)
+            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
+            weight = torch.nn.functional.pad(weight, (0, pad_k))
+            # Pad weight scale for the new K blocks
+            orig_k_blocks = triton.cdiv(k, block_k)
+            new_k_blocks = triton.cdiv(k + pad_k, block_k)
+            extra_k_blocks = new_k_blocks - orig_k_blocks
+            if extra_k_blocks > 0:
+                weight_scale = torch.nn.functional.pad(
+                    weight_scale, (0, extra_k_blocks)
+                )
+
         # Now call FlashInfer with BF16 input + FP8 weight, input will be
         # quantized with FlashInfer kernel (W8A8)
         output = torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
