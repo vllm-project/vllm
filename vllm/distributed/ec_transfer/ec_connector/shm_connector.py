@@ -3,9 +3,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Tuple
 import time, queue, torch, zmq, contextlib, pickle
-import gc, shutil
+import gc, msgpack
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
@@ -90,8 +90,8 @@ class SHMConnector(ECConnectorBase):
             self.thread_executor.submit(self.producer_run)
             logger.debug("============ Producer Mode ===============")
         elif transfer_config.ec_role == "ec_consumer":
-            self.handle_caches = {}
-            self.recv_queue = queue.Queue()
+            self.handle_caches: dict[str, Any] = {}
+            self.recv_queue: queue.Queue[Tuple[str, Any]] = queue.Queue()
             self.thread_executor.submit(self.consumer_run)
             self.thread_executor.submit(self.recv_feat_async)
             logger.debug("============= Consumer Start =============")
@@ -134,8 +134,9 @@ class SHMConnector(ECConnectorBase):
                 logger.debug("recv tensor for hash %s", mm_data.mm_hash)
             except Exception as e:
                 logger.error(
-                    f"Unhandled Cache Miss {mm_data.mm_hash}, error code: {str(e)}"
-                    )
+                    "Unhandled Cache Miss %s, error code: %s",
+                    mm_data.mm_hash, str(e)
+                )
 
     def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
         """
@@ -266,15 +267,12 @@ class SHMConnector(ECConnectorBase):
         foldername = self._generate_foldername_debug(mm_hash)  # <- folder auto-created
         return foldername
 
-    def shared_handle_send(self, path, send_data):
+    def shared_handle_send(self, path, payload):
         """Send shared memory handle to a specific ZMQ address and wait for ACK."""
         with zmq_ctx(zmq.REQ, path) as sock:
             sock.setsockopt(zmq.RCVTIMEO, 5000)
-            ensure_zmq_send(sock, pickle.dumps(send_data))
-            ack = sock.recv()
-            if ack != b"ACK":
-                raise ValueError(f"Unexpected ACK response: {ack}")
-            return ack
+            ensure_zmq_send(sock, payload)
+            return sock.recv()
 
     def producer_run(self):
         """
@@ -286,10 +284,11 @@ class SHMConnector(ECConnectorBase):
                 feat_key, tensor = self.send_queue.get()
                 shared_handle = reduce_tensor(tensor.detach().clone())
                 send_data = {"key": feat_key,"value": shared_handle}
+                payload = msgpack.packb(send_data, use_bin_type=True)
                 future_list = []
                 for path in self.zmq_paths:
                     future = self.thread_executor.submit(
-                        self.shared_handle_send, path, send_data
+                        self.shared_handle_send, path, payload
                         )
                     future_list.append(future)
                 ack_count = 0
@@ -310,8 +309,9 @@ class SHMConnector(ECConnectorBase):
                 self.send_queue.task_done()
             except Exception as e:
                 logger.error(
-                    f"put key: {feat_key} into store fail, error code: {str(e)}"
-                    )
+                    "put key: %s into store fail, error code: %s",
+                    feat_key, str(e)
+                )
                 if 'feat_key' in locals():
                     self.send_queue.task_done()
                 continue
@@ -321,7 +321,7 @@ class SHMConnector(ECConnectorBase):
         while True:
             try:
                 payload = self.recv_queue.get()
-                data = pickle.loads(payload)
+                data = msgpack.unpackb(payload, raw=False)
                 feat_key = data["key"]
                 share_handle = data["value"]
                 self.handle_caches[feat_key] = share_handle
@@ -402,4 +402,3 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
-            
