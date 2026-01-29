@@ -19,6 +19,7 @@ Expected format (multiple tools):
 The model follows this format with high compliance when given appropriate
 few-shot examples in the chat template.
 """
+
 import json
 from collections.abc import Sequence
 
@@ -145,9 +146,7 @@ class Qwen25CoderToolParser(ToolParser):
             else:
                 return delta_text
 
-    def _parse_tool_calls_from_json(
-        self, json_content: str
-    ) -> list[ToolCall]:
+    def _parse_tool_calls_from_json(self, json_content: str) -> list[ToolCall]:
         """
         Parse tool calls from JSON content.
 
@@ -167,9 +166,7 @@ class Qwen25CoderToolParser(ToolParser):
             elif isinstance(parsed, dict):
                 raw_function_calls = [parsed]
             else:
-                logger.warning(
-                    "Unexpected JSON type in tool call: %s", type(parsed)
-                )
+                logger.warning("Unexpected JSON type in tool call: %s", type(parsed))
                 return []
 
             for function_call in raw_function_calls:
@@ -241,7 +238,9 @@ class Qwen25CoderToolParser(ToolParser):
             if all_tool_calls:
                 # Extract content before the first tool call
                 content_end = model_output.find(self.tool_call_start_token)
-                content = model_output[:content_end].strip() if content_end > 0 else None
+                content = (
+                    model_output[:content_end].strip() if content_end > 0 else None
+                )
 
                 return ExtractedToolCallInformation(
                     tools_called=True,
@@ -277,7 +276,7 @@ class Qwen25CoderToolParser(ToolParser):
         # Adjust text to account for buffered content
         if (
             len(previous_text) >= len(self.buffered_delta_text)
-            and previous_text[-len(self.buffered_delta_text):]
+            and previous_text[-len(self.buffered_delta_text) :]
             == self.buffered_delta_text
         ):
             previous_text = previous_text[: -len(self.buffered_delta_text)]
@@ -309,7 +308,7 @@ class Qwen25CoderToolParser(ToolParser):
                 # We're inside a tool call - extract content after last <tools>
                 last_start = current_text.rfind(self.tool_call_start_token)
                 tool_call_content = current_text[
-                    last_start + len(self.tool_call_start_token):
+                    last_start + len(self.tool_call_start_token) :
                 ]
             elif self.tool_call_end_token in delta_text:
                 # Tool call is being closed
@@ -317,7 +316,7 @@ class Qwen25CoderToolParser(ToolParser):
                 last_end = current_text.rfind(self.tool_call_end_token)
                 if last_start < last_end:
                     tool_call_content = current_text[
-                        last_start + len(self.tool_call_start_token): last_end
+                        last_start + len(self.tool_call_start_token) : last_end
                     ]
 
             if not tool_call_content:
@@ -340,7 +339,7 @@ class Qwen25CoderToolParser(ToolParser):
                         )
                         is_complete.append(
                             is_complete_json(
-                                tool_call_content[start_idx: start_idx + end_idx]
+                                tool_call_content[start_idx : start_idx + end_idx]
                             )
                         )
                         # Support both "arguments" and "parameters"
@@ -348,12 +347,12 @@ class Qwen25CoderToolParser(ToolParser):
                             obj["arguments"] = obj["parameters"]
                         tool_call_arr.append(obj)
                         # Move past this JSON object (handle comma/whitespace)
-                        remaining = tool_call_content[start_idx + end_idx:].lstrip()
+                        remaining = tool_call_content[start_idx + end_idx :].lstrip()
                         if remaining.startswith(","):
                             remaining = remaining[1:].lstrip()
                         start_idx = len(tool_call_content) - len(remaining)
                         if start_idx == len(tool_call_content) - len(
-                            tool_call_content[start_idx + end_idx:]
+                            tool_call_content[start_idx + end_idx :]
                         ):
                             break
                     except partial_json_parser.core.exceptions.MalformedJSON:
@@ -439,9 +438,8 @@ class Qwen25CoderToolParser(ToolParser):
                     cur_args_json = json.dumps(cur_arguments, ensure_ascii=False)
 
                     prev_arguments = None
-                    if (
+                    if self.prev_tool_call_arr and self.current_tool_id < len(
                         self.prev_tool_call_arr
-                        and self.current_tool_id < len(self.prev_tool_call_arr)
                     ):
                         prev_arguments = self.prev_tool_call_arr[
                             self.current_tool_id

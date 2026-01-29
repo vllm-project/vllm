@@ -5,6 +5,7 @@ Tests for Qwen2.5-Coder tool parser.
 
 This tests the <tools>JSON</tools> format used by Qwen2.5-Coder models.
 """
+
 import json
 from collections.abc import Generator
 
@@ -16,7 +17,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
-    FunctionCall,
     ToolCall,
 )
 from vllm.tokenizers import TokenizerLike, get_tokenizer
@@ -71,7 +71,10 @@ def sample_tools():
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search query"},
-                        "num_results": {"type": "integer", "description": "Number of results"},
+                        "num_results": {
+                            "type": "integer",
+                            "description": "Number of results",
+                        },
                     },
                     "required": ["query"],
                 },
@@ -375,7 +378,9 @@ class TestExtractToolCallsStreaming:
                         if tool_call.function.name:
                             tool_states[idx]["name"] = tool_call.function.name
                         if tool_call.function.arguments is not None:
-                            tool_states[idx]["arguments"] += tool_call.function.arguments
+                            tool_states[idx]["arguments"] += (
+                                tool_call.function.arguments
+                            )
 
         # Verify we got the tool call
         assert len(tool_states) == 1
@@ -425,7 +430,9 @@ class TestExtractToolCallsStreaming:
                         if tool_call.function.name:
                             tool_states[idx]["name"] = tool_call.function.name
                         if tool_call.function.arguments is not None:
-                            tool_states[idx]["arguments"] += tool_call.function.arguments
+                            tool_states[idx]["arguments"] += (
+                                tool_call.function.arguments
+                            )
 
         # Content before tool call should be collected
         assert "Let me check" in collected_content
