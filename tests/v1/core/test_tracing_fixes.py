@@ -1,11 +1,13 @@
 """Unit tests for journey tracing coordination fixes.
 
-Tests verify:
+These tests verify the global provider pattern and integration behavior:
 1. TracerProvider singleton pattern prevents overwrites
 2. API span creation with events
 3. Trace context injection/extraction
-4. Scheduler span creation with parent context
-5. No vllm.llm_engine scope interference
+4. End-to-end global provider flow
+
+Note: Behavioral tests for tracer separation and vllm.llm_engine removal
+are in test_tracer_separation_behavioral.py and test_vllm_llm_engine_removed_behavioral.py
 """
 
 import pytest
@@ -141,34 +143,6 @@ class TestTraceContextPropagation:
             assert mock_propagator.extract.called
 
 
-class TestVllmLlmEngineRemoved:
-    """Test that vllm.llm_engine scope has been properly removed."""
-
-    def test_no_llm_engine_in_async_llm(self):
-        """Verify async_llm.py doesn't initialize vllm.llm_engine tracer."""
-        with open('vllm/v1/engine/async_llm.py', 'r') as f:
-            content = f.read()
-            assert 'init_tracer("vllm.llm_engine"' not in content
-
-    def test_no_llm_engine_in_llm_engine(self):
-        """Verify llm_engine.py doesn't initialize vllm.llm_engine tracer."""
-        with open('vllm/v1/engine/llm_engine.py', 'r') as f:
-            content = f.read()
-            assert 'init_tracer("vllm.llm_engine"' not in content
-
-    def test_output_processor_tracing_disabled(self):
-        """Verify OutputProcessor.do_tracing() is not called."""
-        with open('vllm/v1/engine/output_processor.py', 'r') as f:
-            content = f.read()
-            # Check that do_tracing call is removed from process_outputs
-            lines = content.split('\n')
-            for i, line in enumerate(lines):
-                if 'if self.tracer:' in line:
-                    # Check next few lines don't call do_tracing
-                    next_lines = '\n'.join(lines[i:i+5])
-                    assert 'self.do_tracing(' not in next_lines
-
-
 class TestGlobalProviderIntegration:
     """Test that global provider pattern works end-to-end."""
 
@@ -231,38 +205,3 @@ class TestGlobalProviderIntegration:
         finally:
             # Restore original provider
             vllm.tracing._global_tracer_provider = original_provider
-
-
-class TestDebugLogging:
-    """Test that comprehensive debug logging was added."""
-
-    def test_tracing_logging_present(self):
-        """Verify critical logging in tracing.py."""
-        with open('vllm/tracing.py', 'r') as f:
-            content = f.read()
-            assert 'Initializing global TracerProvider' in content
-            assert 'Reusing existing global TracerProvider' in content
-            assert 'Injected trace context' in content
-
-    def test_api_serving_logging_present(self):
-        """Verify critical logging in API serving layer."""
-        with open('vllm/entrypoints/openai/engine/serving.py', 'r') as f:
-            content = f.read()
-            assert 'Creating API span for request' in content
-            assert 'Created API span' in content
-            assert 'Emitted api.ARRIVED event' in content
-
-    def test_scheduler_logging_present(self):
-        """Verify critical logging in scheduler."""
-        with open('vllm/v1/core/sched/scheduler.py', 'r') as f:
-            content = f.read()
-            assert 'Initializing vllm.scheduler tracer' in content
-            assert 'Creating core span for request' in content
-            assert 'Created core span' in content
-
-    def test_api_server_logging_present(self):
-        """Verify critical logging in API server startup."""
-        with open('vllm/entrypoints/openai/api_server.py', 'r') as f:
-            content = f.read()
-            assert 'Initializing vllm.api tracer' in content
-            assert 'Successfully initialized vllm.api tracer' in content
