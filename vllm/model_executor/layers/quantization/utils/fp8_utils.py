@@ -1425,16 +1425,14 @@ def validate_fp8_block_shape(
             f"is not divisible by weight quantization block_k = {block_k}."
         )
 
-    # Required by column parallel or enabling merged weights
+    # Required by column parallel with tensor parallelism.
+    # When TP > 1, each partition must be divisible by block size for proper
+    # slicing. For merged matrices without TP (e.g., gate_up_proj), partitions
+    # are logical only - the kernel treats them as a single matrix and handles
+    # partial blocks correctly via ceiling division in scale tensor sizing.
     is_tp_split = tp_size > 1 and output_size // sum(output_partition_sizes) == tp_size
-    is_merged_gemm = len(output_partition_sizes) > 1
-    if is_tp_split or is_merged_gemm:
-        sizes_to_check = output_partition_sizes
-        if not is_tp_split and is_merged_gemm:
-            # In case of merged matrices, we allow the last
-            # matrix to not be a multiple of block size
-            sizes_to_check = output_partition_sizes[:-1]
-        for output_partition_size in sizes_to_check:
+    if is_tp_split:
+        for output_partition_size in output_partition_sizes:
             if output_partition_size % block_n != 0:
                 raise ValueError(
                     f"Weight output_partition_size = "
