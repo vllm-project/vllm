@@ -235,3 +235,101 @@ async def test_pooling_not_supported(
     assert response.json()["error"]["message"].startswith(
         f"Task {task} is not supported"
     )
+
+
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_max_tokens_per_doc(server: RemoteOpenAIServer, model_name: str):
+    """Test that max_tokens_per_doc truncates documents correctly."""
+    query = "What is the capital of France?"
+    # Create a long document that will be truncated
+    long_doc = "The capital of France is Paris. " * 50
+    short_doc = "The capital of Brazil is Brasilia."
+
+    # Test with max_tokens_per_doc set
+    rerank_response = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": model_name,
+            "query": query,
+            "documents": [long_doc, short_doc],
+            "max_tokens_per_doc": 10,
+        },
+    )
+    rerank_response.raise_for_status()
+    rerank = RerankResponse.model_validate(rerank_response.json())
+
+    assert rerank.id is not None
+    assert rerank.results is not None
+    assert len(rerank.results) == 2
+
+    # The truncated long doc should have fewer tokens used
+    # Verify that the request succeeded with truncation
+    assert rerank.usage.prompt_tokens > 0
+
+
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_max_tokens_per_doc_reduces_tokens(server: RemoteOpenAIServer, model_name: str):
+    """Test that max_tokens_per_doc actually reduces the token count."""
+    query = "What is the capital of France?"
+    long_doc = "The capital of France is Paris. " * 20
+
+    # Without max_tokens_per_doc
+    response_no_limit = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": model_name,
+            "query": query,
+            "documents": [long_doc],
+        },
+    )
+    response_no_limit.raise_for_status()
+    rerank_no_limit = RerankResponse.model_validate(response_no_limit.json())
+
+    # With max_tokens_per_doc
+    response_with_limit = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": model_name,
+            "query": query,
+            "documents": [long_doc],
+            "max_tokens_per_doc": 10,
+        },
+    )
+    response_with_limit.raise_for_status()
+    rerank_with_limit = RerankResponse.model_validate(response_with_limit.json())
+
+    # The version with truncation should use fewer tokens
+    assert rerank_with_limit.usage.prompt_tokens < rerank_no_limit.usage.prompt_tokens
+
+
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_max_tokens_per_doc_validation(server: RemoteOpenAIServer, model_name: str):
+    """Test that max_tokens_per_doc validation works correctly."""
+    query = "What is the capital of France?"
+    documents = ["The capital of France is Paris."]
+
+    # Test with invalid max_tokens_per_doc (0)
+    response = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": model_name,
+            "query": query,
+            "documents": documents,
+            "max_tokens_per_doc": 0,
+        },
+    )
+    assert response.status_code == 400
+    assert "max_tokens_per_doc must be a positive integer" in response.text
+
+    # Test with invalid max_tokens_per_doc (negative)
+    response = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": model_name,
+            "query": query,
+            "documents": documents,
+            "max_tokens_per_doc": -5,
+        },
+    )
+    assert response.status_code == 400
+    assert "max_tokens_per_doc must be a positive integer" in response.text
