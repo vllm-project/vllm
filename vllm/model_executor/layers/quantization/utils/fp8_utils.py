@@ -592,7 +592,11 @@ class W8A8BlockFp8LinearOp:
         ],
         QuantFP8 | None,
     ]:
-        if use_cutlass:
+        # Skip CUTLASS for Blackwell (sm_120+) as block FP8 support is not
+        # stable yet. Fall back to Triton backend.
+        capability = current_platform.get_device_capability()
+        is_blackwell = capability is not None and capability.to_int() >= 120
+        if use_cutlass and not is_blackwell:
             return self._run_cutlass, (
                 QuantFP8(
                     False,
