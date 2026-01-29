@@ -300,8 +300,7 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         if (audios := mm_data.get("audios")) is None:
             return {}
 
-        mm_items = self.info.parse_mm_data({"audio": audios}, validate=False)
-        parsed_audios = mm_items.get_items(
+        parsed_audios = self.data_parser.parse_mm_data({"audio": audios}).get_items(
             "audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems)
         )
 

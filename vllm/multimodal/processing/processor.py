@@ -999,6 +999,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         else:
             self.data_parser = self.info.get_data_parser()
 
+            self.data_parser = self._get_data_parser()  # type: ignore
+        else:
+            self.data_parser = self.info.get_data_parser()
+
     @property
     @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
     def supported_mm_limits(self):
@@ -1017,7 +1021,55 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        return self.apply(prompt, mm_items, hf_processor_mm_kwargs, mm_uuids=mm_uuids)
+        return self.apply(prompt, mm_data, hf_processor_mm_kwargs, mm_uuids=mm_uuids)
+
+    def validate_num_items(
+        self,
+        modality: str,
+        num_items: int,
+    ) -> None:
+        supported_limit = self.supported_mm_limits.get(modality, 0)
+        allowed_limit = self.allowed_mm_limits.get(modality, 0)
+
+        if supported_limit is None:
+            supported_limit = allowed_limit
+
+        limit = min(supported_limit, allowed_limit)
+
+        if num_items > limit:
+            msg = f"At most {limit} {modality}(s) may be provided in one prompt."
+
+            if num_items <= supported_limit:
+                msg += " Set `--limit-mm-per-prompt` to increase this limit."
+
+            raise ValueError(msg)
+
+    def _to_mm_items(
+        self,
+        mm_data: MultiModalDataDict,
+    ) -> MultiModalDataItems:
+        """
+        Normalize
+        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+        to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
+        before passing them to
+        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        """
+        mm_items = self.data_parser.parse_mm_data(mm_data)
+
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        if not mm_config.enable_mm_embeds:
+            for modality, items in mm_items.items():
+                if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+                    raise ValueError(
+                        f"You must set `--enable-mm-embeds` to input "
+                        f"`{modality}_embeds`"
+                    )
+
+        for modality, items in mm_items.items():
+            self.validate_num_items(modality, len(items))
+
+        return mm_items
 
     @abstractmethod
     def _get_mm_fields_config(

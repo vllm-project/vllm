@@ -609,8 +609,9 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
             )
 
             images = mm_data["images"]
-            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
-            parsed_images = mm_items.get_items("image", ImageProcessorItems)
+            parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
+                "image", ImageProcessorItems
+            )
 
             tile_size = vision_config.image_size
             possible_resolutions = find_supported_resolutions(
