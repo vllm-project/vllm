@@ -295,7 +295,6 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
-        self.is_fp8bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
     def _forward_bf16_kv(
         self,
