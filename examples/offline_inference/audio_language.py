@@ -330,6 +330,25 @@ def run_qwen2_5_omni(question: str, audio_count: int):
     )
 
 
+def run_qwen3_asr(question: str, audio_count: int) -> ModelRequestData:
+    model_name = "Qwen/Qwen3-Asr-1.7B"
+
+    audio_in_prompt = "<|audio_start|><|audio_pad|><|audio_end|>\n" * audio_count
+    prompt = f"<|im_start|>user\n{audio_in_prompt}<|im_end|>\n<|im_start|>assistant\n"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # Ultravox 0.5-1B
 def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
     model_name = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
@@ -442,6 +461,7 @@ model_example_map = {
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,
+    "qwen3_asr": run_qwen3_asr,
     "ultravox": run_ultravox,
     "voxtral": run_voxtral,
     "whisper": run_whisper,
