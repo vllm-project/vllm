@@ -255,6 +255,10 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    # ViT Multi-Modal Encoder flags used by backend compiler
+    is_first_graph_in_mm_encoder_sequence: bool = True
+    is_last_graph_in_mm_encoder_sequence: bool = True
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):

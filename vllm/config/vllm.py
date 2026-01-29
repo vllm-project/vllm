@@ -1350,15 +1350,16 @@ class VllmConfig:
     def _set_vit_cudagraph_sizes(self):
         """Sets the CUDA graph capture sizes for the Vision Transformer (ViT).
 
-        This method determines the batch sizes for which ViT CUDA graphs will be
-        captured. CUDA graphs improve performance by reducing kernel launch
-        overhead for the vision encoder.
+        This method determines the batch sizes (in terms of number of patches)
+        for which ViT CUDA graphs will be captured. CUDA graphs improve
+        performance by reducing kernel launch overhead for the vision encoder.
 
         The logic is as follows:
         1.  The feature is only enabled if all of the following conditions are met:
-            - Eager mode is not enforced.
-            - CUDA graph mode is enabled.
-            - The multimodal encoder compilation is enabled.
+            - A model is configured (`model_config` is not None).
+            - Eager mode is not enforced (`enforce_eager` is False).
+            - CUDA graph mode is enabled (`cudagraph_mode` is not NONE).
+            - Multimodal encoder compilation is enabled (`compile_mm_encoder` is True).
             If these conditions are not met, the list of capture sizes will be empty,
             effectively disabling ViT CUDA graphs.
 
@@ -1367,17 +1368,22 @@ class VllmConfig:
             and sorted in ascending order.
 
         3.  If no sizes are provided by the user, a default list of sizes is
-            generated up to a maximum of 5120. The default sizes are:
-            [512, 1024, 1536] + list(range(2048, 2048, 128)) + list(
-            range(4096, 8192 + 1, 256))
+            generated. The maximum size for this list is determined automatically
+            by `compute_encoder_budget` (capped at 8192), or by the user-provided
+            `max_vit_cudagraph_capture_size`. The default sizes are:
+            [512, 1024, 1536] + list(range(2048, 4096, 128)) + list(
+            range(4096, max_size + 1, 256))
 
-        The final list of sizes is stored in
-        `self.compilation_config.vit_cudagraph_capture_sizes`.
+        4.  The final list of sizes is stored in
+            `self.compilation_config.vit_cudagraph_capture_sizes`. The
+            `max_vit_cudagraph_capture_size` is also updated to be consistent
+            with the largest value in this final list.
 
+        At runtime:
         - If a batch's size matches or is smaller than a captured size, the
           closest captured graph is used.
         - If a batch's size is larger than the largest captured size, a CUDA
-          graph will not be used for that batch.
+          graph will not be used for that batch (fallback to eager execution).
         """
         if (
             self.model_config is not None

@@ -48,6 +48,10 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 )
 from transformers.video_utils import VideoMetadata
 
+from vllm.compilation.backends import (
+    set_is_first_graph_in_mm_encoder_sequence,
+    set_is_last_graph_in_mm_encoder_sequence,
+)
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CUDAGraphMode,
@@ -601,14 +605,9 @@ class Qwen3_VisionTransformer(nn.Module):
                 device=self.device, dtype=self.dtype, non_blocking=True
             )
 
-        from vllm.compilation.backends import (
-            set_is_first_graph_in_vit_sequence,
-            set_is_last_graph_in_vit_sequence,
-        )
-
         with (
-            set_is_first_graph_in_vit_sequence(True),
-            set_is_last_graph_in_vit_sequence(False),
+            set_is_first_graph_in_mm_encoder_sequence(True),
+            set_is_last_graph_in_mm_encoder_sequence(False),
         ):
             hidden_states = self.patch_embed(hidden_states)
 
@@ -660,8 +659,8 @@ class Qwen3_VisionTransformer(nn.Module):
 
         deepstack_feature_lists = []
         with (
-            set_is_first_graph_in_vit_sequence(False),
-            set_is_last_graph_in_vit_sequence(False),
+            set_is_first_graph_in_mm_encoder_sequence(False),
+            set_is_last_graph_in_mm_encoder_sequence(False),
         ):
             for layer_num, blk in enumerate(self.blocks):
                 hidden_states = blk(
@@ -680,8 +679,8 @@ class Qwen3_VisionTransformer(nn.Module):
                     ](hidden_states)
                     deepstack_feature_lists.append(deepstack_feature)
         with (
-            set_is_first_graph_in_vit_sequence(False),
-            set_is_last_graph_in_vit_sequence(True),
+            set_is_first_graph_in_mm_encoder_sequence(False),
+            set_is_last_graph_in_mm_encoder_sequence(True),
         ):
             hidden_states = self.merger(hidden_states)
         hidden_states = torch.cat(

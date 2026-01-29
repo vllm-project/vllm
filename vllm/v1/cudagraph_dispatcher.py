@@ -68,18 +68,11 @@ class CudagraphDispatcher:
 
     def _compute_bs_to_padded_graph_size(self) -> None:
         """Pre-compute the mapping from batch size to padded graph size."""
-        max_size = self.compilation_config.max_cudagraph_capture_size
+        max_capture_size = self.compilation_config.max_cudagraph_capture_size
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
-        self._bs_to_padded_graph_size: list[int] = [0] * (max_size + 1)
-        for end, start in zip(
-            capture_sizes + [max_size + 1],
-            [0] + capture_sizes,
-        ):
-            for bs in range(start, end):
-                if bs == start:
-                    self._bs_to_padded_graph_size[bs] = start
-                else:
-                    self._bs_to_padded_graph_size[bs] = end
+        self._bs_to_padded_graph_size = self._get_padded_size_map(
+            capture_sizes, max_capture_size
+        )
 
         # Validate that compile_sizes won't be changed by padding.
         # Only validate when cudagraphs are actually being used.
@@ -88,7 +81,7 @@ class CudagraphDispatcher:
             and self.cudagraph_mode != CUDAGraphMode.NONE
         ):
             for size in self.compilation_config.compile_sizes:
-                if size <= self.compilation_config.max_cudagraph_capture_size:
+                if size <= max_capture_size:
                     padded = self._bs_to_padded_graph_size[size]
                     if padded != size:
                         raise ValueError(
@@ -121,18 +114,31 @@ class CudagraphDispatcher:
 
     def _compute_bs_to_padded_vit_graph_size(self) -> None:
         """pre-compute the mapping from batch size to ViT padded graph size."""
-        max_size = self.compilation_config.max_vit_cudagraph_capture_size
+        max_capture_size = self.compilation_config.max_vit_cudagraph_capture_size
         capture_sizes = self.compilation_config.vit_cudagraph_capture_sizes
-        self._bs_to_padded_vit_graph_size: list[int] = [0] * (max_size + 1)
+
+        self._bs_to_padded_vit_graph_size = self._get_padded_size_map(
+            capture_sizes, max_capture_size
+        )
+
+    def _get_padded_size_map(
+        self, capture_sizes: list[int] | None, max_size: int | None
+    ) -> list[int]:
+        if capture_sizes is None:
+            capture_sizes = []
+        if max_size is None:
+            max_size = 0
+        padded_size_map: list[int] = [0] * (max_size + 1)
         for end, start in zip(
             capture_sizes + [max_size + 1],
             [0] + capture_sizes,
         ):
             for bs in range(start, end):
                 if bs == start:
-                    self._bs_to_padded_vit_graph_size[bs] = start
+                    padded_size_map[bs] = start
                 else:
-                    self._bs_to_padded_vit_graph_size[bs] = end
+                    padded_size_map[bs] = end
+        return padded_size_map
 
     def _create_padded_batch_descriptor(
         self,
@@ -318,7 +324,7 @@ class CudagraphDispatcher:
             return CUDAGraphMode.PIECEWISE, relaxed_batch_desc
 
         # finally, just return no cudagraphs and a trivial batch descriptor
-        return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
+        return CUDAGraphMode.NONE, BatchDescriptor(num_tokens, is_vit=is_vit)
 
     def get_capture_descs(
         self, is_vit: bool = False

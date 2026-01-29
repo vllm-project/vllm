@@ -42,6 +42,10 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLVisionConfig,
 )
 
+from vllm.compilation.backends import (
+    set_is_first_graph_in_mm_encoder_sequence,
+    set_is_last_graph_in_mm_encoder_sequence,
+)
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CUDAGraphMode,
@@ -825,14 +829,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         else:
             hidden_states = x.to(device=self.device, dtype=self.dtype)
 
-        from vllm.compilation.backends import (
-            set_is_first_graph_in_vit_sequence,
-            set_is_last_graph_in_vit_sequence,
-        )
-
         with (
-            set_is_first_graph_in_vit_sequence(True),
-            set_is_last_graph_in_vit_sequence(False),
+            set_is_first_graph_in_mm_encoder_sequence(True),
+            set_is_last_graph_in_mm_encoder_sequence(False),
         ):
             hidden_states = self.patch_embed(hidden_states)
 
@@ -925,8 +924,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
             hidden_states = original_hidden_states
 
         with (
-            set_is_first_graph_in_vit_sequence(False),
-            set_is_last_graph_in_vit_sequence(False),
+            set_is_first_graph_in_mm_encoder_sequence(False),
+            set_is_last_graph_in_mm_encoder_sequence(False),
         ):
             for layer_num, blk in enumerate(self.blocks):
                 if layer_num in self.fullatt_block_indexes:
@@ -951,8 +950,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         # adapter
         with (
-            set_is_first_graph_in_vit_sequence(False),
-            set_is_last_graph_in_vit_sequence(True),
+            set_is_first_graph_in_mm_encoder_sequence(False),
+            set_is_last_graph_in_mm_encoder_sequence(True),
         ):
             hidden_states = self.merger(hidden_states)
         hidden_states = hidden_states[reverse_indices, :]

@@ -150,7 +150,9 @@ def torch_sdpa_wrapper(
         v = v.contiguous()
 
     if cu_seqlens is None:
-        return apply_sdpa(q, k, v, scale=scale)
+        context_layer = apply_sdpa(q, k, v, scale=scale)
+        output.copy_(context_layer)
+        return output
 
     outputs = []
 

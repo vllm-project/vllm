@@ -253,16 +253,6 @@ By default, vLLM will try to determine a set of sizes to capture cudagraph. You 
 vllm serve meta-llama/Llama-3.2-1B \
   --compilation-config '{"cudagraph_capture_sizes": [1, 2, 4, 8]}'
 ```
-Similarly, For `Qwen2.5-VL`,`Qwen3-VL` series model, you can specify the capture sizes for the vision transformer (ViT) using `vit_cudagraph_capture_sizes`, the capture sizes should be multiples of the square of `merge_size`. By default, this is disabled as `compile_mm_encoder` is `False`. To enable it and specify capture sizes, you can do the following:
-```bash
-vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
-  --compilation-config '{"compile_mm_encoder": true, "vit_cudagraph_capture_sizes": [512, 1024]}'
-```
-Alternatively, you can specify `max_vit_cudagraph_capture_size` to generate a default list of capture sizes up to the given value:
-```bash
-vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
-  --compilation-config '{"compile_mm_encoder": true, "max_vit_cudagraph_capture_size": 2048}'
-```
 
 Then it will only capture cudagraph for the specified sizes. It can be useful to have fine-grained control over the cudagraph capture.
 

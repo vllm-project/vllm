@@ -10,8 +10,8 @@ import operator
 import os
 import pprint
 import time
-from collections.abc import Callable, Generator, Iterator, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Generator, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from copy import deepcopy
 from functools import partial
 from typing import Any
@@ -30,6 +30,7 @@ from vllm.compilation.partition_rules import (
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
@@ -48,44 +49,45 @@ from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
-# A global flag to indicate if the current graph being compiled
-# is the last one in a sequence of graphs (e.g., a sequence of blocks).
-# This is a workaround to control CUDAGraph weak_ref_output behavior
-# in **vit** piecewise compilation.
-_is_last_graph_in_vit_sequence: bool = True
-
 
 @contextmanager
-def set_is_last_graph_in_vit_sequence(is_last: bool) -> Iterator[None]:
+def _set_mm_encoder_sequence_flag(
+    attr_name: str, value: bool
+) -> Generator[None, None, None]:
+    try:
+        ctx = get_forward_context()
+        original_value = getattr(ctx, attr_name)
+        setattr(ctx, attr_name, value)
+    except Exception:
+        yield
+        return
+
+    try:
+        yield
+    finally:
+        setattr(ctx, attr_name, original_value)
+
+
+def set_is_last_graph_in_mm_encoder_sequence(
+    is_last: bool,
+) -> AbstractContextManager[None]:
     """Context manager to indicate if the current graph being compiled
     is the last one in a sequence of graphs (e.g., a sequence of blocks).
     """
-    global _is_last_graph_in_vit_sequence
-    original_value = _is_last_graph_in_vit_sequence
-    _is_last_graph_in_vit_sequence = is_last
-    try:
-        yield
-    finally:
-        _is_last_graph_in_vit_sequence = original_value
+    return _set_mm_encoder_sequence_flag(
+        "is_last_graph_in_mm_encoder_sequence", is_last
+    )
 
 
-# A global flag to indicate if the current graph being compiled
-# is the first one in a sequence of graphs (e.g., a sequence of blocks).
-_is_first_graph_in_vit_sequence: bool = True
-
-
-@contextmanager
-def set_is_first_graph_in_vit_sequence(is_first: bool) -> Iterator[None]:
+def set_is_first_graph_in_mm_encoder_sequence(
+    is_first: bool,
+) -> AbstractContextManager[None]:
     """Context manager to indicate if the current graph being compiled
     is the first one in a sequence of graphs (e.g., a sequence of blocks).
     """
-    global _is_first_graph_in_vit_sequence
-    original_value = _is_first_graph_in_vit_sequence
-    _is_first_graph_in_vit_sequence = is_first
-    try:
-        yield
-    finally:
-        _is_first_graph_in_vit_sequence = original_value
+    return _set_mm_encoder_sequence_flag(
+        "is_first_graph_in_mm_encoder_sequence", is_first
+    )
 
 
 def make_copy_and_call(
@@ -482,14 +484,24 @@ def wrap_with_cudagraph_if_needed(
     # CUDAGraphWrapper for piecewise_backend, to distinguish
     # it from the FULL cudagraph runtime mode, no matter it
     # is wrapped on a full or piecewise fx graph.
+
+    try:
+        fwd_ctx = get_forward_context()
+        is_first_graph_in_sequence = fwd_ctx.is_first_graph_in_mm_encoder_sequence
+        is_last_graph_in_sequence = fwd_ctx.is_last_graph_in_mm_encoder_sequence
+    except Exception:
+        # Fallback for when ForwardContext is not available
+        is_first_graph_in_sequence = True
+        is_last_graph_in_sequence = True
+
     return static_graph_wrapper_class(
         runnable=piecewise_backend,
         vllm_config=vllm_config,
         runtime_mode=CUDAGraphMode.PIECEWISE,
         cudagraph_options=CUDAGraphOptions(
             debug_log_enable=is_first_graph,
-            gc_disable=not is_first_graph or not _is_first_graph_in_vit_sequence,
-            weak_ref_output=is_last_graph and _is_last_graph_in_vit_sequence,
+            gc_disable=not is_first_graph or not is_first_graph_in_sequence,
+            weak_ref_output=is_last_graph and is_last_graph_in_sequence,
         ),
     )
 
