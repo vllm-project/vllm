@@ -19,6 +19,11 @@ MODEL_NAME = "openai-community/gpt2"
 
 
 @dataclass
+class MockHFConfig:
+    model_type: str = "any"
+
+
+@dataclass
 class MockModelConfig:
     runner_type = "generate"
     model: str = MODEL_NAME
@@ -27,6 +32,7 @@ class MockModelConfig:
     max_model_len: int = 100
     tokenizer_revision = None
     tokenizer_mode = "auto"
+    hf_config = MockHFConfig()
     encoder_config: dict[str, Any] | None = None
     enable_prompt_embeds: bool = True
     skip_tokenizer_init: bool = False
