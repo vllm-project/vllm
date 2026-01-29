@@ -84,17 +84,17 @@ class EPLBConfig:
     max_num_transfers: int | None = None
     """
     The maximum number of tensor transfers that EPLB will execute for each layer.
-    This is a global, not a per-rank, maximum. This value should only be 
-    set if a particular workload is hanging in EPLB. If EPLB determines 
-    that the number of transfers is greater than the max, transfers will be 
+    This is a global, not a per-rank, maximum. This value should only be
+    set if a particular workload is hanging in EPLB. If EPLB determines
+    that the number of transfers is greater than the max, transfers will be
     arbitrarily reverted until that number is below the max.
 
-    The number of transfers for a particular layer is equal to the number of 
+    The number of transfers for a particular layer is equal to the number of
     experts being transfered multiplied by the number of tensors associated
     with each expert.
 
-    NOTE: Limiting the number of transfers can prevent the EPLB algorithm from 
-    achieving optimal placement and may have an adverse effect on model 
+    NOTE: Limiting the number of transfers can prevent the EPLB algorithm from
+    achieving optimal placement and may have an adverse effect on model
     performance.
     """
 

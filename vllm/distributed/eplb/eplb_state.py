@@ -801,7 +801,7 @@ class EplbState:
         # Make sure there's a __len__ method
         assert isinstance(eplb_model_state.model.expert_weights[0], Sized)
         num_tensors_per_expert = len(eplb_model_state.model.expert_weights[0])
-        # logger.info("NUM TENSORS PER EXPERT %d", num_tensors_per_expert)
+
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
