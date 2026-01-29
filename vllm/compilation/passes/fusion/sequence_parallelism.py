@@ -31,7 +31,6 @@ logger = init_logger(__name__)
 # Only apply sequence parallelism for models with hidden_size >= threshold
 SP_MIN_HIDDEN_SIZE: dict[int, int] = {
     90: 8192,  # H100: only for models with hidden_size >= 8192
-    100: 8192,  # Blackwell: only for models with hidden_size >= 8192
 }
 
 # Min size per GPU per device capability for sequence parallelism
@@ -39,7 +38,6 @@ SP_MIN_HIDDEN_SIZE: dict[int, int] = {
 # This ensures the threshold scales appropriately with tensor parallelism
 SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
     90: 8,  # 8MB per GPU for H100
-    100: 64,  # 64MB per GPU for Blackwell
 }
 
 
@@ -66,7 +64,10 @@ def get_sequence_parallelism_threshold(
     if not current_platform.is_cuda():
         return None
 
-    device_capability = current_platform.get_device_capability().to_int()
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return None
+    device_capability = capability.to_int()
 
     # Check if device has configured thresholds
     min_hidden_size = SP_MIN_HIDDEN_SIZE.get(device_capability)
@@ -378,9 +379,10 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
                 # Otherwise calculate using helper function with branching logic
                 tp_size = get_tensor_model_parallel_world_size()
                 hidden_size = config.model_config.get_hidden_size()
-                element_size = self.model_dtype.itemsize
+                dtype = config.model_config.dtype
+                assert isinstance(dtype, torch.dtype)
                 self.min_token_num = get_sequence_parallelism_threshold(
-                    hidden_size, tp_size, element_size
+                    hidden_size, tp_size, dtype.itemsize
                 )
 
             if self.min_token_num is not None:
@@ -423,36 +425,20 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         self.dump_patterns(config, self.patterns)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        # When sequence parallelism is enabled, the residual tensor from RMSNorm
-        # needs to be split along the sequence dimension. However, this dimension
-        # is symbolic during piecewise compilation, and splitting symbolic shapes
-        # is not supported.
-        #
-        # This pass is therefore only applied when the sequence dimension is
-        # concrete:
-        # 1. In full-graph compilation mode (no Dynamo splitting ops are used).
-        #   For this case we always pad num_tokens to be a multiple of
-        #   tensor_parallel_size, so there's no need to check shape % tp_size == 0.
-        # 2. For specific shape provided during compilation (e.g., from
-        #    `compile_sizes`), which must be divisible by the tensor-parallel
-        #    size.
+        # For piecewise compilation, require concrete sizes divisible by TP
         if (
-            not self.compilation_config.splitting_ops
-            or self.compilation_config.use_inductor_graph_partition
+            not self.compilation_config.use_inductor_graph_partition
+            and self.compilation_config.splitting_ops
         ):
-            apply = True
-        else:
             tp_size = get_tensor_model_parallel_world_size()
-            apply = (compile_range.is_single_size()) and (
-                compile_range.end % tp_size == 0
-            )
+            if not compile_range.is_single_size() or compile_range.end % tp_size != 0:
+                return False
 
-        # Additional check: only apply if range is above minimum threshold
-        # Sequence parallelism is only beneficial for larger batch sizes
-        if apply and self.min_token_num is not None:
-            return compile_range.start >= self.min_token_num
+        # Check token threshold (None means SP disabled for this config)
+        if self.min_token_num is None:
+            return False
 
-        return apply
+        return compile_range.start >= self.min_token_num
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
