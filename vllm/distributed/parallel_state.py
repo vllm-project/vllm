@@ -847,13 +847,13 @@ class GroupCoordinator:
                 continue
 
             # send-allgather: send only a slice, then do allgather.
-            use_all_gather = (
+            default_use_all_gather = (
                 all_gather_group is not None and tensor.numel() % all_gather_size == 0
             )
             use_all_gather = (
-                all_gather_tensors.get(key, use_all_gather)
-                if all_gather_tensors
-                else use_all_gather
+                all_gather_tensors.get(key, default_use_all_gather)
+                if all_gather_tensors is not None
+                else default_use_all_gather
             )
             if use_all_gather:
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
@@ -867,6 +867,71 @@ class GroupCoordinator:
                 # use group for GPU tensors
                 torch.distributed.send(tensor, dst=self.ranks[dst], group=group)
         return None
+
+    def isend_tensor_dict(
+        self,
+        tensor_dict: dict[str, torch.Tensor | Any],
+        dst: int | None = None,
+        all_gather_group: Optional["GroupCoordinator"] = None,
+        all_gather_tensors: dict[str, bool] | None = None,
+    ) -> list[Any]:
+        if self.world_size == 1:
+            return []
+        if self.use_cpu_custom_send_recv:
+            # custom device communicator path is synchronous
+            self.send_tensor_dict(
+                tensor_dict, dst, all_gather_group, all_gather_tensors
+            )
+            return []
+
+        all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
+        all_gather_rank = (
+            0 if all_gather_group is None else all_gather_group.rank_in_group
+        )
+
+        group = self.device_group
+        metadata_group = self.cpu_group
+
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+
+        metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
+        self.send_object(metadata_list, dst=dst)
+
+        tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
+        assert len(tensor_keys) == len(tensor_list)
+
+        handles: list[Any] = []
+        for key, tensor in zip(tensor_keys, tensor_list):
+            if tensor.numel() == 0:
+                continue
+
+            default_use_all_gather = (
+                all_gather_group is not None and tensor.numel() % all_gather_size == 0
+            )
+            use_all_gather = (
+                all_gather_tensors.get(key, default_use_all_gather)
+                if all_gather_tensors is not None
+                else default_use_all_gather
+            )
+            if use_all_gather:
+                tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
+
+            if tensor.is_cuda:
+                tensor.record_stream(torch.cuda.current_stream(tensor.device))
+
+            if tensor.is_cpu:
+                handle = torch.distributed.isend(
+                    tensor, dst=self.ranks[dst], group=metadata_group
+                )
+            else:
+                handle = torch.distributed.isend(
+                    tensor, dst=self.ranks[dst], group=group
+                )
+            handles.append(handle)
+
+        return handles
 
     def recv_tensor_dict(
         self,
@@ -925,14 +990,14 @@ class GroupCoordinator:
                     continue
 
                 # send-allgather: send only a slice, then do allgather.
-                use_all_gather = (
+                default_use_all_gather = (
                     all_gather_group is not None
                     and tensor.numel() % all_gather_size == 0
                 )
                 use_all_gather = (
-                    all_gather_tensors.get(key, use_all_gather)
-                    if all_gather_tensors
-                    else use_all_gather
+                    all_gather_tensors.get(key, default_use_all_gather)
+                    if all_gather_tensors is not None
+                    else default_use_all_gather
                 )
 
                 if use_all_gather:
@@ -958,6 +1023,106 @@ class GroupCoordinator:
             else:
                 tensor_dict[key] = value
         return tensor_dict
+
+    def irecv_tensor_dict(
+        self,
+        src: int | None = None,
+        all_gather_group: Optional["GroupCoordinator"] = None,
+        all_gather_tensors: dict[str, bool] | None = None,
+    ) -> tuple[
+        dict[str, torch.Tensor | Any] | None, list[Any], list[Callable[[], None]]
+    ]:
+        if self.world_size == 1:
+            return None, [], []
+        if self.use_cpu_custom_send_recv:
+            # custom device communicator path is synchronous
+            return (
+                self.recv_tensor_dict(src, all_gather_group, all_gather_tensors),
+                [],
+                [],
+            )
+
+        all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
+        all_gather_rank = (
+            0 if all_gather_group is None else all_gather_group.rank_in_group
+        )
+
+        group = self.device_group
+        metadata_group = self.cpu_group
+
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+        assert src < self.world_size, f"Invalid src rank ({src})"
+
+        recv_metadata_list = self.recv_object(src=src)
+        tensor_dict: dict[str, Any] = {}
+        handles: list[Any] = []
+        postprocess: list[Callable[[], None]] = []
+
+        for key, value in recv_metadata_list:
+            if isinstance(value, TensorMetadata):
+                full_tensor = torch.empty(
+                    value.size, dtype=value.dtype, device=value.device
+                )
+                if full_tensor.numel() == 0:
+                    tensor_dict[key] = full_tensor
+                    continue
+
+                default_use_all_gather = (
+                    all_gather_group is not None
+                    and full_tensor.numel() % all_gather_size == 0
+                )
+                use_all_gather = (
+                    all_gather_tensors.get(key, default_use_all_gather)
+                    if all_gather_tensors is not None
+                    else default_use_all_gather
+                )
+
+                if use_all_gather:
+                    orig_shape = full_tensor.shape
+                    slice_tensor = full_tensor.reshape(all_gather_size, -1)[
+                        all_gather_rank
+                    ]
+                    if slice_tensor.is_cpu:
+                        h = torch.distributed.irecv(
+                            slice_tensor, src=self.ranks[src], group=metadata_group
+                        )
+                    else:
+                        h = torch.distributed.irecv(
+                            slice_tensor, src=self.ranks[src], group=group
+                        )
+                    handles.append(h)
+
+                    def _postprocess(
+                        key: str = key,
+                        slice_tensor: torch.Tensor = slice_tensor,
+                        orig_shape: tuple[int, ...] = tuple(orig_shape),
+                        all_gather_group: Optional[
+                            "GroupCoordinator"
+                        ] = all_gather_group,
+                    ) -> None:
+                        assert all_gather_group is not None
+                        tensor_dict[key] = all_gather_group.all_gather(
+                            slice_tensor, dim=0
+                        ).reshape(orig_shape)
+
+                    postprocess.append(_postprocess)
+                    tensor_dict[key] = slice_tensor
+                else:
+                    if full_tensor.is_cpu:
+                        h = torch.distributed.irecv(
+                            full_tensor, src=self.ranks[src], group=metadata_group
+                        )
+                    else:
+                        h = torch.distributed.irecv(
+                            full_tensor, src=self.ranks[src], group=group
+                        )
+                    handles.append(h)
+                    tensor_dict[key] = full_tensor
+            else:
+                tensor_dict[key] = value
+
+        return tensor_dict, handles, postprocess
 
     def barrier(self):
         """Barrier synchronization among the group.
