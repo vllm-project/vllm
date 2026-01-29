@@ -767,8 +767,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (images := mm_data.get("images")) is None:
             return {}
 
-        mm_items = self.info.parse_mm_data({"image": images}, validate=False)
-        parsed_images = mm_items.get_items(
+        parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
             "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems)
         )
 
@@ -794,8 +793,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (videos := mm_data.get("videos")) is None:
             return {}
 
-        mm_items = self.info.parse_mm_data({"video": videos}, validate=False)
-        parsed_videos = mm_items.get_items(
+        parsed_videos = self.data_parser.parse_mm_data({"video": videos}).get_items(
             "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)
         )
 

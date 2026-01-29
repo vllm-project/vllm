@@ -14,13 +14,7 @@ import torch
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import MultiModalDataDict
-from vllm.multimodal.parse import (
-    DictEmbeddingItems,
-    EmbeddingItems,
-    MultiModalDataItems,
-    MultiModalDataParser,
-)
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -601,10 +595,6 @@ class BaseProcessingInfo:
         return MultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
         )
-
-    @cached_property
-    def data_parser(self) -> MultiModalDataParser:
-        return self.get_data_parser()
 
     @property
     def skip_prompt_length_check(self) -> bool:
