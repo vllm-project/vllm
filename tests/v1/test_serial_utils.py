@@ -143,7 +143,7 @@ def test_multimodal_kwargs():
     total_len = sum(memoryview(x).cast("B").nbytes for x in encoded)
 
     # expected total encoding length, should be 14319, +-20 for minor changes
-    assert 14300 <= total_len <= 14440
+    assert 14300 <= total_len <= 14340
     decoded = decoder.decode(encoded).mm[0]
     assert isinstance(decoded, MultiModalKwargsItems)
 
