@@ -71,8 +71,30 @@ class DPCoordinator:
         )
 
         local_only_eng = dp_size == parallel_config.data_parallel_size_local
-        back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
-        back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
+        # NOTE(yongji): handling scaling from intra-node to inter-node
+        if parallel_config.enable_elastic_ep:
+            local_only_eng = False
+
+        # Use pre-allocated ports when elastic EP is enabled to avoid
+        # port collision race conditions with stateless group ports.
+        coordinator_ports = parallel_config.get_coordinator_zmq_ports()
+        if coordinator_ports:
+            # Ports are: [front_publish, back_output, back_publish]
+            front_publish_address = get_engine_client_zmq_addr(
+                local_only=local_only, host=host, port=coordinator_ports[0]
+            )
+            back_output_address = get_engine_client_zmq_addr(
+                local_only_eng, host, port=coordinator_ports[1]
+            )
+            back_publish_address = get_engine_client_zmq_addr(
+                local_only_eng, host, port=coordinator_ports[2]
+            )
+        else:
+            front_publish_address = get_engine_client_zmq_addr(
+                local_only=local_only, host=host
+            )
+            back_output_address = get_engine_client_zmq_addr(local_only_eng, host)
+            back_publish_address = get_engine_client_zmq_addr(local_only_eng, host)
 
         context = get_mp_context()
         self.proc: multiprocessing.Process = context.Process(
@@ -201,6 +223,7 @@ class DPCoordinatorProc:
 
             poller = zmq.Poller()
             poller.register(publish_front, zmq.POLLIN)
+            poller.register(publish_back, zmq.POLLIN)
             poller.register(output_back, zmq.POLLIN)
             last_publish_time = 0
             while True:
@@ -231,6 +254,22 @@ class DPCoordinatorProc:
                 events = dict(events)
                 wave_state_changed = False
 
+                if publish_back in events:
+                    buffer = publish_back.recv()
+                    if buffer == b"\x01":
+                        # NOTE(yongji): newly started engine subscribed
+                        # We need to send READY message here instead of receiving
+                        # SCALE_ELASTIC_EP notification from engine core client
+                        # as SCALE_ELASTIC_EP is only sent when
+                        # new engines finished initialization.
+                        # Subscription message, on the other hand, is sent
+                        # by each engine during initialization
+                        publish_back.send(b"READY")
+                    else:
+                        logger.error(
+                            "DP Coordinator receives unexpected message from engines"
+                        )
+
                 if publish_front in events:
                     buffer = publish_front.recv()
                     if buffer in (b"\x01", b"\x00"):
@@ -259,7 +298,6 @@ class DPCoordinatorProc:
                             # current_wave
                             # we note that 0 is the wave number for the new
                             # engine
-                            engines_running = False
                             logger.info(
                                 "DPCoordinator scaled up from %s to %s engines",
                                 current_count,

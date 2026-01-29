@@ -51,7 +51,12 @@ class CPUModelRunner(GPUModelRunner):
                 if isinstance(v, CpuGpuBuffer):
                     v.gpu = v.cpu
 
-    def load_model(self, eep_scale_up: bool = False) -> None:
+    def load_model(self, load_dummy_weights: bool = False) -> None:
+        if load_dummy_weights:
+            raise ValueError(
+                "Loading dummy weights (needed for elastic EP scale-up) "
+                "Is not supported by the CPU Model Runner."
+            )
         logger.info("Starting to load model %s...", self.model_config.model)
         self.model = get_model(vllm_config=self.vllm_config)
 

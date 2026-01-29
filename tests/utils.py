@@ -27,6 +27,7 @@ import anthropic
 import cloudpickle
 import httpx
 import openai
+import psutil
 import pytest
 import requests
 import torch
@@ -197,6 +198,23 @@ class RemoteOpenAIServer:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        # Kill all child processes (including Ray workers) before terminating
+        # the main process to avoid orphaned processes holding onto ports
+        try:
+            parent = psutil.Process(self.proc.pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                with suppress(psutil.NoSuchProcess):
+                    child.terminate()
+            # Wait for children to terminate
+            psutil.wait_procs(children, timeout=5)
+            # Force kill any remaining children
+            for child in children:
+                with suppress(psutil.NoSuchProcess):
+                    child.kill()
+        except psutil.NoSuchProcess:
+            pass  # Main process already exited
+
         self.proc.terminate()
         try:
             self.proc.wait(8)
@@ -730,6 +748,36 @@ def compare_all_settings(
                     )
 
 
+@contextmanager
+def ensure_current_vllm_config():
+    """Ensures a vllm config is set for the duration of the context.
+
+    If a config is already set, this is a no-op. Otherwise, it creates a default
+    VllmConfig and sets it for the duration of the context.
+
+    Used for tests that call functions which require a vllm config but don't
+    need a specific config.
+
+    Example:
+        with ensure_current_vllm_config():
+            init_distributed_environment(...)
+            ensure_model_parallel_initialized(...)
+    """
+    from vllm.config import (
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
+    )
+
+    if get_current_vllm_config_or_none() is not None:
+        # Config already set, just yield
+        yield
+    else:
+        # No config set, create a default one for the duration
+        with set_current_vllm_config(VllmConfig()):
+            yield
+
+
 def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
@@ -756,6 +804,7 @@ def init_test_distributed_environment(
             distributed_init_method=distributed_init_method,
             local_rank=local_rank,
         )
+        ensure_model_parallel_initialized(tp_size, pp_size)
     else:
         # No config set, create a default one for the test
         with set_current_vllm_config(VllmConfig()):
@@ -765,7 +814,7 @@ def init_test_distributed_environment(
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank,
             )
-    ensure_model_parallel_initialized(tp_size, pp_size)
+            ensure_model_parallel_initialized(tp_size, pp_size)
 
 
 def multi_process_parallel(

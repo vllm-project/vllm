@@ -45,21 +45,24 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 
 @pytest.fixture
 def dist_init():
+    from tests.utils import ensure_current_vllm_config
+
     temp_file = tempfile.mkstemp()[1]
 
     backend = "nccl"
     if current_platform.is_cpu() or current_platform.is_tpu():
         backend = "gloo"
 
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend=backend,
-    )
-    initialize_model_parallel(1, 1)
-    yield
+    with ensure_current_vllm_config():
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=0,
+            backend=backend,
+        )
+        initialize_model_parallel(1, 1)
+        yield
     cleanup_dist_env_and_memory(shutdown_ray=True)
 
 

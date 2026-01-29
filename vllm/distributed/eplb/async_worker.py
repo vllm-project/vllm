@@ -24,7 +24,6 @@ logger = init_logger(__name__)
 
 def start_async_worker(
     state: "EplbState",
-    rank_mapping: dict[int, int] | None = None,
     is_profile: bool = False,
 ) -> threading.Thread:
     ep_group = get_ep_group().device_group
@@ -45,7 +44,6 @@ def start_async_worker(
                     ep_group=ep_group,
                     cuda_stream=cuda_stream,
                     is_profile=is_profile,
-                    rank_mapping=rank_mapping,
                 )
             )
         except Exception as exc:  # pragma: no cover - diagnostic path
@@ -63,7 +61,6 @@ async def transfer_run_periodically(
     ep_group: ProcessGroup,
     cuda_stream: torch.cuda.Stream,
     is_profile: bool = False,
-    rank_mapping: dict[int, int] | None = None,
 ) -> None:
     while True:
         await asyncio.to_thread(state.rearrange_event.wait)
@@ -105,7 +102,6 @@ async def transfer_run_periodically(
                             is_profile=is_profile,
                             layer=model_state.layer_to_transfer,
                             cuda_stream=cuda_stream,
-                            rank_mapping=rank_mapping,
                         )
                         event = torch.cuda.Event(blocking=False)
                         cuda_stream.record_event(event)
