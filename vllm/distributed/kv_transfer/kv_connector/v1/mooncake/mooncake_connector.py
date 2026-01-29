@@ -118,7 +118,7 @@ class SendBlockMeta:
     ready: asyncio.Event
     expire_time: float = float("inf")
     need_send: int = 0
-    sended: int = 0
+    sent: int = 0
     sending: int = 0
 
 
@@ -802,7 +802,7 @@ class MooncakeConnectorWorker:
                     continue
 
             for d_req_id, send_meta in ready_reqs:
-                # Todo: for heterogeneous TP (one P pairs to multiple D),
+                # TODO: for heterogeneous TP (one P pairs to multiple D),
                 # we need to check whether all headers are sent.
                 # If not, we should set expire_time to normal and skip the below.
                 send_meta.sending -= 1
@@ -1189,8 +1189,8 @@ class MooncakeConnectorWorker:
                 asyncio.create_task(
                     self.handle_new_engine_id(remote_engine_id, pull_metas)
                 )
-                continue
-            self.receive_kv(remote_engine_id, pull_metas)
+            else:
+                   self.receive_kv(remote_engine_id, pull_metas)
 
     async def record_send_reqs(self, metadata: MooncakeConnectorMetadata):
         for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
