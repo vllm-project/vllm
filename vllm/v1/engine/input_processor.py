@@ -760,11 +760,11 @@ class InputProcessor:
                     if embed_length > self.mm_encoder_cache_size:
                         raise ValueError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "
-                            f"with length {embed_length}, "
-                            f"which exceeds the calculated encoder cache size "
-                            f"{self.mm_encoder_cache_size}. Please reduce "
-                            f"frames/resolution or increase --max-num-batched-tokens "
-                            f"to at least {embed_length}."
+                            f"with length {embed_length}, which exceeds the "
+                            f"pre-allocated encoder cache size "
+                            f"{self.mm_encoder_cache_size}. Please reduce the input "
+                            f"size or increase the encoder cache size "
+                            f"by setting --limit-mm-per-prompt at startup."
                         )
 
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
