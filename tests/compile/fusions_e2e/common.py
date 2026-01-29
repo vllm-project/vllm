@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import itertools
+from collections.abc import Callable, Iterable
+from typing import Any, NamedTuple
+
+import pytest
+import regex as re
+
+from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+
+class Matches(NamedTuple):
+    # simple pointwise
+    rms_quant_fusion: int = 0
+    act_quant_fusion: int = 0
+    norm_rope_fusion: int = 0
+    attn_quant_fusion: int = 0
+    # distributed
+    ar_rms_fusion: int = 0
+    sequence_parallel: int = 0
+    async_tp: int = 0
+
+
+class ModelFusionInfo(NamedTuple):
+    model_name: str
+    matches: Callable[[int], Matches]
+    """Given number of hidden layers, produces the matches object"""
+    # default_num_layers: int
+    # """The default number of layers for this model"""
+    model_kwargs: dict[str, Any] = {}
+    hf_overrides: Callable[[int], dict] = lambda n: {"num_hidden_layers": n}
+
+
+class AttentionBackendCase(NamedTuple):
+    backend: AttentionBackendEnum
+    model_kwargs: dict[str, Any] = {}
+    """Additional args required for attn+quant fusion"""
+
+
+is_blackwell = lambda: current_platform.is_device_capability_family(100)
+"""Are we running on Blackwell, a lot of tests depend on it"""
+
+
+# Custom ops toggle lists for parametrization
+CUSTOM_OPS_FP8 = ["-quant_fp8", "+quant_fp8"]
+CUSTOM_OPS_RMS_NORM = ["-rms_norm", "+rms_norm"]
+CUSTOM_OPS_QUANT_RMS_NORM = ["+quant_fp8,+rms_norm"]
+
+
+def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
+    """Generate all combinations of custom ops for parametrization."""
+    for op_list in itertools.product(*custom_ops_lists):
+        yield ",".join(op_list)
+
+
+def has_cuda_graph_wrapper_metadata() -> bool:
+    from importlib import import_module
+
+    try:
+        module = import_module("torch._inductor.utils")
+        module.CUDAGraphWrapperMetadata  # noqa B018
+    except AttributeError:
+        return False
+    return True
+
+
+INDUCTOR_GRAPH_PARTITION = [
+    pytest.param(
+        True,
+        marks=pytest.mark.skipif(
+            not has_cuda_graph_wrapper_metadata(),
+            reason="torch version does not support Inductor partition",
+        ),
+    ),
+    False,
+]
+
+FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
+    "rms_quant_fusion": re.compile(
+        r"\[(?:compilation/)?fusion.py:\d+] Replaced (\d+) patterns"
+    ),
+    "act_quant_fusion": re.compile(
+        r"activation_quant_fusion.py:\d+] Replaced (\d+) patterns"
+    ),
+    "norm_rope_fusion": re.compile(
+        r"qk_norm_rope_fusion.py:\d+] Fused QK Norm\+RoPE on (\d+) sites"
+    ),
+    "attn_quant_fusion": re.compile(
+        r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes"
+    ),
+    "ar_rms_fusion": re.compile(r": Replaced (\d+) patterns"),
+    "sequence_parallel": re.compile(
+        r"sequence_parallelism.py:\d+] Replaced (\d+) patterns"
+    ),
+    "async_tp": re.compile(r"collective_fusion.py:\d+] Replaced (\d+) patterns"),
+}
+
+# Fusions
+# rms+quant, silu+quant, qk_norm+rope(, rope+cache)
+# attn+quant
+# ar+rms(+q)
+# SP, AsyncTP
+
+# rope
+
+# tp=1 fp8
+# tp=2 fp8
+# - asynctp
+# - ar+rms(+q)
+# tp=2 bf16
+# - asynctp
+# - ar+rms(+q)
+
+# L40: tp1, triton-only
+# H100: tp1, triton
+# H100: tp2, triton
+# B200: tp1, fi, triton
+# B200: tp2, fi, triton?? - no cross product?
+
+# each case has 1 qwen E2E with all layers (tp2)
+# - nightly only
+# - b200: FI only
+# - h100: Triton only (FA3 once supported)
+
+# H100: tp2, eval, moe
+# H100: tp2, eval, dense
+# B200: tp2, eval, moe
+# B200: tp2, eval, dense
