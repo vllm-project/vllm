@@ -81,6 +81,13 @@ class EPLBConfig:
     Whether to use non-blocking EPLB.
     """
 
+    max_num_transfers_per_layer: int = 1200
+    """
+    The maximum number of p2p transfers that EPLB will execute for each layer.
+    This is a per-rank maximum. This value should only be deacreased if a 
+    particular workload is hanging in EPLB.
+    """
+
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
@@ -89,6 +96,8 @@ class EPLBConfig:
         if self.use_async and self.policy != "default":
             raise ValueError("Async EPLB is only supported with the default policy.")
         if self.log_balancedness and self.log_balancedness_interval <= 0:
+            raise ValueError("log_balancedness_interval must be greater than 0.")
+        if self.max_num_transfers_per_layer and self.max_num_transfers_per_layer <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
         return self
 
