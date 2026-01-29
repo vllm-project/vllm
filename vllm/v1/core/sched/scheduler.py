@@ -1874,7 +1874,7 @@ class Scheduler(SchedulerInterface):
 
             return span
         except Exception as e:
-            logger.error(
+            logger.debug(
                 "Failed to create core span for request %s: %s",
                 request.request_id,
                 e,

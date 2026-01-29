@@ -451,7 +451,7 @@ class OpenAIServing:
                 request_id
             )
         except Exception as e:
-            logger.error(
+            logger.debug(
                 "Failed to create API span for request %s: %s",
                 request_id,
                 e,
