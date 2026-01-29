@@ -723,9 +723,35 @@ class InputProcessor:
                 f"{suggestion}"
             )
 
-            # TODO: Find out how many placeholder tokens are there so we can
-            # check that chunked prefill does not truncate them
-            # max_batch_len = self.scheduler_config.max_num_batched_tokens
+        # Check that chunked prefill does not truncate placeholder tokens
+        # in multimodal models. Placeholder tokens must be processed in a
+        # single chunk to ensure proper embedding replacement.
+        if (
+            model_config.is_multimodal_model
+            and prompt_inputs["type"] == "multimodal"
+            and self.vllm_config.scheduler_config.enable_chunked_prefill
+        ):
+            mm_placeholders = prompt_inputs["mm_placeholders"]
+            if mm_placeholders:
+                # Count total number of placeholder tokens across all modalities
+                # Note: get_num_embeds is a @cached_property, accessed as attribute
+                num_placeholder_tokens = int(
+                    sum(
+                        int(placeholder.get_num_embeds)
+                        for modality_placeholders in mm_placeholders.values()
+                        for placeholder in modality_placeholders
+                    )
+                )
+                max_batch_len = self.vllm_config.scheduler_config.max_num_batched_tokens
+                if max_batch_len and num_placeholder_tokens > max_batch_len:
+                    raise ValueError(
+                        f"The number of placeholder tokens ({num_placeholder_tokens}) "
+                        f"exceeds the maximum batch length ({max_batch_len}) for "
+                        f"chunked prefill. Placeholder tokens must be processed in a "
+                        f"single chunk to ensure proper embedding replacement. "
+                        f"Please increase `--max-num-batched-tokens` to at least "
+                        f"{num_placeholder_tokens}."
+                    )
 
         if (
             prompt_len == max_prompt_len
