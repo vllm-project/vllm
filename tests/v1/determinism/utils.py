@@ -79,7 +79,8 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
         # For longer prompts, repeat context
         padding_text = (
             " This is an interesting topic that deserves more explanation. "
-            * (target_words // 10)
+            # TODO: Update to * (target_words // 10) to better align with word ratio
+            * (target_words // 50)
         )
         base_prompt = padding_text + base_prompt
 
