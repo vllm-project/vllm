@@ -67,7 +67,9 @@ def get_ssm_config_file_name(
         device_name = "NVIDIA_H200"
 
     if nheads is not None:
-        return f"dim={dim},dstate={dstate},nheads={nheads},device_name={device_name}.json"
+        return (
+            f"dim={dim},dstate={dstate},nheads={nheads},device_name={device_name}.json"
+        )
     return f"dim={dim},dstate={dstate},device_name={device_name}.json"
 
 
@@ -83,10 +85,12 @@ def get_ssm_configs_search_space() -> list[dict[str, int]]:
 
     configs = []
     for block_m, num_warps in product(block_m_range, num_warps_range):
-        configs.append({
-            "BLOCK_SIZE_M": block_m,
-            "num_warps": num_warps,
-        })
+        configs.append(
+            {
+                "BLOCK_SIZE_M": block_m,
+                "num_warps": num_warps,
+            }
+        )
     return configs
 
 

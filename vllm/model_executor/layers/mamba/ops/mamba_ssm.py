@@ -40,7 +40,9 @@ def get_ssm_config_file_name(
         device_name = "NVIDIA_H200"
 
     if nheads is not None:
-        return f"dim={dim},dstate={dstate},nheads={nheads},device_name={device_name}.json"
+        return (
+            f"dim={dim},dstate={dstate},nheads={nheads},device_name={device_name}.json"
+        )
     return f"dim={dim},dstate={dstate},device_name={device_name}.json"
 
 
