@@ -57,6 +57,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -289,6 +290,13 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     supports_encoder_tp_data = True
 
+    weights_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "mm_projector.proj.0": "mm_projector.linear_1",
+            "mm_projector.proj.2": "mm_projector.linear_2",
+        }
+    )
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         # Kimi-K2.5 uses video_chunk for all media types
@@ -435,4 +443,4 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.weights_mapper)
