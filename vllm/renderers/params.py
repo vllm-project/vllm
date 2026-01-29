@@ -237,11 +237,7 @@ class TokenizeParams:
         )
 
     def _apply_lowercase(self, tokenizer: TokenizerLike | None, text: str) -> str:
-        do_lower_case = self.do_lower_case
-        if do_lower_case is None:
-            do_lower_case = getattr(tokenizer, "do_lower_case", False)
-
-        if do_lower_case:
+        if self.do_lower_case:
             text = text.lower()
 
         return text
