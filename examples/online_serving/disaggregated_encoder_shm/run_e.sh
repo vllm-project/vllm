@@ -2,8 +2,8 @@ unset ftp_proxy
 unset https_proxy
 unset http_proxy
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/user/ec_cache}"
-rm /home/user/10T/user/ec_cache -rf
-mkdir -p /user/ec_cache
+rm -rf "$EC_SHARED_STORAGE_PATH"
+mkdir -p "$EC_SHARED_STORAGE_PATH"
 
 CUDA_VISIBLE_DEVICES=0 vllm serve "/model_path" \
     --gpu-memory-utilization 0.01 \
