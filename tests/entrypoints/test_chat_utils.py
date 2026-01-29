@@ -24,6 +24,7 @@ from vllm.multimodal.utils import (
 )
 from vllm.utils.serial_utils import tensor2base64
 
+KIMI_K2_5_MODEL_ID = "moonshotai/Kimi-K2.5"
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 QWEN2AUDIO_MODEL_ID = "Qwen/Qwen2-Audio-7B-Instruct"
 QWEN25OMNI_MODEL_ID = "Qwen/Qwen2.5-Omni-7B"
