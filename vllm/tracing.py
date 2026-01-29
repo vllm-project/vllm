@@ -16,6 +16,7 @@ otel_import_error_traceback: str | None = None
 
 # Global TracerProvider singleton to prevent overwriting
 _global_tracer_provider = None
+_global_tracer_endpoint: str | None = None
 try:
     from opentelemetry.context.context import Context
     from opentelemetry.sdk.environment_variables import (
@@ -63,6 +64,9 @@ def init_tracer(
     CRITICAL: Uses a singleton pattern to avoid overwriting the global provider.
     Multiple calls with the same endpoint will reuse the same provider.
 
+    IMPORTANT: First call sets the endpoint. Subsequent calls with different
+    endpoints will log a warning and use the original endpoint (first call wins).
+
     Args:
         instrumenting_module_name: Scope name (e.g., "vllm.api", "vllm.scheduler")
         otlp_traces_endpoint: OTLP endpoint URL
@@ -70,7 +74,7 @@ def init_tracer(
     Returns:
         Tracer instance for the specified scope
     """
-    global _global_tracer_provider
+    global _global_tracer_provider, _global_tracer_endpoint
 
     if not is_otel_available():
         raise ValueError(
@@ -86,6 +90,7 @@ def init_tracer(
             otlp_traces_endpoint
         )
         _global_tracer_provider = TracerProvider()
+        _global_tracer_endpoint = otlp_traces_endpoint
 
         span_exporter = get_span_exporter(otlp_traces_endpoint)
         _global_tracer_provider.add_span_processor(BatchSpanProcessor(span_exporter))
@@ -93,6 +98,16 @@ def init_tracer(
 
         logger.info("Global TracerProvider initialized successfully")
     else:
+        # Warn if endpoint mismatch (first call wins)
+        if otlp_traces_endpoint != _global_tracer_endpoint:
+            logger.warning(
+                "TracerProvider already initialized with endpoint '%s'. "
+                "Ignoring different endpoint '%s' for scope '%s'. "
+                "First init_tracer call sets the endpoint for all scopes.",
+                _global_tracer_endpoint,
+                otlp_traces_endpoint,
+                instrumenting_module_name
+            )
         logger.debug(
             "Reusing existing global TracerProvider for scope: %s",
             instrumenting_module_name

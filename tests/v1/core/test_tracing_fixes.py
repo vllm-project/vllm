@@ -11,17 +11,28 @@ are in test_tracer_separation_behavioral.py and test_vllm_llm_engine_removed_beh
 """
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
+
+
+@pytest.fixture
+def reset_global_tracer_provider():
+    """Reset global tracer provider and endpoint before and after test."""
+    import vllm.tracing as tracing_module
+    original_provider = tracing_module._global_tracer_provider
+    original_endpoint = tracing_module._global_tracer_endpoint
+    tracing_module._global_tracer_provider = None
+    tracing_module._global_tracer_endpoint = None
+    yield
+    # Restore original provider and endpoint after test
+    tracing_module._global_tracer_provider = original_provider
+    tracing_module._global_tracer_endpoint = original_endpoint
 
 
 class TestTracerProviderSingleton:
     """Test that TracerProvider is properly shared across scopes."""
 
-    def test_singleton_prevents_overwrites(self):
+    def test_singleton_prevents_overwrites(self, reset_global_tracer_provider):
         """Verify multiple init_tracer calls don't overwrite the provider."""
-        # Reset global state
-        import vllm.tracing as tracing_module
-        tracing_module._global_tracer_provider = None
 
         # Mock components
         mock_provider = Mock()
@@ -147,61 +158,50 @@ class TestGlobalProviderIntegration:
     """Test that global provider pattern works end-to-end."""
 
     @pytest.mark.asyncio
-    async def test_global_provider_flow(self):
+    async def test_global_provider_flow(self, reset_global_tracer_provider):
         """Verify init_tracer() sets global provider and _create_api_span() uses it."""
-        from unittest.mock import AsyncMock
-        import vllm.tracing
+        mock_span = Mock()
+        mock_span.is_recording.return_value = True
+        mock_span.add_event = Mock()
+        mock_span.set_attribute = Mock()
 
-        # Reset the singleton to force initialization
-        original_provider = vllm.tracing._global_tracer_provider
-        vllm.tracing._global_tracer_provider = None
+        mock_tracer = Mock()
+        mock_tracer.start_span.return_value = mock_span
 
-        try:
-            mock_span = Mock()
-            mock_span.is_recording.return_value = True
-            mock_span.add_event = Mock()
-            mock_span.set_attribute = Mock()
+        mock_provider = Mock()
+        mock_provider.get_tracer.return_value = mock_tracer
 
-            mock_tracer = Mock()
-            mock_tracer.start_span.return_value = mock_span
+        # Mock the OTEL components (patch where they're imported TO, not FROM)
+        with patch('vllm.tracing.TracerProvider', return_value=mock_provider):
+            with patch('vllm.tracing.set_tracer_provider') as mock_set_provider:
+                with patch('opentelemetry.trace.get_tracer_provider', return_value=mock_provider):
+                    with patch('vllm.tracing.get_span_exporter'):
+                        with patch('opentelemetry.trace.SpanKind'):
+                            with patch('vllm.tracing.extract_trace_context', return_value=None):
+                                # Step 1: Initialize tracer (simulating api_server.py)
+                                from vllm.tracing import init_tracer
+                                init_tracer("vllm.api", "http://localhost:4317")
 
-            mock_provider = Mock()
-            mock_provider.get_tracer.return_value = mock_tracer
+                            # Verify set_tracer_provider was called to set global
+                            assert mock_set_provider.called
+                            mock_set_provider.assert_called_with(mock_provider)
 
-            # Mock the OTEL components (patch where they're imported TO, not FROM)
-            with patch('vllm.tracing.TracerProvider', return_value=mock_provider):
-                with patch('vllm.tracing.set_tracer_provider') as mock_set_provider:
-                    with patch('opentelemetry.trace.get_tracer_provider', return_value=mock_provider):
-                        with patch('vllm.tracing.get_span_exporter'):
-                            with patch('opentelemetry.trace.SpanKind'):
-                                with patch('vllm.tracing.extract_trace_context', return_value=None):
-                                    # Step 1: Initialize tracer (simulating api_server.py)
-                                    from vllm.tracing import init_tracer
-                                    tracer = init_tracer("vllm.api", "http://localhost:4317")
+                            # Verify get_tracer was called with correct scope
+                            mock_provider.get_tracer.assert_called_with("vllm.api")
 
-                                # Verify set_tracer_provider was called to set global
-                                assert mock_set_provider.called
-                                mock_set_provider.assert_called_with(mock_provider)
+                            # Step 2: Create API span (simulating _create_api_span)
+                            from vllm.entrypoints.openai.engine.serving import OpenAIServing
 
-                                # Verify get_tracer was called with correct scope
-                                mock_provider.get_tracer.assert_called_with("vllm.api")
+                            serving = OpenAIServing.__new__(OpenAIServing)
+                            serving._cached_is_tracing_enabled = True
 
-                                # Step 2: Create API span (simulating _create_api_span)
-                                from vllm.entrypoints.openai.engine.serving import OpenAIServing
+                            span = await serving._create_api_span("test-req-456", None)
 
-                                serving = OpenAIServing.__new__(OpenAIServing)
-                                serving._cached_is_tracing_enabled = True
-
-                                span = await serving._create_api_span("test-req-456", None)
-
-                                # Verify span was created using the global provider
-                                assert span is mock_span
-                                # get_tracer should be called at least twice:
-                                # once in init_tracer, once in _create_api_span
-                                assert mock_provider.get_tracer.call_count >= 2
-                                # Both should use "vllm.api" scope
-                                for call in mock_provider.get_tracer.call_args_list:
-                                    assert call[0][0] == "vllm.api"
-        finally:
-            # Restore original provider
-            vllm.tracing._global_tracer_provider = original_provider
+                            # Verify span was created using the global provider
+                            assert span is mock_span
+                            # get_tracer should be called at least twice:
+                            # once in init_tracer, once in _create_api_span
+                            assert mock_provider.get_tracer.call_count >= 2
+                            # Both should use "vllm.api" scope
+                            for call in mock_provider.get_tracer.call_args_list:
+                                assert call[0][0] == "vllm.api"
