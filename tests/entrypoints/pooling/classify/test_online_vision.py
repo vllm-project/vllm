@@ -5,9 +5,9 @@ import json
 import pytest
 import requests
 
-from tests.entrypoints.test_utils import encode_base64_content_from_url
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.classify.protocol import ClassificationResponse
+from vllm.utils.mm_utils import encode_base64_content_from_url
 
 MODEL_NAME = "muziyongshixin/Qwen2.5-VL-7B-for-VideoCls"
 MAXIMUM_VIDEOS = 1

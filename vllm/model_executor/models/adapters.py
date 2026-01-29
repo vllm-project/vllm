@@ -466,6 +466,7 @@ def load_weights_using_from_2_way_softmax(
 
     language_model = _get_language_model_for_seq_cls(model)
     is_vlm = language_model is not model
+    using_vlm_head = is_vlm and hasattr(language_model, "score")
 
     language_model.lm_head = ParallelLMHead(
         text_config.vocab_size, text_config.hidden_size, quant_config=quant_config
@@ -506,14 +507,14 @@ def load_weights_using_from_2_way_softmax(
         torch.float32
     ) - lm_head_weight.data[[false_id]].to(torch.float32)
 
-    score_layer = language_model.score if is_vlm else model.score
+    score_layer = language_model.score if using_vlm_head else model.score
     param = score_layer.weight
     weight_loader = getattr(param, "weight_loader", default_weight_loader)
     weight_loader(param, score_weight)
 
     del language_model.lm_head
 
-    score_weight_name = "language_model.score.weight" if is_vlm else "score.weight"
+    score_weight_name = "language_model.score.weight" if using_vlm_head else "score.weight"
     loaded_weights.add(score_weight_name)
 
     lm_head_name = "lm_head.weight"
@@ -537,6 +538,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
 
     language_model = _get_language_model_for_seq_cls(model)
     is_vlm = language_model is not model
+    using_vlm_head = is_vlm and hasattr(language_model, "score")
 
     language_model.lm_head = ParallelLMHead(
         text_config.vocab_size, text_config.hidden_size, quant_config=quant_config
@@ -572,14 +574,14 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
     token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
     score_weight = language_model.lm_head.weight.data[token_ids]
 
-    score_layer = language_model.score if is_vlm else model.score
+    score_layer = language_model.score if using_vlm_head else model.score
     param = score_layer.weight
     weight_loader = getattr(param, "weight_loader", default_weight_loader)
     weight_loader(param, score_weight)
 
     del language_model.lm_head
 
-    score_weight_name = "language_model.score.weight" if is_vlm else "score.weight"
+    score_weight_name = "language_model.score.weight" if using_vlm_head else "score.weight"
     loaded_weights.add(score_weight_name)
 
     lm_head_name = "lm_head.weight"
