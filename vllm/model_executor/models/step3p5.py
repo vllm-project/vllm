@@ -105,7 +105,7 @@ class Step3p5Attention(nn.Module):
         rope_theta: Optional[Union[float, list[float]]] = 10000,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        rope_scaling: Optional[tuple] = None,
+        rope_scaling: Optional[dict[str, Any]] = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         # Step3p5 specific args
@@ -178,17 +178,15 @@ class Step3p5Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        rope_parameters: dict[str, Any] = {
-            "rope_type": "default",
-            "partial_rotary_factor": partial_rotary_factor,
-            "rope_theta": self.rope_theta
-        }
-        if rope_scaling is not None:
-            if not isinstance(rope_scaling, dict):
-                raise ValueError(
-                    "rope_scaling must be a dict for Step3p5Attention."
-                )
-            rope_parameters.update(rope_scaling)
+        if rope_scaling is not None and not isinstance(rope_scaling, dict):
+            raise ValueError("rope_scaling must be a dict for Step3p5Attention.")
+
+        rope_parameters: dict[str, Any] = (
+            dict(rope_scaling) if rope_scaling is not None else {}
+        )
+        rope_parameters.setdefault("rope_type", "default")
+        rope_parameters["rope_theta"] = self.rope_theta
+        rope_parameters["partial_rotary_factor"] = partial_rotary_factor
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
@@ -378,7 +376,6 @@ class Step3p5DecoderLayer(nn.Module):
         super().__init__()
         config = config.hf_config
         self.hidden_size = config.hidden_size
-        rope_scaling = getattr(config, "rope_scaling", None)
         layer_idx = int(prefix.split("layers.")[1].split(".")[0])
         self.layer_idx = layer_idx
         if cache_config is not None:
@@ -412,7 +409,7 @@ class Step3p5DecoderLayer(nn.Module):
                     config, 'head_dim', None),
                 cache_config=cache_config,
                 quant_config=quant_config,
-                rope_scaling=rope_scaling,
+                rope_scaling=getattr(config, "rope_scaling", None),
                 sliding_window=getattr(config, 'sliding_window', None),
                 use_head_wise_attn_gate=getattr(config,
                                                 "use_head_wise_attn_gate",
