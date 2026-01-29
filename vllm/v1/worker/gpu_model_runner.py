@@ -1506,7 +1506,9 @@ class GPUModelRunner(
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
         # Compute optimistic seq_lens (assumes all draft tokens from previous
-        # iteration accepted).
+        # iteration accepted). Store in seq_lens.np for use by
+        # _build_attention_metadata (max_seq_len) and discard_request_mask.
+        # seq_lens.gpu will be computed later using the same optimistic values.
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
         )
@@ -1565,17 +1567,25 @@ class GPUModelRunner(
         )
         self.num_computed_tokens.copy_to_gpu(num_reqs)
 
-        # Compute positions from num_computed_tokens BEFORE async correction.
-        # This ensures positions match input_ids (both use optimistic values).
+        # Compute positions and seq_lens from num_computed_tokens BEFORE async
+        # correction. This ensures positions, seq_lens, and input_ids are all
+        # consistent (all use optimistic values for async spec decode).
         req_indices_gpu = torch.from_numpy(req_indices).to(
             self.device, non_blocking=True
         )
         arange_gpu = (
             torch.from_numpy(arange).to(self.device, non_blocking=True).to(torch.int64)
         )
+        num_scheduled_tokens_gpu = torch.from_numpy(num_scheduled_tokens).to(
+            self.device, non_blocking=True
+        )
         self.positions.gpu[:total_num_scheduled_tokens] = (
             self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64) + arange_gpu
         )
+        self.seq_lens.gpu[:num_reqs] = (
+            self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
+        )
+        self.seq_lens.gpu[num_reqs:].fill_(0)
 
         self.num_accepted_tokens.np[:num_reqs] = (
             self.input_batch.num_accepted_tokens_cpu[:num_reqs]
@@ -1583,7 +1593,7 @@ class GPUModelRunner(
         self.num_accepted_tokens.np[num_reqs:].fill(1)
         self.num_accepted_tokens.copy_to_gpu()
 
-        # Apply async spec decode updates after CPU->GPU copy
+        # Apply async spec decode updates after CPU->GPU copy.
         if async_update_data is not None:
             current_indices_gpu, new_num_computed, valid_counts = async_update_data
             self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
@@ -1596,15 +1606,6 @@ class GPUModelRunner(
                 if req.mrope_position_delta is not None:
                     self.mrope_position_delta.np[i] = req.mrope_position_delta
             self.mrope_position_delta.copy_to_gpu(num_reqs)
-
-        # Compute seq_lens on GPU (uses corrected num_computed_tokens for async).
-        num_scheduled_tokens_gpu = torch.from_numpy(num_scheduled_tokens).to(
-            self.device, non_blocking=True
-        )
-        self.seq_lens.gpu[:num_reqs] = (
-            self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
-        )
-        self.seq_lens.gpu[num_reqs:].fill_(0)
         self.input_batch.block_table.compute_slot_mapping(
             req_indices_gpu, self.positions.gpu[:total_num_scheduled_tokens]
         )
