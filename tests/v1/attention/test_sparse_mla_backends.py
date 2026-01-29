@@ -408,7 +408,7 @@ def test_sparse_backend_decode_correctness(
 
         impl.process_weights_after_loading(dtype)
 
-        # Create mock sparse MLA layer
+        # Create mock sparse MLA layer with weight matrices
         mock_layer = MockSparseMLAAttentionLayer(
             impl=impl,
             num_heads=num_heads,
@@ -417,6 +417,8 @@ def test_sparse_backend_decode_correctness(
             v_head_dim=v_head_dim,
             kv_lora_rank=kv_lora_rank,
             device=device,
+            W_UK=W_UK,
+            W_UV=W_UV,
         )
 
     out_buffer = torch.empty(

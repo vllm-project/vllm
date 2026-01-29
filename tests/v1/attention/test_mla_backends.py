@@ -279,6 +279,10 @@ class MockSparseMLAAttentionLayer:
 
     Sparse MLA implementations only support forward_mqa (decode-style attention)
     for all tokens, so this class only implements that path.
+
+    Unlike regular MLA impls, sparse MLA impls don't have W_UK_T and W_UV
+    attributes. These transformations are done by the layer (MLAAttention),
+    not the impl. This mock layer accepts these weight matrices directly.
     """
 
     def __init__(
@@ -290,6 +294,8 @@ class MockSparseMLAAttentionLayer:
         v_head_dim: int,
         kv_lora_rank: int,
         device: torch.device,
+        W_UK: torch.Tensor,
+        W_UV: torch.Tensor,
     ):
         self.impl = impl
         self.num_heads = num_heads
@@ -297,6 +303,12 @@ class MockSparseMLAAttentionLayer:
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.kv_lora_rank = kv_lora_rank
+
+        # Compute weight matrices in the format expected by forward_impl
+        # W_UK shape: (L, N, P) -> W_UK_T shape: (N, P, L)
+        self.W_UK_T = W_UK.permute(1, 2, 0)
+        # W_UV shape: (L, N, V) -> (N, L, V)
+        self.W_UV = W_UV.transpose(0, 1)
 
         # Scale attributes needed by attention backends
         self._q_scale = torch.tensor(1.0, device=device)
@@ -341,7 +353,7 @@ class MockSparseMLAAttentionLayer:
         mqa_q_nope = mqa_q_nope.transpose(0, 1)
 
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-        mqa_ql_nope = torch.bmm(mqa_q_nope, self.impl.W_UK_T)
+        mqa_ql_nope = torch.bmm(mqa_q_nope, self.W_UK_T)
 
         # Convert from (N, B, L) to (B, N, L)
         mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
@@ -355,9 +367,7 @@ class MockSparseMLAAttentionLayer:
         # attn_out shape: (B, N, L) where L = kv_lora_rank
         # W_UV shape: (N, L, V)
         # output shape: (B, N, V) -> flatten to (B, N*V)
-        decode_output = torch.bmm(attn_out.transpose(0, 1), self.impl.W_UV).transpose(
-            0, 1
-        )
+        decode_output = torch.bmm(attn_out.transpose(0, 1), self.W_UV).transpose(0, 1)
         output[:num_tokens] = decode_output.reshape(
             num_tokens, self.num_heads * self.v_head_dim
         )
@@ -370,6 +380,9 @@ class MockMLAAttentionLayer(AttentionLayerBase):
 
     This replicates the forward_impl logic from MLAAttention to allow
     testing MLA backends without the full layer infrastructure.
+
+    The W_UK_T and W_UV weight matrices are created on the layer (like in
+    MLAAttention.process_weights_after_loading), not on the impl.
     """
 
     def __init__(
@@ -381,6 +394,7 @@ class MockMLAAttentionLayer(AttentionLayerBase):
         v_head_dim: int,
         kv_lora_rank: int,
         device: torch.device,
+        kv_b_proj,
     ):
         self.impl = impl
         self.num_heads = num_heads
@@ -388,6 +402,20 @@ class MockMLAAttentionLayer(AttentionLayerBase):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.kv_lora_rank = kv_lora_rank
+
+        # Compute weight matrices from kv_b_proj (like MLAAttention does)
+        # This replicates MLAAttention.process_weights_after_loading logic
+        kv_b_proj_weight = kv_b_proj.weight.T
+        kv_b_proj_weight = kv_b_proj_weight.view(
+            kv_lora_rank,
+            num_heads,
+            qk_nope_head_dim + v_head_dim,
+        )
+        W_UK, W_UV = kv_b_proj_weight.split([qk_nope_head_dim, v_head_dim], dim=-1)
+        # Convert from (L, N, V) to (N, L, V)
+        self.W_UV = W_UV.transpose(0, 1)
+        # Convert from (L, N, P) to (N, P, L)
+        self.W_UK_T = W_UK.permute(1, 2, 0)
 
         # Scale attributes needed by attention backends
         self._q_scale = torch.tensor(1.0, device=device)
@@ -458,7 +486,7 @@ class MockMLAAttentionLayer(AttentionLayerBase):
             mqa_q_nope = mqa_q_nope.transpose(0, 1)
 
             # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            mqa_ql_nope = torch.bmm(mqa_q_nope, self.impl.W_UK_T)
+            mqa_ql_nope = torch.bmm(mqa_q_nope, self.W_UK_T)
 
             # Convert from (N, B, L) to (B, N, L)
             mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
@@ -472,9 +500,9 @@ class MockMLAAttentionLayer(AttentionLayerBase):
             # attn_out shape: (B, N, L) where L = kv_lora_rank
             # W_UV shape: (N, L, V)
             # output shape: (B, N, V) -> flatten to (B, N*V)
-            decode_output = torch.bmm(
-                attn_out.transpose(0, 1), self.impl.W_UV
-            ).transpose(0, 1)
+            decode_output = torch.bmm(attn_out.transpose(0, 1), self.W_UV).transpose(
+                0, 1
+            )
             output[:num_decode_tokens] = decode_output.reshape(
                 num_decode_tokens, self.num_heads * self.v_head_dim
             )
@@ -535,7 +563,7 @@ def run_attention_backend(
             kv_b_proj=mock_kv_b_proj,
         )
 
-        # Process weights to create W_UK_T and W_UV attributes needed by MLA
+        # Process weights on the impl
         act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
         impl.process_weights_after_loading(act_dtype)
 
@@ -548,6 +576,7 @@ def run_attention_backend(
             v_head_dim=v_head_dim,
             kv_lora_rank=kv_lora_rank,
             device=device,
+            kv_b_proj=mock_kv_b_proj,
         )
 
         # Populate static_forward_context with mock attention layers
