@@ -40,7 +40,7 @@ def create_fused_moe_router(
     topk_group: int | None = None,
     scoring_func: str = "softmax",
     num_fused_shared_experts: int = 0,
-    # grouped topk + fused topk bias parameters/ custom router function
+    # grouped topk + fused topk bias parameters
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
     # custom routing paramaters
@@ -130,7 +130,6 @@ def create_fused_moe_router(
             renormalize=renormalize,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
-            routed_scaling_factor=routed_scaling_factor,
         )
 
     if e_score_correction_bias is not None:

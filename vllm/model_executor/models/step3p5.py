@@ -45,19 +45,6 @@ from .utils import (PPMissingLayer, extract_layer_index,
 
 logger = init_logger(__name__)
 
-def sigmoid_routing_function(hidden_states: torch.Tensor,
-                             gating_output: torch.Tensor, topk: int,
-                             renormalize: bool):
-    gating_output = gating_output.float()
-    gate_prob = torch.sigmoid(gating_output)
-    gate_prob = gate_prob / gate_prob.sum(dim=-1, keepdim=True)
-    topk_prob, indices = torch.topk(gate_prob, k=topk, dim=1)
-    expert_topk_weight = topk_prob
-    if renormalize:
-        expert_topk_weight = expert_topk_weight / torch.sum(
-            expert_topk_weight, dim=-1, keepdim=True)
-    return expert_topk_weight, indices.to(torch.int32) 
-
 class Step3p5MLP(nn.Module):
 
     def __init__(
@@ -309,13 +296,15 @@ class FusedMoEBlock(nn.Module):
         assert config.moe_dynamic_exp_p == 1, "Only support dynamic exp p=1"
 
         self.use_moe_router_bias = config.use_moe_router_bias
+        self.routed_scaling_factor = getattr(config, "moe_router_scaling_factor",
+                                             1.0)
+        if self.routed_scaling_factor is None:
+            self.routed_scaling_factor = 1.0
         if self.use_moe_router_bias:
             self.router_bias = nn.Parameter(torch.zeros(config.moe_num_experts,
                                                         dtype=torch.float32),
                                             requires_grad=False)
             custom_routing_function = self.router_bias_func
-        elif config.moe_router_activation == "sigmoid":
-            custom_routing_function = sigmoid_routing_function
         else:
             custom_routing_function = None
         self.need_fp32_gate = config.need_fp32_gate
@@ -363,6 +352,8 @@ class FusedMoEBlock(nn.Module):
         if renormalize:
             expert_topk_weight = expert_topk_weight / (
                 torch.sum(expert_topk_weight, dim=-1, keepdim=True) + 1e-20)
+        if self.routed_scaling_factor != 1.0:
+            expert_topk_weight *= self.routed_scaling_factor
         return expert_topk_weight, indices.to(torch.int32)
 
     def forward(
