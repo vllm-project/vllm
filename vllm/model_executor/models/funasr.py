@@ -707,12 +707,9 @@ class Transformer(nn.Module):
 
     def forward(self, x, ilens=None):
         batch_size, seq_len, dim = x.size()
-        # num_frames_to_discard = seq_len % self.k
         chunk_num = (seq_len - 1) // self.k + 1
         pad_num = chunk_num * self.k - seq_len
         x = F.pad(x, (0, 0, 0, pad_num, 0, 0), value=0.0)
-        # if num_frames_to_discard > 0:
-        #     x = x[:, :-num_frames_to_discard, :]
         seq_len = x.size(1)
 
         x = x.contiguous()
@@ -723,7 +720,6 @@ class Transformer(nn.Module):
 
         olens = None
         olens = (ilens - 1) // self.k + 1
-        # masks = (~make_pad_mask(olens)[:, None, :]).to(x.device)
         masks = None
 
         if self.blocks is not None:
