@@ -9,9 +9,11 @@ tasks:
 env_vars:
   VLLM_USE_FLASHINFER_MOE_FP8: "1"
   VLLM_FLASHINFER_MOE_BACKEND: "throughput"
-limit: 250
+limit: 1319
 num_fewshot: 5
 max_model_len: 262144
 kv_cache_dtype: fp8
 enforce_eager: false
 apply_chat_template: true
+fewshot_as_multiturn: true
+trust_remote_code: true
