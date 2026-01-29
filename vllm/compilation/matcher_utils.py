@@ -371,10 +371,9 @@ class MatcherQuantFP8(MatcherCustomOp):
         )
 
         if self.quant_key.scale.group_shape.is_per_group():
-            assert scale is None
-            scale = self.make_scale(
-                input, transposed=self.has_col_major_scales, tma=self.is_tma_aligned
-            )
+            if not self.is_tma_aligned:
+                assert scale is None
+                scale = self.make_scale(input, transposed=self.has_col_major_scales)
 
             finfo = torch.finfo(self.quant_key.dtype)
             fp8_min = finfo.min
@@ -414,21 +413,28 @@ class MatcherQuantFP8(MatcherCustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.quant_fp8(input, scale)  # type: ignore[no-any-return]
 
+    def get_tma_aligned_m(self, input: torch.Tensor) -> int:
+        m = input.shape[-2]
+        m_aligned: int = get_tma_aligned_size(m, 4)  # Force return type
+        return m_aligned
+
     def make_scale(
-        self, input: torch.Tensor, transposed: bool = False, tma: bool = False
+        self,
+        input: torch.Tensor,
+        transposed: bool = False,
+        tma_aligned_m: int | None = None,
     ) -> torch.Tensor:
         normalized_group_shape = _normalize_quant_group_shape(
             input, self.quant_key.scale.group_shape
         )
 
-        if tma:
+        if tma_aligned_m is not None:
             assert transposed, (
                 "Invalid scale format combination (TMA must be transposed)"
             )
             m = input.shape[-2]
             sf_k = input.shape[-1] // self.quant_key.scale.group_shape[1]
 
-            tma_aligned_m = get_tma_aligned_size(m, 4)
             scale_shape = input.shape[:-2] + (m, sf_k)
             stride = (
                 (1, tma_aligned_m)

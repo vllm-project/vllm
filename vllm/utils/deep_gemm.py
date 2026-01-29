@@ -341,7 +341,7 @@ def _align(x: int, y: int) -> int:
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/v2.1.1/csrc/utils/math.hpp#L19
-def get_tma_aligned_size(x: int, element_size: int):
+def get_tma_aligned_size(x: int, element_size: int) -> int:
     return _align(x, 16 // element_size)
 
 
