@@ -125,7 +125,7 @@ def choose_scaled_mm_linear_kernel(
         config (_KernelConfigT): Description of the linear layer
             to be implemented.
         possible_kernels (dict[PlatformEnum, list[_KernelT]]): A
-            dictionary of platforms and their list list of possible kernels.
+            dictionary of platforms and their list of possible kernels.
         compute_capability (Optional[int], optional): The compute capability of
             the target device, if None uses `current_platform` to get the
             compute capability. Defaults to None.
