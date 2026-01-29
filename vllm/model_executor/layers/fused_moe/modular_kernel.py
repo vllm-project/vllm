@@ -168,14 +168,13 @@ PrepareMonolithicResultType = tuple[
 ReceiverType = Callable[[], PrepareResultType]
 
 
-# TODO: pass FusedMoEParallelConfig in as ctor parameter?
-class FusedMoEPrepareAndFinalize(ABC):
+class FusedMoEPrepareAndFinalizeBase(ABC):
     """
-    An abstract base class for the [Quantize-Prepare] and [Finalize] steps
-    described above.
+    An abstract base class for FusedMoEPrepareAndFinalize (Modular)
+    and FusedMoEPrepareAndFinalizeMonolithic (Monolithic) implementations.
     """
 
-    def post_init_setup(self, fused_experts: "FusedMoEPermuteExpertsUnpermute"):
+    def post_init_setup(self, fused_experts: "FusedMoEPermuteExpertsUnpermuteBase"):
         """
         Initialize FusedMoEPrepareAndFinalize settings that depend on
         FusedMoEPermuteExpertsUnpermute experts object.
@@ -183,6 +182,56 @@ class FusedMoEPrepareAndFinalize(ABC):
         dependencies may choose to override this function.
         """
         return
+
+    @property
+    @abstractmethod
+    def activation_format(self) -> FusedMoEActivationFormat:
+        """
+        A property indicating the output format of the activations for the
+        'prepare' method.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        """
+        The PrepareFinalize All2All implementations generally constrain the
+        dtype of the topk_ids they support. This function returns the
+        required topk indices dtype so it can be respected.
+        Return None if there are no such restrictions.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def max_num_tokens_per_rank(self) -> int | None:
+        """
+        Some PrepareFinalize All2All implementations are batched. Meaning,
+        they can process only as set of tokens at a time. This
+        function returns the batch size i.e the maximum number of tokens
+        the implementation can process at a time.
+        Return None if there are no such restrictions.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def num_dispatchers(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def output_is_reduced(self) -> bool:
+        """
+        Indicates whether or not the output of finalize is reduced across all
+        ranks.
+        """
+        raise NotImplementedError
+
+
+# TODO: pass FusedMoEParallelConfig in as ctor parameter?
+class FusedMoEPrepareAndFinalize(FusedMoEPrepareAndFinalizeBase):
+    """
+    An abstract base class for the [Quantize-Prepare] and [Finalize] steps
+    described above.
+    """
 
     @abstractmethod
     def prepare(
@@ -348,6 +397,15 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+
+class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalizeBase):
+    """
+    An abstract base class for the [Quantize-Prepare] and [Finalize] steps
+    described above but for the monolithic interface (accepts router logits
+    rather than topk ids and weights).
+    """
+
+    @abstractmethod
     def prepare_monolithic(
         self,
         a1: torch.Tensor,
@@ -373,11 +431,7 @@ class FusedMoEPrepareAndFinalize(ABC):
             f"prepare_monolithic not supported for {self.__class__.__name__}"
         )
 
-    def finalize_monolithic(
-        self,
-        fused_expert_output: torch.Tensor,
-        weight_and_reduce_impl: TopKWeightAndReduce,
-    ) -> torch.Tensor:
+    def finalize_monolithic(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
         """
         Optional method for subclasses compatible with monolithic
         FusedMoEPermuteExpertsUnpermute kernels.
@@ -386,61 +440,12 @@ class FusedMoEPrepareAndFinalize(ABC):
         fused experts output.
         - fused_expert_output: The unweighted, unreduced output of the fused
           experts, it will have (M, topk, K) shape.
-        - weight_and_reduce_impl: An optional TopKWeightAndReduce
-          implementation.
-        """
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def activation_format(self) -> FusedMoEActivationFormat:
-        """
-        A property indicating the output format of the activations for the
-        'prepare' method.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        """
-        The PrepareFinalize All2All implementations generally constrain the
-        dtype of the topk_ids they support. This function returns the
-        required topk indices dtype so it can be respected.
-        Return None if there are no such restrictions.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def max_num_tokens_per_rank(self) -> int | None:
-        """
-        Some PrepareFinalize All2All implementations are batched. Meaning,
-        they can process only as set of tokens at a time. This
-        function returns the batch size i.e the maximum number of tokens
-        the implementation can process at a time.
-        Return None if there are no such restrictions.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def num_dispatchers(self) -> int:
-        raise NotImplementedError
-
-    @abstractmethod
-    def output_is_reduced(self) -> bool:
-        """
-        Indicates whether or not the output of finalize is reduced across all
-        ranks.
         """
         raise NotImplementedError
 
 
 # TODO: add supported activations method (return string)
-class FusedMoEPermuteExpertsUnpermute(ABC):
-    """
-    An abstract base class for the [Permute-Experts-Unpermute] step described
-        above.
-    """
-
+class FusedMoEPermuteExpertsUnpermuteBase(ABC):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -492,50 +497,8 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
-    def moe_problem_size(
-        self,
-        a1: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> tuple[int, int, int, int, int]:
-        """
-        Extract the MoE problem size from the given tensor arguments:
-        - a: The hidden states, input to the MoE layer.
-        - w1: The first set of expert weights.
-        - w2: The second set of expert weights.
-        - topk_ids: The topk ids.
+        #
 
-        Note: extracting the problem shape from the weight and activation
-        tensors is not obvious.  It needs to be done this way specifically
-        due to subtle issues with particular kernels, e.g. the int4 kernels
-        divide the trailing dimension by two, so it's not "correct" to
-        extract N or K from the trailing dimension of w1 or w2.  Similarly,
-        some kernels transpose the weights, so this needs to be kept in mind.
-
-        Note: This implementation covers most cases. However, if experts
-        require a specialized implementation, like MarlinExperts, they are free
-        to override this function.
-        """
-        assert w1.dim() == 3 and w2.dim() == 3
-        E, N, _ = w1.size()
-        K = a1.size(-1)
-
-        if a1.dim() == 2:
-            # Make sure we are using the correct a1 (pre-permute).
-            assert topk_ids.size(0) == a1.size(0), f"{topk_ids.size(0)} != {a1.size(0)}"
-            M = a1.size(0)
-        else:
-            assert a1.dim() == 3
-            assert a1.size(0) == E, f"{a1.size(0)} == {E}"
-            M = a1.size(1)  # This is max_num_tokens
-
-        assert topk_ids.dim() == 2
-        topk = topk_ids.size(1)
-
-        return E, M, N, K, topk
-
-    #
     # Various helpers for registering support for various features.
     # Used by the oracle to select a particular kernel for a deployment.
     #
@@ -717,6 +680,61 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         return False
 
+    def enable_chunking(self):
+        return (
+            envs.VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING and self.supports_chunking()
+        )
+
+
+class FusedMoEPermuteExpertsUnpermute(FusedMoEPermuteExpertsUnpermuteBase):
+    """
+    An abstract base class for the [Permute-Experts-Unpermute] step described
+        above.
+    """
+
+    def moe_problem_size(
+        self,
+        a1: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> tuple[int, int, int, int, int]:
+        """
+        Extract the MoE problem size from the given tensor arguments:
+        - a: The hidden states, input to the MoE layer.
+        - w1: The first set of expert weights.
+        - w2: The second set of expert weights.
+        - topk_ids: The topk ids.
+
+        Note: extracting the problem shape from the weight and activation
+        tensors is not obvious.  It needs to be done this way specifically
+        due to subtle issues with particular kernels, e.g. the int4 kernels
+        divide the trailing dimension by two, so it's not "correct" to
+        extract N or K from the trailing dimension of w1 or w2.  Similarly,
+        some kernels transpose the weights, so this needs to be kept in mind.
+
+        Note: This implementation covers most cases. However, if experts
+        require a specialized implementation, like MarlinExperts, they are free
+        to override this function.
+        """
+        assert w1.dim() == 3 and w2.dim() == 3
+        E, N, _ = w1.size()
+        K = a1.size(-1)
+
+        if a1.dim() == 2:
+            # Make sure we are using the correct a1 (pre-permute).
+            assert topk_ids.size(0) == a1.size(0), f"{topk_ids.size(0)} != {a1.size(0)}"
+            M = a1.size(0)
+        else:
+            assert a1.dim() == 3
+            assert a1.size(0) == E, f"{a1.size(0)} == {E}"
+            M = a1.size(1)  # This is max_num_tokens
+
+        assert topk_ids.dim() == 2
+        topk = topk_ids.size(1)
+
+        return E, M, N, K, topk
+
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
         """
         Workspace type: The dtype to use for the workspace tensors.
@@ -790,11 +808,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     ) -> None:
         apply_moe_activation(activation, output, input)
 
-    def enable_chunking(self):
-        return (
-            envs.VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING and self.supports_chunking()
-        )
-
+    @abstractmethod
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
         raise NotImplementedError
 
@@ -854,6 +868,14 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
+
+class FusedMoEPermuteExpertsUnpermuteMonolithic(FusedMoEPermuteExpertsUnpermuteBase):
+    """
+    An abstract base class for the [Permute-Experts-Unpermute] step described
+        above, but with the monolithic interface (accepts router logits
+        rather than topk ids and weights).
+    """
+
     def apply_monolithic(
         self,
         hidden_states: torch.Tensor,
@@ -890,24 +912,11 @@ def _slice_scales(
     return None
 
 
-@final
-class FusedMoEModularKernel(torch.nn.Module):
-    """
-    This class combines a FusedMoEPrepareAndFinalize instance and
-    a FusedMoEPermuteExpertsUnpermute to provide an interface that
-    is compatible with the `fused_experts` function in fused_moe.py.
-
-    It takes care of managing any required scratch space.
-
-    Note: Instances of this class should only be used for a single model
-    layer due to any layer specific state that may be used by the component
-    objects.
-    """
-
+class FusedMoEModularKernelBase(torch.nn.Module):
     def __init__(
         self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        fused_experts: FusedMoEPermuteExpertsUnpermute,
+        prepare_finalize: FusedMoEPrepareAndFinalizeBase,
+        fused_experts: FusedMoEPermuteExpertsUnpermuteBase,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
     ):
@@ -926,6 +935,22 @@ class FusedMoEModularKernel(torch.nn.Module):
             and moe_parallel_config.dp_size > 1
             and moe_parallel_config.use_ep
         )
+
+        # Confirm P/F and Experts kernels are consistent with eachother.
+        if not (
+            (
+                isinstance(prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
+                and isinstance(fused_experts, FusedMoEPermuteExpertsUnpermuteMonolithic)
+            )
+            or (
+                isinstance(prepare_finalize, FusedMoEPrepareAndFinalize)
+                and isinstance(fused_experts, FusedMoEPermuteExpertsUnpermute)
+            )
+        ):
+            raise ValueError(
+                "prepare_finalize and fused_experts must both be either "
+                "monolithic or non-monolithic"
+            )
 
         self._post_init_setup()
         assert (
@@ -956,6 +981,47 @@ class FusedMoEModularKernel(torch.nn.Module):
         is reduced across all ranks.
         """
         return self.prepare_finalize.output_is_reduced()
+
+
+@final
+class FusedMoEModularKernel(FusedMoEModularKernelBase):
+    """
+    This class combines a FusedMoEPrepareAndFinalize instance and
+    a FusedMoEPermuteExpertsUnpermute to provide an interface that
+    is compatible with the `fused_experts` function in fused_moe.py.
+
+    It takes care of managing any required scratch space.
+
+    Note: Instances of this class should only be used for a single model
+    layer due to any layer specific state that may be used by the component
+    objects.
+    """
+
+    def __init__(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        fused_experts: FusedMoEPermuteExpertsUnpermute,
+        shared_experts: torch.nn.Module | None = None,
+        moe_parallel_config: FusedMoEParallelConfig | None = None,
+    ):
+        if not isinstance(prepare_finalize, FusedMoEPrepareAndFinalize):
+            raise TypeError(
+                "prepare_finalize must be an instance of FusedMoEPrepareAndFinalize"
+            )
+        if not isinstance(fused_experts, FusedMoEPermuteExpertsUnpermute):
+            raise TypeError(
+                "fused_experts must be an instance of FusedMoEPermuteExpertsUnpermute"
+            )
+
+        super().__init__(
+            prepare_finalize,
+            fused_experts,
+            shared_experts,
+            moe_parallel_config,
+        )
+
+        self.prepare_finalize: FusedMoEPrepareAndFinalize = prepare_finalize
+        self.fused_experts: FusedMoEPermuteExpertsUnpermute = fused_experts
 
     def _chunk_info(self, M: int) -> tuple[int, int]:
         """
@@ -999,6 +1065,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         See `workspace_shapes` for a description of the remainder of arguments.
         Returns a tuple of (workspace13, workspace2, output) tensors.
         """
+        assert isinstance(self.fused_experts, FusedMoEPermuteExpertsUnpermute)
         assert M_full > 0 and M_chunk > 0
 
         num_chunks, _ = self._chunk_info(M_full)
@@ -1154,6 +1221,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         The _prepare method is a wrapper around self.prepare_finalize.prepare
         that handles DBO and async.
         """
+        assert isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalize)
+
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
@@ -1239,6 +1308,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
     ) -> torch.Tensor:
+        assert isinstance(self.fused_experts, FusedMoEPermuteExpertsUnpermuteBase)
+
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
         )
@@ -1468,6 +1539,34 @@ class FusedMoEModularKernel(torch.nn.Module):
             apply_router_weight_on_input,
         )
 
+
+@final
+class FusedMoEModularKernelMonolithic(FusedMoEModularKernelBase):
+    def __init__(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalizeMonolithic,
+        fused_experts: FusedMoEPermuteExpertsUnpermuteMonolithic,
+        shared_experts: torch.nn.Module | None = None,
+        moe_parallel_config: FusedMoEParallelConfig | None = None,
+    ):
+        if not isinstance(prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic):
+            raise TypeError(
+                "prepare_finalize must be an instance of "
+                "FusedMoEPrepareAndFinalizeMonolithic"
+            )
+        if not isinstance(fused_experts, FusedMoEPermuteExpertsUnpermuteMonolithic):
+            raise TypeError(
+                "fused_experts must be an instance of "
+                "FusedMoEPermuteExpertsUnpermuteMonolithic"
+            )
+
+        super().__init__(
+            prepare_finalize,
+            fused_experts,
+            shared_experts,
+            moe_parallel_config,
+        )
+
     def forward_monolithic(
         self,
         hidden_states: torch.Tensor,
@@ -1489,6 +1588,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
+        assert isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
+        assert isinstance(self.fused_experts, FusedMoEPermuteExpertsUnpermuteMonolithic)
+
         # TODO(rob): add inplace support.
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare_monolithic(
             hidden_states,
@@ -1514,9 +1616,6 @@ class FusedMoEModularKernel(torch.nn.Module):
             topk_group=topk_group,
         )
 
-        output = self.prepare_finalize.finalize_monolithic(
-            fused_expert_output=fused_out,
-            weight_and_reduce_impl=self.fused_experts.finalize_weight_and_reduce_impl(),
-        )
+        output = self.prepare_finalize.finalize_monolithic(fused_out)
 
         return output
