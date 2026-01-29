@@ -683,7 +683,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [16]
+        return [1, 16, 32]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
