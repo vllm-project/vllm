@@ -91,7 +91,7 @@ class LoRAKernelMeta:
         self.lora_token_start_loc.fill_(0)
         self.no_lora_flag_cpu.fill_(False)
         self.num_active_loras = 0
-        # self.captured_lora_counts = []
+        self.captured_lora_counts = []
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """
