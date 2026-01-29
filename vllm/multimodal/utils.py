@@ -345,6 +345,8 @@ def group_mm_kwargs_by_modality(
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.
     """
+    from vllm.multimodal.inputs import MultiModalKwargsItems
+
     for modality, group in groupby(mm_kwargs, key=lambda x: x[0]):
         items_lst = [item for _, item in group]
         mm_kwargs_items = MultiModalKwargsItems({modality: items_lst})

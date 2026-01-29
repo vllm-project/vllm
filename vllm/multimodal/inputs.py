@@ -340,7 +340,7 @@ class MultiModalFeatureSpec:
     `MultiModalFeatureSpec` per item.
     """
 
-    data: "MultiModalKwargsItem | None"
+    data: Optional["MultiModalKwargsItem"]
     """
     Represents multimodal data for this feature.
 
