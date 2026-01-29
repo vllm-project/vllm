@@ -1010,20 +1010,26 @@ class GPUModelRunner(
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
-                # When using PP, the scheduler sends the sampled tokens back,
-                # because there's no direct communication between the first-
-                # stage worker and the last-stage worker.
-                new_token_ids = req_data.new_token_ids[i]
-                # Add the sampled token(s) from the previous step (if any).
-                # This doesn't include "unverified" tokens like spec tokens.
-                num_new_tokens = (
-                    num_computed_tokens + len(new_token_ids) - req_state.num_tokens
-                )
-                if num_new_tokens == 1:
-                    # Avoid slicing list in most common case.
-                    req_state.output_token_ids.append(new_token_ids[-1])
-                elif num_new_tokens > 0:
-                    req_state.output_token_ids.extend(new_token_ids[-num_new_tokens:])
+                if not req_data.new_token_ids:
+                    # Async scheduled PP: Sampled tokens propagated via GPU broadcast.
+                    new_token_ids: list[int] = []
+                else:
+                    # Non-async scheduling with PP: The scheduler sends
+                    # sampled token ids back because there's no direct communication
+                    # between the first-stage worker and the last-stage worker.
+                    new_token_ids = req_data.new_token_ids[i]
+                    # Add the sampled token(s) from the previous step (if any).
+                    # This doesn't include "unverified" tokens like spec tokens.
+                    num_new_tokens = (
+                        num_computed_tokens + len(new_token_ids) - req_state.num_tokens
+                    )
+                    if num_new_tokens == 1:
+                        # Avoid slicing list in most common case.
+                        req_state.output_token_ids.append(new_token_ids[-1])
+                    elif num_new_tokens > 0:
+                        req_state.output_token_ids.extend(
+                            new_token_ids[-num_new_tokens:]
+                        )
             elif num_output_tokens < len(req_state.output_token_ids):
                 # Some output tokens were discarded due to a sync-KV-load
                 # failure. Align the cached state.
@@ -1211,11 +1217,11 @@ class GPUModelRunner(
         if not scheduler_output or not self.is_multimodal_raw_input_only_model:
             return {}
 
-        mm_kwargs = list[MultiModalKwargsItem]()
+        mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
         for req in scheduler_output.scheduled_new_reqs:
             for feature in req.mm_features:
                 if feature.data is not None:
-                    mm_kwargs.append(feature.data)
+                    mm_kwargs.append((feature.modality, feature.data))
 
         # Input all modalities at once
         mm_kwargs_combined: BatchedTensorInputs = {}
@@ -2213,7 +2219,7 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
     ) -> tuple[
         list[str],
-        list[MultiModalKwargsItem],
+        list[tuple[str, MultiModalKwargsItem]],
         list[tuple[str, PlaceholderRange]],
     ]:
         """Batch multimodal inputs from scheduled encoder inputs.
@@ -2233,7 +2239,7 @@ class GPUModelRunner(
             return [], [], []
 
         mm_hashes = list[str]()
-        mm_kwargs = list[MultiModalKwargsItem]()
+        mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
         # Multimodal LoRA reference info to map each multimodal item
         # back to its request & position
         mm_lora_refs = list[tuple[str, PlaceholderRange]]()
@@ -2246,7 +2252,7 @@ class GPUModelRunner(
                     continue
 
                 mm_hashes.append(mm_feature.identifier)
-                mm_kwargs.append(mm_feature.data)
+                mm_kwargs.append((mm_feature.modality, mm_feature.data))
                 mm_lora_refs.append((req_id, mm_feature.mm_position))
 
         return mm_hashes, mm_kwargs, mm_lora_refs
@@ -3577,7 +3583,9 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         if self.execute_model_state is None:
-            # Nothing to do (PP non-final rank case), output isn't used.
+            # receive sampled token ids from the last PP rank.
+            if self.use_async_scheduling and get_pp_group().world_size > 1:
+                self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # type: ignore[return-value]
 
@@ -3618,6 +3626,12 @@ class GPUModelRunner(
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
         )
+        if self.use_async_scheduling:
+            pp = get_pp_group()
+            if pp.world_size > 1 and pp.is_last_rank:
+                self._pp_broadcast_prev_sampled_token_ids(
+                    sampler_output.sampled_token_ids
+                )
 
         self._draft_token_ids = None
         self._draft_token_req_ids = None
@@ -3752,6 +3766,45 @@ class GPUModelRunner(
             )
 
         return async_output
+
+    def _pp_broadcast_prev_sampled_token_ids(
+        self, sampled_token_ids: torch.Tensor
+    ) -> None:
+        """Broadcast sampled token ids (GPU) from last PP stage"""
+        pp = get_pp_group()
+        assert pp.is_last_rank
+        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+        assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
+            "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
+        )
+        torch.distributed.broadcast(
+            sampled_token_ids, src=pp.rank, group=pp.device_group
+        )
+
+    def _pp_receive_prev_sampled_token_ids_to_input_batch(self) -> None:
+        """Receive sampled token ids broadcast from last PP stage"""
+        pp = get_pp_group()
+        assert not pp.is_last_rank
+        num_reqs = self.input_batch.num_reqs
+        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+        recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
+        torch.distributed.broadcast(recv, src=pp.last_rank, group=pp.device_group)
+        self.input_batch.prev_sampled_token_ids = recv
+
+        # construct `prev_req_id_to_index` here so `_prepare_input_ids`
+        # can map req_id -> previous batch row
+        discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[0]
+        discard_req_indices_set = set(discard_req_indices)
+        prev_req_id_to_index: dict[str, int] = {}
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            if i in discard_req_indices_set:
+                continue
+            prev_req_id_to_index[req_id] = i
+            # PP+async scheduling: advance per-request local cached output length by
+            # appending a placeholder (-1) token id.
+            if (req_state := self.requests.get(req_id)) is not None:
+                req_state.output_token_ids.append(-1)
+        self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
@@ -4422,12 +4475,10 @@ class GPUModelRunner(
         # but not read from the cache
         assert dummy_mm_item is not None, "Item should not already be cached"
 
-        dummy_mm_items = [dummy_mm_item] * max_items_per_batch
-
         return next(
             mm_kwargs_group
             for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
-                dummy_mm_items,
+                [(modality, dummy_mm_item)] * max_items_per_batch,
                 device=self.device,
                 pin_memory=self.pin_memory,
             )

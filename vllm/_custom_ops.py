@@ -789,6 +789,8 @@ def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
 
 
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
+    if cuda_device_capability < 90 or cuda_device_capability >= 110:
+        return False
     try:
         return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
     except AttributeError:
