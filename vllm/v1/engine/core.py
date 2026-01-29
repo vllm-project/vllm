@@ -185,15 +185,14 @@ class EngineCoreSentinel(BaseSentinel):
         msg_bytes = msg.encode("utf-8")
         self.engine_fault_socket.send_multipart([b"", msg_bytes])
 
-    def pause(self, timeout: int = 1, soft_pause: bool = True) -> bool:
+    def pause(self, timeout: int = 1, **kwargs) -> bool:
         """
         Pause the busy loop safely.
         Args:
             timeout:wait for the busy loop to acknowledge the pause signal
-            soft_pause: if True, perform a soft pause using a flag; otherwise
-            abort the communicator
         """
         self.logger("Start pausing EngineCore", level="info")
+        soft_pause = kwargs.get("soft_pause", False)
         start_time = time.monotonic()
         if self.engine_running:
             # Clear the flag to signal busy loop should pause
@@ -234,9 +233,7 @@ class EngineCoreSentinel(BaseSentinel):
                 )
         return success
 
-    def retry(
-        self, timeout: int = 1, new_stateless_dp_group_port: int = 8000, **kwargs
-    ) -> bool:
+    def retry(self, timeout: int = 1, **kwargs) -> bool:
         """
         Handle the retry instruction from the ClientSentinel.
         This instruction tells the EngineCore to continue its busy loop
@@ -244,7 +241,7 @@ class EngineCoreSentinel(BaseSentinel):
         """
         if self.engine_running:
             return True
-
+        new_stateless_dp_group_port = kwargs.get("new_stateless_dp_group_port")
         start_time = time.monotonic()
         identities = self._get_target_worker_identity()
         success, _ = self._broadcast_command_to_downstream(

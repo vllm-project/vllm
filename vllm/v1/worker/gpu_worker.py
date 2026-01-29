@@ -152,7 +152,8 @@ class WorkerSentinel(BaseSentinel):
                 success, method_uuid, reason = self._execute_cmd(cmd_str)
                 self._send_execution_result(success, method_uuid, reason)
 
-    def pause(self, timeout: int = 1, soft_pause: bool = False):
+    def pause(self, timeout: int = 1, **kwargs) -> bool:
+        soft_pause = kwargs.get("soft_pause", False)
         if soft_pause:
             self._set_device_communicator_status(False)
             self.pause_event.set()

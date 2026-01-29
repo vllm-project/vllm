@@ -148,7 +148,7 @@ class BaseSentinel:
         return success, method_uuid, reason
 
     @abstractmethod
-    def pause(self, timeout: int = 1, soft_pause: bool = True) -> bool:
+    def pause(self, timeout: int = 1, **kwargs) -> bool:
         """
         Pause the vLLM instance to enter fault-tolerance mode.
         This method should be called when a fault is detected. It pauses the
