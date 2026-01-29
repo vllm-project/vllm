@@ -14,7 +14,7 @@ from transformers import (
     Qwen3Config,
 )
 
-from vllm.config import ModelConfig, MultiModalConfig, SpeechToTextConfig, VllmConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs.data import PromptType
@@ -594,7 +594,6 @@ class FunASRAudioAttention(nn.Module):
         self,
         num_heads: int,
         embed_dim: int,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -695,7 +694,6 @@ class Transformer(nn.Module):
                         FunASRAudioAttention(
                             kwargs.get("attention_heads", 8),
                             llm_dim,
-                            multimodal_config=None,
                             prefix=f"{prefix}.self_attn",
                         ),
                         PositionwiseFeedForward(
