@@ -210,7 +210,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
-        activation_limit: float | None = None
     ):
         from flashinfer.fused_moe.core import ActivationType
 

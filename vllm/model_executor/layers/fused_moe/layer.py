@@ -332,7 +332,6 @@ class FusedMoE(CustomOp):
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         router_logits_dtype: torch.dtype | None = None,
-        activation_limit: float | None = None,
     ):
         super().__init__()
 
@@ -520,11 +519,6 @@ class FusedMoE(CustomOp):
 
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
-        self.activation_limit = activation_limit
-        if self.activation == "swiglustep" and self.activation_limit is None:
-            raise ValueError(
-                "activation='swiglustep' requires activation_limit to be set."
-            )
 
         self.router = create_fused_moe_router(
             top_k=top_k,

@@ -144,7 +144,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "swiglustep"]
+        return activation in ["silu", "swiglustep_clip_7"]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -185,7 +185,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return (workspace1, workspace2, output)
 
     def _act_mul_quant(
-        self, input: torch.Tensor, output: torch.Tensor, activation: str, activation_limit: float | None = None,
+        self, input: torch.Tensor, output: torch.Tensor, activation: str
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.block_shape is not None
         block_k = self.block_shape[1]
@@ -199,7 +199,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             act_out = torch.empty(
                 (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
             )
-            self.activation(activation, act_out, input, activation_limit)
+            self.activation(activation, act_out, input)
             a2q, a2q_scale = per_token_group_quant_fp8_packed_for_deepgemm(
                 act_out,
                 block_k,
@@ -220,7 +220,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         act_out = torch.empty(
             (M_sum, activation_out_dim), dtype=input.dtype, device=input.device
         )
-        self.activation(activation, act_out, input, activation_limit)
+        self.activation(activation, act_out, input)
         return per_token_group_quant_fp8(
             act_out, block_k, column_major_scales=True, out_q=output
         )
@@ -242,7 +242,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        activation_limit: float | None = None,
     ):
         assert a1q_scale is not None
         assert a2_scale is None
@@ -291,7 +290,7 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             workspace13.view(dtype=torch.float8_e4m3fn), (M_sum, activation_out_dim)
         )
         a2q, a2q_scale = self._act_mul_quant(
-            input=mm1_out.view(-1, N), output=quant_out, activation=activation, activation_limit=activation_limit
+            input=mm1_out.view(-1, N), output=quant_out, activation=activation
         )
 
         mm2_out = _resize_cache(workspace2, (M_sum, K))

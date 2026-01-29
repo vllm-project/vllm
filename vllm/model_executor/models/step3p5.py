@@ -310,14 +310,22 @@ class FusedMoEBlock(nn.Module):
         self.need_fp32_gate = config.need_fp32_gate
         layer_idx = int(prefix.split("layers.")[1].split(".")[0])
         activation = "silu"
-        swigluoai_step_limit = None
-        if config.swiglu_limits and config.swiglu_limits[
-                layer_idx] is not None and config.swiglu_limits[layer_idx] != 0:
-            swigluoai_step_limit = config.swiglu_limits[layer_idx]
-            activation = "swiglustep"
+        swiglu_limits = config.swiglu_limits or []
+        swiglu_limit = (
+            swiglu_limits[layer_idx] if layer_idx < len(swiglu_limits) else None
+        )
+        if swiglu_limit not in (None, 0):
+            swiglu_limit = float(swiglu_limit)
+            swiglu_activation_by_limit = {
+                7.0: "swiglustep_clip_7",
+                16.0: "swiglustep_clip_16",
+            }
+            activation = swiglu_activation_by_limit.get(swiglu_limit, activation)
             logger.info(
-                f"step3p5 layer_idx: {layer_idx}, activation limit: {config.swiglu_limits[layer_idx]}, will use swiglustep"
+                f"step3p5 layer_idx: {layer_idx}, activation: {activation}, "
+                f"limit: {swiglu_limit}"
             )
+        
         self.experts = SharedFusedMoE(
             shared_experts=shared_experts,
             num_experts=config.moe_num_experts,
@@ -328,7 +336,6 @@ class FusedMoEBlock(nn.Module):
             renormalize=config.norm_expert_weight,
             quant_config=quant_config,
             activation=activation,
-            activation_limit=swigluoai_step_limit if swigluoai_step_limit else None,
             prefix=f"{prefix}.experts",
             custom_routing_function=custom_routing_function,
             routed_scaling_factor=config.moe_router_scaling_factor,
@@ -437,7 +444,7 @@ class Step3p5DecoderLayer(nn.Module):
         self.use_moe = False
         self.tp_group = get_tp_group()
         self.use_fused_all_reduce = get_tensor_model_parallel_world_size(
-        ) > 1 and get_dp_group().world_size == 1 and envs.VLLM_USE_FUSED_ALL_REDUCE
+        ) > 1 and get_dp_group().world_size == 1
         if self.use_fused_all_reduce:
             logger.warning_once("Enable custom fused all reduce...")
         else:
@@ -503,7 +510,6 @@ class Step3p5DecoderLayer(nn.Module):
 
         if self.use_moe:
             shared_output, moe_output = self.moe(hidden_states)
-            # share expert & moe 可以合并all reduce
             ffn_output = self.add_and_maybe_inplace_all_reduce(
                 moe_output, shared_output)
         else:

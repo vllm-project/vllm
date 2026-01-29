@@ -1343,7 +1343,6 @@ def inplace_fused_experts(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    activation_limit: float | None = None,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -1371,7 +1370,6 @@ def inplace_fused_experts(
         block_shape,
         w1_bias,
         w2_bias,
-        activation_limit,
     )
 
 
@@ -1400,7 +1398,6 @@ def inplace_fused_experts_fake(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    activation_limit: float | None = None,
 ) -> None:
     pass
 
@@ -1438,7 +1435,6 @@ def outplace_fused_experts(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    activation_limit: float | None = None,
 ) -> torch.Tensor:
     return fused_experts_impl(
         hidden_states,
@@ -1466,7 +1462,6 @@ def outplace_fused_experts(
         block_shape,
         w1_bias,
         w2_bias,
-        activation_limit,
     )
 
 
@@ -1494,7 +1489,6 @@ def outplace_fused_experts_fake(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    activation_limit: float | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -1619,7 +1613,6 @@ def fused_experts_impl(
     block_shape: list[int] | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    activation_limit: float | None = None,
 ) -> torch.Tensor:
     # Check constraints.
     if use_int4_w4a16:
@@ -1848,7 +1841,7 @@ def fused_experts_impl(
         )
 
         apply_moe_activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N), activation_limit=activation_limit,
+            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
 
         qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
@@ -1946,7 +1939,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "gelu", "swigluoai", "swiglustep"]
+        return activation in ["silu", "gelu", "swigluoai", "swiglustep_clip_7"]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -1995,7 +1988,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-        activation_limit: float | None = None,
     ):
         # Check constraints.
         if self.quant_config.use_int4_w4a16:
@@ -2083,7 +2075,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
         self.activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N), activation_limit=activation_limit
+            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
 
         a2q_scale: torch.Tensor | None = None
