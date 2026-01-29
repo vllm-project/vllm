@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 import time
-from collections.abc import MutableMapping
 from dataclasses import dataclass
 
 import uvicorn
@@ -126,49 +125,3 @@ class MooncakeBootstrapServer:
 
     async def query(self) -> dict[int, EngineEntry]:
         return self.workers
-
-
-# Workaround for #27987
-# Drop the last "-{random_uuid():.8}"
-# After #32630 or other solution is merged, we can remove this workaround.
-class TruncatingDict(MutableMapping):
-    def __init__(self, *args, **kwargs):
-        self._store = dict()
-        self.update(dict(*args, **kwargs))
-
-    @staticmethod
-    def _truncate_key(key):
-        if not isinstance(key, str) or len(key) < 10:
-            raise TypeError("Keys must be strings with at least 10 characters")
-        return key[:-9]
-
-    def __setitem__(self, key, value):
-        truncated_key = self._truncate_key(key)
-        self._store[truncated_key] = value
-
-    def __getitem__(self, key):
-        truncated_key = self._truncate_key(key)
-        return self._store[truncated_key]
-
-    def __delitem__(self, key):
-        truncated_key = self._truncate_key(key)
-        del self._store[truncated_key]
-
-    def __contains__(self, key):
-        truncated_key = self._truncate_key(key)
-        return truncated_key in self._store
-
-    def __iter__(self):
-        return iter(self._store)
-
-    def __len__(self):
-        return len(self._store)
-
-    def values(self):
-        return self._store.values()
-
-    def items(self):
-        return self._store.items()
-
-    def __repr__(self):
-        return f"{type(self).__name__}({self._store})"

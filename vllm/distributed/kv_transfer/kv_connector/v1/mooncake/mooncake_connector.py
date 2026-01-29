@@ -1063,6 +1063,10 @@ class MooncakeConnectorWorker:
             with make_zmq_socket(
                 self.async_zmq_ctx, worker_addr, zmq.DEALER, bind=False, linger=0
             ) as sock:
+                # If something goes wrong, let P wait timeout first (in asyncio.wait()).
+                sock.setsockopt(
+                    zmq.RCVTIMEO, (envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT + 60) * 1000
+                )
                 await sock.send(encoded_data)
                 while True:
                     ret_msg = await sock.recv()
