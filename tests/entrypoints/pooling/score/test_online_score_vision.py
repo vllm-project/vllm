@@ -4,7 +4,7 @@
 import pytest
 import requests
 
-from tests.utils import RemoteOpenAIServer, VLLM_PATH
+from tests.utils import VLLM_PATH, RemoteOpenAIServer
 from vllm.entrypoints.pooling.score.protocol import ScoreResponse
 from vllm.multimodal.utils import encode_image_url, fetch_image
 
