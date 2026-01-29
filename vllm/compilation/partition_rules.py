@@ -63,6 +63,18 @@ def inductor_partition_rule_context(
     )
     torch._inductor.config.custom_should_partition_ops = splitting_ops
 
+    # Guarded for older torch builds which don't have this config knob.
+    saved_cudagraph_unsafe_unbacked_ops: list[str] | None = None
+    if hasattr(torch._inductor.config, "cudagraph_unsafe_unbacked_ops"):
+        saved_cudagraph_unsafe_unbacked_ops = list(
+            torch._inductor.config.cudagraph_unsafe_unbacked_ops  # type: ignore[attr-defined]
+        )
+        # Only mark known producers of data-dependent SymInts here. 
+        known_unsafe_unbacked_ops = {"vllm::mla_split_batch"}
+        torch._inductor.config.cudagraph_unsafe_unbacked_ops = [  # type: ignore[attr-defined]
+            op for op in splitting_ops if op in known_unsafe_unbacked_ops
+        ]
+
     logger.debug(
         "Registered inductor partition rules for %d operators", len(splitting_ops)
     )
@@ -72,4 +84,8 @@ def inductor_partition_rule_context(
     finally:
         # Clear and restore previous state
         torch._inductor.config.custom_should_partition_ops = saved_splitting_ops
+        if saved_cudagraph_unsafe_unbacked_ops is not None:
+            torch._inductor.config.cudagraph_unsafe_unbacked_ops = (  # type: ignore[attr-defined]
+                saved_cudagraph_unsafe_unbacked_ops
+            )
         logger.debug("Restored previous partition rules state.")

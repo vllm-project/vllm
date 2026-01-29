@@ -341,12 +341,6 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
         log_partition_reason("CUDAGraph-unsafe custom ops", node=node)
         return True
 
-    # Check if the node uses unbacked (data-dependent) symbols in its inputs
-    if hasattr(node.node, "get_free_symbol_uses"):
-        unbacked_symbols = node.node.get_free_symbol_uses(unbacked_only=True)
-        if unbacked_symbols:
-            log_partition_reason("ops using unbacked symbols", node=node)
-            return True
     return False
 
 
