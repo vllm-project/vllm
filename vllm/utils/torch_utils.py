@@ -592,26 +592,26 @@ def mamba_gate_stream() -> torch.cuda.Stream | None:
 
 
 def maybe_execute_in_parallel(
-    fn0: Callable[[], Any],
-    fn1: Callable[[], Any],
-    event0: torch.cuda.Event,
-    event1: torch.cuda.Event,
+    main_fn: Callable[[], Any],
+    aux_fn: Callable[[], Any],
+    main_event: torch.cuda.Event,
+    aux_event: torch.cuda.Event,
     aux_stream: torch.cuda.Stream | None = None,
 ) -> tuple[Any, Any]:
     """Run two callables, optionally overlapping on an aux CUDA stream."""
     if aux_stream is None:
-        return fn0(), fn1()
+        return main_fn(), aux_fn()
 
-    event0.record()
-    result0 = fn0()
+    main_event.record()
+    main_result = main_fn()
 
     with torch.cuda.stream(aux_stream):
-        aux_stream.wait_event(event0)
-        result1 = fn1()
-        event1.record()
+        aux_stream.wait_event(main_event)
+        aux_result = aux_fn()
+        aux_event.record()
 
-    event1.wait()
-    return result0, result1
+    aux_event.wait()
+    return main_result, aux_result
 
 
 @lru_cache(maxsize=8)

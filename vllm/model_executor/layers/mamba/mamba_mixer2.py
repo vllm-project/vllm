@@ -715,13 +715,13 @@ class MambaMixer2(MambaBase, CustomOp):
             # can start immediately on the default stream. Synchronize only
             # right before the gated RMSNorm.
             num_tokens = hidden_states.shape[0]
-            use_gate_stream = (
+            should_use_gate_stream = (
                 allow_gate_stream
                 and self._gate_stream is not None
                 and hidden_states.is_cuda
                 and num_tokens <= envs.VLLM_MAMBA_GATE_STREAM_TOKEN_THRESHOLD
             )
-            if use_gate_stream:
+            if should_use_gate_stream:
                 main_stream = current_stream()
                 self._gate_stream.wait_stream(main_stream)
                 with torch.cuda.stream(self._gate_stream):
@@ -747,13 +747,14 @@ class MambaMixer2(MambaBase, CustomOp):
         hidden_states: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
+        # 1. Gate + in-proj (optionally split for overlap).
         gate, projected_states = torch.ops.vllm.mamba_gate_in_proj(
             hidden_states,
             mup_vector,
             self.prefix,
         )
 
-        # 3. Prepare inputs for conv + SSM
+        # 2. Prepare inputs for conv + SSM
         ssm_output = torch.empty(
             [
                 hidden_states.shape[0],
@@ -763,7 +764,7 @@ class MambaMixer2(MambaBase, CustomOp):
             device=hidden_states.device,
         )
 
-        # 4. conv + SSM
+        # 3. conv + SSM
         # (split `projected_states` into hidden_states_B_C, dt in the custom op to
         # ensure it is not treated as an intermediate tensor by torch compile)
         torch.ops.vllm.mamba_mixer2(
@@ -777,13 +778,13 @@ class MambaMixer2(MambaBase, CustomOp):
             self.prefix,
         )
 
-        # 5. gated MLP
+        # 4. gated MLP
         # GatedRMSNorm internally applying SiLU to the gate
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
         hidden_states = self.norm(ssm_output, gate)
 
-        # 6. Final linear projection
+        # 5. Final linear projection
         output, _ = self.out_proj(hidden_states)
 
         return output
@@ -924,7 +925,7 @@ class MambaMixer2(MambaBase, CustomOp):
             x = hidden_states_B_C_p.transpose(
                 0, 1
             )  # this is the form that causal-conv see
-            hidden_states_B_C_p_local = causal_conv1d_fn(
+            hidden_states_B_C_prefill = causal_conv1d_fn(
                 x,
                 self.conv_weights,
                 self.conv1d.bias,
@@ -942,7 +943,7 @@ class MambaMixer2(MambaBase, CustomOp):
             ).transpose(0, 1)[:num_prefill_tokens]
 
             hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(
-                hidden_states_B_C_p_local
+                hidden_states_B_C_prefill
             )
 
             # 3. State Space Model sequence transformation
@@ -1091,7 +1092,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 state_indices_tensor_d_output = state_indices_tensor_d
 
             # 2. Convolution sequence transformation
-            hidden_states_B_C_d_local = causal_conv1d_update(
+            hidden_states_B_C_decode = causal_conv1d_update(
                 hidden_states_B_C_d,
                 conv_state,
                 self.conv_weights,
@@ -1103,7 +1104,7 @@ class MambaMixer2(MambaBase, CustomOp):
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
-                hidden_states_B_C_d_local
+                hidden_states_B_C_decode
             )
 
             # 3. State Space Model sequence transformation
@@ -1113,7 +1114,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 .expand(-1, self.head_dim, self.ssm_state_size)
                 .to(dtype=torch.float32)
             )
-            dt_d_local = dt_d[:, :, None].expand(-1, -1, self.head_dim)
+            dt_d_expanded = dt_d[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
             D_d = self.D[:, None, ...].expand(-1, self.head_dim)
             B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
@@ -1129,7 +1130,7 @@ class MambaMixer2(MambaBase, CustomOp):
             selective_state_update(
                 ssm_state,
                 hidden_states_d,
-                dt_d_local,
+                dt_d_expanded,
                 A_d,
                 B_d,
                 C_d,

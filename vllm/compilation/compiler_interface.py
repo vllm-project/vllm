@@ -273,17 +273,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert key is not None
         path = os.path.join(self.cache_dir, key)
 
-        cache_enabled = is_compile_cache_enabled(compiler_config)
-        if cache_enabled and not use_aot:
-            logger.warning_once(
-                "Standalone compile cache save requires "
-                "VLLM_USE_MEGA_AOT_ARTIFACT=1 (torch>=2.10). "
-                "Skipping cache save; set VLLM_USE_STANDALONE_COMPILE=0 "
-                "to use inductor cache instead."
-            )
-            return compiled_graph, None
-
-        if cache_enabled:
+        if is_compile_cache_enabled(compiler_config):
             compiled_graph.save(path=path, format=self.save_format)
             compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)
