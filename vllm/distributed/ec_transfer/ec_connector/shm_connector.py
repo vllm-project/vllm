@@ -69,7 +69,7 @@ class SHMConnector(ECConnectorBase):
         ec_extra_config = getattr(transfer_config, "ec_connector_extra_config", {})
         self.listen_ports = ec_extra_config.get("listen_ports", None)
         if not self.listen_ports:
-            raise ValueError("Producer must have 'consumer_addrs' in config.")
+            raise ValueError("Producer/Consumer must have 'listen_ports' in ec_connector_extra_config.")
         self.consumer_sock_addrs = [(transfer_config.ec_ip, addr_port) for addr_port in self.listen_ports]
         logger.debug("Consumer addrs is: %s", self.consumer_sock_addrs)
 
@@ -118,12 +118,15 @@ class SHMConnector(ECConnectorBase):
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
-            func, args = self.handle_caches.get(mm_data.mm_hash, None)
-            list_args = list(args)
-            list_args[6] = get_world_group().local_rank
-            encoder_cache[mm_data.mm_hash] = func(*list_args)
-            logger.debug("recv tensor for hash %s", mm_data.mm_hash)
-
+            try:
+                func, args = self.handle_caches.get(mm_data.mm_hash, None)
+                list_args = list(args)
+                list_args[6] = get_world_group().local_rank
+                encoder_cache[mm_data.mm_hash] = func(*list_args)
+                logger.debug("recv tensor for hash %s", mm_data.mm_hash)
+            except Exception as e:
+                logger.error(f"Unhandled Cache Miss {mm_data.mm_hash}, error code: {str(e)}")
+                
     def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
         """
         Queue the encoder cache to consumers.
@@ -140,27 +143,24 @@ class SHMConnector(ECConnectorBase):
         self.send_queue.put((mm_hash, encoder_cache[mm_hash]))
         logger.debug("Save cache successful for mm_hash %s", mm_hash)
 
-    def has_caches(
-            self,
-            request: "Request",
-    ) -> list[bool]:
+    def has_cache_item(
+        self,
+        identifier: str,
+    ) -> bool:
         """
-        Check if cache exist externally for each mm_data of request
+        Check if cache exist externally for the media
 
         Args:
-            request (Request): the request object.
+            identifier (str): the identifier of the media.
 
         Returns:
-            List of bool indicate that ith mm_data exist in cache or not
+            Bool indicate that media exists in cache or not
         """
-        result = []
-        for feature in request.mm_features:
-            if self.is_producer:
-                result.append(False)
-            else:
-                result.append(self._found_match_for_mm_data(feature.identifier))
-        return result
-
+        if self.is_producer:
+            return False
+        else:
+            return self._found_match_for_mm_data(identifier)
+    
     def update_state_after_alloc(
             self,
             request: "Request",
@@ -259,6 +259,7 @@ class SHMConnector(ECConnectorBase):
     def shared_handle_send(self, path, send_data):
         """Send shared memory handle to a specific ZMQ address and wait for ACK."""
         with zmq_ctx(zmq.REQ, path) as sock:
+            sock.setsockopt(zmq.RCVTIMEO, 5000)
             ensure_zmq_send(sock, pickle.dumps(send_data))
             ack = sock.recv()
             if ack != b"ACK":
