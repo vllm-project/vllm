@@ -154,19 +154,21 @@ class EngineClient(ABC):
         self,
         *,
         mode: "PauseMode" = "abort",
-        clear_cache: bool = True,
         wait_for_inflight_requests: bool = False,
+        clear_cache: bool = True,
     ) -> None:
         """Pause new generation/encoding requests.
 
         Args:
             mode: How to handle in-flight requests:
-                - ``"abort"``: Abort all in-flight requests immediately (default).
+                - ``"abort"``: Abort all in-flight requests immediately
+                  and return partial results with "abort" reason (default).
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            clear_cache: Whether to clear KV and prefix caches after draining.
-                Ignored when ``mode="keep"``.
+            wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
+            clear_cache: DEPRECATED. Whether to clear KV and prefix caches
+                after draining.
         """
         ...
 

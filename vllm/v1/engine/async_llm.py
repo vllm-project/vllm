@@ -154,7 +154,6 @@ class AsyncLLM(EngineClient):
         # Pause / resume state for async RL workflows.
         self._pause_cond = asyncio.Condition()
         self._paused = False
-        self._paused_keep_mode = False
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -567,10 +566,8 @@ class AsyncLLM(EngineClient):
         self,
         *,
         mode: PauseMode = "abort",
-        # DEPRECATED: use mode argument to specify pause behavior
         wait_for_inflight_requests: bool | None = None,
-        # DEPRECATED: call clear_cache instead
-        clear_cache: bool = False,
+        clear_cache: bool = True,
     ) -> None:
         """
         Pause generation to allow model weight updates.
@@ -584,28 +581,28 @@ class AsyncLLM(EngineClient):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            clear_cache: Whether to clear KV cache and prefix cache after
+            wait_for_inflight_requests: DEPRECATED: use mode argument.
+                Whether to wait for in-flight requests to complete before pausing.
+            clear_cache: DEPRECATED. Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
                 Default is ``True`` (clear caches).
-                Ignored when ``mode="keep"``.
+
         """
 
         async with self._pause_cond:
             if self._paused:
                 return
             self._paused = True
-            self._paused_keep_mode = mode == "keep"
 
-            # Deprecated behavior, will be removed
-            if wait_for_inflight_requests is not None:
-                if wait_for_inflight_requests:
-                    if self.output_processor.has_unfinished_requests():
-                        await self.output_processor.wait_for_requests_to_drain()
-                else:
-                    request_ids = list(self.output_processor.request_states.keys())
-                    if request_ids:
-                        await self.abort(request_ids, internal=True)
-                return
+            if wait_for_inflight_requests:
+                warnings.warn(
+                    "The `wait_for_inflight_requests` parameter in "
+                    "`AsyncLLM.pause_generation()` is deprecated. "
+                    "Please use `mode` argument instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                mode = "wait"
 
             if mode == "abort":
                 request_ids = list(self.output_processor.request_states.keys())
@@ -621,21 +618,15 @@ class AsyncLLM(EngineClient):
 
             # Clear cache
             if clear_cache:
-                raise DeprecationWarning(
-                    "clear_cache with pause_generation is deprecated,"
-                    "use clear_cache function instead."
-                )
+                await self.reset_prefix_cache()
+                await self.reset_mm_cache()
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
 
         async with self._pause_cond:
-            was_keep_mode = getattr(self, "_paused_keep_mode", False)
-            # If we were in keep mode, resume the scheduler.
-            if was_keep_mode:
-                await self.engine_core.resume_scheduler_async()
+            await self.engine_core.resume_scheduler_async()
             self._paused = False
-            self._paused_keep_mode = False
             self._pause_cond.notify_all()  # Wake up all waiting requests
 
     async def is_paused(self) -> bool:

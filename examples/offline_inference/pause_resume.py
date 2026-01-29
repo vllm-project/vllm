@@ -60,18 +60,18 @@ async def main():
         while len(token_times) < 5:
             await asyncio.sleep(0.01)
 
-        print(f"\n>>> Pausing engine (keep mode) at token {len(token_times)}")
+        print(f"\nPausing engine (keep mode) at token {len(token_times)}")
         pause_time = time.monotonic()
         await engine.pause_generation(mode="keep")
-        print(f">>> Paused! Sleeping for {PAUSE_DURATION}s...")
+        print(f"Paused! Sleeping for {PAUSE_DURATION}s...")
 
         # Sleep while paused - no tokens should be generated during this time
         await asyncio.sleep(PAUSE_DURATION)
 
-        print(">>> Resuming engine...")
+        print("Resuming engine...")
         await engine.resume_generation()
         resume_time = time.monotonic()
-        print(">>> Resumed!\n")
+        print("Resumed!\n")
 
     # Run both tasks concurrently
     gen_task = asyncio.create_task(generator_task())
@@ -83,7 +83,8 @@ async def main():
     print("\n=== Token Timing Analysis ===")
     max_gap = 0.0
     max_gap_tokens = (0, 0)
-    for i in range(1, len(token_times)):
+    # Start from index 2 to exclude TTFT (time to first token)
+    for i in range(2, len(token_times)):
         gap = token_times[i][1] - token_times[i - 1][1]
         if gap > max_gap:
             max_gap = gap
