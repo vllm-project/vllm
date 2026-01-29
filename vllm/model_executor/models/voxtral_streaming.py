@@ -267,8 +267,10 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
                         audio=RawAudio.from_audio(audio),
                         language=None,
                     )
-                    # audio will be correctly padded
-                    # and correct token ids will be created
+                    # mistral tokenizer takes care
+                    # of preparing the first prompt inputs
+                    # and does some left-silence padding
+                    # for improved performance
                     audio_enc = tokenizer.mistral.encode_transcription(request)
 
                     token_ids = audio_enc.tokens
