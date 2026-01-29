@@ -275,6 +275,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
 
+# increase timeout for hf downloads (for testing)
+ENV HF_HUB_DOWNLOAD_TIMEOUT 60
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -r requirements/nightly_torch_test.txt
 
