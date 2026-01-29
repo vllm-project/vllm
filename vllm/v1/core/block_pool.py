@@ -20,8 +20,8 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
-    get_block_hash,
     generate_block_hash_extra_keys,
+    get_block_hash,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
 )
@@ -287,9 +287,12 @@ class BlockPool:
             # Generate extra keys for each block individually.
             # Each block may have different extra_keys (e.g., different MM
             # features, or cache_salt only for the first block).
+            # Skip null blocks to match the length of new_hashes.
             extra_keys_list: list[tuple[Any, ...] | None] = []
             curr_mm_idx = 0
             for i in range(num_cached_blocks, num_full_blocks):
+                if blocks[i].is_null:
+                    continue
                 block_start = i * block_size
                 block_end = block_start + block_size
                 extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
@@ -301,9 +304,7 @@ class BlockPool:
                 BlockStored(
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
-                    token_ids=request.all_token_ids[
-                        start_token_idx:end_token_idx
-                    ],
+                    token_ids=request.all_token_ids[start_token_idx:end_token_idx],
                     block_size=block_size,
                     lora_id=request.lora_request.adapter_id
                     if request.lora_request
