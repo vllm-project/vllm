@@ -351,6 +351,10 @@ class TpKVTopology:
                 # stride_order to retrieve physical position of block_size
                 kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
+            # In the default non-cross layers layout the block_size position
+            # is logical while in the cross layers case it is the physical
+            # position. This matches the shape of the actual kv cache tensors
+            # passed at register_kv_caches()/register_cross_layers_kv_cache()
             block_size_position = kv_cache_shape.index(16)
 
             assert block_size_position is not None

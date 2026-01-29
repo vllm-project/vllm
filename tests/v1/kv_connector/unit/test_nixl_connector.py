@@ -1377,6 +1377,7 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
     llm.llm_engine.engine_core.shutdown()
 
 
+@pytest.mark.parametrize("enable_cross_layers", [False, True])
 @pytest.mark.parametrize(
     "attn_backend",
     [
@@ -1398,7 +1399,9 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
         "FLASHINFER",
     ],
 )
-def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
+def test_register_kv_caches(
+    default_vllm_config, dist_init, attn_backend, enable_cross_layers
+):
     """
     Test that register_kv_caches() properly calls nixl_wrapper methods with
     correct data.
@@ -1415,7 +1418,7 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
     # Enable cross layers blocks
     vllm_config.kv_transfer_config.kv_connector_extra_config[
         "enable_cross_layers_blocks"
-    ] = True
+    ] = enable_cross_layers
 
     # Import the appropriate backend based on the parameter
     if attn_backend == "FLASH_ATTN":
