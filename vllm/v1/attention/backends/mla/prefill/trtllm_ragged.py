@@ -29,6 +29,8 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
     uses TRT-LLM's ragged attention kernel for DeepSeek models.
     """
 
+    requires_r1_mla_dimensions = True
+
     @staticmethod
     def get_name() -> str:
         return "TRTLLM_RAGGED_PREFILL"

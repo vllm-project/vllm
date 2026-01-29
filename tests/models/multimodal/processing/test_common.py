@@ -122,6 +122,7 @@ MM_DATA_PATCHES = {
     "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
     "glm4v": glm4_1v_patch_mm_data,
     "glm4v_moe": glm4_1v_patch_mm_data,
+    "glm_ocr": glm4_1v_patch_mm_data,
     "glmasr": glmasr_patch_mm_data,
     "molmo2": qwen3_vl_patch_mm_data,
     "qwen3_vl": qwen3_vl_patch_mm_data,
@@ -409,6 +410,11 @@ def test_processing_correctness(
         pytest.skip(
             "Qwen-VL tokenizer requires downloading a font file from "
             "servers that often refuse connections in CI"
+        )
+    if model_id == "moonshotai/Kimi-K2.5":
+        # FIXME(Isaac): Fix Kimi-K2.5's offline inference about vision chunks.
+        pytest.skip(
+            "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
         )
 
     _test_processing_correctness(

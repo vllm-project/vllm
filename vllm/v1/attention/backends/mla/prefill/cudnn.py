@@ -52,6 +52,8 @@ class CudnnPrefillBackend(MLAPrefillBackend):
     requires NVIDIA artifactory access.
     """
 
+    requires_r1_mla_dimensions = True
+
     @staticmethod
     def get_name() -> str:
         return "CUDNN_PREFILL"

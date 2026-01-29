@@ -53,6 +53,8 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
     This backend is optimized for Blackwell (SM100) architecture.
     """
 
+    requires_r1_mla_dimensions = True
+
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_PREFILL"

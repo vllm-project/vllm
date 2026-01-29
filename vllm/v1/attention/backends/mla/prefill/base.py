@@ -49,6 +49,7 @@ class MLAPrefillBackend(ABC):
         torch.float16,
         torch.bfloat16,
     ]
+    requires_r1_mla_dimensions: ClassVar[bool] = False
 
     @staticmethod
     @abstractmethod
@@ -108,6 +109,10 @@ class MLAPrefillBackend(ABC):
         Returns:
             A list of invalid reasons. Empty list if configuration is valid.
         """
+        from vllm.v1.attention.backends.mla.prefill.selector import (
+            is_deepseek_r1_mla_compatible,
+        )
+
         invalid_reasons: list[str] = []
 
         if not cls.supports_compute_capability(device_capability):
@@ -119,6 +124,14 @@ class MLAPrefillBackend(ABC):
 
         if not cls.is_available():
             invalid_reasons.append("required dependencies not available")
+
+        if cls.requires_r1_mla_dimensions and not is_deepseek_r1_mla_compatible(
+            vllm_config
+        ):
+            invalid_reasons.append(
+                "model does not have DeepSeek R1 MLA dimensions "
+                "(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128)"
+            )
 
         return invalid_reasons
 
