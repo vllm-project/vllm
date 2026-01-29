@@ -683,7 +683,6 @@ class FunASRAudioAttention(nn.Module):
             num_heads=self.num_local_heads,
             head_size=self.head_dim,
             scale=self.scaling,
-            multimodal_config=multimodal_config,
         )
 
     def forward(
