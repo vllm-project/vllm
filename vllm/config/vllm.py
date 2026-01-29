@@ -595,6 +595,11 @@ class VllmConfig:
                     "`external_launcher` distributed executor backend, but you chose "
                     f"`{executor_backend}`."
                 )
+            if self.cache_config.mamba_cache_mode != "none":
+                raise ValueError(
+                    "Currently, async scheduling is not compatible with "
+                    "prefix caching for Mamba models."
+                )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
             if (
