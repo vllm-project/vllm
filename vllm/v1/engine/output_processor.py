@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
@@ -12,6 +12,7 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
+    STREAM_FINISHED,
     CompletionOutput,
     PoolingOutput,
     PoolingRequestOutput,
@@ -51,6 +52,8 @@ class RequestOutputCollector:
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
         self.ready = asyncio.Event()
 
+        self._input_stream_task: asyncio.Task | None = None
+
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
         if self.output is None or isinstance(output, Exception):
@@ -87,11 +90,35 @@ class RequestOutputCollector:
             raise output
         return output
 
+    def close(self):
+        if self._input_stream_task is not None:
+            self._input_stream_task.cancel()
+        self._input_stream_task = None
+
+    def __del__(self):
+        if (task := self._input_stream_task) is not None:
+            task.get_loop().call_soon_threadsafe(task.cancel)
+            self._input_stream_task = None
+
 
 @dataclass
 class OutputProcessorOutput:
     request_outputs: list[RequestOutput | PoolingRequestOutput]
     reqs_to_abort: list[str]
+
+
+@dataclass
+class StreamingUpdate:
+    """Streaming input update data for output processor.
+
+    Contains the incremental prompt data to be applied to a request state
+    when the current sub-request completes.
+    """
+
+    prompt: str | None
+    prompt_token_ids: list[int] | None
+    arrival_time: float
+    final: bool = False
 
 
 class RequestState:
@@ -116,6 +143,7 @@ class RequestState:
         top_p: float | None = None,
         n: int | None = None,
         temperature: float | None = None,
+        stream_input: bool = False,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -145,6 +173,31 @@ class RequestState:
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
+
+        # Streaming input queue
+        self.streaming_input = stream_input
+        self.input_chunk_queue: deque[StreamingUpdate] | None = (
+            deque() if stream_input else None
+        )
+
+    def apply_streaming_update(self, update: StreamingUpdate) -> None:
+        # Apply the update to the request state.
+        self.streaming_input = not update.final
+        # TODO also include relevant output tokens in new prompt here
+        #     (match scheduler behavior).
+        if update.prompt:
+            self.prompt = (
+                (self.prompt + update.prompt) if self.prompt else update.prompt
+            )
+        if self.prompt_token_ids:
+            self.prompt_token_ids.extend(update.prompt_token_ids or ())
+        else:
+            self.prompt_token_ids = update.prompt_token_ids or []
+        assert self.prompt_token_ids is not None
+        self.prompt_len = len(self.prompt_token_ids)
+        if self.stats is not None:
+            self.stats.arrival_time = update.arrival_time
+        self.is_prefilling = True
 
     @classmethod
     def from_new_request(
@@ -205,6 +258,7 @@ class RequestState:
             queue=queue,
             log_stats=log_stats,
             stream_interval=stream_interval,
+            stream_input=request.resumable,
         )
 
     def make_request_output(
@@ -410,7 +464,6 @@ class OutputProcessor:
         a parent request, in which case the associated child requests are aborted
         also.
         """
-
         internal_req_ids = []
         for request_id in request_ids:
             if internal:
@@ -469,8 +522,10 @@ class OutputProcessor:
         queue: RequestOutputCollector | None = None,
     ) -> None:
         request_id = request.request_id
-        if request_id in self.request_states:
-            raise ValueError(f"Request id {request_id} already running.")
+        req_state = self.request_states.get(request_id)
+        if req_state is not None:
+            self._update_streaming_request_state(req_state, request, prompt)
+            return
 
         req_state = RequestState.from_new_request(
             tokenizer=self.tokenizer,
@@ -490,6 +545,39 @@ class OutputProcessor:
 
         # Track the external_req_id -> [internal_req_id, ...] mapping
         self.external_req_ids[req_state.external_req_id].append(request_id)
+
+    def _update_streaming_request_state(
+        self, req_state: RequestState, request: EngineCoreRequest, prompt: str | None
+    ) -> None:
+        """Queue a streaming update instead of immediately applying it."""
+        if not request.resumable:
+            # Final request - just mark completion, don't add its dummy tokens.
+            if req_state.input_chunk_queue is None:
+                # Engine already finished - emit final output and clean up.
+                self._finish_request(req_state)
+                if req_state.queue is not None:
+                    # Emit a final output with finished=True
+                    # to unblock the generate() loop.
+                    req_state.queue.put(STREAM_FINISHED)
+            elif req_state.input_chunk_queue:
+                req_state.input_chunk_queue[-1].final = True
+            else:
+                req_state.streaming_input = False
+            return
+
+        update = StreamingUpdate(
+            prompt=prompt,
+            prompt_token_ids=request.prompt_token_ids,
+            arrival_time=request.arrival_time,
+        )
+
+        # Apply request updates now if the last input already completed.
+        if req_state.input_chunk_queue is None:
+            req_state.apply_streaming_update(update)
+            req_state.input_chunk_queue = deque()
+        else:
+            # Queue the streaming update otherwise.
+            req_state.input_chunk_queue.append(update)
 
     def process_outputs(
         self,
@@ -566,6 +654,9 @@ class OutputProcessor:
                 kv_transfer_params,
                 routed_experts,
             ):
+                if req_state.streaming_input:
+                    request_output.finished = False
+
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)
@@ -575,35 +666,47 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
-                self.request_states.pop(req_id)
+                if req_state.streaming_input:
+                    if req_state.input_chunk_queue:
+                        update = req_state.input_chunk_queue.popleft()
+                        req_state.apply_streaming_update(update)
+                    else:
+                        req_state.input_chunk_queue = None
+                else:
+                    self._finish_request(req_state)
+                    if not engine_core_output.finished:
+                        # If req not finished in EngineCore, but Detokenizer
+                        # detected stop string, abort needed in EngineCore.
+                        reqs_to_abort.append(req_id)
 
-                internal_ids = self.external_req_ids[req_state.external_req_id]
-                internal_ids.remove(req_id)
-                if not internal_ids:
-                    del self.external_req_ids[req_state.external_req_id]
-
-                # Remove parent request if applicable.
-                parent_req = req_state.parent_req
-                if parent_req and not parent_req.child_requests:
-                    self.parent_requests.pop(parent_req.request_id, None)
-                if not self.request_states:
-                    self._requests_drained.set()
-                if not engine_core_output.finished:
-                    # If req not finished in EngineCore, but Detokenizer
-                    # detected stop string, abort needed in EngineCore.
-                    reqs_to_abort.append(req_id)
-
-                # Track per-request stats
-                self._update_stats_from_finished(
-                    req_state, finish_reason, iteration_stats
-                )
-                if self.tracer:
-                    self.do_tracing(engine_core_output, req_state, iteration_stats)
+                    # Track per-request stats
+                    self._update_stats_from_finished(
+                        req_state, finish_reason, iteration_stats
+                    )
+                    if self.tracer:
+                        self.do_tracing(engine_core_output, req_state, iteration_stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    def _finish_request(self, req_state: RequestState) -> None:
+        req_id = req_state.request_id
+        self.request_states.pop(req_id)
+
+        internal_ids = self.external_req_ids[req_state.external_req_id]
+        internal_ids.remove(req_id)
+        if not internal_ids:
+            del self.external_req_ids[req_state.external_req_id]
+
+        # Remove parent request if applicable.
+        parent_req = req_state.parent_req
+        if parent_req and not parent_req.child_requests:
+            self.parent_requests.pop(parent_req.request_id, None)
+
+        if not self.request_states:
+            self._requests_drained.set()
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
         self.lora_states.update_scheduler_stats(scheduler_stats)
