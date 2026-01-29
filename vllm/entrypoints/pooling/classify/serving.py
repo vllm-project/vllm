@@ -214,6 +214,8 @@ class ServingClassification(ClassificationMixin):
             model_name=model_name,
             request_id=request_id,
         )
+        # Set endpoint for API span tracing
+        ctx.endpoint = "/v1/classify"  # type: ignore
 
         return await super().handle(ctx)  # type: ignore
 

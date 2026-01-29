@@ -191,6 +191,40 @@ class OpenAIServingPooling(OpenAIServing):
             except ValueError as e:
                 return self.create_error_response(str(e))
 
+            # Extract trace headers once before loop
+            trace_headers = (
+                None
+                if raw_request is None
+                else await self._get_trace_headers(raw_request.headers)
+            )
+
+            # Create API span if tracing enabled (only once per request)
+            is_tracing_enabled = await self._get_is_tracing_enabled()
+            if is_tracing_enabled:
+                api_span = await self._create_api_span(
+                    request_id,
+                    trace_headers,
+                    endpoint="/v1/pooling"
+                )
+                if api_span:
+                    arrival_time = time.monotonic()
+                    self._store_api_span(request_id, api_span, arrival_time)
+
+                    # Inject API span context into trace_headers for parent-child linkage
+                    try:
+                        from vllm.tracing import inject_trace_context
+                        trace_headers = inject_trace_context(api_span, trace_headers)
+                        logger.debug(
+                            "Injected API span context into trace_headers for request %s",
+                            request_id,
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            "Failed to inject API span context for request %s: %s",
+                            request_id,
+                            e,
+                        )
+
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 
@@ -199,12 +233,6 @@ class OpenAIServingPooling(OpenAIServing):
                     engine_prompt,
                     params=pooling_params,
                     lora_request=lora_request,
-                )
-
-                trace_headers = (
-                    None
-                    if raw_request is None
-                    else await self._get_trace_headers(raw_request.headers)
                 )
 
                 generator = self.engine_client.encode(
@@ -218,6 +246,13 @@ class OpenAIServingPooling(OpenAIServing):
 
                 generators.append(generator)
         except ValueError as e:
+            # Validation error after span creation - finalize and return error
+            self._finalize_api_span(
+                request_id,
+                terminal_event="ABORTED",
+                reason="validation_error",
+                error_message=str(e),
+            )
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
@@ -225,11 +260,28 @@ class OpenAIServingPooling(OpenAIServing):
 
         if is_io_processor_request:
             assert self.io_processor is not None
-            output = await self.io_processor.post_process_async(
-                model_output=result_generator,
-                request_id=request_id,
-            )
-            return self.io_processor.output_to_response(output)
+            try:
+                output = await self.io_processor.post_process_async(
+                    model_output=result_generator,
+                    request_id=request_id,
+                )
+                response = self.io_processor.output_to_response(output)
+
+                # SUCCESS: Finalize with DEPARTED before return
+                self._finalize_api_span(
+                    request_id,
+                    terminal_event="DEPARTED",
+                )
+                return response
+            except Exception as e:
+                # IO processor error - finalize and return error
+                self._finalize_api_span(
+                    request_id,
+                    terminal_event="ABORTED",
+                    reason="io_processor_error",
+                    error_message=str(e),
+                )
+                return self.create_error_response(str(e))
 
         assert isinstance(request, (PoolingCompletionRequest, PoolingChatRequest))
         num_prompts = len(engine_prompts)
@@ -238,29 +290,65 @@ class OpenAIServingPooling(OpenAIServing):
         final_res_batch: list[PoolingRequestOutput | None]
         final_res_batch = [None] * num_prompts
         try:
-            async for i, res in result_generator:
-                final_res_batch[i] = res
+            try:
+                async for i, res in result_generator:
+                    final_res_batch[i] = res
 
-            assert all(final_res is not None for final_res in final_res_batch)
+                assert all(final_res is not None for final_res in final_res_batch)
 
-            final_res_batch_checked = cast(list[PoolingRequestOutput], final_res_batch)
+                final_res_batch_checked = cast(list[PoolingRequestOutput], final_res_batch)
 
-            response = self.request_output_to_pooling_response(
-                final_res_batch_checked,
-                request_id,
-                created_time,
-                model_name,
-                request.encoding_format,
-                request.embed_dtype,
-                request.endianness,
-            )
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+                response = self.request_output_to_pooling_response(
+                    final_res_batch_checked,
+                    request_id,
+                    created_time,
+                    model_name,
+                    request.encoding_format,
+                    request.embed_dtype,
+                    request.endianness,
+                )
 
-        return response
+                # SUCCESS: Finalize with DEPARTED before return
+                self._finalize_api_span(
+                    request_id,
+                    terminal_event="DEPARTED",
+                )
+                return response
+
+            except asyncio.CancelledError:
+                # Client disconnected - finalize and return error
+                self._finalize_api_span(
+                    request_id,
+                    terminal_event="ABORTED",
+                    reason="client_disconnect",
+                )
+                return self.create_error_response("Client disconnected")
+
+            except ValueError as e:
+                # Validation error - finalize and return error
+                self._finalize_api_span(
+                    request_id,
+                    terminal_event="ABORTED",
+                    reason="validation_error",
+                    error_message=str(e),
+                )
+                # TODO: Use a vllm-specific Validation Error
+                return self.create_error_response(str(e))
+
+            except Exception as e:
+                # Unexpected exception - finalize and return error
+                self._finalize_api_span(
+                    request_id,
+                    terminal_event="ABORTED",
+                    reason="exception",
+                    error_message=str(e),
+                )
+                return self.create_error_response(str(e))
+
+        finally:
+            # CRITICAL: Unconditional cleanup-only in outer finally
+            # Called with terminal_event=None: no event emission, just end+cleanup if not already done
+            self._finalize_api_span(request_id)
 
     def request_output_to_pooling_response(
         self,

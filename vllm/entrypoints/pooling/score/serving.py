@@ -361,6 +361,38 @@ class ServingScores(OpenAIServing):
         request_id = f"score-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
+        # Create API span if tracing enabled
+        trace_headers = (
+            None
+            if raw_request is None
+            else await self._get_trace_headers(raw_request.headers)
+        )
+        is_tracing_enabled = await self._get_is_tracing_enabled()
+        if is_tracing_enabled:
+            api_span = await self._create_api_span(
+                request_id,
+                trace_headers,
+                endpoint="/v1/score"
+            )
+            if api_span:
+                arrival_time = time.monotonic()
+                self._store_api_span(request_id, api_span, arrival_time)
+
+                # Inject API span context into trace_headers for parent-child linkage
+                try:
+                    from vllm.tracing import inject_trace_context
+                    trace_headers = inject_trace_context(api_span, trace_headers)
+                    logger.debug(
+                        "Injected API span context into trace_headers for request %s",
+                        request_id,
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "Failed to inject API span context for request %s: %s",
+                        request_id,
+                        e,
+                    )
+
         try:
             final_res_batch = await self._run_scoring(
                 request.data_1,
@@ -370,19 +402,62 @@ class ServingScores(OpenAIServing):
                 raw_request,
             )
             if isinstance(final_res_batch, ErrorResponse):
+                # Finalize with ABORTED on error response
+                self._finalize_api_span(
+                    request_id,
+                    terminal_event="ABORTED",
+                    reason="scoring_error",
+                )
                 return final_res_batch
 
-            return self.request_output_to_score_response(
+            response = self.request_output_to_score_response(
                 final_res_batch,
                 request_id,
                 created_time,
                 self.models.model_name(),
             )
+
+            # SUCCESS: Finalize with DEPARTED before return
+            self._finalize_api_span(
+                request_id,
+                terminal_event="DEPARTED",
+            )
+            return response
+
         except asyncio.CancelledError:
+            # Client disconnected - finalize and return error
+            self._finalize_api_span(
+                request_id,
+                terminal_event="ABORTED",
+                reason="client_disconnect",
+            )
             return self.create_error_response("Client disconnected")
+
         except ValueError as e:
+            # Validation error - finalize and return error
+            self._finalize_api_span(
+                request_id,
+                terminal_event="ABORTED",
+                reason="validation_error",
+                error_message=str(e),
+            )
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
+
+        except Exception as e:
+            # Unexpected exception - finalize and return error
+            self._finalize_api_span(
+                request_id,
+                terminal_event="ABORTED",
+                reason="exception",
+                error_message=str(e),
+            )
+            return self.create_error_response(str(e))
+
+        finally:
+            # CRITICAL: Unconditional cleanup-only in outer finally
+            # Called with terminal_event=None: no event emission, just end+cleanup if not already done
+            self._finalize_api_span(request_id)
 
     async def do_rerank(
         self, request: RerankRequest, raw_request: Request | None = None
@@ -412,6 +487,38 @@ class ServingScores(OpenAIServing):
             )
         )
 
+        # Create API span if tracing enabled
+        trace_headers = (
+            None
+            if raw_request is None
+            else await self._get_trace_headers(raw_request.headers)
+        )
+        is_tracing_enabled = await self._get_is_tracing_enabled()
+        if is_tracing_enabled:
+            api_span = await self._create_api_span(
+                request_id,
+                trace_headers,
+                endpoint="/v1/rerank"
+            )
+            if api_span:
+                arrival_time = time.monotonic()
+                self._store_api_span(request_id, api_span, arrival_time)
+
+                # Inject API span context into trace_headers for parent-child linkage
+                try:
+                    from vllm.tracing import inject_trace_context
+                    trace_headers = inject_trace_context(api_span, trace_headers)
+                    logger.debug(
+                        "Injected API span context into trace_headers for request %s",
+                        request_id,
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "Failed to inject API span context for request %s: %s",
+                        request_id,
+                        e,
+                    )
+
         try:
             final_res_batch = await self._run_scoring(
                 request.query,
@@ -421,20 +528,63 @@ class ServingScores(OpenAIServing):
                 raw_request,
             )
             if isinstance(final_res_batch, ErrorResponse):
+                # Finalize with ABORTED on error response
+                self._finalize_api_span(
+                    request_id,
+                    terminal_event="ABORTED",
+                    reason="rerank_error",
+                )
                 return final_res_batch
 
-            return self.request_output_to_rerank_response(
+            response = self.request_output_to_rerank_response(
                 final_res_batch,
                 request_id,
                 self.models.model_name(),
                 documents,
                 top_n,
             )
+
+            # SUCCESS: Finalize with DEPARTED before return
+            self._finalize_api_span(
+                request_id,
+                terminal_event="DEPARTED",
+            )
+            return response
+
         except asyncio.CancelledError:
+            # Client disconnected - finalize and return error
+            self._finalize_api_span(
+                request_id,
+                terminal_event="ABORTED",
+                reason="client_disconnect",
+            )
             return self.create_error_response("Client disconnected")
+
         except ValueError as e:
+            # Validation error - finalize and return error
+            self._finalize_api_span(
+                request_id,
+                terminal_event="ABORTED",
+                reason="validation_error",
+                error_message=str(e),
+            )
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
+
+        except Exception as e:
+            # Unexpected exception - finalize and return error
+            self._finalize_api_span(
+                request_id,
+                terminal_event="ABORTED",
+                reason="exception",
+                error_message=str(e),
+            )
+            return self.create_error_response(str(e))
+
+        finally:
+            # CRITICAL: Unconditional cleanup-only in outer finally
+            # Called with terminal_event=None: no event emission, just end+cleanup if not already done
+            self._finalize_api_span(request_id)
 
     def request_output_to_score_response(
         self,

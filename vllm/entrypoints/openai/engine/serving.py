@@ -370,6 +370,7 @@ class OpenAIServing:
         self,
         request_id: str,
         trace_headers: dict[str, str] | None = None,
+        endpoint: str | None = None,
     ) -> Any | None:
         """Create parent span for API-level journey tracing.
 
@@ -383,6 +384,7 @@ class OpenAIServing:
         Args:
             request_id: The request ID (e.g., chatcmpl-xxx)
             trace_headers: Optional trace headers from request
+            endpoint: Optional HTTP endpoint/route (e.g., "/v1/chat/completions")
 
         Returns:
             Span object if tracer available, None otherwise
@@ -462,6 +464,9 @@ class OpenAIServing:
         # Set basic attributes
         try:
             api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request_id)
+            # Set HTTP endpoint/route if provided (OpenTelemetry HTTP semantic convention)
+            if endpoint:
+                api_span.set_attribute("http.route", endpoint)
             logger.debug("Set request_id attribute on API span for %s", request_id)
         except Exception as e:
             logger.debug(
@@ -931,10 +936,55 @@ class OpenAIServing:
         generation: AsyncGenerator[AnyResponse | ErrorResponse, None]
         generation = self._pipeline(ctx)
 
-        async for response in generation:
-            return response
+        try:
+            async for response in generation:
+                # Check if this is an error response
+                if isinstance(response, ErrorResponse):
+                    # Finalize with ABORTED on error
+                    self._finalize_api_span(
+                        ctx.request_id,
+                        terminal_event="ABORTED",
+                        reason="pipeline_error",
+                    )
+                else:
+                    # SUCCESS: Finalize with DEPARTED on success
+                    self._finalize_api_span(
+                        ctx.request_id,
+                        terminal_event="DEPARTED",
+                    )
+                return response
 
-        return self.create_error_response("No response yielded from pipeline")
+            # No response yielded - finalize with ABORTED and return error
+            self._finalize_api_span(
+                ctx.request_id,
+                terminal_event="ABORTED",
+                reason="no_response",
+            )
+            return self.create_error_response("No response yielded from pipeline")
+
+        except asyncio.CancelledError:
+            # Client disconnected - finalize and re-raise
+            self._finalize_api_span(
+                ctx.request_id,
+                terminal_event="ABORTED",
+                reason="client_disconnect",
+            )
+            raise
+
+        except Exception as e:
+            # Unexpected exception - finalize and return error
+            self._finalize_api_span(
+                ctx.request_id,
+                terminal_event="ABORTED",
+                reason="exception",
+                error_message=str(e),
+            )
+            return self.create_error_response(str(e))
+
+        finally:
+            # CRITICAL: Unconditional cleanup-only in outer finally
+            # Called with terminal_event=None: no event emission, just end+cleanup if not already done
+            self._finalize_api_span(ctx.request_id)
 
     async def _pipeline(
         self,
@@ -1000,6 +1050,36 @@ class OpenAIServing:
                 if ctx.raw_request is None
                 else await self._get_trace_headers(ctx.raw_request.headers)
             )
+
+            # Create API span if tracing enabled (for pooling/embedding endpoints)
+            # Only create once per request (i == 0 handled in loop below)
+            endpoint = getattr(ctx, "endpoint", None)
+            if endpoint and ctx.engine_prompts and len(ctx.engine_prompts) > 0:
+                is_tracing_enabled = await self._get_is_tracing_enabled()
+                if is_tracing_enabled:
+                    api_span = await self._create_api_span(
+                        ctx.request_id,
+                        trace_headers,
+                        endpoint=endpoint
+                    )
+                    if api_span:
+                        arrival_time = time.monotonic()
+                        self._store_api_span(ctx.request_id, api_span, arrival_time)
+
+                        # Inject API span context into trace_headers for parent-child linkage
+                        try:
+                            from vllm.tracing import inject_trace_context
+                            trace_headers = inject_trace_context(api_span, trace_headers)
+                            logger.debug(
+                                "Injected API span context into trace_headers for request %s",
+                                ctx.request_id,
+                            )
+                        except Exception as e:
+                            logger.debug(
+                                "Failed to inject API span context for request %s: %s",
+                                ctx.request_id,
+                                e,
+                            )
 
             pooling_params = self._create_pooling_params(ctx)
             if isinstance(pooling_params, ErrorResponse):

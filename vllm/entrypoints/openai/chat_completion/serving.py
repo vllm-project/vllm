@@ -426,7 +426,11 @@ class OpenAIServingChat(OpenAIServing):
                 if i == 0:
                     is_tracing_enabled = await self._get_is_tracing_enabled()
                     if is_tracing_enabled:
-                        api_span = await self._create_api_span(request_id, trace_headers)
+                        api_span = await self._create_api_span(
+                            request_id,
+                            trace_headers,
+                            endpoint="/v1/chat/completions"
+                        )
                         if api_span:
                             arrival_time = time.monotonic()
                             self._store_api_span(request_id, api_span, arrival_time)

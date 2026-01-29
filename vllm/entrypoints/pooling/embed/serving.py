@@ -648,6 +648,8 @@ class OpenAIServingEmbedding(EmbeddingMixin):
             chat_template=self.chat_template,
             chat_template_content_format=self.chat_template_content_format,
         )
+        # Set endpoint for API span tracing
+        ctx.endpoint = "/v1/embeddings"  # type: ignore
 
         return await super().handle(ctx)  # type: ignore
 

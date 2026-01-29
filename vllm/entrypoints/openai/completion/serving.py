@@ -5,7 +5,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import cast
+from typing import Any, cast
 
 import jinja2
 from fastapi import Request
@@ -165,6 +165,9 @@ class OpenAIServingCompletion(OpenAIServing):
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
+        # Get model name early for API span attributes
+        model_name = self.models.model_name(lora_request)
+
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
@@ -222,6 +225,46 @@ class OpenAIServingCompletion(OpenAIServing):
                     else await self._get_trace_headers(raw_request.headers)
                 )
 
+                # Create API span if tracing enabled (only for first sub-request)
+                if i == 0:
+                    is_tracing_enabled = await self._get_is_tracing_enabled()
+                    if is_tracing_enabled:
+                        api_span = await self._create_api_span(
+                            request_id,
+                            trace_headers,
+                            endpoint="/v1/completions"
+                        )
+                        if api_span:
+                            arrival_time = time.monotonic()
+                            self._store_api_span(request_id, api_span, arrival_time)
+
+                            # Inject API span context into trace_headers for parent-child linkage
+                            # This enables the scheduler to create core span as child of API span
+                            try:
+                                from vllm.tracing import inject_trace_context
+                                trace_headers = inject_trace_context(api_span, trace_headers)
+                                logger.debug(
+                                    "Injected API span context into trace_headers for request %s",
+                                    request_id,
+                                )
+                            except Exception as e:
+                                # Injection failure should not break request processing
+                                # Core span will be created as root span instead
+                                logger.debug(
+                                    "Failed to inject API span context for request %s: %s",
+                                    request_id,
+                                    e,
+                                )
+
+                            # Set request attributes on API span
+                            if isinstance(sampling_params, SamplingParams):
+                                self._set_completion_api_span_request_attributes(
+                                    api_span,
+                                    model_name,
+                                    prompt_token_ids,
+                                    sampling_params,
+                                )
+
                 # Mypy inconsistently requires this second cast in different
                 # environments. It shouldn't be necessary (redundant from above)
                 # but pre-commit in CI fails without it.
@@ -263,7 +306,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        model_name = self.models.model_name(lora_request)
         num_prompts = len(engine_prompts)
 
         # We do not stream the results when using beam search.
@@ -519,13 +561,51 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
+            # SUCCESS: Finalize with DEPARTED before [DONE]
+            self._finalize_api_span(
+                request_metadata.request_id,
+                terminal_event="DEPARTED",
+            )
+            yield "data: [DONE]\n\n"
+
         except GenerationError as e:
+            # Generation error - finalize span and yield error
+            self._finalize_api_span(
+                request_metadata.request_id,
+                terminal_event="ABORTED",
+                reason="generation_error",
+                error_message=str(e),
+            )
             yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
+            return
+
+        except asyncio.CancelledError:
+            # Client disconnected - finalize and re-raise
+            self._finalize_api_span(
+                request_metadata.request_id,
+                terminal_event="ABORTED",
+                reason="client_disconnect",
+            )
+            raise
+
         except Exception as e:
+            # Unexpected exception - finalize and yield error
+            self._finalize_api_span(
+                request_metadata.request_id,
+                terminal_event="ABORTED",
+                reason="exception",
+                error_message=str(e),
+            )
             logger.exception("Error in completion stream generator.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
-        yield "data: [DONE]\n\n"
+            return
+
+        finally:
+            # CRITICAL: Unconditional cleanup-only in outer finally
+            # Called with terminal_event=None: no event emission, just end+cleanup if not already done
+            # This is fallback for GeneratorExit or any truly uncaught exceptions
+            self._finalize_api_span(request_metadata.request_id)
 
     def request_output_to_completion_response(
         self,
@@ -751,3 +831,48 @@ class OpenAIServingCompletion(OpenAIServing):
             cache_salt=request.cache_salt,
             needs_detokenization=bool(request.echo and not request.return_token_ids),
         )
+
+    def _set_completion_api_span_request_attributes(
+        self,
+        api_span: Any,
+        model_name: str,
+        prompt_token_ids: list[int] | None,
+        sampling_params: SamplingParams,
+    ) -> None:
+        """Set request metadata attributes on API span for completions.
+
+        Defensive: All operations wrapped in try/except. Never raises.
+
+        Args:
+            api_span: The OTEL span object (or None)
+            model_name: Model name for response
+            prompt_token_ids: Prompt tokens (for counting), may be None for embeds
+            sampling_params: Request sampling parameters
+        """
+        if not api_span:
+            return
+
+        try:
+            if not api_span.is_recording():
+                return
+
+            from vllm.tracing import SpanAttributes
+
+            # Always set model
+            api_span.set_attribute(SpanAttributes.GEN_AI_RESPONSE_MODEL, model_name)
+
+            # Set prompt tokens if available
+            if prompt_token_ids is not None:
+                api_span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS, len(prompt_token_ids))
+
+            # Conditionally set sampling params (only if not None)
+            if sampling_params.temperature is not None:
+                api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE, sampling_params.temperature)
+            if sampling_params.top_p is not None:
+                api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, sampling_params.top_p)
+            if sampling_params.max_tokens is not None:
+                api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS, sampling_params.max_tokens)
+            if sampling_params.n is not None:
+                api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, sampling_params.n)
+        except Exception:
+            pass  # Defensive: attribute setting failures don't break request
