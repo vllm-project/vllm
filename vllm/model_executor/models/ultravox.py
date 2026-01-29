@@ -5,6 +5,7 @@
 """PyTorch Ultravox model."""
 
 import copy
+import inspect
 from collections.abc import Iterable, Mapping, Sequence
 from types import SimpleNamespace
 from typing import Annotated, Any, Literal, TypeAlias
@@ -35,12 +36,12 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -132,6 +133,10 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_target_channels(self) -> int:
+        """Return target audio channels for Ultravox models (mono)."""
+        return 1
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
@@ -168,7 +173,10 @@ class UltravoxDummyInputsBuilder(BaseDummyInputsBuilder[UltravoxProcessingInfo])
 class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo]):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.info.get_target_channels(),
+        )
 
     def _call_hf_processor(
         self,
@@ -380,11 +388,17 @@ class UltravoxTransformerProjector(nn.Module, ModuleUtilsMixin):
         )
         hidden_states = hidden_states + positions
 
+        # Backward compatibility for Transformers v4 where layer_head_mask
+        # was a required argument for WhisperEncoderLayer.forward
+        kwargs = {}
+        if "layer_head_mask" in inspect.signature(self.layers[0].forward).parameters:
+            kwargs["layer_head_mask"] = None
+
         for layer in self.layers:
             layer_outputs = layer(
                 hidden_states,
                 attention_mask=extended_attention_mask,
-                layer_head_mask=None,
+                **kwargs,
             )
             hidden_states = layer_outputs[0]
 
@@ -479,11 +493,17 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 
         attention_mask = self.get_attention_mask_by_audio_len(audio_lens, hidden_states)
 
+        # Backward compatibility for Transformers v4 where layer_head_mask
+        # was a required argument for WhisperEncoderLayer.forward
+        kwargs = {}
+        if "layer_head_mask" in inspect.signature(self.layers[0].forward).parameters:
+            kwargs["layer_head_mask"] = None
+
         for encoder_layer in self.layers:
             layer_outputs = encoder_layer(
                 hidden_states,
                 attention_mask,
-                layer_head_mask=None,
+                **kwargs,
             )
 
             hidden_states = layer_outputs[0]

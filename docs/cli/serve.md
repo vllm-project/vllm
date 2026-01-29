@@ -6,4 +6,4 @@
 
 ## Arguments
 
---8<-- "docs/argparse/serve.inc.md"
+--8<-- "docs/generated/argparse/serve.inc.md"

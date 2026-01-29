@@ -24,6 +24,8 @@ from vllm.utils.serial_utils import (
 
 MODEL_NAME = "internlm/internlm2-1_8b-reward"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
+input_text = "The chef prepared a delicious meal."
+input_tokens = [1, 918, 29981, 10166, 395, 18067, 15265, 281]
 
 
 @pytest.fixture(scope="module")
@@ -46,30 +48,40 @@ def server():
         yield remote_server
 
 
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_basic(server: RemoteOpenAIServer, model_name: str):
+    # test /v1/models
+    response = requests.get(server.url_for("/v1/models"))
+    served_model = response.json()["data"][0]["id"]
+    assert served_model == MODEL_NAME
+
+    # test /tokenize
+    response = requests.post(
+        server.url_for("/tokenize"),
+        json={"model": model_name, "prompt": input_text},
+    )
+    assert response.json()["tokens"] == input_tokens
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_single_pooling(server: RemoteOpenAIServer, model_name: str):
-    input_texts = [
-        "The chef prepared a delicious meal.",
-    ]
-
-    # test single pooling
+def test_completion_request(server: RemoteOpenAIServer, model_name: str):
+    # test input: str
     response = requests.post(
         server.url_for("pooling"),
-        json={"model": model_name, "input": input_texts, "encoding_format": "float"},
+        json={"model": model_name, "input": input_text, "encoding_format": "float"},
     )
     response.raise_for_status()
     poolings = PoolingResponse.model_validate(response.json())
 
     assert poolings.id is not None
     assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == 8
+    assert len(poolings.data[0].data) == len(input_tokens)
     assert poolings.usage.completion_tokens == 0
-    assert poolings.usage.prompt_tokens == 8
-    assert poolings.usage.total_tokens == 8
+    assert poolings.usage.prompt_tokens == len(input_tokens)
+    assert poolings.usage.total_tokens == len(input_tokens)
 
-    # test using token IDs
-    input_tokens = [1, 1, 1, 1, 1]
+    # test input: list[int]
     response = requests.post(
         server.url_for("pooling"),
         json={"model": model_name, "input": input_tokens, "encoding_format": "float"},
@@ -79,21 +91,17 @@ async def test_single_pooling(server: RemoteOpenAIServer, model_name: str):
 
     assert poolings.id is not None
     assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == 5
+    assert len(poolings.data[0].data) == len(input_tokens)
     assert poolings.usage.completion_tokens == 0
-    assert poolings.usage.prompt_tokens == 5
-    assert poolings.usage.total_tokens == 5
+    assert poolings.usage.prompt_tokens == len(input_tokens)
+    assert poolings.usage.total_tokens == len(input_tokens)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
-    # test list[str]
-    input_texts = [
-        "The cat sat on the mat.",
-        "A feline was resting on a rug.",
-        "Stars twinkle brightly in the night sky.",
-    ]
+def test_completion_request_batched(server: RemoteOpenAIServer, model_name: str):
+    N = 10
+    input_texts = [input_text] * N
+
     response = requests.post(
         server.url_for("pooling"),
         json={"model": model_name, "input": input_texts, "encoding_format": "float"},
@@ -102,32 +110,30 @@ async def test_batch_pooling(server: RemoteOpenAIServer, model_name: str):
     poolings = PoolingResponse.model_validate(response.json())
 
     assert poolings.id is not None
-    assert len(poolings.data) == 3
-    assert len(poolings.data[0].data) == 8
+    assert len(poolings.data) == N
+    assert len(poolings.data[0].data) == len(input_tokens)
     assert poolings.usage.completion_tokens == 0
-    assert poolings.usage.prompt_tokens == 29
-    assert poolings.usage.total_tokens == 29
+    assert poolings.usage.prompt_tokens == len(input_tokens) * N
+    assert poolings.usage.total_tokens == len(input_tokens) * N
 
     # test list[list[int]]
-    input_tokens = [
-        [4, 5, 7, 9, 20],
-        [15, 29, 499],
-        [24, 24, 24, 24, 24],
-        [25, 32, 64, 77],
-    ]
     response = requests.post(
         server.url_for("pooling"),
-        json={"model": model_name, "input": input_tokens, "encoding_format": "float"},
+        json={
+            "model": model_name,
+            "input": [input_tokens] * N,
+            "encoding_format": "float",
+        },
     )
     response.raise_for_status()
     poolings = PoolingResponse.model_validate(response.json())
 
     assert poolings.id is not None
-    assert len(poolings.data) == 4
-    assert len(poolings.data[0].data) == 5
+    assert len(poolings.data) == N
+    assert len(poolings.data[0].data) == len(input_tokens)
     assert poolings.usage.completion_tokens == 0
-    assert poolings.usage.prompt_tokens == 17
-    assert poolings.usage.total_tokens == 17
+    assert poolings.usage.prompt_tokens == len(input_tokens) * N
+    assert poolings.usage.total_tokens == len(input_tokens) * N
 
 
 @pytest.mark.asyncio
@@ -259,9 +265,7 @@ async def test_batch_base64_pooling(server: RemoteOpenAIServer, model_name: str)
 async def test_base64_embed_dtype_and_endianness(
     server: RemoteOpenAIServer, model_name: str
 ):
-    input_texts = [
-        "The best thing about vLLM is that it supports many different models",
-    ]
+    input_texts = [input_text] * 3
 
     url = server.url_for("pooling")
     float_response = requests.post(
@@ -308,9 +312,7 @@ async def test_base64_embed_dtype_and_endianness(
 async def test_bytes_embed_dtype_and_endianness(
     server: RemoteOpenAIServer, model_name: str
 ):
-    input_texts = [
-        "The best thing about vLLM is that it supports many different models",
-    ]
+    input_texts = [input_text] * 3
 
     url = server.url_for("pooling")
     float_response = requests.post(
@@ -358,9 +360,7 @@ async def test_bytes_embed_dtype_and_endianness(
 async def test_bytes_only_embed_dtype_and_endianness(
     server: RemoteOpenAIServer, model_name: str
 ):
-    input_texts = [
-        "The best thing about vLLM is that it supports many different models",
-    ] * 2
+    input_texts = [input_text] * 3
 
     url = server.url_for("pooling")
     float_response = requests.post(
@@ -414,15 +414,11 @@ async def test_bytes_only_embed_dtype_and_endianness(
 async def test_params_not_supported(
     server: RemoteOpenAIServer, model_name: str, param_name: str
 ):
-    input_texts = [
-        "The best thing about vLLM is that it supports many different models",
-    ]
-
     responses_base64 = requests.post(
         server.url_for("pooling"),
         json={
             "model": model_name,
-            "input": input_texts,
+            "input": input_text,
             "encoding_format": "base64",
             param_name: f"bad_{param_name}",
         },
@@ -435,13 +431,9 @@ async def test_params_not_supported(
 
 @pytest.mark.asyncio
 async def test_invocations(server: RemoteOpenAIServer):
-    input_texts = [
-        "The chef prepared a delicious meal.",
-    ]
-
     request_args = {
         "model": MODEL_NAME,
-        "input": input_texts,
+        "input": input_text,
         "encoding_format": "float",
     }
 

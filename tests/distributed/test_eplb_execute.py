@@ -286,15 +286,17 @@ def _test_async_transfer_layer_without_mtp_worker(
         device,
         old_indices,
     )
+    old_indices_cpu = old_indices.cpu()
+    new_indices_cpu = new_indices.cpu()
 
     expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
     cuda_stream = torch.cuda.Stream(device=device)
 
     for layer_idx in range(num_layers):
-        is_unchanged, is_received_locally, experts_recv_loc = asyncio.run(
+        is_unchanged, is_received_locally, recv_metadata = asyncio.run(
             transfer_layer(
-                old_global_expert_indices=old_indices,
-                new_global_expert_indices=new_indices,
+                old_global_expert_indices=old_indices_cpu,
+                new_global_expert_indices=new_indices_cpu,
                 expert_weights=expert_weights,
                 expert_weights_buffer=expert_buffer,
                 ep_group=ep_group,
@@ -302,16 +304,15 @@ def _test_async_transfer_layer_without_mtp_worker(
                 cuda_stream=cuda_stream,
             )
         )
-
         cuda_stream.synchronize()
         move_from_buffer(
             expert_weights=expert_weights[layer_idx],
-            expert_weights_buffer=expert_buffer,
+            expert_weights_buffers=expert_buffer,
             is_unchanged=is_unchanged,
             is_received_locally=is_received_locally,
-            experts_recv_loc=experts_recv_loc,
-            new_indices=new_indices[layer_idx].tolist(),
-            ep_group=ep_group,
+            recv_metadata=recv_metadata,
+            new_indices=new_indices_cpu[layer_idx].numpy(),
+            ep_rank=ep_rank,
         )
 
     verify_expert_weights_after_shuffle(

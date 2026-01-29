@@ -6,11 +6,17 @@ import importlib.util
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm() and current_platform.is_fp8_fnuz(),
+    reason="Only fp8_fnuz supported on CDNA3 architecture",
+)
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
 def test_pre_quantized_model(vllm_runner):
     with vllm_runner(

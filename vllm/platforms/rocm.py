@@ -3,19 +3,20 @@
 
 import os
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 
 logger = init_logger(__name__)
 
@@ -134,8 +135,6 @@ def use_rocm_custom_paged_attention(
     alibi_slopes: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
 ) -> bool:
-    from vllm._aiter_ops import rocm_aiter_ops
-
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
     ON_GFX11_GFX12 = any(arch in GPU_ARCH for arch in ["gfx11", "gfx12"])
@@ -151,7 +150,6 @@ def use_rocm_custom_paged_attention(
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
-            and not (rocm_aiter_ops.is_pa_attn_enabled())
             and sinks is None
         )
 
@@ -183,7 +181,9 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq",
+        "awq_marlin",  # will be overwritten with awq
         "gptq",
+        "gptq_marlin",  # will be overwritten with gptq
         "fp8",
         "compressed-tensors",
         "fbgemm_fp8",
@@ -199,51 +199,39 @@ class RocmPlatform(Platform):
         supported_quantization += ["bitsandbytes"]
 
     @classmethod
-    def get_vit_attn_backend(
-        cls, head_size: int, dtype: torch.dtype
-    ) -> AttentionBackendEnum:
-        from importlib.util import find_spec
+    def import_kernels(cls) -> None:
+        """Import ROCm-specific kernels."""
+        super().import_kernels()
 
-        from vllm._aiter_ops import rocm_aiter_ops
+        import contextlib
 
-        if rocm_aiter_ops.is_mha_enabled():
-            # Note: AITER FA is only supported for Qwen-VL models.
-            # TODO: Add support for other VL models in their model class.
-            return AttentionBackendEnum.ROCM_AITER_FA
-
-        if on_gfx9() and find_spec("flash_attn") is not None:
-            return AttentionBackendEnum.FLASH_ATTN
-
-        return AttentionBackendEnum.TORCH_SDPA
+        # Import ROCm-specific extension
+        with contextlib.suppress(ImportError):
+            import vllm._rocm_C  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend,
-        head_size,
-        dtype,
-        kv_cache_dtype,
-        block_size,
-        use_mla,
-        has_sink,
-        use_sparse,
-        use_mm_prefix,
-        attn_type: str | None = None,
+        selected_backend: "AttentionBackendEnum",
+        attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if use_sparse:
-            if kv_cache_dtype.startswith("fp8"):
+        block_size = attn_selector_config.block_size
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+
+        if attn_selector_config.use_sparse:
+            if kv_cache_dtype and kv_cache_dtype.startswith("fp8"):
                 raise ValueError(
                     "ROCMAiterMLASparseBackend doesn't support fp8 kv_cache_dtype."
                 )
             assert block_size == 1, (
                 "Sparse MLA backend on ROCm only supports block size 1 for now."
             )
-            logger.info_once("Using Sparse MLA backend on V1 engine.")
+            logger.info_once("Using Sparse MLA backend.")
             return AttentionBackendEnum.ROCM_AITER_MLA_SPARSE.get_path()
 
-        if use_mla:
+        if attn_selector_config.use_mla:
             if selected_backend is None:
                 selected_backend = (
                     AttentionBackendEnum.ROCM_AITER_MLA
@@ -275,16 +263,16 @@ class RocmPlatform(Platform):
             return AttentionBackendEnum.FLEX_ATTENTION.get_path()
 
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
-            logger.info("Using Triton Attention backend on V1 engine.")
+            logger.info("Using Triton Attention backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
 
         if selected_backend == AttentionBackendEnum.ROCM_ATTN:
-            logger.info("Using Rocm Attention backend on V1 engine.")
+            logger.info("Using Rocm Attention backend.")
             return AttentionBackendEnum.ROCM_ATTN.get_path()
 
         if selected_backend == AttentionBackendEnum.ROCM_AITER_FA:
             if on_gfx9():
-                logger.info("Using Aiter Flash Attention backend on V1 engine.")
+                logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
             else:
                 raise ValueError(
@@ -293,25 +281,25 @@ class RocmPlatform(Platform):
                 )
 
         if selected_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
-            logger.info("Using Aiter Unified Attention backend on V1 engine.")
+            logger.info("Using Aiter Unified Attention backend.")
             return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
 
         # Handle automatic backend selection based on environment variables
         if selected_backend is None:
             # Priority 1: Check for AITER Unified Attention (must check before MHA)
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:
-                logger.info("Using Aiter Unified Attention backend on V1 engine.")
+                logger.info("Using Aiter Unified Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
 
             # Priority 2: Check for AITER MHA (Flash Attention)
             # Only use if explicitly enabled (not just VLLM_ROCM_USE_AITER=1)
             if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-                logger.info("Using Aiter Flash Attention backend on V1 engine.")
+                logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
             # Priority 3: Check for ROCM_ATTN (prefill-decode split)
             if envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION:
-                logger.info("Using Rocm Attention backend on V1 engine.")
+                logger.info("Using Rocm Attention backend.")
                 return AttentionBackendEnum.ROCM_ATTN.get_path()
 
             # Priority 4: Check for AITER enabled without specific flags
@@ -321,17 +309,59 @@ class RocmPlatform(Platform):
                 and on_gfx9()
                 and envs.VLLM_ROCM_USE_AITER_MHA is not False
             ):
-                logger.info("Using Aiter Flash Attention backend on V1 engine.")
+                logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
             # Default: Triton Unified Attention
-            logger.info("Using Triton Attention backend on V1 engine.")
+            logger.info("Using Triton Attention backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
 
         raise RuntimeError(
             f"Attention backend {selected_backend.name} is not supported on "
             "ROCm. Note that V0 attention backends have been removed."
         )
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
+        return [
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TORCH_SDPA,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: Optional["AttentionBackendEnum"] = None,
+    ) -> "AttentionBackendEnum":
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention. "
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        from importlib.util import find_spec
+
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if rocm_aiter_ops.is_enabled():
+            logger.info_once("Using AITER Flash Attention backend for ViT model.")
+            return AttentionBackendEnum.ROCM_AITER_FA
+
+        if (
+            on_gfx9()
+            and find_spec("flash_attn") is not None
+            and (dtype == torch.float16 or dtype == torch.bfloat16)
+        ):
+            logger.info_once("Using Flash Attention backend for ViT model.")
+            return AttentionBackendEnum.FLASH_ATTN
+
+        logger.info_once("Using Torch SDPA backend for ViT model.")
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -405,6 +435,10 @@ class RocmPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
+        use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
+        use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
+        use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
+        use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
 
         if compilation_config.cudagraph_mode.has_full_cudagraphs():
             # decode context parallel does not support full cudagraphs
@@ -424,10 +458,22 @@ class RocmPlatform(Platform):
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
-
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            if (
+                envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION and envs.VLLM_ROCM_USE_AITER
+                # NOTE: This block has been deprecated
+                # or get_env_variable_attn_backend()
+                # == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+                # TODO: monitor https://github.com/vllm-project/vllm/pull/30396
+                # to see how we can transition to the new way of selecting
+                # attention backends
+            ):
+                cache_config.block_size = 64
+                logger.warning(
+                    "[ROCM_AITER_UNIFIED_ATTN]: Setting kv cache block size to 64."
+                )
+            else:
+                cache_config.block_size = 16
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
@@ -438,6 +484,25 @@ class RocmPlatform(Platform):
             and "-rms_norm" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+rms_norm")
+
+        if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
+            compilation_config.custom_ops.append("+quant_fp8")
+
+        if use_aiter_fused_se and "-grouped_topk" in compilation_config.custom_ops:
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled, which "
+                "requires the 'grouped_topk' custom op. Overriding the "
+                "user-provided '-grouped_topk'."
+            )
+            compilation_config.custom_ops.remove("-grouped_topk")
+        # Ensure grouped_topk is always enabled when using AITER if
+        # its not disabled by user
+        if (
+            use_aiter_fused_moe
+            and "+grouped_topk" not in compilation_config.custom_ops
+            and "-grouped_topk" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+grouped_topk")
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

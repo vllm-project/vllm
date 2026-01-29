@@ -12,11 +12,6 @@ from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.score.protocol import ScoreResponse
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm():
-    pytest.skip(
-        "Encoder self-attention is not implemented on ROCm.", allow_module_level=True
-    )
-
 MODELS = [
     {"name": "BAAI/bge-reranker-v2-m3", "is_cross_encoder": True},
     {"name": "BAAI/bge-base-en-v1.5", "is_cross_encoder": False},
@@ -43,6 +38,10 @@ def model(request):
 @pytest.fixture(scope="class")
 def server(model: dict[str, Any]):
     args = ["--enforce-eager", "--max-model-len", "100", "--dtype", DTYPE]
+
+    # ROCm: Use Flex Attention to support encoder-only self-attention.
+    if current_platform.is_rocm():
+        args.extend(["--attention-backend", "FLEX_ATTENTION"])
 
     with RemoteOpenAIServer(model["name"], args) as remote_server:
         yield remote_server
@@ -237,17 +236,14 @@ class TestModel:
                     "use_activation": use_activation,
                 },
             )
-            if response.status_code != 200:
-                return response
-
             outputs = response.json()
             return torch.tensor([x["score"] for x in outputs["data"]])
 
-        if model["is_cross_encoder"]:
-            default = get_outputs(use_activation=None)
-            w_activation = get_outputs(use_activation=True)
-            wo_activation = get_outputs(use_activation=False)
+        default = get_outputs(use_activation=None)
+        w_activation = get_outputs(use_activation=True)
+        wo_activation = get_outputs(use_activation=False)
 
+        if model["is_cross_encoder"]:
             assert torch.allclose(default, w_activation, atol=1e-2), (
                 "Default should use activation."
             )
@@ -257,9 +253,3 @@ class TestModel:
             assert torch.allclose(F.sigmoid(wo_activation), w_activation, atol=1e-2), (
                 "w_activation should be close to activation(wo_activation)."
             )
-        else:
-            get_outputs(use_activation=None)
-
-            # The activation parameter only works for the is_cross_encoder model
-            response = get_outputs(use_activation=True)
-            assert response.status_code == 400

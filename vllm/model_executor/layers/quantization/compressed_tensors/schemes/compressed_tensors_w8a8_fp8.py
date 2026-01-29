@@ -61,7 +61,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             )
 
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enaled()
+        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
 
         if self.weight_block_size is not None:
             assert not self.is_static_input_scheme
@@ -158,7 +158,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             input_scale = None
 
         else:
-            raise ValueError(f"Unknown quantization strategy {self.strategy}")
+            raise ValueError(
+                f"Unknown quantization strategy {self.strategy}: "
+                f"should be one of {list(QuantizationStrategy)}"
+            )
 
         # required by torch.compile to be torch.nn.Parameter
         layer.weight = Parameter(weight.data, requires_grad=False)

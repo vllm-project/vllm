@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 
 from vllm.assets.audio import AudioAsset
-from vllm.multimodal.utils import encode_audio_base64, fetch_audio
+from vllm.multimodal.utils import encode_audio_base64, encode_audio_url, fetch_audio
 
 from ...utils import RemoteOpenAIServer
 
@@ -49,6 +49,14 @@ async def client(server):
 def base64_encoded_audio() -> dict[str, str]:
     return {
         audio_url: encode_audio_base64(*fetch_audio(audio_url))
+        for audio_url in TEST_AUDIO_URLS
+    }
+
+
+@pytest.fixture(scope="session")
+def url_encoded_audio() -> dict[str, str]:
+    return {
+        audio_url: encode_audio_url(*fetch_audio(audio_url))
         for audio_url in TEST_AUDIO_URLS
     }
 
@@ -149,11 +157,9 @@ async def test_single_chat_session_audio_base64encoded(
     client: openai.AsyncOpenAI,
     model_name: str,
     audio_url: str,
-    base64_encoded_audio: dict[str, str],
+    url_encoded_audio: dict[str, str],
 ):
-    messages = dummy_messages_from_audio_url(
-        f"data:audio/wav;base64,{base64_encoded_audio[audio_url]}"
-    )
+    messages = dummy_messages_from_audio_url(url_encoded_audio[audio_url])
 
     # test single completion
     chat_completion = await client.chat.completions.create(
@@ -254,7 +260,9 @@ async def test_single_chat_session_input_audio(
 async def test_chat_streaming_audio(
     client: openai.AsyncOpenAI, model_name: str, audio_url: str
 ):
-    messages = dummy_messages_from_audio_url(audio_url)
+    messages = dummy_messages_from_audio_url(
+        audio_url, "What's a short title for this audio?"
+    )
 
     # test single completion
     chat_completion = await client.chat.completions.create(
@@ -311,7 +319,7 @@ async def test_chat_streaming_input_audio(
                         "format": "wav",
                     },
                 },
-                {"type": "text", "text": "What's happening in this audio?"},
+                {"type": "text", "text": "What's a short title for this audio?"},
             ],
         }
     ]

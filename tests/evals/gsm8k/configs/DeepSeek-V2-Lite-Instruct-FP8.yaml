@@ -2,5 +2,4 @@ model_name: "RedHatAI/DeepSeek-Coder-V2-Lite-Instruct-FP8"
 accuracy_threshold: 0.72
 num_questions: 1319
 num_fewshot: 5
-max_model_len: 4096
-
+server_args: "--enforce-eager --max-model-len 4096"

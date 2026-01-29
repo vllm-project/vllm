@@ -1,29 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import time
 from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.parse import MultiModalDataParser
-from vllm.multimodal.processing import EncDecMultiModalProcessor
+from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
-from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
-from vllm.v1.structured_output.backend_guidance import validate_guidance_grammar
+from vllm.v1.structured_output.backend_guidance import (
+    has_guidance_unsupported_json_features,
+    validate_guidance_grammar,
+)
 from vllm.v1.structured_output.backend_lm_format_enforcer import (
     validate_structured_output_request_lm_format_enforcer,
 )
@@ -51,11 +57,12 @@ class InputProcessor:
         self.generation_config_fields = self.model_config.try_get_generation_config()
 
         self.mm_registry = mm_registry
-        self.mm_processor_cache = processor_cache_from_config(vllm_config, mm_registry)
+        self.mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
             tokenizer,
+            self.vllm_config.observability_config,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
@@ -63,10 +70,6 @@ class InputProcessor:
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.input_preprocessor.tokenizer
-
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: TokenizerLike | None) -> None:
-        self.input_preprocessor.tokenizer = tokenizer
 
     def _validate_logprobs(
         self,
@@ -82,9 +85,11 @@ class InputProcessor:
             if num_logprobs == -1:
                 num_logprobs = self.model_config.get_vocab_size()
             if num_logprobs > max_logprobs:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Requested sample logprobs of {num_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}"
+                    f"which is greater than max allowed: {max_logprobs}",
+                    parameter="logprobs",
+                    value=num_logprobs,
                 )
 
         # Validate prompt logprobs.
@@ -93,9 +98,11 @@ class InputProcessor:
             if num_prompt_logprobs == -1:
                 num_prompt_logprobs = self.model_config.get_vocab_size()
             if num_prompt_logprobs > max_logprobs:
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Requested prompt logprobs of {num_prompt_logprobs}, "
-                    f"which is greater than max allowed: {max_logprobs}"
+                    f"which is greater than max allowed: {max_logprobs}",
+                    parameter="prompt_logprobs",
+                    value=num_prompt_logprobs,
                 )
 
     def _validate_sampling_params(
@@ -133,9 +140,11 @@ class InputProcessor:
                 invalid_token_ids.append(token_id)
 
         if invalid_token_ids:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"token_id(s) {invalid_token_ids} in logit_bias contain "
-                f"out-of-vocab token ids. Vocabulary size: {vocab_size}"
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="logit_bias",
+                value=invalid_token_ids,
             )
 
     def _validate_supported_sampling_params(
@@ -145,24 +154,16 @@ class InputProcessor:
         # Logits processors not supported.
         if params.logits_processors:
             raise ValueError(
-                "vLLM V1 does not support per request user provided logits processors."
+                "vLLM V1 does not support per request user-provided logits processors."
             )
-        # Async scheduling + spec decode currently incompatible with some
-        # sampling parameters.
-        if (
-            self.vllm_config.speculative_config is not None
-            and self.vllm_config.scheduler_config.async_scheduling
-            and (
-                params.frequency_penalty != 0.0
-                or params.presence_penalty != 0.0
-                or params.repetition_penalty != 1.0
-                or params.bad_words_token_ids
-                or params.structured_outputs
-            )
+
+        # Some sampling parameters are not yet compatible with spec decoding.
+        if self.vllm_config.speculative_config is not None and (
+            params.min_tokens > 1 or params.min_p > _SAMPLING_EPS or params.logit_bias
         ):
             raise ValueError(
-                "async scheduling with spec decoding doesn't yet support "
-                "penalties, bad words or structured outputs in sampling parameters."
+                "The min_tokens, min_p, and logit_bias sampling parameters "
+                "are not yet supported with speculative decoding."
             )
 
     def _validate_params(
@@ -192,29 +193,39 @@ class InputProcessor:
         def _validate_single_prompt(single_prompt: dict | str) -> None:
             if not isinstance(single_prompt, dict):
                 return
+
             mm_data = single_prompt.get("multi_modal_data")
             mm_uuids = single_prompt.get("multi_modal_uuids")
             if not mm_data or not mm_uuids:
                 return
 
+            import torch
+
+            def _get_len(items: object):
+                if isinstance(items, dict):  # Embedding inputs
+                    return _get_len(next(iter(items.values()))) if items else 1
+
+                if isinstance(items, list):
+                    return len(items)
+                if isinstance(items, torch.Tensor):
+                    # To keep backwards compatibility for single item embedding input
+                    return 1 if getattr(items, "_is_single_item", False) else len(items)
+
+                return 1
+
             for modality, items in mm_data.items():
                 if modality in mm_uuids:
-                    data_len = len(items) if isinstance(items, list) else 1
-                    uuid_len = (
-                        len(mm_uuids[modality])
-                        if isinstance(mm_uuids[modality], list)
-                        else 1
-                    )
+                    data_len = _get_len(items)
+                    uuid_len = _get_len(mm_uuids[modality])
                     if uuid_len != data_len:
                         raise ValueError(
-                            f"multi_modal_uuids for modality '{modality}' "
+                            f"multi_modal_uuids for modality {modality!r} "
                             "must have same length as data: got "
-                            f"{uuid_len} uuids vs "
-                            f"{data_len} items."
+                            f"{uuid_len} uuids vs {data_len} items."
                         )
                 else:
                     raise ValueError(
-                        f"multi_modal_uuids for modality '{modality}' must "
+                        f"multi_modal_uuids for modality {modality!r} must "
                         "be provided if multi_modal_data is provided."
                     )
 
@@ -333,8 +344,22 @@ class InputProcessor:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
-                if isinstance(self.tokenizer, MistralTokenizer):
+
+                # Check if schema has features unsupported by guidance
+                so_params = params.structured_outputs
+                skip_guidance = False
+                if so_params.json:
+                    if isinstance(so_params.json, str):
+                        import json
+
+                        schema = json.loads(so_params.json)
+                    else:
+                        schema = so_params.json
+                    skip_guidance = has_guidance_unsupported_json_features(schema)
+
+                if isinstance(self.tokenizer, MistralTokenizer) or skip_guidance:
                     # Fall back to outlines if the tokenizer is Mistral
+                    # or if schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(params)
                     params.structured_outputs._backend = "outlines"
                 else:
@@ -343,6 +368,10 @@ class InputProcessor:
                     params.structured_outputs._backend = "guidance"
             # Remember that this backend was set automatically
             params.structured_outputs._backend_was_auto = True
+
+        # Run post-init validation. This is also important to ensure subsequent
+        # roundtrip serialization/deserialization won't fail.
+        params.structured_outputs.__post_init__()
 
     def _maybe_build_mm_uuids(
         self,
@@ -382,6 +411,37 @@ class InputProcessor:
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
 
+    def _get_mm_identifier(
+        self,
+        mm_hash: str,
+        lora_request: LoRARequest | None,
+    ) -> str:
+        """
+        When enable_tower_connector_lora is True, multi-modal embeddings
+        vary depending on the LoRA request. Therefore, the mm_hash must be
+        generated based on the LoRA request to prevent incorrect cache hits.
+        """
+        if (
+            lora_request is None
+            or self.lora_config is None
+            or not self.lora_config.enable_tower_connector_lora
+        ):
+            return mm_hash
+        return f"{lora_request.lora_name}:{mm_hash}"
+
+    @staticmethod
+    def assign_request_id(request: EngineCoreRequest):
+        """Replace the externally supplied request ID with an internal request ID
+        that adds 8 random characters in order to ensure uniquness.
+        """
+        if request.external_req_id is not None:
+            raise ValueError(
+                "The external_req_id field should not be set on EngineCoreRequests"
+                " passed to vLLM; use the request_id field."
+            )
+        request.external_req_id = request.request_id
+        request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
+
     def process_inputs(
         self,
         request_id: str,
@@ -397,13 +457,14 @@ class InputProcessor:
         self._validate_lora(lora_request)
         self._validate_params(params)
 
-        data_parallel_size = self.vllm_config.parallel_config.data_parallel_size
-        if data_parallel_rank is not None and not (
-            0 <= data_parallel_rank < data_parallel_size
-        ):
+        parallel_config = self.vllm_config.parallel_config
+        dp_size = parallel_config.data_parallel_size
+        dp_local_size = parallel_config.data_parallel_size_local
+        num_ranks = dp_local_size if parallel_config.local_engines_only else dp_size
+        if data_parallel_rank is not None and not (0 <= data_parallel_rank < num_ranks):
             raise ValueError(
                 f"data_parallel_rank {data_parallel_rank} "
-                f"is out of range [0, {data_parallel_size})."
+                f"is out of range [0, {num_ranks})."
             )
 
         if arrival_time is None:
@@ -438,11 +499,21 @@ class InputProcessor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
-            prompt,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        num_threads = int(os.environ.get("OMP_NUM_THREADS", "1"))
+        if "OMP_NUM_THREADS" not in os.environ:
+            logger.debug_once(
+                "OMP_NUM_THREADS is not set; defaulting Torch threads to %d for "
+                "input preprocessing.",
+                num_threads,
+            )
+
+        with set_request_id(request_id), set_default_torch_num_threads(num_threads):
+            processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
+                prompt,
+                tokenization_kwargs=tokenization_kwargs,
+                mm_uuids=mm_uuids,
+            )
+
         from vllm.platforms import current_platform
 
         current_platform.validate_request(
@@ -498,12 +569,17 @@ class InputProcessor:
 
             mm_features = []
             for modality, idx in sorted_mm_idxs:
+                base_mm_hash = decoder_mm_hashes[modality][idx]
                 mm_features.append(
                     MultiModalFeatureSpec(
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
-                        identifier=decoder_mm_hashes[modality][idx],
+                        identifier=self._get_mm_identifier(
+                            base_mm_hash,
+                            lora_request,
+                        ),
                         mm_position=decoder_mm_positions[modality][idx],
+                        mm_hash=base_mm_hash,
                     )
                 )
 
@@ -560,7 +636,7 @@ class InputProcessor:
 
         tokenizer = self.tokenizer
         if tokenizer is not None:
-            max_input_id = max(prompt_ids or [], default=0)
+            max_input_id = max(prompt_ids or (), default=0)
 
             # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
             # self.model_config.get_vocab_size() is the model’s vocab size.
@@ -579,16 +655,18 @@ class InputProcessor:
 
         max_prompt_len = self.model_config.max_model_len
         if prompt_len > max_prompt_len:
-            if prompt_type == "encoder" and model_config.is_multimodal_model:
+            if model_config.is_multimodal_model:
                 mm_registry = self.input_preprocessor.mm_registry
-                mm_processor = mm_registry.create_processor(
+                model_cls = mm_registry._get_model_cls(model_config)
+                factories = model_cls._processor_factory
+                ctx = mm_registry._create_processing_ctx(
                     model_config,
                     tokenizer=tokenizer,
                 )
-                assert isinstance(mm_processor, EncDecMultiModalProcessor)
+                mm_info = factories.info(ctx)
 
-                if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper
+                if mm_info.skip_prompt_length_check:
+                    return
 
             if model_config.is_multimodal_model:
                 suggestion = (

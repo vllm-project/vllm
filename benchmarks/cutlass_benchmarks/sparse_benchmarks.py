@@ -343,7 +343,9 @@ def bench(
         return bench_int8(dtype, m, k, n, label, sub_label)
     if dtype == torch.float8_e4m3fn:
         return bench_fp8(dtype, m, k, n, label, sub_label)
-    raise ValueError("unsupported type")
+    raise ValueError(
+        f"Unsupported dtype {dtype}: should be one of torch.int8, torch.float8_e4m3fn."
+    )
 
 
 # runner

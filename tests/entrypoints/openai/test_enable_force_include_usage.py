@@ -8,7 +8,7 @@ from ...utils import RemoteOpenAIServer
 
 
 @pytest.fixture(scope="module")
-def chat_server_with_force_include_usage(request):  # noqa: F811
+def chat_server_with_force_include_usage(request):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",

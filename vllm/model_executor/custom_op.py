@@ -38,8 +38,9 @@ class CustomOp(nn.Module):
             )
         return super().__new__(op_cls_to_instantiate)
 
-    def __init__(self):
+    def __init__(self, enforce_enable: bool = False):
         super().__init__()
+        self._enforce_enable = enforce_enable
         self._forward_method = self.dispatch_forward()
 
     def forward(self, *args, **kwargs):
@@ -66,8 +67,9 @@ class CustomOp(nn.Module):
         return self.forward_native(*args, **kwargs)
 
     def forward_cpu(self, *args, **kwargs):
-        # By default, we assume that CPU ops are compatible with CUDA ops.
-        return self.forward_cuda(*args, **kwargs)
+        # By default, we assume that CPU ops are compatible with the
+        # PyTorch-native implementation.
+        return self.forward_native(*args, **kwargs)
 
     def forward_tpu(self, *args, **kwargs):
         # By default, we assume that TPU ops are compatible with the
@@ -84,7 +86,14 @@ class CustomOp(nn.Module):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
         compilation_config = get_cached_compilation_config()
-        enabled = self.enabled()
+
+        # NOTE(shen-shanshan): CustomOp object can be enforce enabled, e.g.,
+        # enable device-specific kernels in ViT models when enabling graph
+        # mode. By default, it will follow the compilation_config to determine
+        # whether enable itself.
+        # This enforce_enable mechanism will be removed after we adding a
+        # separate compilation_config for multi-modal part.
+        enabled = self._enforce_enable or self.enabled()
         if enabled:
             compilation_config.enabled_custom_ops.update([self.__class__.name])
         else:

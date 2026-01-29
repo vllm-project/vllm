@@ -91,6 +91,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
@@ -335,42 +336,3 @@ def flashinfer_cutedsl_moe_masked(
         alpha_dtype=get_cute_dtype(w2_alpha),
     )  # in logical [m, k, l]
     out = out.permute(2, 0, 1)
-
-
-def flashinfer_cutedsl_moe_fp4(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    quant_config: FusedMoEQuantConfig,
-    inplace: bool = False,
-    activation: str = "silu",
-    global_num_experts: int = -1,
-    expert_map: torch.Tensor | None = None,
-    apply_router_weight_on_input: bool = False,
-) -> torch.Tensor:
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-        create_flashinfer_prepare_finalize,
-    )
-
-    fused_experts = mk.FusedMoEModularKernel(
-        create_flashinfer_prepare_finalize(use_dp=False),  # could be swapped later
-        FlashInferCuteDSLExperts(
-            out_dtype=hidden_states.dtype,
-            quant_config=quant_config,
-        ),
-    )
-
-    return fused_experts(
-        hidden_states=hidden_states,
-        w1=w1,
-        w2=w2,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        inplace=inplace,
-        activation=activation,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-    )

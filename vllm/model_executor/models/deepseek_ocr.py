@@ -14,9 +14,11 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -37,12 +39,12 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -343,7 +345,7 @@ class DeepseekOCRMultiModalProcessor(
     info=DeepseekOCRProcessingInfo,
     dummy_inputs=DeepseekOCRDummyInputsBuilder,
 )
-class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # map prefix for language backbone
@@ -395,6 +397,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self.vision_model = DeepCLIPVisionTransformer(
             config=clip_vision_config,
             quant_config=quant_config,
+            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
 
@@ -435,19 +438,16 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if pixel_values is None or torch.sum(pixel_values).item() == 0:
             return None
 
-        if pixel_values is not None:
-            base_size = self.vision_config.image_size
-            return DeepseekOCRImagePixelInputs(
-                type="pixel_values",
-                data=pixel_values,
-                images_crop=images_crop,
-                images_spatial_crop=images_spatial_crop,
-                resolve_bindings={
-                    "base_size": base_size,
-                },
-            )
-
-        raise AssertionError("This line should be unreachable.")
+        base_size = self.vision_config.image_size
+        return DeepseekOCRImagePixelInputs(
+            type="pixel_values",
+            data=pixel_values,
+            images_crop=images_crop,
+            images_spatial_crop=images_spatial_crop,
+            resolve_bindings={
+                "base_size": base_size,
+            },
+        )
 
     def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
         global_features_1 = self.sam_model(image_tensor)
@@ -589,3 +589,13 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         loader = AutoWeightsLoader(self)
         autoloaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         return autoloaded_weights
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="projector",
+            tower_model=["sam_model", "vision_model"],
+        )

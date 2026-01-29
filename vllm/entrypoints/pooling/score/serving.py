@@ -9,12 +9,12 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.score.protocol import (
     RerankDocument,
     RerankRequest,
@@ -25,7 +25,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
     ScoreResponseData,
 )
-from vllm.entrypoints.score_utils import (
+from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
     _cosine_similarity,
@@ -38,7 +38,8 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
 logger = init_logger(__name__)
@@ -51,6 +52,7 @@ class ServingScores(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
+        score_template: str | None = None,
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
@@ -59,6 +61,7 @@ class ServingScores(OpenAIServing):
             request_logger=request_logger,
             log_error_stack=log_error_stack,
         )
+        self.score_template = score_template
 
     async def _embedding_score(
         self,
@@ -168,6 +171,7 @@ class ServingScores(OpenAIServing):
             data_2=data_2,
             tokenizer=tokenizer,
             tokenization_kwargs=tokenization_kwargs,
+            score_template=self.score_template,
         )
         self._validate_input(request, engine_prompt["prompt_token_ids"], full_prompt)
         if request.mm_processor_kwargs is not None:
@@ -501,5 +505,7 @@ class ServingScores(OpenAIServing):
             id=request_id,
             model=model_name,
             results=results,
-            usage=RerankUsage(total_tokens=num_prompt_tokens),
+            usage=RerankUsage(
+                total_tokens=num_prompt_tokens, prompt_tokens=num_prompt_tokens
+            ),
         )

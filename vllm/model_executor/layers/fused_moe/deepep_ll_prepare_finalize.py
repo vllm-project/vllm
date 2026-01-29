@@ -295,6 +295,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             self.max_tokens_per_rank,
             num_experts,
             use_fp8=self.use_fp8_dispatch,
+            round_scale=self.use_ue8m0_dispatch,
+            use_ue8m0=self.use_ue8m0_dispatch,
             **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
             **(
                 dict(x_global_scale=qc_a1_gscale_or_scale)

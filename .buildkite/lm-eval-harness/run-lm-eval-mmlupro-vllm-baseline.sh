@@ -3,7 +3,7 @@
 # We use this for fp8, which HF does not support.
 #
 # Make sure you have lm-eval-harness installed:
-#   pip install git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api]
+#   pip install "lm-eval[api]>=0.4.9.2"
 
 usage() {
     echo``

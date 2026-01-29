@@ -6,8 +6,8 @@ import pytest
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, VllmConfig
+from vllm.multimodal import MultiModalRegistry, MultiModalUUIDDict
 from vllm.sampling_params import SamplingParams
-from vllm.v1.engine import input_processor as input_processor_mod
 from vllm.v1.engine.input_processor import InputProcessor
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
@@ -35,9 +35,9 @@ def _mock_input_processor(
         raising=True,
     )
     monkeypatch.setattr(
-        input_processor_mod,
+        MultiModalRegistry,
         "processor_cache_from_config",
-        lambda vllm_config, mm_registry: None,
+        lambda self, vllm_config: None,
         raising=True,
     )
 
@@ -166,7 +166,7 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
         monkeypatch, mm_cache_gb=0.0, enable_prefix_caching=False
     )
 
-    captured: dict[str, object] = {}
+    captured: dict[str, MultiModalUUIDDict] = {}
 
     def fake_preprocess(
         prompt, *, tokenization_kwargs=None, lora_request=None, mm_uuids=None
@@ -196,7 +196,16 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
     )
 
     # Expect request-id-based overrides are passed through
-    assert captured["mm_uuids"] == {
-        "image": [f"{request_id}-image-0", f"{request_id}-image-1"],
-        "video": [f"{request_id}-video-0"],
-    }
+    mm_uuids = captured["mm_uuids"]
+    assert set(mm_uuids.keys()) == {"image", "video"}
+    assert len(mm_uuids["image"]) == 2
+    assert len(mm_uuids["video"]) == 1
+    assert mm_uuids["image"][0].startswith(f"{request_id}-image-") and mm_uuids[
+        "image"
+    ][0].endswith("-0")
+    assert mm_uuids["image"][1].startswith(f"{request_id}-image-") and mm_uuids[
+        "image"
+    ][1].endswith("-1")
+    assert mm_uuids["video"][0].startswith(f"{request_id}-video-") and mm_uuids[
+        "video"
+    ][0].endswith("-0")

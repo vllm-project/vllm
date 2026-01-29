@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Annotated, Any, TypeAlias
+from typing import Any, TypeAlias
 
 from pydantic import (
     Field,
@@ -10,45 +10,23 @@ from pydantic import (
 
 from vllm import PoolingParams
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.pooling.base.protocol import (
+    CompletionRequestMixin,
+    PoolingBasicRequestMixin,
+)
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 
-class EmbeddingCompletionRequest(OpenAIBaseModel):
+class EmbeddingCompletionRequest(PoolingBasicRequestMixin, CompletionRequestMixin):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/embeddings
-    model: str | None = None
-    input: list[int] | list[list[int]] | str | list[str]
+
     encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
-    user: str | None = None
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
 
     # --8<-- [start:embedding-extra-params]
-    add_special_tokens: bool = Field(
-        default=True,
-        description=(
-            "If true (the default), special tokens (e.g. BOS) will be added to "
-            "the prompt."
-        ),
-    )
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
-    )
-    request_id: str = Field(
-        default_factory=random_uuid,
-        description=(
-            "The request_id related to this request. If the caller does "
-            "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."
-        ),
-    )
     normalize: bool | None = Field(
         default=None,
         description="Whether to normalize the embeddings outputs. Default is True.",
@@ -73,20 +51,17 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
 
     def to_pooling_params(self):
         return PoolingParams(
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize,
+            use_activation=self.normalize,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
 
-class EmbeddingChatRequest(OpenAIBaseModel):
-    model: str | None = None
+class EmbeddingChatRequest(PoolingBasicRequestMixin):
     messages: list[ChatCompletionMessageParam]
 
     encoding_format: EncodingFormat = "float"
     dimensions: int | None = None
-    user: str | None = None
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
 
     # --8<-- [start:chat-embedding-extra-params]
     add_generation_prompt: bool = Field(
@@ -97,7 +72,16 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "model."
         ),
     )
-
+    continue_final_message: bool = Field(
+        default=False,
+        description=(
+            "If this is set, the chat will be formatted so that the final "
+            "message in the chat is open-ended, without any EOS tokens. The "
+            "model will continue this message rather than starting a new one. "
+            'This allows you to "prefill" part of the model\'s response for it. '
+            "Cannot be used at the same time as `add_generation_prompt`."
+        ),
+    )
     add_special_tokens: bool = Field(
         default=False,
         description=(
@@ -127,22 +111,6 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
-    )
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
-    )
-    request_id: str = Field(
-        default_factory=random_uuid,
-        description=(
-            "The request_id related to this request. If the caller does "
-            "not set it, a random_uuid will be generated. This id is used "
-            "through out the inference process and return in response."
-        ),
     )
     normalize: bool | None = Field(
         default=None,
@@ -180,7 +148,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
-            normalize=self.normalize,
+            use_activation=self.normalize,
         )
 
 

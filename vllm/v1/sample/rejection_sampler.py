@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.v1.outputs import LogprobsTensors, SamplerOutput
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
 from vllm.v1.sample.ops.penalties import apply_all_penalties
@@ -119,8 +119,14 @@ class RejectionSampler(nn.Module):
         raw_target_logits = logits[target_logits_indices]
         # Use float32 for the target_logits.
         raw_target_logits = raw_target_logits.to(torch.float32)
+        target_logits = raw_target_logits
+        if not self.is_processed_logprobs_mode:
+            # Clone raw_target_logits before applying processors to preserve
+            # the original raw logits for logprobs computation, since
+            # apply_logits_processors modifies the tensor in-place.
+            target_logits = target_logits.clone()
         target_logits = self.apply_logits_processors(
-            raw_target_logits, sampling_metadata, metadata
+            target_logits, sampling_metadata, metadata
         )
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
@@ -145,7 +151,7 @@ class RejectionSampler(nn.Module):
         )
 
         logprobs_tensors = None
-        if sampling_metadata.max_num_logprobs:
+        if sampling_metadata.max_num_logprobs is not None:
             logprobs_tensors = self._get_logprobs_tensors(
                 sampling_metadata.max_num_logprobs,
                 metadata,
@@ -179,13 +185,22 @@ class RejectionSampler(nn.Module):
         final_logits[target_logits_indices] = target_logits.to(torch.float32)
         final_logits[bonus_logits_indices] = bonus_logits.to(torch.float32)
 
-        # Compute accepted token indices.
-        accepted_mask = sampled_token_ids != PLACEHOLDER_TOKEN_ID
-        num_accepted_tokens = accepted_mask.sum(dim=-1)
-        accepted_logit_indices = accepted_mask.nonzero(as_tuple=True)[1]
-        accepted_logit_indices += cu_num_sampled_tokens.repeat_interleave(
-            num_accepted_tokens
+        # NOTE: To avoid cpu-gpu synchronization, we now simply compute indices for
+        # all draft tokens, including the rejected ones. The rejected tokens will
+        # be filtered out in the `parse_output`.
+        logit_start_indices = cu_num_sampled_tokens
+        offsets = torch.arange(
+            sampled_token_ids.shape[-1],
+            device=logit_start_indices.device,
+            dtype=logit_start_indices.dtype,
         )
+        accepted_logit_indices = (
+            logit_start_indices.unsqueeze(1) + offsets.unsqueeze(0)
+        ).flatten()
+        accepted_logit_indices.clamp_(max=final_logits.shape[0] - 1)
+        accepted_tokens = sampled_token_ids.clone().flatten()
+        # we replace rejected token ids with 0 to avoid gather_logprobs error
+        accepted_tokens[accepted_tokens == PLACEHOLDER_TOKEN_ID] = 0
 
         # Compute logprobs for accepted tokens.
         accepted_logits = final_logits[accepted_logit_indices]
@@ -194,7 +209,6 @@ class RejectionSampler(nn.Module):
             if self.is_logits_logprobs_mode
             else self.sampler.compute_logprobs(accepted_logits)
         )
-        accepted_tokens = sampled_token_ids[accepted_mask]
         return self.sampler.gather_logprobs(
             accepted_logprobs,
             max_num_logprobs,
@@ -206,8 +220,8 @@ class RejectionSampler(nn.Module):
         output_token_ids: torch.Tensor,
         vocab_size: int,
         discard_req_indices: Sequence[int] = (),
-        return_cu_num_tokens: bool = False,
-    ) -> tuple[list[list[int]], list[int] | None]:
+        logprobs_tensors: LogprobsTensors | None = None,
+    ) -> tuple[list[list[int]], LogprobsLists | None]:
         """Parse the output of the rejection sampler.
         Args:
             output_token_ids: The sampled token IDs in shape
@@ -216,7 +230,7 @@ class RejectionSampler(nn.Module):
                 and will be filtered out in this function.
             vocab_size: The size of the vocabulary.
             discard_req_indices: Optional row indices to discard tokens in.
-            return_cu_num_tokens: Whether to also return cumulative token counts.
+            logprobs_tensors: Optional logprobs tensors to filter.
         Returns:
             A list of lists of token IDs.
         """
@@ -225,15 +239,18 @@ class RejectionSampler(nn.Module):
         valid_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
             output_token_ids_np < vocab_size
         )
-        cu_num_tokens = None
-        if return_cu_num_tokens:
+        output_logprobs = None
+        if logprobs_tensors is not None:
             cu_num_tokens = [0] + valid_mask.sum(axis=1).cumsum().tolist()
+            filtered_tensors = logprobs_tensors.filter(valid_mask.flatten())
+            output_logprobs = filtered_tensors.tolists(cu_num_tokens)
+
         if len(discard_req_indices) > 0:
             valid_mask[discard_req_indices] = False
         outputs = [
             row[valid_mask[i]].tolist() for i, row in enumerate(output_token_ids_np)
         ]
-        return outputs, cu_num_tokens
+        return outputs, output_logprobs
 
     def apply_logits_processors(
         self,

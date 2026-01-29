@@ -3,7 +3,7 @@
 
 from collections.abc import Sequence
 
-from vllm.entrypoints.openai.protocol import DeltaMessage
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 

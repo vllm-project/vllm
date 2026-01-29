@@ -33,9 +33,7 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
-from vllm.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -78,11 +76,14 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
     DeepseekV32IndexerMetadata,
 )
+from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.worker.workspace import current_workspace_manager
 
 from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
 from .utils import (
@@ -156,7 +157,6 @@ class DeepseekAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )
@@ -499,7 +499,6 @@ class DeepseekV2Attention(nn.Module):
 
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
-            rotary_dim=qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=False,
@@ -618,8 +617,15 @@ def sparse_attn_indexer(
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
+
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        # Reserve workspace for indexer during profiling run
+        current_workspace_manager().get_simultaneous(
+            ((total_seq_lens, head_dim), torch.float8_e4m3fn),
+            ((total_seq_lens, 4), torch.uint8),
+        )
+
         return sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
@@ -653,17 +659,17 @@ def sparse_attn_indexer(
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata.prefill
+
+        # Get the full shared workspace buffers once (will allocate on first use)
+        workspace_manager = current_workspace_manager()
+        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
+            ((total_seq_lens, head_dim), fp8_dtype),
+            ((total_seq_lens, 4), torch.uint8),
+        )
+
         for chunk in prefill_metadata.chunks:
-            k_fp8 = torch.empty(
-                [chunk.total_seq_lens, head_dim],
-                device=k.device,
-                dtype=fp8_dtype,
-            )
-            k_scale = torch.empty(
-                [chunk.total_seq_lens, 4],
-                device=k.device,
-                dtype=torch.uint8,
-            )
+            k_fp8 = k_fp8_full[: chunk.total_seq_lens]
+            k_scale = k_scale_full[: chunk.total_seq_lens]
             ops.cp_gather_indexer_k_quant_cache(
                 kv_cache,
                 k_fp8,
@@ -673,7 +679,9 @@ def sparse_attn_indexer(
             )
             fp8_mqa_logits_func = fp8_mqa_logits
             if current_platform.is_rocm():
-                from vllm.attention.ops.rocm_aiter_mla_sparse import rocm_fp8_mqa_logits
+                from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                    rocm_fp8_mqa_logits,
+                )
 
                 fp8_mqa_logits_func = rocm_fp8_mqa_logits
             logits = fp8_mqa_logits_func(
@@ -709,13 +717,20 @@ def sparse_attn_indexer(
             # decode_threshold since we unstrictly split
             # prefill and decode by decode_threshold
             # (currently set to 1 + speculative tokens)
+
+            # [num_decode_tokens, n_head, head_dim] -> [bs, 1+next_n, n_head, head_dim]
             padded_q_fp8_decode_tokens = pack_seq_triton(
                 q_fp8[:num_decode_tokens], decode_lens
             )
+            # [num_decode_tokens, n_head] -> [bs, 1+next_n, n_head]
+            padded_weights = pack_seq_triton(weights[:num_decode_tokens], decode_lens)
+            # [bs, 1+next_n, n_head] -> [bs * next_n, n_head]
+            padded_weights = padded_weights.flatten(0, 1)
         else:
             padded_q_fp8_decode_tokens = q_fp8[:num_decode_tokens].reshape(
                 decode_lens.shape[0], -1, *q_fp8.shape[1:]
             )
+            padded_weights = weights
         # TODO: move and optimize below logic with triton kernels
         batch_size = padded_q_fp8_decode_tokens.shape[0]
         next_n = padded_q_fp8_decode_tokens.shape[1]
@@ -723,7 +738,7 @@ def sparse_attn_indexer(
         num_padded_tokens = batch_size * next_n
         fp8_paged_mqa_logits_func = fp8_paged_mqa_logits
         if current_platform.is_rocm():
-            from vllm.attention.ops.rocm_aiter_mla_sparse import (
+            from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
                 rocm_fp8_paged_mqa_logits,
             )
 
@@ -731,14 +746,14 @@ def sparse_attn_indexer(
         logits = fp8_paged_mqa_logits_func(
             padded_q_fp8_decode_tokens,
             kv_cache,
-            weights[:num_padded_tokens],
+            padded_weights[:num_padded_tokens],
             decode_metadata.seq_lens,
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
         )
         num_rows = logits.shape[0]
-        topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
+        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
         torch.ops._C.top_k_per_row_decode(
             logits,
@@ -779,15 +794,6 @@ def sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
-    # profile run
-    # NOTE(Chen): create the max possible flattened_kv. So that
-    # profile_run can get correct memory usage.
-    _flattened_kv = torch.empty(
-        [total_seq_lens, head_dim + 4], device=k.device, dtype=torch.uint8
-    )
-    fp8_dtype = current_platform.fp8_dtype()
-    _k_fp8 = _flattened_kv[..., :head_dim].view(fp8_dtype).contiguous()
-    _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
     return topk_indices_buffer
 
 
@@ -838,7 +844,11 @@ class Indexer(nn.Module):
         )
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.weights_proj = ReplicatedLinear(
-            hidden_size, self.n_head, quant_config=None, prefix=f"{prefix}.weights_proj"
+            hidden_size,
+            self.n_head,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.weights_proj",
         )
         self.softmax_scale = self.head_dim**-0.5
 
@@ -877,8 +887,14 @@ class Indexer(nn.Module):
         )
 
         q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
-        q = torch.cat([q_pe.squeeze(0), q_nope], dim=-1)
-        k = torch.cat([k_pe.squeeze((0, 2)), k_nope], dim=-1)
+        # Note: RoPE (NeoX) can introduce extra leading dimensions during compilation
+        # so we need to reshape back to token-flattened shapes
+        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+
+        q = torch.cat([q_pe, q_nope], dim=-1)
+        # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
+        k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
@@ -1018,7 +1034,6 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
-            rotary_dim=qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=False,
@@ -1038,7 +1053,6 @@ class DeepseekV2MLAAttention(nn.Module):
         if self.is_v32:
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
-                rotary_dim=qk_rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
                 is_neox_style=True,
@@ -1481,6 +1495,7 @@ class DeepseekV2ForCausalLM(
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         return SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -1514,6 +1529,7 @@ class DeepseekV2ForCausalLM(
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -1593,7 +1609,11 @@ class DeepseekV2ForCausalLM(
                     # Determine split axis based on op type
                     # gate/up: ColumnParallel → split along dim 0
                     # down: RowParallel → split along dim 1
-                    split_dim = 1 if "down_proj.weight" in name else 0
+                    split_dim = (
+                        1
+                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
+                        else 0
+                    )
                     total = loaded_weight.shape[split_dim]
                     assert total % num_chunks == 0, (
                         f"Shared expert weight dim {total} "
@@ -1606,14 +1626,13 @@ class DeepseekV2ForCausalLM(
                     weight_to_load = loaded_weight
 
                     if is_fusion_moe_shared_experts_layer:
-                        if split_dim == 0:
-                            weight_to_load = loaded_weight[
-                                j * chunk_size : (j + 1) * chunk_size, :
-                            ]
+                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
+                        if loaded_weight.ndim == 1:
+                            weight_to_load = loaded_weight[chunk_slice]
+                        elif split_dim == 0:
+                            weight_to_load = loaded_weight[chunk_slice, :]
                         else:
-                            weight_to_load = loaded_weight[
-                                :, j * chunk_size : (j + 1) * chunk_size
-                            ]
+                            weight_to_load = loaded_weight[:, chunk_slice]
                         # Synthesize an expert-style name so expert mapping
                         # can route it
                         chunk_name = name.replace(

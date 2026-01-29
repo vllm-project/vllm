@@ -10,6 +10,7 @@ if not current_platform.is_cpu():
 MODELS = [
     "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ",
     "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",  # with g_idx
+    "Qwen/Qwen1.5-0.5B-Chat-GPTQ-Int4",  # without g_idx
 ]
 DTYPE = ["bfloat16"]
 

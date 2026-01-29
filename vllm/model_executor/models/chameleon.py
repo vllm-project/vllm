@@ -49,13 +49,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -314,7 +314,6 @@ class ChameleonAttention(nn.Module):
         self.k_norm = ChameleonLayerNorm((self.num_kv_heads, self.head_dim))
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
         )

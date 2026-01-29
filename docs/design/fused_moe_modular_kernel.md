@@ -2,7 +2,7 @@
 
 ## Introduction
 
-FusedMoEModularKernel is implemented [here](../..//vllm/model_executor/layers/fused_moe/modular_kernel.py)
+FusedMoEModularKernel is implemented [here](../../vllm/model_executor/layers/fused_moe/modular_kernel.py)
 
 Based on the format of the input activations, FusedMoE implementations are broadly classified into 2 types.
 

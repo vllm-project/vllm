@@ -46,13 +46,7 @@ class SuffixDecodingProposer:
                 draft_token_ids.append([])
                 continue
 
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
             req_id = input_batch.req_ids[i]
-            if req_id in input_batch.spec_decode_unsupported_reqs:
-                draft_token_ids.append([])
-                continue
-
             num_tokens = input_batch.num_tokens_no_spec[i]
             if num_tokens >= self.max_model_len:
                 # Skip requests that have already reached the max model length.

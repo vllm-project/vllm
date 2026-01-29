@@ -60,7 +60,8 @@ async def generate(request: Request) -> Response:
 async def _generate(request_dict: dict, raw_request: Request) -> Response:
     prompt = request_dict.pop("prompt")
     stream = request_dict.pop("stream", False)
-    sampling_params = SamplingParams(**request_dict)
+    # Since SamplingParams is created fresh per request, safe to skip clone
+    sampling_params = SamplingParams(**request_dict, skip_clone=True)
     request_id = random_uuid()
 
     assert engine is not None

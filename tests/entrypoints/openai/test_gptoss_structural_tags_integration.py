@@ -8,13 +8,11 @@ from unittest.mock import Mock
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import (
-    StructuredOutputsParams,
-)
-from vllm.entrypoints.tool_server import ToolServer
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.reasoning.gptoss_reasoning_parser import (
     GptOssReasoningParser,
 )
+from vllm.sampling_params import StructuredOutputsParams
 
 
 class TestGptOssStructuralTagsIntegration:

@@ -125,7 +125,7 @@ messages = [
 
 
 @pytest.fixture(scope="module")
-def server():  # noqa: F811
+def server():
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -212,7 +212,7 @@ async def test_function_tool_use(
 
 
 @pytest.fixture(scope="module")
-def k2_server():  # noqa: F811
+def k2_server():
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",

@@ -127,11 +127,11 @@ class BailingAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        self.rotary_dim = getattr(config, "rotary_dim", self.head_dim)
+        rotary_dim = getattr(config, "rotary_dim", self.head_dim)
+        config.rope_parameters["partial_rotary_factor"] = rotary_dim / self.head_dim
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.rotary_dim,
             max_position=config.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=True,
@@ -476,6 +476,7 @@ class BailingMoeModel(nn.Module):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

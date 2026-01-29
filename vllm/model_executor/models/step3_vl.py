@@ -15,11 +15,11 @@ from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -35,13 +35,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.configs import Step3VisionEncoderConfig
@@ -753,8 +753,8 @@ class Step3VisionAttention(nn.Module):
             disable_tp=use_data_parallel,
         )
 
-        # Use unified MultiHeadAttention with automatic backend selection
-        self.attn = MultiHeadAttention(self.num_heads, self.head_dim, self.scale)
+        # Use unified MMEncoderAttention with automatic backend selection
+        self.attn = MMEncoderAttention(self.num_heads, self.head_dim, self.scale)
 
     def forward(
         self,
@@ -767,7 +767,7 @@ class Step3VisionAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
 
-        # Use unified MultiHeadAttention with automatic backend selection
+        # Use unified MMEncoderAttention with automatic backend selection
         attn_output = self.attn(q, k, v)
 
         attn_output, _ = self.out_proj(attn_output)

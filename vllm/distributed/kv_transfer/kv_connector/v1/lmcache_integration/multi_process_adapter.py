@@ -95,6 +95,10 @@ class LMCacheMPSchedulerAdapter:
             kv_rank: The kv rank used for LMCache keys
             vllm_block_size: The block size used in vLLM
         """
+        logger.warning(
+            "Importing LMCacheMPSchedulerAdapter is deprecated. "
+            "Please update your LMCache to the latest version."
+        )
         self.mq_client = MessageQueueClient(server_url, context)
 
         # Request futures
@@ -147,6 +151,14 @@ class LMCacheMPSchedulerAdapter:
         """
         return self.blocks_in_chunk
 
+    def cleanup_lookup_result(self, request_id: str) -> None:
+        """
+        Clean up lookup future for a finished request to prevent memory leak.
+        Args:
+            request_id: The ID of the finished request.
+        """
+        self.lookup_futures.pop(request_id, None)
+
     # Helper functions
     def _create_key(self, block_hash: bytes) -> IPCCacheEngineKey:
         """Convert a block hash to an IPC cache engine key"""
@@ -168,6 +180,10 @@ class LMCacheMPWorkerAdapter:
         kv_rank: int,
         vllm_block_size: int,
     ):
+        logger.warning(
+            "Importing LMCacheMPWorkerAdapter is deprecated. "
+            "Please update your LMCache to the latest version."
+        )
         self.mq_client = MessageQueueClient(server_url, context)
 
         # Instance id for GPU worker
@@ -262,6 +278,7 @@ class LMCacheMPWorkerAdapter:
     ):
         keys = []
         block_ids = []
+
         for op in ops:
             keys.extend(self._block_hashes_to_keys(op.block_hashes))
             block_ids.extend(op.block_ids)

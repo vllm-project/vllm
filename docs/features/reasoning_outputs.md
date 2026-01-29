@@ -204,6 +204,42 @@ The reasoning content is also available when both tool calling and the reasoning
 
 For more examples, please refer to [examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py](../../examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py).
 
+## Server-Level Default Chat Template Kwargs
+
+You can set default `chat_template_kwargs` at the server level using the `--default-chat-template-kwargs` CLI argument. This is useful for configuring reasoning behavior across all requests without requiring clients to specify it in each request.
+
+### Disabling Thinking Mode by Default
+
+For models like Qwen3 where thinking is enabled by default, you can disable it server-wide:
+
+```bash
+vllm serve Qwen/Qwen3-8B \
+    --reasoning-parser qwen3 \
+    --default-chat-template-kwargs '{"enable_thinking": false}'
+```
+
+### Enabling Thinking Mode by Default
+
+For models like IBM Granite 3.2 or DeepSeek-V3.1 where thinking is disabled by default, you can enable it server-wide:
+
+```bash
+vllm serve ibm-granite/granite-3.2-2b-instruct \
+    --reasoning-parser granite \
+    --default-chat-template-kwargs '{"thinking": true}'
+```
+
+### Request-Level Override
+
+Request-level `chat_template_kwargs` always take priority over server defaults. For example, if the server is started with `enable_thinking=false`, a client can still enable it for a specific request:
+
+```python
+response = client.chat.completions.create(
+    model=model,
+    messages=messages,
+    extra_body={"chat_template_kwargs": {"enable_thinking": True}}  # Overrides server default
+)
+```
+
 ## Limitations
 
 - The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).

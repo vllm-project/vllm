@@ -8,12 +8,15 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+)
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.lora.request import LoRARequest
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"

@@ -13,6 +13,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 from vllm.platforms import current_platform
 
 
+# --8<-- [start:logits_processor]
 @CustomOp.register("logits_processor")
 class LogitsProcessor(CustomOp):
     """Process logits and apply logits processors from sampling metadata.
@@ -22,6 +23,8 @@ class LogitsProcessor(CustomOp):
     2. Scale logits if needed.
     3. Apply logits processors (if any).
     """
+
+    # --8<-- [end:logits_processor]
 
     def __init__(
         self,

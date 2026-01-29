@@ -251,17 +251,6 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
         endif()
 
         # Build ACL with CMake
-        set(ARM_COMPUTE_BUILD_SHARED_LIB "OFF")
-        set(CMAKE_BUILD_TYPE "Release")
-        set(ARM_COMPUTE_ARCH "armv8.2-a")
-        set(ARM_COMPUTE_ENABLE_ASSERTS "OFF")
-        set(ARM_COMPUTE_ENABLE_CPPTHREADS "OFF")
-        set(ONEDNN_ENABLE_PRIMITIVE "MATMUL;REORDER")
-        set(ARM_COMPUTE_ENABLE_OPENMP "ON")
-        set(ARM_COMPUTE_ENABLE_WERROR "OFF")
-        set(ARM_COMPUTE_BUILD_EXAMPLES "OFF")
-        set(ARM_COMPUTE_BUILD_TESTING "OFF")
-
         set(_cmake_config_cmd
              ${CMAKE_COMMAND} -G Ninja -B build 
             -DARM_COMPUTE_BUILD_SHARED_LIB=OFF 
@@ -341,7 +330,7 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
         PUBLIC ${oneDNN_BINARY_DIR}/include
         PRIVATE ${oneDNN_SOURCE_DIR}/src
     )
-    target_link_libraries(dnnl_ext dnnl)
+    target_link_libraries(dnnl_ext dnnl torch)
     target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS} -fPIC)
     list(APPEND LIBS dnnl_ext)
     set(USE_ONEDNN ON)
@@ -369,13 +358,13 @@ set(VLLM_EXT_SRC
     "csrc/cpu/pos_encoding.cpp"
     "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_attn.cpp"
-    "csrc/cpu/scratchpad_manager.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
         "csrc/cpu/cpu_wna16.cpp"
+        "csrc/cpu/cpu_fused_moe.cpp"
         ${VLLM_EXT_SRC})
     if (ENABLE_AVX512BF16 AND ENABLE_AVX512VNNI)
         set(VLLM_EXT_SRC

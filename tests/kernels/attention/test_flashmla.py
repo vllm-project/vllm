@@ -7,12 +7,12 @@ import random
 import pytest
 import torch
 
-from vllm.attention.ops.flashmla import (
+from vllm.triton_utils import triton
+from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
     is_flashmla_dense_supported,
 )
-from vllm.triton_utils import triton
 
 
 def cal_diff(

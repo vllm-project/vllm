@@ -119,7 +119,7 @@ def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
 def get_available_device() -> str:
     try:
         return triton.runtime.driver.active.get_current_target().backend
-    except BaseException:
+    except (RuntimeError, AttributeError):
         return "cpu"
 
 

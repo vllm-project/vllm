@@ -30,7 +30,7 @@ from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 class MarlinLinearKernel(MPLinearKernel):
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        return 75
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:

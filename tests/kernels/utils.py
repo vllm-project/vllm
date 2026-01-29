@@ -13,11 +13,11 @@ import torch
 from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
-from vllm.attention.backends.abstract import AttentionType
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.torch_utils import make_tensor_with_pad
+from vllm.v1.attention.backend import AttentionType
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.

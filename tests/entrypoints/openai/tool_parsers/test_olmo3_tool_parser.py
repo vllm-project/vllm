@@ -9,9 +9,9 @@ from tests.entrypoints.openai.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
-from vllm.entrypoints.openai.protocol import FunctionCall
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers import ToolParser, ToolParserManager
 
 # https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#model-response-format-1
 SIMPLE_FUNCTION_OUTPUT = "get_weather(city='San Francisco', metric='celsius')"

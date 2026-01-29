@@ -25,6 +25,7 @@ from vllm import _custom_ops as ops  # use existing nvfp4 gemm in vllm
 from vllm._custom_ops import fusedQuantizeNv
 from vllm.model_executor.layers.quantization.qutlass_utils import to_blocked
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA required for these tests.", allow_module_level=True)
@@ -193,7 +194,7 @@ LLAMA_MODELS = {
 
 @pytest.fixture(autouse=True)
 def _seed_each_test():
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     np.random.seed(0)
     torch.random.manual_seed(0)
 

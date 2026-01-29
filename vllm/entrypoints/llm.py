@@ -9,7 +9,7 @@ import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 from vllm.beam_search import (
     BeamSearchInstance,
@@ -18,8 +18,10 @@ from vllm.beam_search import (
     create_sort_beams_key_function,
 )
 from vllm.config import (
+    AttentionConfig,
     CompilationConfig,
     PoolerConfig,
+    ProfilerConfig,
     StructuredOutputsConfig,
     is_init_field,
 )
@@ -40,7 +42,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     resolve_chat_template_content_format,
 )
-from vllm.entrypoints.score_utils import (
+from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
     _cosine_similarity,
@@ -71,8 +73,8 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
-from vllm.tokenizers import MistralTokenizer, TokenizerLike
-from vllm.tokenizers.hf import get_cached_tokenizer
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
@@ -156,6 +158,7 @@ class LLM:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
+        enable_return_routed_experts: Whether to return routed experts.
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
         hf_token: The token to use as HTTP bearer authorization for remote files
@@ -170,10 +173,14 @@ class LLM:
             The available overrides depend on the model that is being run.
             For example, for Phi-3-Vision: `{"num_crops": 4}`.
         pooler_config: Initialize non-default pooling config for the pooling
-            model. e.g. `PoolerConfig(pooling_type="mean", normalize=False)`.
+            model. e.g. `PoolerConfig(seq_pooling_type="MEAN", normalize=False)`.
         compilation_config: Either an integer or a dictionary. If it is an
             integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
+        attention_config: Configuration for attention mechanisms. Can be a
+            dictionary or an AttentionConfig instance. If a dictionary, it will
+            be converted to an AttentionConfig. Allows specifying the attention
+            backend and other attention-related settings.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
     Note:
@@ -198,11 +205,12 @@ class LLM:
         quantization: QuantizationMethods | None = None,
         revision: str | None = None,
         tokenizer_revision: str | None = None,
-        seed: int | None = None,
+        seed: int = 0,
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: bool = False,
+        enable_return_routed_experts: bool = False,
         disable_custom_all_reduce: bool = False,
         hf_token: bool | str | None = None,
         hf_overrides: HfOverrides | None = None,
@@ -211,6 +219,8 @@ class LLM:
         structured_outputs_config: dict[str, Any]
         | StructuredOutputsConfig
         | None = None,
+        profiler_config: dict[str, Any] | ProfilerConfig | None = None,
+        attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -250,37 +260,28 @@ class LLM:
         if hf_overrides is None:
             hf_overrides = {}
 
-        if compilation_config is not None:
-            if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(
-                    mode=CompilationMode(compilation_config)
-                )
-            elif isinstance(compilation_config, dict):
-                compilation_config_instance = CompilationConfig(
-                    **{
-                        k: v
-                        for k, v in compilation_config.items()
-                        if is_init_field(CompilationConfig, k)
-                    }
-                )
-            else:
-                compilation_config_instance = compilation_config
-        else:
-            compilation_config_instance = CompilationConfig()
+        def _make_config(value: Any, cls: type[_R]) -> _R:
+            """Convert dict/None/instance to a config instance."""
+            if value is None:
+                return cls()
+            if isinstance(value, dict):
+                return cls(**{k: v for k, v in value.items() if is_init_field(cls, k)})  # type: ignore[arg-type]
+            return value
 
-        if structured_outputs_config is not None:
-            if isinstance(structured_outputs_config, dict):
-                structured_outputs_instance = StructuredOutputsConfig(
-                    **{
-                        k: v
-                        for k, v in structured_outputs_config.items()
-                        if is_init_field(StructuredOutputsConfig, k)
-                    }
-                )
-            else:
-                structured_outputs_instance = structured_outputs_config
+        if isinstance(compilation_config, int):
+            compilation_config_instance = CompilationConfig(
+                mode=CompilationMode(compilation_config)
+            )
         else:
-            structured_outputs_instance = StructuredOutputsConfig()
+            compilation_config_instance = _make_config(
+                compilation_config, CompilationConfig
+            )
+
+        structured_outputs_instance = _make_config(
+            structured_outputs_config, StructuredOutputsConfig
+        )
+        profiler_config_instance = _make_config(profiler_config, ProfilerConfig)
+        attention_config_instance = _make_config(attention_config, AttentionConfig)
 
         # warn about single-process data parallel usage.
         _dp_size = int(kwargs.get("data_parallel_size", 1))
@@ -318,12 +319,15 @@ class LLM:
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
+            enable_return_routed_experts=enable_return_routed_experts,
             disable_custom_all_reduce=disable_custom_all_reduce,
             hf_token=hf_token,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             pooler_config=pooler_config,
             structured_outputs_config=structured_outputs_instance,
+            profiler_config=profiler_config_instance,
+            attention_config=attention_config_instance,
             compilation_config=compilation_config_instance,
             logits_processors=logits_processors,
             **kwargs,
@@ -347,18 +351,11 @@ class LLM:
         self.input_processor = self.llm_engine.input_processor
         self.io_processor = self.llm_engine.io_processor
 
+        # Cache for __repr__ to avoid repeated collective_rpc calls
+        self._cached_repr: str | None = None
+
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
-
-    @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
-    def set_tokenizer(self, tokenizer: TokenizerLike) -> None:
-        # While CachedTokenizer is dynamic, have no choice but
-        # compare class name. Misjudgment will arise from
-        # user-defined tokenizer started with 'Cached'
-        if tokenizer.__class__.__name__.startswith("Cached"):
-            self.llm_engine.tokenizer = tokenizer
-        else:
-            self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def reset_mm_cache(self) -> None:
         self.input_processor.clear_mm_cache()
@@ -651,7 +648,10 @@ class LLM:
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
         beam_search_params = SamplingParams(
-            logprobs=2 * beam_width, max_tokens=1, temperature=temperature
+            logprobs=2 * beam_width,
+            max_tokens=1,
+            temperature=temperature,
+            skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
 
@@ -1289,6 +1289,7 @@ class LLM:
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        score_template: str | None = None,
     ) -> list[ScoringRequestOutput]:
         model_config = self.model_config
 
@@ -1322,6 +1323,7 @@ class LLM:
                 data_2=d,
                 tokenizer=tokenizer,
                 tokenization_kwargs=tokenization_kwargs,
+                score_template=score_template,
             )
 
             if token_type_ids := engine_prompt.pop("token_type_ids", None):
@@ -1356,6 +1358,7 @@ class LLM:
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
+        chat_template: str | None = None,
     ) -> list[ScoringRequestOutput]:
         """Generate similarity scores for all pairs `<text,text_pair>` or
           `<multi-modal data, multi-modal data pair>`.
@@ -1388,6 +1391,8 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
+            chat_template: The chat template to use for the scoring. If None, we
+                use the model's default chat template.
         Returns:
             A list of `ScoringRequestOutput` objects containing the
             generated scores in the same order as the input prompts.
@@ -1414,6 +1419,11 @@ class LLM:
             and getattr(model_config.hf_config, "num_labels", 0) != 1
         ):
             raise ValueError("Score API is only enabled for num_labels == 1.")
+
+        if not model_config.is_cross_encoder and chat_template is not None:
+            raise ValueError(
+                "chat_template is only supported for cross-encoder models."
+            )
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
@@ -1484,6 +1494,7 @@ class LLM:
                 use_tqdm,
                 pooling_params,
                 lora_request,
+                score_template=chat_template,
             )
         else:
             return self._embedding_score(
@@ -1619,7 +1630,7 @@ class LLM:
                 added_request_ids.append(request_id)
         except Exception as e:
             if added_request_ids:
-                self.llm_engine.abort_request(added_request_ids)
+                self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
 
     def _validate_mm_data_and_uuids(
@@ -1729,7 +1740,7 @@ class LLM:
             priority=priority,
             prompt_text=prompt_text,
         )
-        return request_id
+        return engine_request.request_id
 
     def _run_engine(
         self, *, use_tqdm: bool | Callable[..., tqdm] = True
@@ -1781,3 +1792,16 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
+
+    def __repr__(self) -> str:
+        """Return a transformers-style hierarchical view of the model."""
+        # Cache the result to avoid repeated collective_rpc calls
+        if self._cached_repr is None:
+            results = self.llm_engine.collective_rpc("get_model_inspection")
+            # In distributed settings, we get results from all workers
+            # Just return the first one (they should all be the same)
+            if results:
+                self._cached_repr = results[0]
+            else:
+                self._cached_repr = f"LLM(model={self.model_config.model!r})"
+        return self._cached_repr

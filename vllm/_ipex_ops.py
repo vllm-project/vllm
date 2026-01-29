@@ -384,18 +384,6 @@ class ipex_ops:
         return None
 
     @staticmethod
-    def copy_blocks(
-        key_caches: list[torch.Tensor],
-        value_caches: list[torch.Tensor],
-        block_mapping: torch.Tensor,
-    ) -> None:
-        torch.xpu.copy_blocks(  # type: ignore
-            key_caches,
-            value_caches,
-            block_mapping,
-        )
-
-    @staticmethod
     def swap_blocks(
         src: torch.Tensor, dst: torch.Tensor, block_mapping: torch.Tensor
     ) -> None:

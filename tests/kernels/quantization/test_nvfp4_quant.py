@@ -6,6 +6,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
@@ -134,7 +135,7 @@ def test_quantize_to_fp4(
     seed: int,
     device: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
 
     m, n = shape
@@ -156,7 +157,7 @@ def test_quantize_to_fp4(
 @torch.inference_mode()
 def test_quantize_to_fp4_padded(pad_shape: tuple[int, int]) -> None:
     dtype = torch.float16
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     torch.set_default_device("cuda:0")
 
     m, n = pad_shape

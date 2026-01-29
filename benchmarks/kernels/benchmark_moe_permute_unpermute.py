@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
 from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import set_random_seed
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -261,7 +262,7 @@ def benchmark_unpermute(
 class BenchmarkWorker:
     def __init__(self, seed: int) -> None:
         torch.set_default_device("cuda")
-        current_platform.seed_everything(seed)
+        set_random_seed(seed)
         self.seed = seed
         # Get the device ID to allocate tensors and kernels
         # on the respective GPU. This is required for Ray to work
@@ -279,7 +280,7 @@ class BenchmarkWorker:
         use_int8_w8a16: bool,
         use_customized_permute: bool = False,
     ) -> tuple[dict[str, int], float]:
-        current_platform.seed_everything(self.seed)
+        set_random_seed(self.seed)
 
         permute_time = benchmark_permute(
             num_tokens,

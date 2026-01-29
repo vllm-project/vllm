@@ -124,9 +124,7 @@ class MultiprocExecutor(Executor):
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
 
-        # Multiprocessing-based executor does not support multi-node setting.
-        # Since it only works for single node, we can use the loopback address
-        # get_loopback_ip() for communication.
+        # use the loopback address get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port()
         )
@@ -294,8 +292,8 @@ class MultiprocExecutor(Executor):
         kwargs: dict | None = None,
         non_block: bool = False,
         unique_reply_rank: int | None = None,
-        kv_output_aggregator: KVOutputAggregator = None,
-    ) -> Any | list[Any] | Future[Any | list[Any]]:
+        kv_output_aggregator: KVOutputAggregator | None = None,
+    ) -> Any:
         """Returns single result if unique_reply_rank and/or kv_output_aggregator
         is provided, otherwise list."""
         assert self.rpc_broadcast_mq is not None, (
@@ -413,9 +411,9 @@ class MultiprocExecutor(Executor):
 
     @cached_property
     def max_concurrent_batches(self) -> int:
-        if self.scheduler_config.async_scheduling:
-            return 2
-        return self.parallel_config.pipeline_parallel_size
+        # PP requires PP-size concurrent batches to fill the pipeline.
+        pp_size = self.parallel_config.pipeline_parallel_size
+        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def _get_output_rank(self) -> int:
         # Only returns ModelRunnerOutput from TP rank=0 and PP rank=-1
@@ -476,6 +474,8 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    rpc_broadcast_mq: MessageQueue | None
+    worker_response_mq: MessageQueue | None
 
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
@@ -487,7 +487,7 @@ class WorkerProc:
             )
 
             # Initializes a message queue for sending the model output
-            self.worker_response_mq: MessageQueue = MessageQueue(1, 1)
+            self.worker_response_mq = MessageQueue(1, 1)
             self.peer_response_handles = []
         else:
             # Initialize remote MessageQueue for receiving SchedulerOutput across nodes
@@ -519,9 +519,7 @@ class WorkerProc:
         shared_worker_lock: LockType,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(
-            vllm_config=vllm_config, rpc_rank=local_rank, global_rank=rank
-        )
+        wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
@@ -695,7 +693,7 @@ class WorkerProc:
         worker = None
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
-        death_pipe = kwargs.pop("death_pipe", None)
+        death_pipe: Connection | None = kwargs.pop("death_pipe", None)
         shutdown_event = threading.Event()
         # Start death monitoring thread if death_pipe is provided
         if death_pipe is not None:
@@ -706,7 +704,7 @@ class WorkerProc:
                     death_pipe.recv()
                 except EOFError:
                     # Parent process has exited, terminate this worker
-                    logger.info("Parent process exited, terminating worker")
+                    logger.info_once("Parent process exited, terminating worker")
                     # Send signal to self to trigger clean shutdown
                     shutdown_event.set()
                 except Exception as e:
@@ -720,6 +718,7 @@ class WorkerProc:
         try:
             reader.close()
             worker = WorkerProc(*args, **kwargs)
+            assert worker.worker_response_mq is not None
 
             # Send READY once we know everything is loaded
             ready_writer.send(
@@ -804,6 +803,7 @@ class WorkerProc:
 
     def worker_busy_loop(self, cancel: threading.Event | None = None):
         """Main busy loop for Multiprocessing Workers"""
+        assert self.rpc_broadcast_mq is not None
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                 cancel=cancel, indefinite=True

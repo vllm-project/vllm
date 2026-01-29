@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
-from vllm.entrypoints.context import (
+from vllm.entrypoints.openai.responses.context import (
     HarmonyContext,
     StreamingHarmonyContext,
     TurnMetrics,
@@ -71,7 +71,7 @@ async def generate_mock_outputs(
 def mock_parser():
     """Set up a mock parser for tests."""
     with patch(
-        "vllm.entrypoints.context.get_streamable_parser_for_assistant"
+        "vllm.entrypoints.openai.responses.context.get_streamable_parser_for_assistant"
     ) as mock_parser_factory:
         # Create a mock parser object
         parser = MagicMock()
@@ -284,7 +284,7 @@ async def test_negative_tool_tokens_edge_case():
     """Test edge case where calculation could result in negative tool
     tokens. We should log an error and clamp the value to 0."""
     # Use patch to check if logger.error was called
-    with patch("vllm.entrypoints.context.logger.error") as mock_log:
+    with patch("vllm.entrypoints.openai.responses.context.logger.error") as mock_log:
         context = HarmonyContext(messages=[], available_tools=["browser"])
 
         # First turn

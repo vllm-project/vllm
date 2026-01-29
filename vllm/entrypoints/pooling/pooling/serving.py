@@ -14,12 +14,12 @@ from typing_extensions import assert_never
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
     IOProcessorResponse,
@@ -137,11 +137,8 @@ class OpenAIServingPooling(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
-                (
-                    _,
-                    _,
-                    engine_prompts,
-                ) = await self._preprocess_chat(
+
+                _, engine_prompts = await self._preprocess_chat(
                     request,
                     tokenizer,
                     request.messages,

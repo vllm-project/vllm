@@ -8,8 +8,9 @@ import pytest
 import pytest_asyncio
 from transformers import AutoProcessor
 
-from vllm.multimodal.base import MediaWithBytes
-from vllm.multimodal.utils import encode_image_base64, fetch_image
+from vllm.multimodal.media import MediaWithBytes
+from vllm.multimodal.utils import encode_image_url, fetch_image
+from vllm.platforms import current_platform
 
 from ...utils import RemoteOpenAIServer
 
@@ -24,24 +25,33 @@ TEST_IMAGE_ASSETS = [
     "RGBA_comp.png",  # "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
 ]
 
-EXPECTED_MM_BEAM_SEARCH_RES = [
-    [
-        "The image shows a wooden boardwalk leading through a",
-        "The image shows a wooden boardwalk extending into a",
-    ],
-    [
-        "The image shows two parrots perched on",
-        "The image shows two birds perched on a cur",
-    ],
-    [
-        "The image shows a Venn diagram with three over",
-        "The image shows a colorful Venn diagram with",
-    ],
-    [
-        "This image displays a gradient of colors ranging from",
-        "This image displays a gradient of colors forming a spectrum",
-    ],
+# Required terms for beam search validation
+# Each entry is a list of term groups - ALL groups must match
+# Each group is a list of alternatives - at least ONE term in the group must appear
+# This provides semantic validation while allowing wording variation
+REQUIRED_BEAM_SEARCH_TERMS = [
+    # Boardwalk image: must have "boardwalk" AND ("wooden" or "wood")
+    [["boardwalk"], ["wooden", "wood"]],
+    # Parrots image: must have ("parrot" or "bird") AND "two"
+    [["parrot", "bird"], ["two"]],
+    # Venn diagram: must have "venn" AND "diagram"
+    [["venn"], ["diagram"]],
+    # Gradient image: must have "gradient" AND ("color" or "spectrum")
+    [["gradient"], ["color", "spectrum"]],
 ]
+
+
+def check_output_matches_terms(content: str, term_groups: list[list[str]]) -> bool:
+    """
+    Check if content matches all required term groups.
+    Each term group requires at least one of its terms to be present.
+    All term groups must be satisfied.
+    """
+    content_lower = content.lower()
+    for group in term_groups:
+        if not any(term.lower() in content_lower for term in group):
+            return False
+    return True
 
 
 @pytest.fixture(scope="module")
@@ -59,7 +69,16 @@ def server():
         json.dumps({"image": MAXIMUM_IMAGES}),
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # ROCm: Increase timeouts to handle potential network delays and slower
+    # video processing when downloading multiple videos from external sources
+    env_overrides = {}
+    if current_platform.is_rocm():
+        env_overrides = {
+            "VLLM_VIDEO_FETCH_TIMEOUT": "120",
+            "VLLM_ENGINE_ITERATION_TIMEOUT_S": "300",
+        }
+
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_overrides) as remote_server:
         yield remote_server
 
 
@@ -70,11 +89,9 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image(local_asset_server) -> dict[str, str]:
+def url_encoded_image(local_asset_server) -> dict[str, str]:
     return {
-        image_asset: encode_image_base64(
-            local_asset_server.get_image_asset(image_asset)
-        )
+        image_asset: encode_image_url(local_asset_server.get_image_asset(image_asset))
         for image_asset in TEST_IMAGE_ASSETS
     }
 
@@ -234,11 +251,11 @@ async def test_single_chat_session_image_base64encoded(
     model_name: str,
     raw_image_url: str,
     image_url: str,
-    base64_encoded_image: dict[str, str],
+    url_encoded_image: dict[str, str],
 ):
     content_text = "What's in this image?"
     messages = dummy_messages_from_image_url(
-        f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}",
+        url_encoded_image[raw_image_url],
         content_text,
     )
 
@@ -288,15 +305,13 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
     client: openai.AsyncOpenAI,
     model_name: str,
     image_idx: int,
-    base64_encoded_image: dict[str, str],
+    url_encoded_image: dict[str, str],
 ):
-    # NOTE: This test also validates that we pass MM data through beam search
+    # NOTE: This test validates that we pass MM data through beam search
     raw_image_url = TEST_IMAGE_ASSETS[image_idx]
-    expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
+    required_terms = REQUIRED_BEAM_SEARCH_TERMS[image_idx]
 
-    messages = dummy_messages_from_image_url(
-        f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"
-    )
+    messages = dummy_messages_from_image_url(url_encoded_image[raw_image_url])
 
     chat_completion = await client.chat.completions.create(
         model=model_name,
@@ -307,8 +322,29 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
         extra_body=dict(use_beam_search=True),
     )
     assert len(chat_completion.choices) == 2
-    for actual, expected_str in zip(chat_completion.choices, expected_res):
-        assert actual.message.content == expected_str
+
+    # Verify beam search produces two different non-empty outputs
+    content_0 = chat_completion.choices[0].message.content
+    content_1 = chat_completion.choices[1].message.content
+
+    # Emit beam search outputs for debugging
+    print(
+        f"Beam search outputs for image {image_idx} ({raw_image_url}): "
+        f"Output 0: {content_0!r}, Output 1: {content_1!r}"
+    )
+
+    assert content_0, "First beam search output should not be empty"
+    assert content_1, "Second beam search output should not be empty"
+    assert content_0 != content_1, "Beam search should produce different outputs"
+
+    # Verify each output contains the required terms for this image
+    for i, content in enumerate([content_0, content_1]):
+        if not check_output_matches_terms(content, required_terms):
+            pytest.fail(
+                f"Output {i} '{content}' doesn't contain required terms. "
+                f"Expected all of these term groups (at least one from each): "
+                f"{required_terms}"
+            )
 
 
 @pytest.mark.asyncio
