@@ -153,6 +153,7 @@ class Mixer2RMSNormGated(CustomOp):
             bias=None,
             z=gate,
             eps=self.variance_epsilon,
+            group_size=self.group_size,
             norm_before_gate=False,
         )
 

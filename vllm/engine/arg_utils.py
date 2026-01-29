@@ -1655,8 +1655,17 @@ class EngineArgs:
 
         # Set num_input_prefix_tokens from model config
         scheduler_config.num_input_prefix_tokens = getattr_iter(
-            model_config, ("num_meta_tokens", "num_memory_tokens"), 0
+            model_config.hf_config, ("num_meta_tokens", "num_memory_tokens"), 0
         )
+
+        if scheduler_config.num_input_prefix_tokens > 0:
+            model_config.max_model_len += scheduler_config.num_input_prefix_tokens
+            logger.info(
+                "Increased max_model_len by %d to account for input prefix tokens. "
+                "New max_model_len: %d",
+                scheduler_config.num_input_prefix_tokens,
+                model_config.max_model_len,
+            )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
             raise ValueError(

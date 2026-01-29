@@ -4775,7 +4775,11 @@ class GPUModelRunner(
             # MM Encoder only model no need to run sampler.
             return torch.tensor([])
 
-        hidden_states = torch.rand_like(hidden_states)
+        has_inf_or_nan = (
+            torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
+        )
+        if has_inf_or_nan:
+            hidden_states = torch.rand_like(hidden_states)
 
         logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)

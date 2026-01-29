@@ -24,12 +24,12 @@ import torch
 from einops import rearrange
 from torch import nn
 
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionBackend
+    from vllm.v1.attention.backend import AttentionBackend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -163,6 +163,7 @@ class NemotronFlashMoE(nn.Module):
 
         # Experts
         expert_mapping = FusedMoE.make_expert_params_mapping(
+            model=self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -226,7 +227,7 @@ class NemotronDeltaNet(MambaBase, CustomOp):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
-        self.num_meta_tokens = config.num_meta_tokens
+        self.num_meta_tokens = getattr(config, "num_memory_tokens", 0)
 
         # DeltaNet dimensions
         self.num_k_heads = config.linear_num_key_heads
@@ -780,7 +781,7 @@ class NemotronFlashSequentialAttention(nn.Module):
         self.num_attention_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
-        self.num_meta_tokens = config.num_meta_tokens
+        self.num_meta_tokens = getattr(config, "num_memory_tokens", 0)
 
         self.q_proj = ColumnParallelLinear(
             self.hidden_size,
@@ -991,7 +992,7 @@ class NemotronFlashModel(nn.Module):
             prefix=f"{prefix}.embed_tokens",
         )
 
-        self.num_meta_tokens = config.num_meta_tokens
+        self.num_meta_tokens = getattr(config, "num_memory_tokens", 0)
         if self.num_meta_tokens > 0:
             # Initialize with zeros - will be overwritten by load_weights
             self.memory_tokens = nn.Parameter(
@@ -1047,49 +1048,25 @@ class NemotronFlashModel(nn.Module):
     def _apply_memory_tokens(
         self, hidden_states: torch.Tensor, positions: torch.Tensor
     ) -> torch.Tensor:
-        """Replace first num_meta embeddings of each prefill sequence with meta tokens.
+        """Replace first num_meta embeddings with memory tokens.
 
-        Uses forward_context to get query_start_loc for proper sequence boundaries.
+        The input processor prepends num_memory_tokens placeholder tokens
+        to each sequence. This method replaces those placeholder embeddings
+        with the learned memory_tokens during prefill.
         """
         num_meta = self.num_meta_tokens
-
-        # Get attention metadata for sequence boundaries
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
-
-        # attn_metadata might be a dict keyed by prefix for hybrid models
-        if isinstance(attn_metadata, dict):
-            # Use the first available metadata for sequence info
-            # (all should have same query_start_loc for embedding phase)
-            attn_metadata = next(iter(attn_metadata.values()))
-
-        if attn_metadata is None:
+        if num_meta == 0:
             return hidden_states
 
-        query_start_loc = getattr(attn_metadata, "query_start_loc", None)
-        if query_start_loc is None or len(query_start_loc) <= 1:
-            return hidden_states
+        seq_len = hidden_states.shape[0]
+        if (
+            seq_len >= num_meta
+            and len(positions) >= num_meta
+            and positions[0].item() == 0
+        ):
+            hidden_states[:num_meta] = self.memory_tokens
 
-        # Clone to avoid in-place modification
-        result = hidden_states.clone()
-
-        # For each sequence, check if it starts at position 0 (new prefill)
-        # and replace its first num_meta embeddings
-        num_seqs = len(query_start_loc) - 1
-
-        for i in range(num_seqs):
-            seq_start = query_start_loc[i].item()
-            seq_end = query_start_loc[i + 1].item()
-            seq_len = seq_end - seq_start
-
-            if seq_start < len(positions) and positions[seq_start].item() == 0:
-                # Replace first num_meta embeddings with memory_tokens
-                tokens_to_replace = min(num_meta, seq_len)
-                if tokens_to_replace > 0:
-                    result[seq_start : seq_start + tokens_to_replace] = (
-                        self.memory_tokens[:tokens_to_replace]
-                    )
-        return result
+        return hidden_states
 
 
 class NemotronFlashForCausalLM(
@@ -1286,8 +1263,15 @@ class NemotronFlashForCausalLM(
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        memory_tokens_weight = None
+
         def preprocess_weights():
+            nonlocal memory_tokens_weight
             for name, weight in weights:
+                if name == "model.memory_tokens":
+                    memory_tokens_weight = weight
+                    continue
+
                 if (
                     ".gla." in name
                     and "conv1d.weight" in name
@@ -1302,4 +1286,12 @@ class NemotronFlashForCausalLM(
             self,
             skip_prefixes=["lm_head."] if self.config.tie_word_embeddings else None,
         )
-        return loader.load_weights(preprocess_weights(), mapper=self.hf_to_vllm_mapper)
+        result = loader.load_weights(
+            preprocess_weights(), mapper=self.hf_to_vllm_mapper
+        )
+
+        if memory_tokens_weight is not None and self.model.memory_tokens is not None:
+            self.model.memory_tokens.data.copy_(memory_tokens_weight)
+            result.add("model.memory_tokens")
+
+        return result
