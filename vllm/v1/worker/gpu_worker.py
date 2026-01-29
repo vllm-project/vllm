@@ -936,7 +936,7 @@ class Worker(WorkerBase):
             tensorizer_config=tensorizer_config,
         )
 
-    def init_weight_transfer(self, init_info: dict) -> None:
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
         """
         Initialize weight transfer mechanism.
         For NCCL backend, this creates a process group with the trainer.
@@ -951,7 +951,7 @@ class Worker(WorkerBase):
             )
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
-        self.weight_transfer_engine.init_transfer(typed_init_info)
+        self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
     def update_weights(self, update_info: dict) -> None:
         """

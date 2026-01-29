@@ -18,11 +18,11 @@ import torch
 from vllm import LLM
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
-    BackendInitInfo,
-    BackendUpdateInfo,
     WeightTransferEngine,
+    WeightTransferInitInfo,
     WeightTransferInitRequest,
-    WeightUpdateRequest,
+    WeightTransferUpdateInfo,
+    WeightTransferUpdateRequest,
 )
 
 from ...utils import create_new_process_for_each_test
@@ -35,14 +35,14 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 @dataclass
-class MockInitInfo(BackendInitInfo):
+class MockInitInfo(WeightTransferInitInfo):
     """Mock initialization info."""
 
     test_param: str = "test"
 
 
 @dataclass
-class MockUpdateInfo(BackendUpdateInfo):
+class MockUpdateInfo(WeightTransferUpdateInfo):
     """Mock update info."""
 
     names: list[str] | None = None
@@ -57,7 +57,7 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
     update_info_cls = MockUpdateInfo
 
     # Class-level tracking for verification across processes
-    init_transfer_called: bool = False
+    init_transfer_engine_called: bool = False
     receive_weights_called: bool = False
     shutdown_called: bool = False
     last_init_info: MockInitInfo | None = None
@@ -66,14 +66,14 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
     def __init__(self, config, parallel_config):
         super().__init__(config, parallel_config)
         # Reset tracking on init
-        MockWeightTransferEngine.init_transfer_called = False
+        MockWeightTransferEngine.init_transfer_engine_called = False
         MockWeightTransferEngine.receive_weights_called = False
         MockWeightTransferEngine.shutdown_called = False
         MockWeightTransferEngine.last_init_info = None
         MockWeightTransferEngine.last_update_info = None
 
-    def init_transfer(self, init_info: MockInitInfo) -> None:
-        MockWeightTransferEngine.init_transfer_called = True
+    def init_transfer_engine(self, init_info: MockInitInfo) -> None:
+        MockWeightTransferEngine.init_transfer_engine_called = True
         MockWeightTransferEngine.last_init_info = init_info
 
     def receive_weights(
@@ -118,8 +118,9 @@ def test_get_world_size_tp1():
 
 
 @create_new_process_for_each_test()
-def test_init_weight_transfer_calls_engine():
-    """Test that init_weight_transfer calls the engine's init_transfer method."""
+def test_init_weight_transfer_engine_calls_engine():
+    """Test that init_weight_transfer_engine calls the engine's
+    init_transfer_engine method."""
     if torch.cuda.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
@@ -145,22 +146,22 @@ def test_init_weight_transfer_calls_engine():
         results = llm.collective_rpc(check_engine_exists)
         assert all(results), "Weight transfer engine should be initialized"
 
-        # Call init_weight_transfer
-        llm.init_weight_transfer(
+        # Call init_weight_transfer_engine
+        llm.init_weight_transfer_engine(
             WeightTransferInitRequest(init_info={"test_param": "hello"})
         )
 
-        # Verify init_transfer was called on the engine
+        # Verify init_transfer_engine was called on the engine
         def check_init_called(self):
             engine = self.weight_transfer_engine
             return (
-                engine.init_transfer_called,
+                engine.init_transfer_engine_called,
                 engine.last_init_info.test_param if engine.last_init_info else None,
             )
 
         results = llm.collective_rpc(check_init_called)
         for called, param in results:
-            assert called, "init_transfer should have been called"
+            assert called, "init_transfer_engine should have been called"
             assert param == "hello", f"Expected 'hello', got {param}"
 
 
@@ -186,7 +187,7 @@ def test_update_weights_calls_engine():
         )
 
         # First init the weight transfer
-        llm.init_weight_transfer(
+        llm.init_weight_transfer_engine(
             WeightTransferInitRequest(init_info={"test_param": "init"})
         )
 
@@ -196,7 +197,7 @@ def test_update_weights_calls_engine():
         test_shapes = [[10, 10], [10]]
 
         llm.update_weights(
-            WeightUpdateRequest(
+            WeightTransferUpdateRequest(
                 update_info={
                     "names": test_names,
                     "dtype_names": test_dtypes,
@@ -266,13 +267,13 @@ def test_full_weight_transfer_flow():
         )
 
         # Step 1: Initialize
-        llm.init_weight_transfer(
+        llm.init_weight_transfer_engine(
             WeightTransferInitRequest(init_info={"test_param": "flow_test"})
         )
 
         # Step 2: Update weights
         llm.update_weights(
-            WeightUpdateRequest(
+            WeightTransferUpdateRequest(
                 update_info={
                     "names": ["test.weight"],
                     "dtype_names": ["bfloat16"],
@@ -288,7 +289,7 @@ def test_full_weight_transfer_flow():
         def check_flow(self):
             engine = self.weight_transfer_engine
             return {
-                "init_called": engine.init_transfer_called,
+                "init_called": engine.init_transfer_engine_called,
                 "update_called": engine.receive_weights_called,
                 "init_param": (
                     engine.last_init_info.test_param if engine.last_init_info else None
@@ -300,7 +301,7 @@ def test_full_weight_transfer_flow():
 
         results = llm.collective_rpc(check_flow)
         for result in results:
-            assert result["init_called"], "init_transfer should be called"
+            assert result["init_called"], "init_transfer_engine should be called"
             assert result["update_called"], "receive_weights should be called"
             assert result["init_param"] == "flow_test"
             assert result["update_names"] == ["test.weight"]

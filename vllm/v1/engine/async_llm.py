@@ -17,7 +17,7 @@ from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
-    WeightUpdateRequest,
+    WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
@@ -1026,7 +1026,9 @@ class AsyncLLM(EngineClient):
     def dead_error(self) -> BaseException:
         return EngineDeadError()
 
-    async def init_weight_transfer(self, request: WeightTransferInitRequest) -> None:
+    async def init_weight_transfer_engine(
+        self, request: WeightTransferInitRequest
+    ) -> None:
         """
         Initialize weight transfer for RL training.
 
@@ -1043,10 +1045,10 @@ class AsyncLLM(EngineClient):
             raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
 
         await self.collective_rpc(
-            "init_weight_transfer", kwargs={"init_info": init_info_dict}
+            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    async def update_weights(self, request: WeightUpdateRequest) -> None:
+    async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
         Batched weight update for RL training.
 
@@ -1054,10 +1056,12 @@ class AsyncLLM(EngineClient):
             request: Weight update request with backend-specific update info
         """
 
-        if isinstance(request, WeightUpdateRequest):
+        if isinstance(request, WeightTransferUpdateRequest):
             update_info_dict = request.update_info
         else:
-            raise TypeError(f"Expected WeightUpdateRequest, got {type(request)}")
+            raise TypeError(
+                f"Expected WeightTransferUpdateRequest, got {type(request)}"
+            )
 
         await self.collective_rpc(
             "update_weights", kwargs={"update_info": update_info_dict}

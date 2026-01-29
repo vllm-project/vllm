@@ -14,14 +14,19 @@ if TYPE_CHECKING:
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
-    BackendInitInfo,
-    BackendUpdateInfo,
     WeightTransferEngine,
+    WeightTransferInitInfo,
+    WeightTransferUpdateInfo,
+)
+from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    DEFAULT_PACKED_NUM_BUFFERS,
+    packed_broadcast_consumer,
 )
 
 
 @dataclass
-class NCCLInitInfo(BackendInitInfo):
+class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     """Initialization info for NCCL weight transfer backend."""
 
     master_address: str
@@ -31,7 +36,7 @@ class NCCLInitInfo(BackendInitInfo):
 
 
 @dataclass
-class NCCLUpdateInfo(BackendUpdateInfo):
+class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     """Update info for NCCL weight transfer backend."""
 
     names: list[str]
@@ -41,6 +46,12 @@ class NCCLUpdateInfo(BackendUpdateInfo):
     """Whether to use packed tensor broadcasting for efficiency.
     When True, multiple tensors are batched together before broadcasting
     to reduce NCCL communication overhead."""
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
+    """Size in bytes for each packed tensor buffer. Default is 1GB.
+    Both producer and consumer must use the same value."""
+    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
+    """Number of buffers for double/triple buffering during packed transfer.
+    Both producer and consumer must use the same value."""
 
     def __post_init__(self):
         """Validate that all lists have the same length."""
@@ -57,7 +68,9 @@ class NCCLUpdateInfo(BackendUpdateInfo):
             )
 
 
-class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo]):
+class NCCLWeightTransferEngine(
+    WeightTransferEngine[NCCLWeightTransferInitInfo, NCCLWeightTransferUpdateInfo]
+):
     """
     Weight transfer engine using NCCL for communication between trainer and workers.
 
@@ -66,8 +79,8 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
     """
 
     # Define backend-specific dataclass types
-    init_info_cls = NCCLInitInfo
-    update_info_cls = NCCLUpdateInfo
+    init_info_cls = NCCLWeightTransferInitInfo
+    update_info_cls = NCCLWeightTransferUpdateInfo
 
     def __init__(
         self, config: WeightTransferConfig, parallel_config: ParallelConfig
@@ -82,7 +95,7 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
         super().__init__(config, parallel_config)
         self.model_update_group: PyNcclCommunicator | None = None
 
-    def init_transfer(self, init_info: NCCLInitInfo) -> None:
+    def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """
         Initialize NCCL process group with the trainer.
 
@@ -95,10 +108,10 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
         # Must account for data parallel to get unique ranks across all workers
         dp_rank = self.parallel_config.data_parallel_rank
         world_size_per_dp = self.parallel_config.world_size  # TP * PP
-        tp_rank = self.parallel_config.rank
+        rank_within_dp = self.parallel_config.rank
 
         # Unique rank across all DP groups
-        worker_rank = dp_rank * world_size_per_dp + tp_rank
+        worker_rank = dp_rank * world_size_per_dp + rank_within_dp
         rank = worker_rank + init_info.rank_offset
         # Create stateless process group
         self.model_update_group = (
@@ -113,7 +126,7 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
 
     def receive_weights(
         self,
-        update_info: NCCLUpdateInfo,
+        update_info: NCCLWeightTransferUpdateInfo,
         load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
     ) -> None:
         """
@@ -131,15 +144,11 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
         """
         if self.model_update_group is None:
             raise RuntimeError(
-                "NCCL weight transfer not initialized. Call init_transfer() first."
+                "NCCL weight transfer not initialized. "
+                "Call init_transfer_engine() first."
             )
 
         if update_info.packed:
-            # Use packed tensor broadcasting for efficiency
-            from vllm.distributed.weight_transfer.packed_tensor import (
-                packed_broadcast_consumer,
-            )
-
             # Build iterator of (name, (shape, dtype)) from update_info
             def state_dict_info_iterator():
                 for name, dtype_name, shape in zip(
@@ -153,6 +162,8 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
                 group=self.model_update_group,
                 src=0,
                 post_unpack_func=load_weights,
+                buffer_size_bytes=update_info.packed_buffer_size_bytes,
+                num_buffers=update_info.packed_num_buffers,
             )
         else:
             # Use simple one-by-one broadcasting
@@ -181,6 +192,8 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
         | None = None,
         packed: bool = False,
         stream: torch.cuda.Stream | None = None,
+        packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+        packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
     ) -> None:
         """Broadcast weights from trainer to vLLM workers.
 
@@ -195,6 +208,10 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
                    broadcasting to reduce NCCL communication overhead.
             stream: CUDA stream to use for broadcasting if packed is False.
                     If packed is True, new streams will be created for each buffer.
+            packed_buffer_size_bytes: Size in bytes for each packed tensor buffer.
+                   Must match the value used in NCCLWeightTransferUpdateInfo.
+            packed_num_buffers: Number of buffers for double/triple buffering.
+                   Must match the value used in NCCLWeightTransferUpdateInfo.
 
         Example:
             >>> from vllm.distributed.weight_transfer.nccl_engine import (
@@ -220,6 +237,8 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
                 group=group,
                 src=src,
                 post_iter_func=post_iter_func,
+                buffer_size_bytes=packed_buffer_size_bytes,
+                num_buffers=packed_num_buffers,
             )
         else:
             # Use simple one-by-one broadcasting
@@ -231,7 +250,7 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
 
     @staticmethod
     def trainer_init(
-        init_info: NCCLInitInfo | dict,
+        init_info: NCCLWeightTransferInitInfo | dict,
     ) -> "PyNcclCommunicator":
         """
         Initialize NCCL process group for trainer-side weight transfer.
@@ -240,7 +259,7 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
         CUDA device (torch.cuda.current_device()).
 
         Args:
-            init_info: Either an NCCLInitInfo object or a dict with keys:
+            init_info: Either an NCCLWeightTransferInitInfo object or a dict with keys:
                 - master_address: str
                 - master_port: int
                 - world_size: int
@@ -265,7 +284,7 @@ class NCCLWeightTransferEngine(WeightTransferEngine[NCCLInitInfo, NCCLUpdateInfo
             master_port = init_info["master_port"]
             world_size = init_info["world_size"]
         else:
-            # NCCLInitInfo object
+            # NCCLWeightTransferInitInfo object
             master_address = init_info.master_address
             master_port = init_info.master_port
             world_size = init_info.world_size

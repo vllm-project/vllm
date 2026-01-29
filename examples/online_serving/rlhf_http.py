@@ -61,7 +61,7 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
     return results
 
 
-def init_weight_transfer(
+def init_weight_transfer_engine(
     base_url: str,
     master_address: str,
     master_port: int,
@@ -69,7 +69,7 @@ def init_weight_transfer(
     world_size: int,
 ) -> None:
     """Initialize weight transfer via HTTP endpoint."""
-    url = f"{base_url}/init_weight_transfer"
+    url = f"{base_url}/init_weight_transfer_engine"
     payload = {
         "init_info": dict(
             master_address=master_address,
@@ -181,7 +181,7 @@ def main():
     import threading
 
     init_thread = threading.Thread(
-        target=init_weight_transfer,
+        target=init_weight_transfer_engine,
         args=(BASE_URL, master_address, master_port, rank_offset, world_size),
     )
     init_thread.start()
@@ -195,7 +195,7 @@ def main():
         ),
     )
 
-    # Wait for init_weight_transfer to complete
+    # Wait for init_weight_transfer_engine to complete
     init_thread.join()
 
     # Pause generation before weight sync

@@ -117,7 +117,7 @@ scheduling_inference = PlacementGroupSchedulingStrategy(
 
 # Launch the vLLM inference engine. The `enforce_eager` flag reduces
 # start-up latency.
-# Note: Weight transfer APIs (init_weight_transfer, update_weights,
+# Note: Weight transfer APIs (init_weight_transfer_engine, update_weights,
 # finalize_weight_update) are now native to vLLM workers.
 llm = ray.remote(
     num_cpus=0,
@@ -159,7 +159,7 @@ for output in outputs:
 master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
 
 world_size = ray.get(llm.get_world_size.remote()) + 1  # +1 for the trainer
-inference_handle = llm.init_weight_transfer.remote(
+inference_handle = llm.init_weight_transfer_engine.remote(
     dict(
         init_info=dict(
             master_address=master_address,

@@ -16,9 +16,9 @@ from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLInitInfo,
-    NCCLUpdateInfo,
     NCCLWeightTransferEngine,
+    NCCLWeightTransferInitInfo,
+    NCCLWeightTransferUpdateInfo,
 )
 from vllm.utils.network_utils import get_open_port
 
@@ -36,15 +36,15 @@ def create_mock_parallel_config(
     return config
 
 
-# --- Unit Tests: NCCLUpdateInfo Validation ---
+# --- Unit Tests: NCCLWeightTransferUpdateInfo Validation ---
 
 
-class TestNCCLUpdateInfoValidation:
-    """Test NCCLUpdateInfo dataclass validation."""
+class TestNCCLWeightTransferUpdateInfoValidation:
+    """Test NCCLWeightTransferUpdateInfo dataclass validation."""
 
     def test_valid_update_info(self):
-        """Test creating valid NCCLUpdateInfo."""
-        info = NCCLUpdateInfo(
+        """Test creating valid NCCLWeightTransferUpdateInfo."""
+        info = NCCLWeightTransferUpdateInfo(
             names=["layer.weight", "layer.bias"],
             dtype_names=["float32", "float32"],
             shapes=[[10, 10], [10]],
@@ -56,7 +56,7 @@ class TestNCCLUpdateInfoValidation:
     def test_mismatched_dtype_names_raises(self):
         """Test that mismatched dtype_names length raises ValueError."""
         with pytest.raises(ValueError, match="dtype_names"):
-            NCCLUpdateInfo(
+            NCCLWeightTransferUpdateInfo(
                 names=["layer.weight", "layer.bias"],
                 dtype_names=["float32"],  # Only one dtype
                 shapes=[[10, 10], [10]],
@@ -65,7 +65,7 @@ class TestNCCLUpdateInfoValidation:
     def test_mismatched_shapes_raises(self):
         """Test that mismatched shapes length raises ValueError."""
         with pytest.raises(ValueError, match="shapes"):
-            NCCLUpdateInfo(
+            NCCLWeightTransferUpdateInfo(
                 names=["layer.weight", "layer.bias"],
                 dtype_names=["float32", "float32"],
                 shapes=[[10, 10]],  # Only one shape
@@ -73,7 +73,7 @@ class TestNCCLUpdateInfoValidation:
 
     def test_empty_lists_valid(self):
         """Test that empty lists are valid."""
-        info = NCCLUpdateInfo(
+        info = NCCLWeightTransferUpdateInfo(
             names=[],
             dtype_names=[],
             shapes=[],
@@ -102,7 +102,7 @@ class TestNCCLEngineParsing:
             }
         )
 
-        assert isinstance(init_info, NCCLInitInfo)
+        assert isinstance(init_info, NCCLWeightTransferInitInfo)
         assert init_info.master_address == "127.0.0.1"
         assert init_info.master_port == 12345
         assert init_info.rank_offset == 1
@@ -136,7 +136,7 @@ class TestNCCLEngineParsing:
             }
         )
 
-        assert isinstance(update_info, NCCLUpdateInfo)
+        assert isinstance(update_info, NCCLWeightTransferUpdateInfo)
         assert update_info.names == ["w1", "w2"]
         assert update_info.dtype_names == ["float32", "bfloat16"]
         assert update_info.shapes == [[100, 100], [50]]
@@ -174,7 +174,7 @@ class TestEngineRegistry:
 
 
 def test_nccl_receive_weights_without_init_raises():
-    """Test that receive_weights raises if init_transfer wasn't called."""
+    """Test that receive_weights raises if init_transfer_engine wasn't called."""
     if torch.cuda.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
@@ -182,7 +182,7 @@ def test_nccl_receive_weights_without_init_raises():
     parallel_config = create_mock_parallel_config()
     engine = NCCLWeightTransferEngine(config, parallel_config)
 
-    update_info = NCCLUpdateInfo(
+    update_info = NCCLWeightTransferUpdateInfo(
         names=["w"],
         dtype_names=["float32"],
         shapes=[[10]],
@@ -244,9 +244,9 @@ def inference_receive_tensor(
     from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import WeightTransferConfig
     from vllm.distributed.weight_transfer.nccl_engine import (
-        NCCLInitInfo,
-        NCCLUpdateInfo,
         NCCLWeightTransferEngine,
+        NCCLWeightTransferInitInfo,
+        NCCLWeightTransferUpdateInfo,
     )
 
     # Create engine with mock parallel config
@@ -259,13 +259,13 @@ def inference_receive_tensor(
     engine = NCCLWeightTransferEngine(config, parallel_config)
 
     # Initialize the engine (joins as rank 1)
-    init_info = NCCLInitInfo(
+    init_info = NCCLWeightTransferInitInfo(
         master_address=master_address,
         master_port=master_port,
         rank_offset=1,  # Trainer is rank 0, we become rank 1
         world_size=world_size,
     )
-    engine.init_transfer(init_info)
+    engine.init_transfer_engine(init_info)
 
     # Receive weights with a no-op load_weights that captures the tensor
     received_tensors = []
@@ -275,7 +275,7 @@ def inference_receive_tensor(
             # Clone tensor to keep it after engine cleans up
             received_tensors.append((name, tensor.clone()))
 
-    update_info = NCCLUpdateInfo(
+    update_info = NCCLWeightTransferUpdateInfo(
         names=["test.weight"],
         dtype_names=[tensor_dtype],
         shapes=[tensor_shape],

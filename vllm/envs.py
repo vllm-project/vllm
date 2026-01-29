@@ -251,8 +251,6 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
-    VLLM_PACKED_TENSOR_NUM_BUFFERS: int = 2
-    VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES: int = 1024 * 1024 * 1024  # 1GB
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
 
@@ -1622,14 +1620,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug logging for --enable-mfu-metrics
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
-    ),
-    # Number of buffers for packed tensor weight transfer in NCCLWeightTransferEngine
-    "VLLM_PACKED_TENSOR_NUM_BUFFERS": lambda: int(
-        os.getenv("VLLM_PACKED_TENSOR_NUM_BUFFERS", "2")
-    ),
-    # Size in bytes for each packed tensor buffer (default 1GB)
-    "VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES": lambda: int(
-        os.getenv("VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES", str(1024 * 1024 * 1024))
     ),
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),

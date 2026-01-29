@@ -142,7 +142,7 @@ def test_openapi_stateless(case: schemathesis.Case):
     # Skip weight transfer endpoints as they require special setup
     # (weight_transfer_config) and are meant to be stateful.
     if case.operation.path in (
-        "/init_weight_transfer",
+        "/init_weight_transfer_engine",
         "/update_weights",
         "/finalize_weight_update",
     ):

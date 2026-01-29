@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 import vllm.envs as envs
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
-    WeightUpdateRequest,
+    WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
@@ -103,8 +103,8 @@ async def is_paused(raw_request: Request) -> JSONResponse:
     return JSONResponse(content={"is_paused": paused})
 
 
-@router.post("/init_weight_transfer")
-async def init_weight_transfer(raw_request: Request):
+@router.post("/init_weight_transfer_engine")
+async def init_weight_transfer_engine(raw_request: Request):
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
@@ -115,7 +115,7 @@ async def init_weight_transfer(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'init_info' in request body",
         )
-    await engine_client(raw_request).init_weight_transfer(
+    await engine_client(raw_request).init_weight_transfer_engine(
         WeightTransferInitRequest(init_info=init_info)
     )
     return JSONResponse(content={"message": "Weight transfer initialized"})
@@ -134,7 +134,7 @@ async def update_weights(raw_request: Request):
             detail="Missing 'update_info' in request body",
         )
     await engine_client(raw_request).update_weights(
-        request=WeightUpdateRequest(update_info=update_info)
+        request=WeightTransferUpdateRequest(update_info=update_info)
     )
     return JSONResponse(content={"message": "Weights updated"})
 

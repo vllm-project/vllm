@@ -12,20 +12,20 @@ import torch
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 
-TInitInfo = TypeVar("TInitInfo", bound="BackendInitInfo")
-TUpdateInfo = TypeVar("TUpdateInfo", bound="BackendUpdateInfo")
+TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
+TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
 
 
 # Base protocols for backend-specific dataclasses
 @dataclass
-class BackendInitInfo(ABC):  # noqa: B024
+class WeightTransferInitInfo(ABC):  # noqa: B024
     """Base class for backend-specific initialization info."""
 
     pass
 
 
 @dataclass
-class BackendUpdateInfo(ABC):  # noqa: B024
+class WeightTransferUpdateInfo(ABC):  # noqa: B024
     """Base class for backend-specific weight update info."""
 
     pass
@@ -40,7 +40,7 @@ class WeightTransferInitRequest:
 
 
 @dataclass
-class WeightUpdateRequest:
+class WeightTransferUpdateRequest:
     """API-level weight update request."""
 
     update_info: dict[str, Any] = field(default_factory=dict)
@@ -118,7 +118,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
             ) from e
 
     @abstractmethod
-    def init_transfer(self, init_info: TInitInfo) -> None:
+    def init_transfer_engine(self, init_info: TInitInfo) -> None:
         """
         Initialize the weight transfer mechanism.
         This is called once at the beginning of training.

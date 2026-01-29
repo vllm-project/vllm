@@ -8,7 +8,10 @@ from typing import Any
 
 import torch
 
-from vllm import envs
+# Default values for packed tensor configuration.
+# These are imported by NCCLWeightTransferUpdateInfo and trainer_send_weights.
+DEFAULT_PACKED_BUFFER_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB
+DEFAULT_PACKED_NUM_BUFFERS = 2
 
 
 def packed_broadcast_producer(
@@ -16,6 +19,8 @@ def packed_broadcast_producer(
     group: Any,
     src: int,
     post_iter_func: Callable[[tuple[str, torch.Tensor]], torch.Tensor],
+    buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
 ) -> None:
     """Broadcast tensors in a packed manner from trainer to workers.
 
@@ -25,10 +30,13 @@ def packed_broadcast_producer(
         src: Source rank (0 in current implementation)
         post_iter_func: Function to apply to each (name, tensor) pair before
                        packing, should return a tensor
+        buffer_size_bytes: Size in bytes for each packed tensor buffer.
+                          Both producer and consumer must use the same value.
+        num_buffers: Number of buffers for double/triple buffering.
+                    Both producer and consumer must use the same value.
 
     """
-    target_packed_tensor_size = envs.VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES
-    num_buffers = envs.VLLM_PACKED_TENSOR_NUM_BUFFERS
+    target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.cuda.Stream() for _ in range(num_buffers)]
     buffer_idx = 0
@@ -83,6 +91,8 @@ def packed_broadcast_consumer(
     group: Any,
     src: int,
     post_unpack_func: Callable[[list[tuple[str, torch.Tensor]]], None],
+    buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS,
 ) -> None:
     """Consume packed tensors and unpack them into a list of tensors.
 
@@ -92,6 +102,10 @@ def packed_broadcast_consumer(
         src: Source rank (0 in current implementation)
         post_unpack_func: Function to apply to each list of (name, tensor) after
                          unpacking
+        buffer_size_bytes: Size in bytes for each packed tensor buffer.
+                          Both producer and consumer must use the same value.
+        num_buffers: Number of buffers for double/triple buffering.
+                    Both producer and consumer must use the same value.
 
     """
 
@@ -125,8 +139,7 @@ def packed_broadcast_consumer(
 
         return unpacked_list
 
-    target_packed_tensor_size = envs.VLLM_PACKED_TENSOR_BUFFER_SIZE_BYTES
-    num_buffers = envs.VLLM_PACKED_TENSOR_NUM_BUFFERS
+    target_packed_tensor_size = buffer_size_bytes
 
     streams = [torch.cuda.Stream() for _ in range(num_buffers)]
     buffer_idx = 0

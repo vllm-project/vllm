@@ -41,12 +41,12 @@ from vllm import SamplingParams
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
-    WeightUpdateRequest,
+    WeightTransferUpdateRequest,
 )
 from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLInitInfo,
-    NCCLUpdateInfo,
     NCCLWeightTransferEngine,
+    NCCLWeightTransferInitInfo,
+    NCCLWeightTransferUpdateInfo,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
@@ -156,7 +156,7 @@ scheduling_inference = PlacementGroupSchedulingStrategy(
 
 # Launch the vLLM inference engine. The `enforce_eager` flag reduces
 # start-up latency.
-# Note: Weight transfer APIs (init_weight_transfer, update_weights,
+# Note: Weight transfer APIs (init_weight_transfer_engine, update_weights,
 # finalize_weight_update) are now native to vLLM workers.
 llm = ray.remote(
     num_cpus=0,
@@ -197,10 +197,10 @@ sampling_params = [
 master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
 
 world_size = 3  # 1 trainer + 2 inference workers (tensor_parallel_size=2)
-inference_handle = llm.init_weight_transfer.remote(
+inference_handle = llm.init_weight_transfer_engine.remote(
     WeightTransferInitRequest(
         init_info=asdict(
-            NCCLInitInfo(
+            NCCLWeightTransferInitInfo(
                 master_address=master_address,
                 master_port=master_port,
                 rank_offset=1,
@@ -232,9 +232,9 @@ names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 # Issue update_weights call with NCCL-specific update info
 # packed=True enables efficient batched tensor broadcasting
 inference_handle = llm.update_weights.remote(
-    WeightUpdateRequest(
+    WeightTransferUpdateRequest(
         update_info=asdict(
-            NCCLUpdateInfo(
+            NCCLWeightTransferUpdateInfo(
                 names=names,
                 dtype_names=dtype_names,
                 shapes=shapes,

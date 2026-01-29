@@ -35,7 +35,7 @@ from vllm.config.model import (
 )
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
-    WeightUpdateRequest,
+    WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (
@@ -1722,7 +1722,9 @@ class LLM:
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
 
-    def init_weight_transfer(self, request: WeightTransferInitRequest | dict) -> None:
+    def init_weight_transfer_engine(
+        self, request: WeightTransferInitRequest | dict
+    ) -> None:
         """
         Initialize weight transfer for RL training.
 
@@ -1734,10 +1736,10 @@ class LLM:
         )
 
         self.llm_engine.collective_rpc(
-            "init_weight_transfer", kwargs={"init_info": init_info_dict}
+            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def update_weights(self, request: WeightUpdateRequest | dict) -> None:
+    def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
         Update the weights of the model.
 
