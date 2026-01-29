@@ -155,6 +155,7 @@ class EngineClient(ABC):
         *,
         mode: "PauseMode" = "abort",
         clear_cache: bool = True,
+        wait_for_inflight_requests: bool = False,
     ) -> None:
         """Pause new generation/encoding requests.
 

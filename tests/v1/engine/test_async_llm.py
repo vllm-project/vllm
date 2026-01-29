@@ -853,7 +853,7 @@ async def test_pause_keep():
         # --- Test 1: Single request with timing verification ---
         sampling_params = SamplingParams(max_tokens=30, ignore_eos=True)
         token_times: list[tuple[int, float]] = []
-        pause_duration = 1.0
+        pause_duration = 5.0
 
         async def generator_task():
             """Generate tokens and record timestamps."""

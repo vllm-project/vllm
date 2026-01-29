@@ -26,6 +26,7 @@ router = APIRouter()
 async def pause_generation(
     raw_request: Request,
     mode: Annotated[PauseMode, Query()] = "abort",
+    wait_for_inflight_requests: bool = Query(False),
     clear_cache: Annotated[bool, Query()] = True,
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
@@ -45,6 +46,7 @@ async def pause_generation(
         await engine.pause_generation(
             mode=mode,
             clear_cache=clear_cache,
+            wait_for_inflight_requests=wait_for_inflight_requests,
         )
         return JSONResponse(
             content={"status": "paused"},
