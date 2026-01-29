@@ -862,10 +862,7 @@ class LLM:
                     self._preprocess_cmpl_singleton(
                         prompt,
                         tok_params,
-                        tokenize=not (
-                            "multi_modal_data" in prompt
-                            or "multi_modal_uuids" in prompt
-                        ),
+                        tokenize=not self.model_config.is_multimodal_model,
                     )
                 )
 
