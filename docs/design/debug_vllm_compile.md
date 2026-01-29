@@ -211,7 +211,7 @@ LLM(model, compilation_config=CompilationConfig(
 These modes are stricter and reduce or eliminate the need of dynamic shapes guarding, which can help isolate issues:
 
 - `unbacked`: Uses unbacked symints which don't allow guards, making it easier to identify where guards are being incorrectly added
-- `backed_size_oblivious`: Uses a mode that is more strict about guarding.
+- `backed_size_oblivious`: Uses a mode that is stricter about guarding.
 
 For more details on dynamic shapes modes, see [Dynamic shapes and vLLM guard dropping](torch_compile.md#dynamic-shapes-and-vllm-guard-dropping).
 
