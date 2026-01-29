@@ -45,6 +45,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Sc
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
@@ -1932,6 +1933,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
             (kFp8StaticTensorSym, kFp8DynamicTokenSym),
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
