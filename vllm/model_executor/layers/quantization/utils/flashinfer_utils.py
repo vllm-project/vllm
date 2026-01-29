@@ -121,6 +121,10 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
             "FusedMoE flashinfer kernels with Llama4 routing method are only "
             "supported for Llama4"
         )
+    else:
+        assert layer.custom_routing_function is None, (
+            "Custom routing function is only supported for Llama4"
+        )
 
     return torch.ops.vllm.fi_trtllm_fp8_per_tensor_moe(
         routing_logits=router_logits,
