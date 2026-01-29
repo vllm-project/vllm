@@ -274,17 +274,212 @@ class MockAttentionLayer:
         raise NotImplementedError
 
 
-class MockMLAAttentionLayer(AttentionLayerBase):
-    """A mock MLA attention layer for populating static_forward_context."""
+class MockSparseMLAAttentionLayer:
+    """A mock sparse MLA attention layer for testing.
 
-    def __init__(self, impl):
+    Sparse MLA implementations only support forward_mqa (decode-style attention)
+    for all tokens, so this class only implements that path.
+    """
+
+    def __init__(
+        self,
+        impl,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        device: torch.device,
+    ):
         self.impl = impl
+        self.num_heads = num_heads
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_lora_rank = kv_lora_rank
+
+        # Scale attributes needed by attention backends
+        self._q_scale = torch.tensor(1.0, device=device)
+        self._k_scale = torch.tensor(1.0, device=device)
+        self._v_scale = torch.tensor(1.0, device=device)
+        self._prob_scale = torch.tensor(1.0, device=device)
+        self._q_scale_float = 1.0
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
+
+    def forward_impl(
+        self,
+        q: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Forward for sparse MLA - uses forward_mqa for all tokens."""
+        # Write to KV cache
+        kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
+        if kv_cache.numel() > 0:
+            ops.concat_and_cache_mla(
+                kv_c,
+                k_pe.squeeze(1),
+                kv_cache,
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype=kv_cache_dtype,
+                scale=self._k_scale,
+            )
+
+        num_tokens = q.shape[0]
+
+        # Sparse MLA uses forward_mqa for all tokens
+        # Split q into nope and pe parts
+        mqa_q_nope, mqa_q_pe = q.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+
+        # Convert from (B, N, P) to (N, B, P)
+        mqa_q_nope = mqa_q_nope.transpose(0, 1)
+
+        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+        mqa_ql_nope = torch.bmm(mqa_q_nope, self.impl.W_UK_T)
+
+        # Convert from (N, B, L) to (B, N, L)
+        mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+
+        # Pass as tuple to forward_mqa
+        mqa_q = (mqa_ql_nope, mqa_q_pe)
+
+        attn_out, _ = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
+
+        # v_up projection: multiply by W_UV
+        # attn_out shape: (B, N, L) where L = kv_lora_rank
+        # W_UV shape: (N, L, V)
+        # output shape: (B, N, V) -> flatten to (B, N*V)
+        decode_output = torch.bmm(attn_out.transpose(0, 1), self.impl.W_UV).transpose(
+            0, 1
+        )
+        output[:num_tokens] = decode_output.reshape(
+            num_tokens, self.num_heads * self.v_head_dim
+        )
+
+        return output
+
+
+class MockMLAAttentionLayer(AttentionLayerBase):
+    """A mock MLA attention layer for testing.
+
+    This replicates the forward_impl logic from MLAAttention to allow
+    testing MLA backends without the full layer infrastructure.
+    """
+
+    def __init__(
+        self,
+        impl,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        kv_lora_rank: int,
+        device: torch.device,
+    ):
+        self.impl = impl
+        self.num_heads = num_heads
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.kv_lora_rank = kv_lora_rank
+
+        # Scale attributes needed by attention backends
+        self._q_scale = torch.tensor(1.0, device=device)
+        self._k_scale = torch.tensor(1.0, device=device)
+        self._v_scale = torch.tensor(1.0, device=device)
+        self._prob_scale = torch.tensor(1.0, device=device)
+        self._q_scale_float = 1.0
+        self._k_scale_float = 1.0
+        self._v_scale_float = 1.0
 
     def get_attn_backend(self):
         raise NotImplementedError
 
     def get_kv_cache_spec(self, vllm_config):
         raise NotImplementedError
+
+    def forward_impl(
+        self,
+        q: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Replicates MLAAttention.forward_impl logic for testing."""
+        # Write to KV cache
+        if kv_cache.numel() > 0:
+            ops.concat_and_cache_mla(
+                kv_c,
+                k_pe.squeeze(1),
+                kv_cache,
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype="auto",
+                scale=self._k_scale,
+            )
+
+        # Determine decode vs prefill split
+        num_decode_tokens = attn_metadata.num_decode_tokens or 0
+        has_decode = (attn_metadata.num_decodes or 0) > 0
+        has_prefill = (attn_metadata.num_prefills or 0) > 0
+
+        # Run prefill with forward_mha
+        if has_prefill:
+            prefill_q = q[num_decode_tokens:]
+            prefill_k_pe = k_pe[num_decode_tokens:]
+            prefill_k_c = kv_c[num_decode_tokens:]
+            self.impl.forward_mha(
+                prefill_q,
+                prefill_k_c,
+                prefill_k_pe,
+                kv_cache,
+                attn_metadata,
+                self._k_scale,
+                output=output[num_decode_tokens:],
+            )
+
+        # Run decode with forward_mqa
+        if has_decode:
+            decode_q = q[:num_decode_tokens]
+
+            # Split q into nope and pe parts
+            mqa_q_nope, mqa_q_pe = decode_q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+
+            # Convert from (B, N, P) to (N, B, P)
+            mqa_q_nope = mqa_q_nope.transpose(0, 1)
+
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            mqa_ql_nope = torch.bmm(mqa_q_nope, self.impl.W_UK_T)
+
+            # Convert from (N, B, L) to (B, N, L)
+            mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+
+            # Pass as tuple to forward_mqa
+            mqa_q = (mqa_ql_nope, mqa_q_pe)
+
+            attn_out, _ = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
+
+            # v_up projection: multiply by W_UV
+            # attn_out shape: (B, N, L) where L = kv_lora_rank
+            # W_UV shape: (N, L, V)
+            # output shape: (B, N, V) -> flatten to (B, N*V)
+            decode_output = torch.bmm(
+                attn_out.transpose(0, 1), self.impl.W_UV
+            ).transpose(0, 1)
+            output[:num_decode_tokens] = decode_output.reshape(
+                num_decode_tokens, self.num_heads * self.v_head_dim
+            )
+
+        return output
 
 
 def run_attention_backend(
@@ -344,10 +539,21 @@ def run_attention_backend(
         act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
         impl.process_weights_after_loading(act_dtype)
 
+        # Create mock MLA layer
+        mock_layer = MockMLAAttentionLayer(
+            impl=impl,
+            num_heads=num_heads,
+            qk_nope_head_dim=qk_nope_head_dim,
+            qk_rope_head_dim=qk_rope_head_dim,
+            v_head_dim=v_head_dim,
+            kv_lora_rank=kv_lora_rank,
+            device=device,
+        )
+
         # Populate static_forward_context with mock attention layers
         for layer_name in layer_names:
             vllm_config.compilation_config.static_forward_context[layer_name] = (
-                MockMLAAttentionLayer(impl)
+                mock_layer
             )
 
         # Build metadata
@@ -357,18 +563,15 @@ def run_attention_backend(
             common_attn_metadata=common_attn_metadata,
         )
 
-        # Create mock layer and output buffer
-        mock_layer = MockAttentionLayer(device)
+        # Create output buffer
         num_tokens = query.shape[0]
         output = torch.empty(
             num_tokens, num_heads * v_head_dim, dtype=query.dtype, device=query.device
         )
 
         # Run forward pass
-        # NOTE: The query, key, and value are already shaped correctly
-        # in the calling test function.
-        output = impl.forward(
-            mock_layer, query, kv_c, k_pe, kv_cache, attn_metadata, output=output
+        output = mock_layer.forward_impl(
+            query, kv_c, k_pe, kv_cache, attn_metadata, output
         )
 
         return output
