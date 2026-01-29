@@ -798,8 +798,8 @@ class VllmBackend:
 
         # TODO(patchy): ngram gpu kernel will cause vllm torch compile cache errors.
         is_ngram_gpu_enabled = (
-            vllm_config.speculative_config
-            and vllm_config.speculative_config.method == "ngram_gpu"
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.use_ngram_gpu()
         )
         disable_cache = disable_cache or is_ngram_gpu_enabled
 
