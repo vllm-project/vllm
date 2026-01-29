@@ -41,7 +41,7 @@ MTPModelTypes = Literal[
     "longcat_flash_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
-    "step3p5_mtp",
+    "step3p5_mtp"
 ]
 EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
 SpeculativeMethod = Literal[
@@ -76,12 +76,6 @@ class SpeculativeConfig:
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
-
-    enable_multi_layers_mtp: bool = False
-    """If set to True, the MTP method will run multiple layers of MTP
-    speculator. If set to False, it will run only one layer of MTP speculator.
-    This is only effective when the method is set to `mtp`."""
-
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
@@ -270,12 +264,14 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )
-
+        
         if hf_config.model_type == "step3p5":
             hf_config.model_type = "step3p5_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
-            hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
-
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Step3p5MTP"]}
+            )
+        
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
 
@@ -408,10 +404,7 @@ class SpeculativeConfig:
                     MTPModelTypes
                 ):
                     self.method = "mtp"
-                    if (
-                        self.enable_multi_layers_mtp is False
-                        and self.num_speculative_tokens > 1
-                    ):
+                    if self.num_speculative_tokens > 1:
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run"
                             "multiple times of forward on same MTP layer"
