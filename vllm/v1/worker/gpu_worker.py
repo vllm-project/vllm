@@ -683,30 +683,9 @@ class Worker(WorkerBase):
 
         if is_start:
             # Generate the trace name by combining prefix with comprehensive rank suffix
-            # Include all parallel dimensions: DP, PP, TP, DCP, EP
-            from vllm.distributed.parallel_state import (
-                get_dcp_group,
-                get_dp_group,
-                get_ep_group,
-                get_pp_group,
-                get_tp_group,
-            )
+            from vllm.distributed.utils import get_worker_rank_suffix
 
-            try:
-                dp_rank = get_dp_group().rank_in_group
-                pp_rank = get_pp_group().rank_in_group
-                tp_rank = get_tp_group().rank_in_group
-                dcp_rank = get_dcp_group().rank_in_group
-                ep_rank = get_ep_group().rank_in_group
-
-                # Build comprehensive rank suffix with all parallel dimensions
-                rank_suffix = (
-                    f"dp{dp_rank}_pp{pp_rank}_tp{tp_rank}_"
-                    f"dcp{dcp_rank}_ep{ep_rank}_rank{self.rank}"
-                )
-            except Exception:
-                # Fallback if parallel state not initialized
-                rank_suffix = f"rank{self.rank}"
+            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
 
             # Build the full trace name
             if profile_prefix:
