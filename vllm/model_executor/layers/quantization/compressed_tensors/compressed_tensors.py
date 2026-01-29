@@ -39,7 +39,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    W4A16SPARSE24_SUPPORTED_BITS,
     WNA16_SUPPORTED_BITS,
     CompressedTensors24,
     CompressedTensorsScheme,
@@ -48,7 +47,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A8Int,
     CompressedTensorsW4A16Fp4,
     CompressedTensorsW4A16Mxfp4,
-    CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8,
@@ -606,29 +604,19 @@ class CompressedTensorsConfig(QuantizationConfig):
                 actorder=weight_quant.actorder,
             )
 
-        if self._is_wNa16_group_channel(weight_quant, input_quant):
-            if (
-                format == CompressionFormat.marlin_24.value
-                and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS
-            ):
-                assert weight_quant.symmetric
-                return CompressedTensorsW4A16Sparse24(
-                    strategy=weight_quant.strategy,
-                    num_bits=weight_quant.num_bits,
-                    group_size=weight_quant.group_size,
-                )
-            if (
-                format == CompressionFormat.pack_quantized.value
-                and weight_quant.num_bits in WNA16_SUPPORTED_BITS
-            ):
-                return CompressedTensorsWNA16(
-                    num_bits=weight_quant.num_bits,
-                    strategy=weight_quant.strategy,
-                    symmetric=weight_quant.symmetric,
-                    group_size=weight_quant.group_size,
-                    actorder=weight_quant.actorder,
-                    layer_name=layer_name,
-                )
+        if (
+            self._is_wNa16_group_channel(weight_quant, input_quant)
+            and (format == CompressionFormat.pack_quantized.value)
+            and (weight_quant.num_bits in WNA16_SUPPORTED_BITS)
+        ):
+            return CompressedTensorsWNA16(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                symmetric=weight_quant.symmetric,
+                group_size=weight_quant.group_size,
+                actorder=weight_quant.actorder,
+                layer_name=layer_name,
+            )
 
         act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
@@ -752,11 +740,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 model_compression_config=model_compression_config,
             )
         elif weight_quant is None:
-            logger.warning_once(
-                "Acceleration for non-quantized schemes is "
-                "not supported by Compressed Tensors. "
-                "Falling back to UnquantizedLinearMethod"
-            )
+            # Falling back to UnquantizedLinearMethod
             return None
 
         else:
