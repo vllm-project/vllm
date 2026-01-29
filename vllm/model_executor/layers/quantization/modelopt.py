@@ -1812,7 +1812,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             raise ValueError("MXFP8 currently only supports serialized checkpoints.")
 
         self.backend: str = "torch"
-        self.mxfp8_linear = Mxfp8LinearOp(use_fallback=True)
+        self.mxfp8_linear = Mxfp8LinearOp()
 
         logger.info_once(f"Using {self.backend} for MXFP8 GEMM")
 

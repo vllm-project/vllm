@@ -133,9 +133,6 @@ class Mxfp8LinearOp:
     This class executes a MXFP8 linear layer.
     """
 
-    def __init__(self, use_fallback: bool = False):
-        self.use_fallback = use_fallback
-
     def apply(
         self,
         input: torch.Tensor,
@@ -144,19 +141,6 @@ class Mxfp8LinearOp:
         out_dtype: torch.dtype,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.use_fallback:
-            return self._apply_fallback(input, weight, weight_scale, out_dtype, bias)
-        return self._apply_scaled_mm(input, weight, weight_scale, out_dtype, bias)
-
-    def _apply_fallback(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        out_dtype: torch.dtype,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Fallback implementation using manual dequantization for debugging."""
         # weight_scale comes in as float8_e8m0fnu
         # after process_weights_after_loading
         # It may be padded to [N_padded, K/32] and flattened
@@ -180,46 +164,3 @@ class Mxfp8LinearOp:
         # Standard linear operation
         output = torch.nn.functional.linear(input, weight_bf16, bias)
         return output.to(out_dtype)
-
-    def _apply_scaled_mm(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-        weight_scale: torch.Tensor,
-        out_dtype: torch.dtype,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # Weights should be mxfp8, weight_scale
-        # is pre-processed to float8_e8m0fnu
-        assert weight.dtype == MXFP8_VALUE_DTYPE
-        # weight_scale is already pre-processed
-        # in process_weights_after_loading
-        assert weight_scale.dtype == torch.float8_e8m0fnu
-
-        assert out_dtype == torch.bfloat16, "Only bfloat16 is supported as out_dtype"
-
-        # From bf16 to mxfp8
-        assert input.dtype == torch.bfloat16
-
-        swizzled = True
-        input_mxfp8, input_mxfp8_scales = torch.ops.vllm.mxfp8_quantize(input, swizzled)
-
-        # For Blockwise 1x32 scaling, a and b should be float8,
-        # scales should be float8_e8m0fnu and 1D contiguous
-        # Use .view() to reinterpret uint8 bytes as float8_e8m0fnu
-        # (not .to() which converts values)
-        input_mxfp8_scales = input_mxfp8_scales.view(torch.float8_e8m0fnu).flatten()
-
-        output = torch._scaled_mm(
-            input_mxfp8,
-            weight.t(),
-            scale_a=input_mxfp8_scales,
-            scale_b=weight_scale,
-            out_dtype=out_dtype,
-            use_fast_accum=True,
-        )
-
-        if bias is not None:
-            output = output + bias
-
-        return output
