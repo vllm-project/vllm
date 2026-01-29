@@ -665,7 +665,7 @@ class HfRenderer(RendererLike):
         ):
             mm_uuids = rebuild_mm_uuids_from_mm_data(mm_uuids, mm_data)
 
-            # get video placehoder, replace it with runtime video-chunk prompts
+            # get video placeholder, replace it with runtime video-chunk prompts
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
             )
@@ -717,7 +717,7 @@ class HfRenderer(RendererLike):
             and mm_uuids is not None
             and mm_data is not None
         ):
-            # get video placehoder, replace it with runtime video-chunk prompts
+            # get video placeholder, replace it with runtime video-chunk prompts
             video_placeholder = getattr(
                 model_config.hf_config, "video_placeholder", None
             )
