@@ -190,7 +190,7 @@ class LoRAModelRunnerMixin:
                     # This ensures prepare_tensors sees both LoRA and no-LoRA
                     # tokens, computing num_active_loras = effective_num_loras+1
                     cycle_values = np.array(
-                        [-1] + list(range(1, effective_num_loras + 1)),
+                        list(range(1, effective_num_loras + 1)),
                         dtype=np.int32,
                     )
                     prompt_lora_mapping = cycle_values[

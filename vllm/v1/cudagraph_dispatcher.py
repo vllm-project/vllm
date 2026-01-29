@@ -100,21 +100,24 @@ class CudagraphDispatcher:
 
     def _get_lora_cases(self) -> list[int]:
         """
-        Returns list of num_active_loras values for CUDA graph capture.
+        Returns list of has_lora values for CUDA graph capture.
         This is the single source of truth for LoRA capture cases.
-        has_lora can be inferred as num_active_loras > 0.
         """
         lora_config = self.vllm_config.lora_config
         if lora_config is None:
             # No LoRA configured - single case with no LoRA
             return [0]
 
-        # LoRA is enabled - capture graphs for different active LoRA counts
-        # Always include the no-LoRA case (0) for requests without adapters
-        captured_counts = get_captured_lora_counts(
-            lora_config.max_loras, self.specialize_lora_count
-        )
-        return [0] + captured_counts
+        # LoRA is enabled - capture graphs based on cudagraph_specialize_lora
+        if self.compilation_config.cudagraph_specialize_lora:
+            captured_counts = get_captured_lora_counts(
+                lora_config.max_loras, self.specialize_lora_count
+            )
+            # Specialize: capture separate graphs for with and without LoRA
+            return [0] + captured_counts
+        else:
+            # No specialization: only capture graphs with LoRA active
+            return [0, lora_config.max_loras + 1]
 
     def _create_padded_batch_descriptor(
         self,
@@ -164,14 +167,11 @@ class CudagraphDispatcher:
 
         self._compute_bs_to_padded_graph_size()
 
-        # Track whether we have LoRA config (always specialize on count)
-        self.has_lora_config = self.vllm_config.lora_config is not None
-
         # Get LoRA cases to capture
         lora_cases = self._get_lora_cases()
-        self.captured_lora_counts = sorted(
-            [num_loras for num_loras in lora_cases if num_loras > 0]
-        )
+        self.captured_lora_counts = [
+            lora_count for lora_count in lora_cases if lora_count
+        ]
 
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
