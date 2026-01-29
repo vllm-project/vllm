@@ -106,7 +106,6 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
         self.max_model_len = max_model_len
-
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
         self.log_stats = log_stats
@@ -148,6 +147,64 @@ class KVCacheManager:
             The KV cache usage (between 0.0 and 1.0).
         """
         return self.block_pool.get_usage()
+
+    @property
+    def block_size(self) -> int:
+        """Get the minimum KV cache block size across all groups.
+
+        Returns:
+            Minimum block size from all kv_cache_groups, or 0 if caching disabled.
+
+        Note:
+            For single-group models (most common), this equals the group's block_size.
+            For hybrid models, returns min to ensure consistent token calculations.
+        """
+        if self.enable_caching and self.kv_cache_config.kv_cache_groups:
+            return min(
+                group.kv_cache_spec.block_size
+                for group in self.kv_cache_config.kv_cache_groups
+            )
+        return 0
+
+    @property
+    def total_tokens(self) -> int:
+        """Get the total KV cache capacity in tokens.
+
+        Returns:
+            Total number of tokens that can be stored in the KV cache.
+            Calculated as: (num_blocks - 1) / num_groups × block_size
+
+        Note:
+            - Excludes 1 block reserved for null_block (block_pool.py:174)
+            - Divides by num_groups for multi-group models (hybrid attention)
+        """
+        if not self.enable_caching or not self.kv_cache_config.kv_cache_groups:
+            return 0
+
+        return (
+            (self.kv_cache_config.num_blocks - 1)
+            // len(self.kv_cache_config.kv_cache_groups)
+        ) * self.block_size
+
+    @property
+    def free_tokens(self) -> int:
+        """Get the number of available tokens in the KV cache.
+
+        Returns:
+            Number of free tokens available for allocation.
+            Calculated as: num_free_blocks / num_groups × block_size
+
+        Note:
+            BlockPool tracks total blocks across all groups, so we divide by
+            num_groups to get per-group block count for accurate token calculation.
+        """
+        if not self.enable_caching or not self.kv_cache_config.kv_cache_groups:
+            return 0
+
+        return (
+            self.block_pool.get_num_free_blocks()
+            // len(self.kv_cache_config.kv_cache_groups)
+        ) * self.block_size
 
     def make_prefix_cache_stats(self) -> PrefixCacheStats | None:
         """Get (and reset) the prefix cache stats.

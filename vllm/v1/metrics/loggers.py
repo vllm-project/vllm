@@ -329,6 +329,12 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
             )
+            self.last_scheduler_stats.kv_cache_total_tokens += (
+                last_scheduler_stats.kv_cache_total_tokens
+            )
+            self.last_scheduler_stats.kv_cache_free_tokens += (
+                last_scheduler_stats.kv_cache_free_tokens
+            )
         self.last_scheduler_stats.kv_cache_usage /= len(self.last_scheduler_stats_dict)
 
     def log(self):
@@ -480,6 +486,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.gauge_kv_cache_usage = make_per_engine(
             gauge_kv_cache_usage, engine_indexes, model_name
+        )
+
+        gauge_kv_cache_total_tokens = self._gauge_cls(
+            name="vllm:kv_cache_total_tokens",
+            documentation="Total KV cache capacity in tokens.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_cache_total_tokens = make_per_engine(
+            gauge_kv_cache_total_tokens, engine_indexes, model_name
+        )
+
+        gauge_kv_cache_free_tokens = self._gauge_cls(
+            name="vllm:kv_cache_free_tokens",
+            documentation="Number of available tokens in KV cache.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_cache_free_tokens = make_per_engine(
+            gauge_kv_cache_free_tokens, engine_indexes, model_name
         )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1002,6 +1028,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            self.gauge_kv_cache_total_tokens[engine_idx].set(
+                scheduler_stats.kv_cache_total_tokens
+            )
+            self.gauge_kv_cache_free_tokens[engine_idx].set(
+                scheduler_stats.kv_cache_free_tokens
+            )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries

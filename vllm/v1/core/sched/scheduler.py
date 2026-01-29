@@ -1788,6 +1788,8 @@ class Scheduler(SchedulerInterface):
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
+            kv_cache_total_tokens=self.kv_cache_manager.total_tokens,
+            kv_cache_free_tokens=self.kv_cache_manager.free_tokens,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
