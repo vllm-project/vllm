@@ -11,7 +11,6 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal
 
-import cv2
 import numpy as np
 import torch
 import torch.nn as nn
@@ -416,6 +415,8 @@ class NemotronParseImageProcessor:
         else:
             self.target_height = self.target_width = int(self.final_size)
 
+        import cv2
+
         self.transform = A.Compose(
             [
                 A.PadIfNeeded(
@@ -457,6 +458,8 @@ class NemotronParseImageProcessor:
             new_height = int(new_width / aspect_ratio)
 
         # Use cv2.INTER_LINEAR like the original
+        import cv2
+
         return cv2.resize(
             image, (new_width, new_height), interpolation=cv2.INTER_LINEAR
         )
