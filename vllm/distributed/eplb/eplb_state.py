@@ -48,7 +48,6 @@ from .async_worker import start_async_worker
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     RecvMetadata,
-    cap_num_transfers,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -821,16 +820,27 @@ class EplbState:
                 eplb_model_state.physical_to_logical_map,
             )
 
+            # Uncommon case: max_num_transfers has been specified in the eplb config
             max_num_transfers = self.parallel_config.eplb_config.max_num_transfers
-            cap_num_transfers(
-                eplb_model_state.physical_to_logical_map,
-                new_physical_to_logical_map,
-                num_tensors_per_expert=num_tensors_per_expert,
-                max_num_transfers=max_num_transfers,
-            )
-            new_logical_to_physical_map = torch.argsort(
-                new_physical_to_logical_map, dim=-1
-            ).unsqueeze(-1)
+            if max_num_transfers is not None:
+                max_num_transfers = int(max_num_transfers)
+                # Capping the number of transfers isn't supported when running
+                # with redundant experts
+                assert self.parallel_config.eplb_config.num_redundant_experts == 0
+                logger.info_once(
+                    "The maximum number of EPLB transfers has been capped at %d",
+                    max_num_transfers,
+                )
+                cap_num_transfers(
+                    eplb_model_state.physical_to_logical_map,
+                    new_physical_to_logical_map,
+                    num_tensors_per_expert=num_tensors_per_expert,
+                    max_num_transfers=max_num_transfers,
+                )
+                new_logical_to_physical_map = torch.argsort(
+                    new_physical_to_logical_map, dim=-1
+                ).unsqueeze(-1)
+
             if not self.is_async or is_profile:
                 # Update expert weights
                 rearrange_expert_weights_inplace(
@@ -1229,3 +1239,98 @@ def _node_count_with_rank_mapping(
                 node_assignment[other_rank] = next_node_id
 
     return next_node_id
+
+
+def find_cycles(old_expert_indices: torch.Tensor, new_expert_indices: torch.Tensor):
+    """
+    Args:
+        old_expert_indices: Shape (num_physical_experts).
+        new_expert_indices: Shape (num_physical_experts).
+    """
+    num_experts = len(old_expert_indices)
+    visited = [False] * num_experts
+    cycles = []
+
+    for current_expert in range(num_experts):
+        if (
+            visited[current_expert]
+            or old_expert_indices[current_expert] == new_expert_indices[current_expert]
+        ):
+            continue
+
+        cycle = []
+        pos = current_expert
+
+        while not visited[pos]:
+            visited[pos] = True
+            cycle.append(pos)
+            new_expert = new_expert_indices[pos].item()
+            next_pos = (old_expert_indices == new_expert).nonzero()[0].item()
+            pos = next_pos
+
+        if len(cycle) > 1:
+            cycles.append(cycle)
+
+    return cycles
+
+
+def apply_transfer_cap(
+    old_expert_indices: torch.Tensor,
+    new_expert_indices: torch.Tensor,
+    max_transfers: int,
+) -> None:
+    """
+    Undo transfers until the total number of transfers is less than or equal
+    to max_transfers
+    Args:
+        old_expert_indices: Shape (num_physical_experts).
+        new_expert_indices: Shape (num_physical_experts).
+    """
+    cycles = find_cycles(old_expert_indices, new_expert_indices)
+
+    total_transfers = sum(len(cycle) for cycle in cycles)
+
+    if total_transfers <= max_transfers:
+        return
+
+    # Undo smallest cycles first
+    cycles.sort(key=len)
+
+    transfers_remaining = total_transfers
+    for cycle in cycles:
+        for pos in cycle:
+            new_expert_indices[pos] = old_expert_indices[pos]
+        transfers_remaining -= len(cycle)
+        if transfers_remaining <= max_transfers:
+            break
+
+
+def cap_num_transfers(
+    old_global_expert_indices: torch.Tensor,
+    new_global_expert_indices: torch.Tensor,
+    num_tensors_per_expert: int,
+    max_num_transfers: int,
+) -> None:
+    """
+    Detects if the total number of transfer operations exceeds
+    max_num_transfers. If it does, then apply_transfer_cap will undo transfers
+    until the number of transfers is below max_num_transfers.
+
+    Args:
+        old_global_expert_indices: Shape (num_moe_layers, num_physical_experts).
+        new_global_expert_indices: Shape (num_moe_layers, num_physical_experts).
+        num_weights_per_expert: Number of tensors in each layer
+        associated with a single expert.
+        max_num_transfers: Maximum number of total transfers allowed.
+    """
+    num_moe_layers = old_global_expert_indices.shape[0]
+    for layer in range(num_moe_layers):
+        old_layer_indices = old_global_expert_indices[layer]
+        new_layer_indices = new_global_expert_indices[layer]
+        num_expert_transfers = (old_layer_indices != new_layer_indices).sum().item()
+        total_num_transfers = num_expert_transfers * num_tensors_per_expert
+        if total_num_transfers >= max_num_transfers:
+            max_expert_transfers = max_num_transfers // num_tensors_per_expert
+            apply_transfer_cap(
+                old_layer_indices, new_layer_indices, max_expert_transfers
+            )
