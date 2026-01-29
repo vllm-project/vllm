@@ -759,8 +759,8 @@ class InputProcessor:
                     embed_length = mm_position.get_num_embeds
                     if embed_length > self.mm_encoder_cache_size:
                         raise ValueError(
-                            f"The {prompt_type} prompt contains a multimodal item "
-                            f"in modality {modality!r} with length {embed_length}, "
+                            f"The {prompt_type} prompt contains a(n) {modality} item "
+                            f"with length {embed_length}, "
                             f"which exceeds the calculated encoder cache size "
                             f"{self.mm_encoder_cache_size}. Please reduce "
                             f"frames/resolution or increase --max-num-batched-tokens "
