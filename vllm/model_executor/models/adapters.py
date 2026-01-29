@@ -514,7 +514,9 @@ def load_weights_using_from_2_way_softmax(
 
     del language_model.lm_head
 
-    score_weight_name = "language_model.score.weight" if using_vlm_head else "score.weight"
+    score_weight_name = (
+        "language_model.score.weight" if using_vlm_head else "score.weight"
+    )
     loaded_weights.add(score_weight_name)
 
     lm_head_name = "lm_head.weight"
@@ -581,7 +583,9 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
 
     del language_model.lm_head
 
-    score_weight_name = "language_model.score.weight" if using_vlm_head else "score.weight"
+    score_weight_name = (
+        "language_model.score.weight" if using_vlm_head else "score.weight"
+    )
     loaded_weights.add(score_weight_name)
 
     lm_head_name = "lm_head.weight"
