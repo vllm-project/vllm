@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
+
 class Step3p5ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for Step3p5 model.
@@ -38,6 +39,25 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         # Used to hold a trailing "\n" from reasoning content so we can decide
         # whether it is immediately before </think>.
         self._pending_reasoning_newline = False
+
+        # Used to delay the reasoning end detection.
+        # This is necessary to remove the newline appears immediately after </think>,
+        # which may cause the end detection to be delayed by one round.
+        self.end_offset = 1
+
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        if self.end_token_id in input_ids and self.end_offset > 0:
+            self.end_offset -= 1
+            return False
+        return self.end_offset < 1
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        if self.end_token_id in input_ids and self.end_offset > 0:
+            self.end_offset -= 1
+            return False
+        return self.end_offset < 1
 
     def extract_reasoning(
         self,
@@ -68,11 +88,6 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
                 remaining = delta_text.removeprefix("\n")
                 return DeltaMessage(content=remaining) if remaining else None
 
-        # If we are about to see the end token, any pending newline is
-        # immediately before </think> and should be dropped.
-        if self.end_token_id in delta_token_ids and self._pending_reasoning_newline:
-            self._pending_reasoning_newline = False
-
         ret = super().extract_reasoning_streaming(
             previous_text,
             current_text,
@@ -98,9 +113,9 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
                 content = delta_text[end_index + len(self.end_token) :]
                 ret = DeltaMessage(reasoning=reasoning, content=content or None)
             elif self.end_token_id in previous_token_ids:
-                ret = DeltaMessage(content=delta_text or None)
+                ret = DeltaMessage(content=delta_text)
             else:
-                ret = DeltaMessage(reasoning=delta_text or None)
+                ret = DeltaMessage(reasoning=delta_text)
 
         reasoning_to_output = ret.reasoning
         content_to_output = ret.content
@@ -122,6 +137,9 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
 
         # Content: handle the newline immediately after </think>.
         if content_to_output is not None:
+            # No need to get into parser again to remove newline after </think>.
+            self.end_offset -= 1
+
             # If we have content, reasoning must have ended.
             self._pending_reasoning_newline = False
 
