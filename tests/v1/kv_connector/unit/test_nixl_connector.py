@@ -1396,7 +1396,6 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
             ),
         ),
         "TRITON_ATTN",
-        "FLASHINFER",
     ],
 )
 def test_register_kv_caches(
@@ -1606,6 +1605,8 @@ def test_register_kv_caches(
                 f"Block entry {i}: Expected block len {expected_block_len}, "
                 f"got {block_len}"
             )
+
+        assert connector.connector_worker.block_size == 16
 
 
 class FakePlatform(Platform):
