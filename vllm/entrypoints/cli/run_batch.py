@@ -38,10 +38,10 @@ class RunBatchSubcommand(CLISubcommand):
         if args.enable_metrics:
             from prometheus_client import start_http_server
 
-            logger.info("Prometheus metrics enabled")
+            logger.debug("Prometheus metrics enabled")
             start_http_server(port=args.port, addr=args.url)
         else:
-            logger.info("Prometheus metrics disabled")
+            logger.debug("Prometheus metrics disabled")
 
         asyncio.run(run_batch_main(args))
 
