@@ -4475,12 +4475,10 @@ class GPUModelRunner(
         # but not read from the cache
         assert dummy_mm_item is not None, "Item should not already be cached"
 
-        dummy_mm_items = [dummy_mm_item] * max_items_per_batch
-
         return next(
             mm_kwargs_group
             for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
-                dummy_mm_items,
+                [(modality, dummy_mm_item) for _ in range(max_items_per_batch)],
                 device=self.device,
                 pin_memory=self.pin_memory,
             )
