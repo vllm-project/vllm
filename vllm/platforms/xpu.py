@@ -186,18 +186,6 @@ class XPUPlatform(Platform):
             )
 
     @classmethod
-    def mem_get_info(cls, device) -> tuple[int, int]:
-        if cls.is_data_center_gpu():
-            # For data center GPU, use torch.xpu.mem_get_info
-            return torch.xpu.mem_get_info(device)
-        # FIXME:kunshang, For client GPU, estimate free memory
-        allocated_mem = torch.xpu.memory_stats(device)["allocated_bytes.all.current"]
-        total_mem = torch.xpu.get_device_properties(device).total_memory
-        other_mem = 512 * 1024 * 1024  # reserve 512MB for other usage
-        estimated_free_mem = total_mem - allocated_mem - other_mem
-        return estimated_free_mem, total_mem
-
-    @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
 
