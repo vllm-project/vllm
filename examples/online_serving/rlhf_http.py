@@ -13,7 +13,7 @@ assumes you have already started a vLLM server using `vllm serve`. It uses:
 Prerequisites:
     Start a vLLM server with weight transfer enabled:
 
-    $ vllm serve facebook/opt-125m \
+    $ VLLM_SERVER_DEV_MODE=1 vllm serve facebook/opt-125m \
         --enforce-eager \
         --weight-transfer-config '{"backend": "nccl"}' \
         --load-format dummy
