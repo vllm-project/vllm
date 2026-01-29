@@ -3,133 +3,70 @@
 These tests verify behavior by mocking and inspecting actual function calls,
 not by reading source files and asserting text patterns.
 """
-import pytest
 from unittest.mock import Mock, patch, MagicMock
-from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.config import VllmConfig
 
 
-@pytest.fixture
-def base_vllm_config():
-    """Create base VllmConfig for scheduler tests."""
-    config = VllmConfig()
-    # Mock model_config with minimal required attributes
-    config.model_config = Mock()
-    config.model_config.is_encoder_decoder = False
-    config.model_config.vocab_size = 32000
-    config.model_config.max_model_len = 2048
-    # Set cache_config with valid num_gpu_blocks
-    config.cache_config.num_gpu_blocks = 1000
-    return config
-
-
-@pytest.fixture
-def mock_kv_cache_config():
-    """Mock KVCacheConfig for scheduler tests."""
-    mock_config = Mock()
-    mock_config.num_gpu_blocks = 1000
-    return mock_config
-
-
-@pytest.fixture
-def mock_structured_output_manager():
-    """Mock StructuredOutputManager for scheduler tests."""
-    return Mock()
+# Import create_scheduler utility
+from tests.v1.core.utils import create_scheduler
 
 
 class TestTracerSeparationBehavioral:
     """Behavioral tests verifying journey and step tracers are separate."""
 
     @patch('vllm.tracing.init_tracer')
-    def test_journey_tracer_uses_scheduler_scope(
-        self, mock_init_tracer, base_vllm_config,
-        mock_kv_cache_config, mock_structured_output_manager
-    ):
+    def test_journey_tracer_uses_scheduler_scope(self, mock_init_tracer):
         """Verify journey tracer is initialized with vllm.scheduler scope."""
         mock_tracer = Mock()
         mock_init_tracer.return_value = mock_tracer
 
-        # Enable journey tracing only
-        base_vllm_config.observability_config.enable_journey_tracing = True
-        base_vllm_config.observability_config.otlp_traces_endpoint = "http://test:4317"
-        base_vllm_config.observability_config.step_tracing_enabled = False
-
-        # Try to instantiate Scheduler - it may fail during full initialization,
-        # but that's OK since tracer initialization happens early in __init__
-        try:
-            scheduler = Scheduler(
-                vllm_config=base_vllm_config,
-                kv_cache_config=mock_kv_cache_config,
-                structured_output_manager=mock_structured_output_manager,
-                block_size=16,
-            )
-            # If it succeeds, verify tracer attributes
-            assert scheduler.journey_tracer is mock_tracer
-            assert scheduler.step_tracer is None
-        except Exception:
-            # Scheduler initialization may fail due to missing dependencies,
-            # but we only care that init_tracer was called correctly
-            pass
+        # Create scheduler with journey tracing enabled
+        scheduler = create_scheduler(
+            enable_journey_tracing=True,
+            otlp_traces_endpoint="http://test:4317",
+            step_tracing_enabled=False,
+        )
 
         # Verify init_tracer called with vllm.scheduler scope
         mock_init_tracer.assert_called_once_with("vllm.scheduler", "http://test:4317")
 
+        # Verify tracer attributes
+        assert scheduler.journey_tracer is mock_tracer
+        assert scheduler.step_tracer is None
+
     @patch('vllm.tracing.init_tracer')
-    def test_step_tracer_uses_scheduler_step_scope(
-        self, mock_init_tracer, base_vllm_config, mock_kv_cache_config, mock_structured_output_manager
-    ):
+    def test_step_tracer_uses_scheduler_step_scope(self, mock_init_tracer):
         """Verify step tracer is initialized with vllm.scheduler.step scope."""
         mock_tracer = Mock()
         mock_init_tracer.return_value = mock_tracer
 
-        # Enable step tracing only
-        base_vllm_config.observability_config.enable_journey_tracing = False
-        base_vllm_config.observability_config.step_tracing_enabled = True
-        base_vllm_config.observability_config.otlp_traces_endpoint = "http://test:4317"
-
-        try:
-            scheduler = Scheduler(
-                vllm_config=base_vllm_config,
-                kv_cache_config=mock_kv_cache_config,
-                structured_output_manager=mock_structured_output_manager,
-                block_size=16,
-            )
-            assert scheduler.journey_tracer is None
-            assert scheduler.step_tracer is mock_tracer
-        except Exception:
-            pass
+        # Create scheduler with step tracing enabled
+        scheduler = create_scheduler(
+            enable_journey_tracing=False,
+            step_tracing_enabled=True,
+            otlp_traces_endpoint="http://test:4317",
+        )
 
         # Verify init_tracer called with vllm.scheduler.step scope
         mock_init_tracer.assert_called_once_with("vllm.scheduler.step", "http://test:4317")
 
+        # Verify tracer attributes
+        assert scheduler.journey_tracer is None
+        assert scheduler.step_tracer is mock_tracer
+
     @patch('vllm.tracing.init_tracer')
-    def test_both_tracers_use_distinct_scopes(
-        self, mock_init_tracer, base_vllm_config, mock_kv_cache_config, mock_structured_output_manager
-    ):
+    def test_both_tracers_use_distinct_scopes(self, mock_init_tracer):
         """Verify both tracers initialized with distinct scopes when both enabled."""
         # Return different mock tracers for each call
         journey_tracer = Mock(name="journey_tracer")
         step_tracer = Mock(name="step_tracer")
         mock_init_tracer.side_effect = [journey_tracer, step_tracer]
 
-        # Enable both journey and step tracing
-        base_vllm_config.observability_config.enable_journey_tracing = True
-        base_vllm_config.observability_config.step_tracing_enabled = True
-        base_vllm_config.observability_config.otlp_traces_endpoint = "http://test:4317"
-
-        try:
-            scheduler = Scheduler(
-                vllm_config=base_vllm_config,
-                kv_cache_config=mock_kv_cache_config,
-                structured_output_manager=mock_structured_output_manager,
-                block_size=16,
-            )
-            # Verify tracers are stored in separate variables
-            assert scheduler.journey_tracer is journey_tracer
-            assert scheduler.step_tracer is step_tracer
-            assert scheduler.journey_tracer is not scheduler.step_tracer
-        except Exception:
-            pass
+        # Create scheduler with both tracing features enabled
+        scheduler = create_scheduler(
+            enable_journey_tracing=True,
+            step_tracing_enabled=True,
+            otlp_traces_endpoint="http://test:4317",
+        )
 
         # Verify init_tracer called twice with distinct scopes
         assert mock_init_tracer.call_count == 2
@@ -137,161 +74,120 @@ class TestTracerSeparationBehavioral:
         assert calls[0][0] == ("vllm.scheduler", "http://test:4317")
         assert calls[1][0] == ("vllm.scheduler.step", "http://test:4317")
 
+        # Verify tracers are stored in separate variables
+        assert scheduler.journey_tracer is journey_tracer
+        assert scheduler.step_tracer is step_tracer
+        assert scheduler.journey_tracer is not scheduler.step_tracer
+
     @patch('vllm.tracing.init_tracer')
-    def test_no_accidental_coupling_between_tracers(
-        self, mock_init_tracer, base_vllm_config, mock_kv_cache_config, mock_structured_output_manager
-    ):
+    def test_no_accidental_coupling_between_tracers(self, mock_init_tracer):
         """Verify step tracer initializes even if journey tracer fails."""
         # Make journey tracer init fail, step tracer succeed
         step_tracer = Mock(name="step_tracer")
         mock_init_tracer.side_effect = [Exception("Journey init failed"), step_tracer]
 
-        # Enable both
-        base_vllm_config.observability_config.enable_journey_tracing = True
-        base_vllm_config.observability_config.step_tracing_enabled = True
-        base_vllm_config.observability_config.otlp_traces_endpoint = "http://test:4317"
-
-        try:
-            scheduler = Scheduler(
-                vllm_config=base_vllm_config,
-                kv_cache_config=mock_kv_cache_config,
-                structured_output_manager=mock_structured_output_manager,
-                block_size=16,
-            )
-            # Journey tracer failed, step tracer succeeded (no coupling!)
-            assert scheduler.journey_tracer is None
-            assert scheduler.step_tracer is step_tracer
-        except Exception:
-            pass
+        # Create scheduler with both tracing features enabled
+        scheduler = create_scheduler(
+            enable_journey_tracing=True,
+            step_tracing_enabled=True,
+            otlp_traces_endpoint="http://test:4317",
+        )
 
         # Verify both init calls were attempted
         assert mock_init_tracer.call_count == 2
 
+        # Journey tracer failed, step tracer succeeded (no coupling!)
+        assert scheduler.journey_tracer is None
+        assert scheduler.step_tracer is step_tracer
+
     @patch('vllm.tracing.init_tracer')
-    def test_journey_tracer_used_for_core_spans(
-        self, mock_init_tracer, base_vllm_config, mock_kv_cache_config, mock_structured_output_manager
-    ):
+    def test_journey_tracer_used_for_core_spans(self, mock_init_tracer):
         """Verify journey_tracer is used to create llm_core spans."""
         journey_tracer = MagicMock()
         mock_span = Mock()
         journey_tracer.start_span.return_value = mock_span
         mock_init_tracer.return_value = journey_tracer
 
-        # Enable journey tracing
-        base_vllm_config.observability_config.enable_journey_tracing = True
-        base_vllm_config.observability_config.otlp_traces_endpoint = "http://test:4317"
+        # Create scheduler with journey tracing enabled
+        scheduler = create_scheduler(
+            enable_journey_tracing=True,
+            otlp_traces_endpoint="http://test:4317",
+        )
 
-        scheduler = None
-        try:
-            scheduler = Scheduler(
-                vllm_config=base_vllm_config,
-                kv_cache_config=mock_kv_cache_config,
-                structured_output_manager=mock_structured_output_manager,
-                block_size=16,
-            )
-
-            # Create a mock request
-            from vllm.v1.request import Request
-            mock_request = Mock(spec=Request)
-            mock_request.request_id = "test-req-123"
-            mock_request.trace_headers = None
-
-            # Call _create_core_span (internal method, but testing behavior)
-            span = scheduler._create_core_span(mock_request)
-
-            # Verify journey_tracer.start_span was called
-            assert journey_tracer.start_span.called
-            call_kwargs = journey_tracer.start_span.call_args[1]
-            assert call_kwargs['name'] == "llm_core"
-            assert span is mock_span
-        except Exception:
-            # If scheduler init fails, just verify tracer was initialized
-            pass
-
-        # At minimum, verify tracer was initialized
+        # Verify init_tracer was called
         mock_init_tracer.assert_called_with("vllm.scheduler", "http://test:4317")
 
+        # Create a mock request
+        from vllm.v1.request import Request
+        mock_request = Mock(spec=Request)
+        mock_request.request_id = "test-req-123"
+        mock_request.trace_headers = None
+
+        # Call _create_core_span (internal method, but testing behavior)
+        span = scheduler._create_core_span(mock_request)
+
+        # Verify journey_tracer.start_span was called
+        assert journey_tracer.start_span.called
+        # Check first positional arg or 'name' kwarg
+        call_args, call_kwargs = journey_tracer.start_span.call_args
+        span_name = call_args[0] if call_args else call_kwargs.get('name')
+        assert span_name == "llm_core"
+        assert span is mock_span
+
     @patch('vllm.tracing.init_tracer')
-    def test_step_tracer_used_for_step_spans(
-        self, mock_init_tracer, base_vllm_config, mock_kv_cache_config, mock_structured_output_manager
-    ):
+    def test_step_tracer_used_for_step_spans(self, mock_init_tracer):
         """Verify step_tracer is used to create scheduler_steps span."""
         step_tracer = MagicMock()
         mock_span = Mock()
         step_tracer.start_span.return_value = mock_span
         mock_init_tracer.return_value = step_tracer
 
-        # Enable step tracing
-        base_vllm_config.observability_config.step_tracing_enabled = True
-        base_vllm_config.observability_config.otlp_traces_endpoint = "http://test:4317"
+        # Create scheduler with step tracing enabled
+        scheduler = create_scheduler(
+            step_tracing_enabled=True,
+            otlp_traces_endpoint="http://test:4317",
+        )
 
-        try:
-            scheduler = Scheduler(
-                vllm_config=base_vllm_config,
-                kv_cache_config=mock_kv_cache_config,
-                structured_output_manager=mock_structured_output_manager,
-                block_size=16,
-            )
-
-            # Verify step_tracer.start_span was called during __init__
-            assert step_tracer.start_span.called
-            call_kwargs = step_tracer.start_span.call_args[1]
-            assert call_kwargs['name'] == "scheduler_steps"
-            assert scheduler._step_span is mock_span
-        except Exception:
-            # If scheduler init fails, just verify tracer was initialized
-            pass
-
-        # At minimum, verify tracer was initialized
+        # Verify init_tracer was called
         mock_init_tracer.assert_called_with("vllm.scheduler.step", "http://test:4317")
 
-    @patch('vllm.tracing.init_tracer')
-    def test_no_endpoint_disables_both_tracers(
-        self, mock_init_tracer, base_vllm_config, mock_kv_cache_config, mock_structured_output_manager
-    ):
-        """Verify tracers not initialized when endpoint is None."""
-        # Enable both but no endpoint
-        base_vllm_config.observability_config.enable_journey_tracing = True
-        base_vllm_config.observability_config.step_tracing_enabled = True
-        base_vllm_config.observability_config.otlp_traces_endpoint = None
+        # Verify step_tracer.start_span was called during __init__
+        assert step_tracer.start_span.called
+        # Check first positional arg or 'name' kwarg
+        call_args, call_kwargs = step_tracer.start_span.call_args
+        span_name = call_args[0] if call_args else call_kwargs.get('name')
+        assert span_name == "scheduler_steps"
+        assert scheduler._step_span is mock_span
 
-        try:
-            scheduler = Scheduler(
-                vllm_config=base_vllm_config,
-                kv_cache_config=mock_kv_cache_config,
-                structured_output_manager=mock_structured_output_manager,
-                block_size=16,
-            )
-            assert scheduler.journey_tracer is None
-            assert scheduler.step_tracer is None
-        except Exception:
-            pass
+    @patch('vllm.tracing.init_tracer')
+    def test_no_endpoint_disables_both_tracers(self, mock_init_tracer):
+        """Verify tracers not initialized when endpoint is None."""
+        # Create scheduler with both features enabled but no endpoint
+        scheduler = create_scheduler(
+            enable_journey_tracing=True,
+            step_tracing_enabled=True,
+            otlp_traces_endpoint=None,
+        )
 
         # Verify init_tracer never called
         mock_init_tracer.assert_not_called()
 
+        # Verify tracer attributes are None
+        assert scheduler.journey_tracer is None
+        assert scheduler.step_tracer is None
+
     @patch('vllm.tracing.init_tracer')
-    def test_tracers_share_same_endpoint(
-        self, mock_init_tracer, base_vllm_config, mock_kv_cache_config, mock_structured_output_manager
-    ):
+    def test_tracers_share_same_endpoint(self, mock_init_tracer):
         """Verify both tracers use the same OTLP endpoint (singleton provider)."""
         mock_init_tracer.return_value = Mock()
 
-        # Enable both with single endpoint
+        # Create scheduler with both features enabled and shared endpoint
         endpoint = "http://shared-collector:4317"
-        base_vllm_config.observability_config.enable_journey_tracing = True
-        base_vllm_config.observability_config.step_tracing_enabled = True
-        base_vllm_config.observability_config.otlp_traces_endpoint = endpoint
-
-        try:
-            scheduler = Scheduler(
-                vllm_config=base_vllm_config,
-                kv_cache_config=mock_kv_cache_config,
-                structured_output_manager=mock_structured_output_manager,
-                block_size=16,
-            )
-        except Exception:
-            pass
+        create_scheduler(
+            enable_journey_tracing=True,
+            step_tracing_enabled=True,
+            otlp_traces_endpoint=endpoint,
+        )
 
         # Verify both calls used the same endpoint
         assert mock_init_tracer.call_count == 2
