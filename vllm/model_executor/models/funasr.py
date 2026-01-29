@@ -100,7 +100,6 @@ class EncoderLayerSANM(nn.Module):
         self.feed_forward = feed_forward
         self.norm1 = LayerNorm(in_size)
         self.norm2 = LayerNorm(size)
-        # self.dropout = nn.Dropout(dropout_rate)
         self.in_size = in_size
         self.size = size
         self.normalize_before = normalize_before
@@ -216,15 +215,9 @@ class MultiHeadedAttentionSANM(nn.Module):
         # We assume d_v always equals d_k
         self.d_k = n_feat // n_head
         self.h = n_head
-        # self.linear_q = nn.Linear(n_feat, n_feat)
-        # self.linear_k = nn.Linear(n_feat, n_feat)
-        # self.linear_v = nn.Linear(n_feat, n_feat)
-
-        # self.linear_out = nn.Linear(n_feat, n_feat)
         self.out_proj = nn.Linear(n_feat, n_feat)
         self.linear_q_k_v = nn.Linear(in_feat, n_feat * 3)
         self.attn = None
-        # self.dropout = nn.Dropout(p=dropout_rate)
 
         self.fsmn_block = nn.Conv1d(
             n_feat, n_feat, kernel_size, stride=1, padding=0, groups=n_feat, bias=False
@@ -249,7 +242,6 @@ class MultiHeadedAttentionSANM(nn.Module):
         x = self.fsmn_block(x)
         x = x.transpose(1, 2)
         x += inputs
-        # x = self.dropout(x)
         if mask is not None:
             x = x * mask
         return x
@@ -311,14 +303,12 @@ class MultiHeadedAttentionSANM(nn.Module):
         else:
             attn = torch.softmax(scores, dim=-1)  # (batch, head, time1, time2)
 
-        # p_attn = self.dropout(attn)
         p_attn = attn
         x = torch.matmul(p_attn, value)  # (batch, head, time1, d_k)
         x = (
             x.transpose(1, 2).contiguous().view(n_batch, -1, self.h * self.d_k)
         )  # (batch, time1, d_model)
 
-        # return self.linear_out(x)  # (batch, time1, d_model)
         return self.out_proj(x)  # (batch, time1, d_model)
 
     def forward(self, x, mask, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
@@ -512,7 +502,6 @@ class SenseVoiceEncoderSmall(nn.Module):
 
         xs_pad = self.after_norm(xs_pad)
 
-        # forward encoder2
         olens = masks.squeeze(1).sum(1).int()
 
         for layer_idx, encoder_layer in enumerate(self.tp_encoders):
@@ -1091,7 +1080,6 @@ class FunASRForConditionalGeneration(
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        # orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."}
         orig_to_new_substr={
             "linear_q.": "q_proj.",
             "linear_k.": "k_proj.",
