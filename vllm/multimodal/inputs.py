@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
+from functools import cached_property, partial
 from itertools import accumulate
 from typing import (
     TYPE_CHECKING,
@@ -20,7 +20,8 @@ from typing import (
 )
 
 import numpy as np
-from typing_extensions import NotRequired, TypeVar, deprecated
+from PIL.Image import Image
+from typing_extensions import NotRequired, TypeVar
 
 from vllm.utils.collection_utils import full_groupby, is_list_of
 from vllm.utils.import_utils import LazyLoader
@@ -29,12 +30,9 @@ from vllm.utils.jsontree import json_map_leaves
 if TYPE_CHECKING:
     import torch
     import torch.types
-    from PIL.Image import Image
     from transformers.feature_extraction_utils import BatchFeature
 
-    from .base import MediaWithBytes
-    from .processing import MultiModalHashes
-
+    from .media import MediaWithBytes
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -107,6 +105,28 @@ The number of data items allowed per modality is restricted by
 """
 
 
+class VisionChunkImage(TypedDict):
+    """Represents an image wrapped as a vision chunk."""
+
+    type: Literal["image"]
+    image: Image
+    uuid: str | None
+
+
+class VisionChunkVideo(TypedDict):
+    """Represents a video chunk with metadata."""
+
+    type: Literal["video_chunk"]
+    video_chunk: list[Image]
+    uuid: str | None
+    prompt: str
+    video_idx: int
+
+
+VisionChunk = VisionChunkImage | VisionChunkVideo
+"""A vision chunk is either an image or a video chunk."""
+
+
 @final
 class MultiModalDataBuiltins(TypedDict, total=False):
     """Type annotations for modality types predefined by vLLM."""
@@ -119,6 +139,9 @@ class MultiModalDataBuiltins(TypedDict, total=False):
 
     audio: ModalityData[AudioItem]
     """The input audio(s)."""
+
+    vision_chunk: ModalityData[VisionChunk]
+    """The input visual atom(s) - unified modality for images and video chunks."""
 
 
 MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]
@@ -169,11 +192,39 @@ class PlaceholderRange:
     between `offset` and `offset + length` to assign embeddings to.
     """
 
+    @cached_property
+    def embeds_cumsum(self) -> torch.Tensor | None:
+        return None if self.is_embed is None else self.is_embed.cumsum(dim=0)
+
+    @cached_property
     def get_num_embeds(self) -> int:
-        if self.is_embed is None:
+        if self.embeds_cumsum is None:
             return self.length
 
-        return int(self.is_embed.sum().item())
+        return int(self.embeds_cumsum[-1])
+
+    def get_embeds_indices_in_range(
+        self, start_idx: int, end_idx: int
+    ) -> tuple[int, int]:
+        """
+        Returns the starting and ending indices of the embeddings of encoder outputs
+        in the range of [start_idx, end_idx) in the placeholders.
+
+        For example, given:
+        PlaceholderRange(offset=2, length=5, is_embed=[False, True, False, True, True])
+
+        If start_idx=3 and end_idx=5, the output is (1, 3) because we want to get
+        the second and the third embeddings from the encoder output.
+        """
+        if self.embeds_cumsum is None:
+            return start_idx, end_idx
+
+        embeds_start_idx = (
+            int(self.embeds_cumsum[start_idx - 1]) if start_idx > 0 else 0
+        )
+        embeds_end_idx = int(self.embeds_cumsum[end_idx - 1])
+
+        return embeds_start_idx, embeds_end_idx
 
     def extract_embeds_range(self) -> list[tuple[int, int]]:
         """Extract the start and end indices of the embedded region in prompt.
@@ -188,7 +239,7 @@ class PlaceholderRange:
             Returns full placeholder range if `is_embed` is `None`.
         """
         if self.is_embed is None:
-            return [(self.offset, self.offset + self.length)]
+            return [(self.offset, self.offset + self.length - 1)]
 
         mask_i = self.is_embed.int()
         starts = torch.nonzero(
@@ -277,13 +328,7 @@ def batched_tensors_equal(a: BatchedTensorInputs, b: BatchedTensorInputs) -> boo
     Equality check between
     [`BatchedTensorInputs`][vllm.multimodal.inputs.BatchedTensorInputs] objects.
     """
-    for k in a:
-        if k not in b:
-            return False
-        if not nested_tensors_equal(a[k], b[k]):
-            return False
-
-    return True
+    return all(k in b and nested_tensors_equal(a[k], b[k]) for k in a)
 
 
 @dataclass
@@ -308,6 +353,9 @@ class MultiModalFeatureSpec:
     mm_position: PlaceholderRange
     """e.g., PlaceholderRange(offset=2, length=336)"""
 
+    mm_hash: str | None = None
+    """Base mm_hash for processor cache (without LoRA prefix)."""
+
     @staticmethod
     def gather_kwargs(features: list["MultiModalFeatureSpec"], keys: set[str]):
         kwargs = defaultdict[str, list[NestedTensors]](list)
@@ -325,8 +373,8 @@ class MultiModalFeatureSpec:
 @dataclass
 class MultiModalFieldElem:
     """
-    Represents a keyword argument corresponding to a multi-modal item
-    in [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs].
+    Represents a keyword argument inside a
+    [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem].
     """
 
     modality: str
@@ -338,14 +386,14 @@ class MultiModalFieldElem:
     key: str
     """
     The key of this field in
-    [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs],
+    [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem],
     i.e. the name of the keyword argument to be passed to the model.
     """
 
     data: NestedTensors
     """
     The tensor data of this field in
-    [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs],
+    [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem],
     i.e. the value of the keyword argument to be passed to the model.
 
     It may be set to `None` if it is determined that the item is cached
@@ -379,9 +427,9 @@ class MultiModalFieldElem:
 @dataclass(frozen=True, kw_only=True)
 class BaseMultiModalField(ABC):
     """
-    Defines how to interpret tensor data belonging to a keyword argument in
-    [`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs] for multiple
-    multi-modal items, and vice versa.
+    Defines how to interpret tensor data belonging to a keyword argument for
+    [`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems],
+    and vice versa.
     """
 
     keep_on_cpu: bool = False
@@ -954,65 +1002,15 @@ MultiModalKwargsOptionalItems: TypeAlias = (
 )
 
 
-@deprecated("`MultiModalKwargs` is deprecated and will be removed in v0.14.")
-class MultiModalKwargs(UserDict[str, NestedTensors]):
-    """
-    A dictionary that represents the keyword arguments to
-    [`torch.nn.Module.forward`][].
-    """
-
-    @staticmethod
-    @deprecated(
-        "`MultiModalKwargs.from_hf_inputs` is deprecated and "
-        "will be removed in v0.14. "
-        "Please use `MultiModalKwargsItems.from_hf_inputs` and "
-        "access the tensor data using `.get_data()`."
-    )
-    def from_hf_inputs(
-        hf_inputs: "BatchFeature",
-        config_by_key: Mapping[str, MultiModalFieldConfig],
-    ):
-        return MultiModalKwargsItems.from_hf_inputs(hf_inputs, config_by_key).get_data()
-
-    @staticmethod
-    @deprecated(
-        "`MultiModalKwargs.from_items` is deprecated and "
-        "will be removed in v0.14. "
-        "Please use `MultiModalKwargsItems.from_seq` and "
-        "access the tensor data using `.get_data()`."
-    )
-    def from_items(
-        items: Sequence[MultiModalKwargsItem],
-        *,
-        pin_memory: bool = False,
-    ):
-        return MultiModalKwargsItems.from_seq(items).get_data(pin_memory=pin_memory)
-
-    def __getitem__(self, key: str):
-        if key not in self:
-            raise KeyError(
-                f"Keyword argument {key!r} not found. "
-                f"Available keys: {set(self.keys())}"
-            )
-
-        return super().__getitem__(key)
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, self.__class__):
-            return False
-
-        for k in self:
-            if k not in other:
-                return False
-            if not nested_tensors_equal(self[k], other[k]):
-                return False
-
-        return True
+MultiModalHashes = dict[str, list[str]]
+"""
+A dictionary containing per-item hashes for each modality.
+"""
 
 
 MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
 """
-A dictionary containing placeholder ranges for each modality.
+A dictionary containing per-item placeholder ranges for each modality.
 """
 
 
@@ -1032,10 +1030,10 @@ class MultiModalInputs(TypedDict):
     mm_kwargs: MultiModalKwargsOptionalItems
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: "MultiModalHashes"
+    mm_hashes: MultiModalHashes
     """The hashes of the multi-modal data."""
 
-    mm_placeholders: "MultiModalPlaceholderDict"
+    mm_placeholders: MultiModalPlaceholderDict
     """
     For each modality, information about the placeholder tokens in
     `prompt_token_ids`.

@@ -45,7 +45,11 @@ from transformers import (
 )
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from tests.models.utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
+from tests.models.utils import (
+    TokensTextLogprobs,
+    TokensTextLogprobsPromptLogprobs,
+    softmax,
+)
 from vllm import LLM, SamplingParams, envs
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -59,7 +63,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.base import MediaWithBytes
+from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
@@ -185,6 +189,17 @@ def dist_init():
     cleanup_dist_env_and_memory()
 
 
+@pytest.fixture
+def default_vllm_config():
+    """Set a default VllmConfig for tests that directly test CustomOps or pathways
+    that use get_current_vllm_config() outside of a full engine context.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        yield
+
+
 @pytest.fixture()
 def should_do_global_cleanup_after_test(request) -> bool:
     """Allow subdirectories to skip global cleanup by overriding this fixture.
@@ -200,6 +215,27 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
     if should_do_global_cleanup_after_test:
         cleanup_dist_env_and_memory()
+
+
+@pytest.fixture
+def workspace_init():
+    """Initialize the workspace manager for tests that need it.
+
+    This fixture initializes the workspace manager with a CUDA device
+    if available, and resets it after the test completes. Tests that
+    create a full vLLM engine should NOT use this fixture as the engine
+    will initialize the workspace manager itself.
+    """
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        reset_workspace_manager,
+    )
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        init_workspace_manager(device)
+    yield
+    reset_workspace_manager()
 
 
 @pytest.fixture(autouse=True)
@@ -389,7 +425,7 @@ class HfRunner:
 
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
-        from transformers import AutoProcessor  # noqa: F401
+        from transformers import AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
@@ -492,7 +528,7 @@ class HfRunner:
             elif problem_type == "multi_label_classification":
                 logits = output.logits.sigmoid()[0].tolist()
             else:
-                logits = output.logits.softmax(dim=-1)[0].tolist()
+                logits = softmax(output.logits)[0].tolist()
             outputs.append(logits)
 
         return outputs
@@ -660,6 +696,7 @@ class HfRunner:
         images: PromptImageInput | None = None,
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
+        use_cache: bool = True,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
         all_inputs = self.get_inputs(
@@ -673,7 +710,7 @@ class HfRunner:
         for inputs in all_inputs:
             output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
-                use_cache=True,
+                use_cache=use_cache,
                 do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
@@ -681,10 +718,16 @@ class HfRunner:
                 **kwargs,
             )
 
+            # Encoder-decoder models return decoder_hidden_states instead of
+            # hidden_states
+            hidden_states = (
+                getattr(output, "hidden_states", None) or output.decoder_hidden_states
+            )
+
             (
                 seq_logprobs_lst,
                 output_len,
-            ) = self._hidden_states_to_logprobs(output.hidden_states, num_logprobs)
+            ) = self._hidden_states_to_logprobs(hidden_states, num_logprobs)
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]

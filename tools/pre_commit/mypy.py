@@ -26,6 +26,7 @@ import regex as re
 FILES = [
     "vllm/*.py",
     "vllm/assets",
+    "vllm/compilation",
     "vllm/distributed",
     "vllm/engine",
     "vllm/entrypoints",
@@ -35,17 +36,21 @@ FILES = [
     "vllm/multimodal",
     "vllm/platforms",
     "vllm/plugins",
+    "vllm/renderers",
     "vllm/tokenizers",
     "vllm/transformers_utils",
     "vllm/triton_utils",
     "vllm/usage",
     "vllm/utils",
     "vllm/worker",
+    "vllm/v1/attention",
     "vllm/v1/core",
     "vllm/v1/engine",
+    "vllm/v1/executor",
     "vllm/v1/metrics",
     "vllm/v1/pool",
     "vllm/v1/sample",
+    "vllm/v1/structured_output",
     "vllm/v1/worker",
 ]
 
@@ -54,16 +59,11 @@ FILES = [
 SEPARATE_GROUPS = [
     "tests",
     # v0 related
-    "vllm/attention",
-    "vllm/compilation",
     "vllm/lora",
     "vllm/model_executor",
     # v1 related
-    "vllm/v1/attention",
-    "vllm/v1/executor",
     "vllm/v1/kv_offload",
     "vllm/v1/spec_decode",
-    "vllm/v1/structured_output",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
@@ -73,7 +73,7 @@ EXCLUDE = [
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
     # Ignore triton kernels in ops.
-    "vllm/attention/ops",
+    "vllm/v1/attention/ops",
 ]
 
 

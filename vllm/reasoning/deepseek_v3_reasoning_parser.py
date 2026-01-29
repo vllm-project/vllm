@@ -5,7 +5,10 @@ from collections.abc import Sequence
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
@@ -24,8 +27,10 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
-        chat_kwargs = kwargs.pop("chat_template_kwargs", {}) or {}
-        thinking = bool(chat_kwargs.pop("thinking", False))
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        thinking = bool(chat_kwargs.get("thinking", False))
+        enable_thinking = bool(chat_kwargs.get("enable_thinking", False))
+        thinking = thinking or enable_thinking
 
         if thinking:
             self._parser = DeepSeekR1ReasoningParser(tokenizer, *args, **kwargs)
@@ -36,7 +41,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         return self._parser.is_reasoning_end(input_ids)
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
         return self._parser.is_reasoning_end_streaming(input_ids, delta_ids)
 
@@ -65,3 +70,19 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
             current_token_ids,
             delta_token_ids,
         )
+
+
+class DeepSeekV3ReasoningWithThinkingParser(DeepSeekV3ReasoningParser):
+    """
+    DeepSeekV3ReasoningParser that defaults to thinking mode.
+    """
+
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        thinking = chat_kwargs.get("thinking", None)
+        enable_thinking = chat_kwargs.get("enable_thinking", None)
+        if thinking is None and enable_thinking is None:
+            chat_kwargs["thinking"] = True
+            chat_kwargs["enable_thinking"] = True
+            kwargs["chat_template_kwargs"] = chat_kwargs
+        super().__init__(tokenizer, *args, **kwargs)

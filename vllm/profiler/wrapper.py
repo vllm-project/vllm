@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from contextlib import nullcontext
 from typing import Literal
 
@@ -9,6 +10,7 @@ import torch
 from typing_extensions import override
 
 from vllm.config import ProfilerConfig
+from vllm.config.profiler import _is_uri_path
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -61,7 +63,7 @@ class WorkerProfiler(ABC):
         """Call _stop with error handling but no safeguards."""
         try:
             self._stop()
-            logger.info("Profiler stopped successfully.")
+            logger.info_once("Profiler stopped successfully.", scope="local")
         except Exception as e:
             logger.warning("Failed to stop profiler: %s", e)
         self._running = False  # Always mark as not running, assume stop worked
@@ -91,7 +93,7 @@ class WorkerProfiler(ABC):
             and self._delay_iters > 0
             and self._active_iteration_count == self._delay_iters
         ):
-            logger.info("Starting profiler after delay...")
+            logger.info_once("Starting profiler after delay...", scope="local")
             self._call_start()
 
         if self._running:
@@ -105,7 +107,9 @@ class WorkerProfiler(ABC):
             # Automatically stop the profiler after max iters
             # will be marked as not running, but leave as active so that stop
             # can clean up properly
-            logger.info("Max profiling iterations reached. Stopping profiler...")
+            logger.info_once(
+                "Max profiling iterations reached. Stopping profiler...", scope="local"
+            )
             self._call_stop()
             return
 
@@ -125,7 +129,7 @@ class WorkerProfiler(ABC):
 
     def shutdown(self) -> None:
         """Ensure profiler is stopped when shutting down."""
-        logger.info_once("Shutting down profiler")
+        logger.info_once("Shutting down profiler", scope="local")
         if self._running:
             self.stop()
 
@@ -149,6 +153,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         worker_name: str,
         local_rank: int,
         activities: list[TorchProfilerActivity],
+        on_trace_ready: Callable[[torch.profiler.profile], None] | None = None,
     ) -> None:
         super().__init__(profiler_config)
 
@@ -156,9 +161,10 @@ class TorchProfilerWrapper(WorkerProfiler):
         self.profiler_config = profiler_config
         torch_profiler_trace_dir = profiler_config.torch_profiler_dir
         if local_rank in (None, 0):
-            logger.info(
+            logger.info_once(
                 "Torch profiling enabled. Traces will be saved to: %s",
                 torch_profiler_trace_dir,
+                scope="local",
             )
             logger.debug(
                 "Profiler config: record_shapes=%s,"
@@ -169,6 +175,17 @@ class TorchProfilerWrapper(WorkerProfiler):
                 profiler_config.torch_profiler_with_flops,
             )
 
+        # Determine trace handler: use custom handler if provided,
+        # otherwise default to tensorboard trace handler
+        if on_trace_ready is not None:
+            trace_handler = on_trace_ready
+        else:
+            trace_handler = torch.profiler.tensorboard_trace_handler(
+                torch_profiler_trace_dir,
+                worker_name=worker_name,
+                use_gzip=profiler_config.torch_profiler_use_gzip,
+            )
+
         self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
         self.profiler = torch.profiler.profile(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
@@ -176,11 +193,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             profile_memory=profiler_config.torch_profiler_with_memory,
             with_stack=profiler_config.torch_profiler_with_stack,
             with_flops=profiler_config.torch_profiler_with_flops,
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                torch_profiler_trace_dir,
-                worker_name=worker_name,
-                use_gzip=profiler_config.torch_profiler_use_gzip,
-            ),
+            on_trace_ready=trace_handler,
         )
 
     @override
@@ -195,12 +208,15 @@ class TorchProfilerWrapper(WorkerProfiler):
         rank = self.local_rank
         if profiler_config.torch_profiler_dump_cuda_time_total:
             profiler_dir = profiler_config.torch_profiler_dir
-            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
             sort_key = "self_cuda_time_total"
             table = self.profiler.key_averages().table(sort_by=sort_key)
 
-            with open(profiler_out_file, "w") as f:
-                print(table, file=f)
+            # Skip file write for URI paths (gs://, s3://, etc.)
+            # as standard file I/O doesn't work with URI schemes
+            if not _is_uri_path(profiler_dir):
+                profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+                with open(profiler_out_file, "w") as f:
+                    print(table, file=f)
 
             # only print profiler results on rank 0
             if rank == 0:

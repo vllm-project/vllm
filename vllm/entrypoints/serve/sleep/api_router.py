@@ -62,9 +62,5 @@ async def reconfigure(request: ReconfigureRequest, raw_request: Request):
 def attach_router(app: FastAPI):
     if not envs.VLLM_SERVER_DEV_MODE:
         return
-    logger.warning(
-        "SECURITY WARNING: Development endpoints are enabled! "
-        "This should NOT be used in production!"
-    )
 
     app.include_router(router)

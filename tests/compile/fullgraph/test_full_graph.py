@@ -10,10 +10,10 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ...utils import create_new_process_for_each_test
 
@@ -55,14 +55,6 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
                 (
                     "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
                     {"quantization": "gptq_marlin"},
-                )
-            )
-
-        if is_quant_method_supported("gptq_marlin_24"):
-            TEST_MODELS.append(
-                (
-                    "alexm-nm/tinyllama-24-marlin24-4bit-g128",
-                    {"quantization": "gptq_marlin_24"},
                 )
             )
 
@@ -156,6 +148,20 @@ def test_full_graph(
         )
         for model_info in models_list(all=False)
         if is_torch_equal_or_newer("2.9.0.dev")
+    ]
+    + [
+        # Test get_raw_stream patch with compile_sizes
+        # This tests that TorchInductor autotune works correctly with get_raw_stream
+        # patch in torch 2.9 and without patch in torch 2.10+
+        (
+            CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                compile_sizes=[1, 2],  # Triggers autotune which uses get_raw_stream
+                cudagraph_mode=CUDAGraphMode.NONE,
+            ),
+            "facebook/opt-125m",
+            {},
+        ),
     ],
 )
 # only test some of the models
@@ -197,20 +203,19 @@ def test_custom_compile_config(
     ],
 )
 def test_fp8_kv_scale_compile(
-    monkeypatch: pytest.MonkeyPatch,
     compilation_mode: int,
     model: str,
     backend: AttentionBackendEnum | None,
 ):
-    if backend:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend.name)
-
     model_kwargs = {
         "quantization": "fp8",
         "kv_cache_dtype": "fp8_e4m3",
         "calculate_kv_scales": True,
         "max_model_len": 512,
     }
+    if backend:
+        model_kwargs["attention_config"] = {"backend": backend.name}
+
     run_model(compilation_mode, model, **model_kwargs)
 
 

@@ -6,13 +6,8 @@ from typing import Any, Optional
 import torch
 from packaging import version
 from torch.nn import Module
-from torch.nn.parameter import Parameter
 
 from vllm._ipex_ops import ipex_ops as ops
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEMethodBase,
-    FusedMoeWeightScaleSupported,
-)
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -24,10 +19,14 @@ from vllm.model_executor.layers.quantization import (
     QuantizationMethods,
 )
 from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
+from vllm.model_executor.layers.quantization.fp8 import (
+    Fp8Config,
+    Fp8LinearMethod,
+    Fp8OnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 MIN_IPEX_VERSION = "2.6.0"
@@ -306,12 +305,14 @@ class XPUFp8LinearMethod(Fp8LinearMethod):
         super().__init__(quant_config)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
         # If checkpoint not serialized fp8, quantize the weights.
         if not self.quant_config.is_checkpoint_fp8_serialized:
             qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
             # Update the layer with the new values.
-            layer.weight = Parameter(qweight, requires_grad=False)
-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            replace_parameter(layer, "weight", qweight.data)
+            replace_parameter(layer, "weight_scale", weight_scale.data)
             layer.input_scale = None
 
     def apply(
@@ -328,69 +329,14 @@ class XPUFp8LinearMethod(Fp8LinearMethod):
         return output
 
 
-class XPUFp8MoEMethod(FusedMoEMethodBase):
+class XPUFp8MoEMethod(Fp8OnlineMoEMethod):
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
-        super().__init__(layer.moe_config)
+        super().__init__(quant_config, layer)
         self.quant_config = quant_config
 
-    def create_weights(
-        self,
-        layer: Module,
-        num_experts: int,
-        hidden_size: int,
-        intermediate_size_per_partition: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        layer.intermediate_size_per_partition = intermediate_size_per_partition
-        layer.hidden_size = hidden_size
-        layer.num_experts = num_experts
-        layer.orig_dtype = params_dtype
-        layer.weight_block_size = None
-        # WEIGHTS
-        w13_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                2 * intermediate_size_per_partition,
-                hidden_size,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w13_weight", w13_weight)
-        set_weight_attrs(w13_weight, extra_weight_attrs)
-
-        w2_weight = torch.nn.Parameter(
-            torch.empty(
-                num_experts,
-                hidden_size,
-                intermediate_size_per_partition,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        layer.register_parameter("w2_weight", w2_weight)
-        set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        # Allocate 2 scales for w1 and w3 respectively.
-        # They will be combined to a single scale after weight loading.
-        w13_weight_scale = torch.nn.Parameter(
-            torch.ones(num_experts, 2, dtype=torch.float32), requires_grad=False
-        )
-        w2_weight_scale = torch.nn.Parameter(
-            torch.ones(num_experts, dtype=torch.float32), requires_grad=False
-        )
-        layer.register_parameter("w13_weight_scale", w13_weight_scale)
-        layer.register_parameter("w2_weight_scale", w2_weight_scale)
-
-        extra_weight_attrs.update(
-            {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
-        )
-        # INPUT_SCALES
-        layer.w13_input_scale = None
-        layer.w2_input_scale = None
-
     def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
         if not self.quant_config.is_checkpoint_fp8_serialized:
             fp8_dtype = current_platform.fp8_dtype()
             w13_weight = torch.empty_like(layer.w13_weight.data, dtype=fp8_dtype)
@@ -413,8 +359,9 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
                 w2_weight[expert, :, :], layer.w2_weight_scale[expert] = (
                     ops.scaled_fp8_quant(layer.w2_weight.data[expert, :, :])
                 )
-            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+            replace_parameter(layer, "w13_weight", w13_weight)
+            replace_parameter(layer, "w2_weight", w2_weight)
+
         import intel_extension_for_pytorch as ipex
 
         ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
@@ -434,7 +381,11 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
     ) -> FusedMoEQuantConfig | None:
         return None
 
-    def apply(
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
+    def apply_monolithic(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,

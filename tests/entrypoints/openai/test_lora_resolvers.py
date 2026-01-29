@@ -9,9 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.openai.protocol import CompletionRequest, ErrorResponse
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.tokenizers import get_tokenizer
@@ -61,13 +63,13 @@ class MockLoRAResolver(LoRAResolver):
             return LoRARequest(
                 lora_name="test-lora",
                 lora_int_id=1,
-                lora_local_path="/fake/path/test-lora",
+                lora_path="/fake/path/test-lora",
             )
         elif lora_name == "invalid-lora":
             return LoRARequest(
                 lora_name="invalid-lora",
                 lora_int_id=2,
-                lora_local_path="/fake/path/invalid-lora",
+                lora_path="/fake/path/invalid-lora",
             )
         return None
 

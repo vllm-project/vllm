@@ -7,7 +7,7 @@ vLLM also maintains a continuous performance benchmark under [perf.vllm.ai](http
 
 ## Performance benchmark quick overview
 
-**Benchmarking Coverage**: latency, throughput and fix-qps serving on B200, A100, H100, Intel® Xeon® Processors and Intel® Gaudi® 3 Accelerators with different models.
+**Benchmarking Coverage**: latency, throughput and fix-qps serving on B200, A100, H100, Intel® Xeon® Processors, Intel® Gaudi® 3 Accelerators and Arm® Neoverse™ with different models.
 
 **Benchmarking Duration**: about 1hr.
 
@@ -23,7 +23,7 @@ bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 
 Runtime environment variables:
 
-- `ON_CPU`: set the value to '1' on Intel® Xeon® Processors. Default value is 0.
+- `ON_CPU`: set the value to '1' on Intel® Xeon® and Arm® Neoverse™ Processors. Default value is 0.
 - `SERVING_JSON`: JSON file to use for the serving tests. Default value is empty string (use default file).
 - `LATENCY_JSON`: JSON file to use for the latency tests. Default value is empty string (use default file).
 - `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
@@ -34,8 +34,9 @@ Runtime environment variables:
 
 See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions.md) for detailed descriptions, and use `tests/latency-tests.json`, `tests/throughput-tests.json`, `tests/serving-tests.json` to configure the test cases.
 > NOTE: For Intel® Xeon® Processors, use `tests/latency-tests-cpu.json`, `tests/throughput-tests-cpu.json`, `tests/serving-tests-cpu.json` instead.
-For Intel® Gaudi® 3 Accelerators, use `tests/latency-tests-hpu.json`, `tests/throughput-tests-hpu.json`, `tests/serving-tests-hpu.json` instead.
->
+> For Intel® Gaudi® 3 Accelerators, use `tests/latency-tests-hpu.json`, `tests/throughput-tests-hpu.json`, `tests/serving-tests-hpu.json` instead.
+> For Arm® Neoverse™, use `tests/latency-tests-arm64-cpu.json`, `tests/throughput-tests-arm64-cpu.json`, `tests/serving-tests-arm64-cpu.json` instead.
+
 ### Latency test
 
 Here is an example of one test inside `latency-tests.json`:
@@ -175,19 +176,6 @@ If you do not see the table, please wait till the benchmark finish running.
 The json version of the table (together with the json version of the benchmark) will be also attached to the markdown file.
 The raw benchmarking results (in the format of json files) are in the `Artifacts` tab of the benchmarking.
 
-The `compare-json-results.py` helps to compare benchmark results JSON files converted using `convert-results-json-to-markdown.py`.
-When run, benchmark script generates results under `benchmark/results` folder, along with the `benchmark_results.md` and `benchmark_results.json`.
-`compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.  
-If only one benchmark_results.json is passed, `compare-json-results.py` compares different TP and PP configurations in the benchmark_results.json instead.
+#### Performance Results Comparison  
 
-Here is an example using the script to compare result_a and result_b with Model, Dataset name, input/output length, max concurrency and qps.
-`python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`
-
-|   | Model | Dataset Name | Input Len | Output Len | # of max concurrency | qps  | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
-|----|---------------------------------------|--------|-----|-----|------|-----|-----------|----------|----------|
-| 0  | meta-llama/Meta-Llama-3.1-8B-Instruct | random | 128 | 128 | 1000 | 1 | 142.633982                             | 156.526018                             | 1.097396 |
-| 1  | meta-llama/Meta-Llama-3.1-8B-Instruct | random | 128 | 128 | 1000 | inf| 241.620334                             | 294.018783                             | 1.216863 |
-
-A comparison diagram will be generated below the table.
-Here is an example to compare between 96c/results_gnr_96c_091_tp2pp3 and 128c/results_gnr_128c_091_tp2pp3
-<img width="1886" height="828" alt="image" src="https://github.com/user-attachments/assets/c02a43ef-25d0-4fd6-90e5-2169a28682dd" />
+Follow the instructions in [performance results comparison](https://docs.vllm.ai/en/latest/benchmarking/dashboard/#performance-results-comparison) to analyze performance results and the sizing guide.

@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
@@ -24,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -138,6 +138,12 @@ class MultiConnector(KVConnectorBase_V1):
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        if not self._connectors:
+            return False
+        return all(c.prefer_cross_layer_blocks for c in self._connectors)
+
     @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
@@ -163,6 +169,13 @@ class MultiConnector(KVConnectorBase_V1):
                 )
             )
         return ret
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+    ):
+        # Register on all connectors
+        for c in self._connectors:
+            c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
@@ -258,6 +271,12 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             agg_block_ids |= c.get_block_ids_with_load_errors()
         return agg_block_ids
+
+    # TODO: Add a generic implementation of 'get_kv_connector_kv_cache_events' method
+    # for the MultiConnector. It should be able to get events from multiple
+    # connectors, handling the case where only a subset of the requested connectors
+    # implements the 'get_kv_connector_kv_cache_events'
+    # Follow on PR from https://github.com/vllm-project/vllm/pull/28309#pullrequestreview-3566351082
 
     # ==============================
     # Scheduler-side methods

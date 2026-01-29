@@ -1,3 +1,4 @@
+#include "cuda_compat.h"
 #include "dispatch_utils.h"
 
 #include <torch/cuda.h>
@@ -97,7 +98,9 @@ static inline __device__ bool isPartialMatch(float x, uint32_t pattern) {
 template <typename T, typename idxT, typename Func>
 __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
                                    const T* in, idxT len, Func f) {
-  constexpr int WARP_SIZE = 32;
+  // Use dynamic WARP_SIZE from cuda_compat.h to support both
+  // Wave64 (MI300X/gfx942) and Wave32 (Strix Halo/gfx1151) architectures
+  constexpr int kWarpSize = WARP_SIZE;
   using WideT = float4;
   if constexpr (sizeof(T) >= sizeof(WideT)) {
     for (idxT i = thread_rank; i < len; i += num_threads) {
@@ -132,8 +135,8 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
       }
     }
 
-    static_assert(WARP_SIZE >= items_per_scalar);
-    // and because items_per_scalar > skip_cnt, WARP_SIZE > skip_cnt
+    static_assert(kWarpSize >= items_per_scalar);
+    // and because items_per_scalar > skip_cnt, kWarpSize > skip_cnt
     // no need to use loop
     if (thread_rank < skip_cnt) {
       f(in[thread_rank], thread_rank);
@@ -142,7 +145,7 @@ __device__ void vectorized_process(size_t thread_rank, size_t num_threads,
     // len_cast * items_per_scalar + items_per_scalar > len - skip_cnt;
     // and so
     // len - (skip_cnt + len_cast * items_per_scalar) < items_per_scalar <=
-    // WARP_SIZE no need to use loop
+    // kWarpSize no need to use loop
     const idxT remain_i = skip_cnt + len_cast * items_per_scalar + thread_rank;
     if (remain_i < len) {
       f(in[remain_i], remain_i);
@@ -550,8 +553,8 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowPrefill(
   int rowEnd = rowEnds[rowIdx];
 
   // Local pointers to this block
-  outIndices += rowIdx * topK;
-  logits += rowIdx * stride0;
+  outIndices += static_cast<int64_t>(rowIdx) * topK;
+  logits += static_cast<int64_t>(rowIdx) * stride0;
 
   topKPerRowJob<kNumThreadsPerBlock, kNumBins, useRadixSort>(
       nullptr, logits, rowStart, rowEnd, outIndices, nullptr, stride1, topK);
@@ -576,19 +579,21 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
 
   // Local pointers to this block
   if constexpr (!multipleBlocksPerRow && !mergeBlocks) {
-    outIndices += rowIdx * topK;
+    outIndices += static_cast<int64_t>(rowIdx) * topK;
   } else if constexpr (multipleBlocksPerRow) {
     const auto blockSize = rowEnd / gridDim.y;  // 16384 / 2 = 8192
     rowStart = blockSize * blockIdx.y;          // 8192 * 1 = 8192
     rowEnd = gridDim.y == blockIdx.y + 1 ? rowEnd : rowStart + blockSize;
-    outIndices += rowIdx * gridDim.y * topK + blockIdx.y * topK;
-    outLogits += rowIdx * gridDim.y * topK + blockIdx.y * topK;
+    outIndices +=
+        static_cast<int64_t>(rowIdx) * gridDim.y * topK + blockIdx.y * topK;
+    outLogits +=
+        static_cast<int64_t>(rowIdx) * gridDim.y * topK + blockIdx.y * topK;
   } else if constexpr (mergeBlocks) {
     rowEnd = numBlocksToMerge * topK;
-    indices += rowIdx * numBlocksToMerge * topK;
-    outIndices += rowIdx * topK;
+    indices += static_cast<int64_t>(rowIdx) * numBlocksToMerge * topK;
+    outIndices += static_cast<int64_t>(rowIdx) * topK;
   }
-  logits += rowIdx * stride0;
+  logits += static_cast<int64_t>(rowIdx) * stride0;
 
   topKPerRowJob<kNumThreadsPerBlock, kNumBins, useRadixSort,
                 multipleBlocksPerRow, mergeBlocks>(

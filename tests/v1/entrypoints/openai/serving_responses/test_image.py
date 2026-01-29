@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
-from vllm.multimodal.utils import encode_image_base64
+from vllm.multimodal.utils import encode_image_url
 
 # Use a small vision model for testing
 MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
@@ -52,9 +52,9 @@ async def client(image_server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image(local_asset_server) -> dict[str, str]:
+def url_encoded_image(local_asset_server) -> dict[str, str]:
     return {
-        image_url: encode_image_base64(local_asset_server.get_image_asset(image_url))
+        image_url: encode_image_url(local_asset_server.get_image_asset(image_url))
         for image_url in TEST_IMAGE_ASSETS
     }
 
@@ -95,7 +95,7 @@ async def test_single_chat_session_image_base64encoded(
     client: openai.AsyncOpenAI,
     model_name: str,
     raw_image_url: str,
-    base64_encoded_image: dict[str, str],
+    url_encoded_image: dict[str, str],
 ):
     content_text = "What's in this image?"
     messages = [
@@ -104,7 +104,7 @@ async def test_single_chat_session_image_base64encoded(
             "content": [
                 {
                     "type": "input_image",
-                    "image_url": f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}",  # noqa: E501
+                    "image_url": url_encoded_image[raw_image_url],
                     "detail": "auto",
                 },
                 {"type": "input_text", "text": content_text},
