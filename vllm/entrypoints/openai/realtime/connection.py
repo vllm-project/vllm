@@ -144,12 +144,11 @@ class RealtimeConnection:
 
         # Create audio stream generator
         audio_stream = self.audio_stream_generator()
-        input_stream: asyncio.Queue[list[int]] = asyncio.Queue()
+        input_stream = asyncio.Queue[list[int]]()
 
         # Transform to StreamingInput generator
         streaming_input_gen = self.serving.transcribe_realtime(
-            audio_stream,
-            input_stream,
+            audio_stream, input_stream
         )
 
         # Start generation task

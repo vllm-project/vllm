@@ -501,20 +501,19 @@ class InductorAdaptor(CompilerInterface):
             # get hit.
             # TODO(zou3519): we're going to replace this all with
             # standalone_compile sometime.
-            if is_torch_equal_or_newer("2.6"):
-                stack.enter_context(
-                    torch._inductor.config.patch(fx_graph_remote_cache=False)
-                )
-                # InductorAdaptor (unfortunately) requires AOTAutogradCache
-                # to be turned off to run. It will fail to acquire the hash_str
-                # and error if not.
-                # StandaloneInductorAdaptor (PyTorch 2.8+) fixes this problem.
-                stack.enter_context(
-                    torch._functorch.config.patch(enable_autograd_cache=False)
-                )
-                stack.enter_context(
-                    torch._functorch.config.patch(enable_remote_autograd_cache=False)
-                )
+            stack.enter_context(
+                torch._inductor.config.patch(fx_graph_remote_cache=False)
+            )
+            # InductorAdaptor (unfortunately) requires AOTAutogradCache
+            # to be turned off to run. It will fail to acquire the hash_str
+            # and error if not.
+            # StandaloneInductorAdaptor (PyTorch 2.8+) fixes this problem.
+            stack.enter_context(
+                torch._functorch.config.patch(enable_autograd_cache=False)
+            )
+            stack.enter_context(
+                torch._functorch.config.patch(enable_remote_autograd_cache=False)
+            )
 
             compiled_graph = compile_fx(
                 graph,
