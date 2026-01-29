@@ -572,10 +572,7 @@ class LayerNorm(torch.nn.LayerNorm):
             return super().forward(x)
         return (
             # super(LayerNorm, self)
-            super()
-            .__init__()
-            .forward(x.transpose(self.dim, -1))
-            .transpose(self.dim, -1)
+            super().forward(x.transpose(self.dim, -1)).transpose(self.dim, -1)
         )
 
 
