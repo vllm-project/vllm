@@ -13,6 +13,10 @@ logger = init_logger(__name__)
 
 _is_otel_imported = False
 otel_import_error_traceback: str | None = None
+
+# Global TracerProvider singleton to prevent overwriting
+_global_tracer_provider = None
+_global_tracer_endpoint: str | None = None
 try:
     from opentelemetry.context.context import Context
     from opentelemetry.sdk.environment_variables import (
@@ -55,19 +59,67 @@ def is_otel_available() -> bool:
 def init_tracer(
     instrumenting_module_name: str, otlp_traces_endpoint: str
 ) -> Tracer | None:
+    """Initialize tracer with a global singleton TracerProvider.
+
+    CRITICAL: Uses a singleton pattern to avoid overwriting the global provider.
+    Multiple calls with the same endpoint will reuse the same provider.
+
+    IMPORTANT: First call sets the endpoint. Subsequent calls with different
+    endpoints will log a warning and use the original endpoint (first call wins).
+
+    Args:
+        instrumenting_module_name: Scope name (e.g., "vllm.api", "vllm.scheduler")
+        otlp_traces_endpoint: OTLP endpoint URL
+
+    Returns:
+        Tracer instance for the specified scope
+    """
+    global _global_tracer_provider, _global_tracer_endpoint
+
     if not is_otel_available():
         raise ValueError(
             "OpenTelemetry is not available. Unable to initialize "
             "a tracer. Ensure OpenTelemetry packages are installed. "
             f"Original error:\n{otel_import_error_traceback}"
         )
-    trace_provider = TracerProvider()
 
-    span_exporter = get_span_exporter(otlp_traces_endpoint)
-    trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
-    set_tracer_provider(trace_provider)
+    # Use singleton pattern: create provider once, reuse for all tracers
+    if _global_tracer_provider is None:
+        logger.info(
+            "Initializing global TracerProvider with endpoint: %s",
+            otlp_traces_endpoint
+        )
+        _global_tracer_provider = TracerProvider()
+        _global_tracer_endpoint = otlp_traces_endpoint
 
-    tracer = trace_provider.get_tracer(instrumenting_module_name)
+        span_exporter = get_span_exporter(otlp_traces_endpoint)
+        _global_tracer_provider.add_span_processor(BatchSpanProcessor(span_exporter))
+        set_tracer_provider(_global_tracer_provider)
+
+        logger.info("Global TracerProvider initialized successfully")
+    else:
+        # Warn if endpoint mismatch (first call wins)
+        if otlp_traces_endpoint != _global_tracer_endpoint:
+            logger.warning(
+                "TracerProvider already initialized with endpoint '%s'. "
+                "Ignoring different endpoint '%s' for scope '%s'. "
+                "First init_tracer call sets the endpoint for all scopes.",
+                _global_tracer_endpoint,
+                otlp_traces_endpoint,
+                instrumenting_module_name
+            )
+        logger.debug(
+            "Reusing existing global TracerProvider for scope: %s",
+            instrumenting_module_name
+        )
+
+    # Get tracer for this specific scope from the singleton provider
+    tracer = _global_tracer_provider.get_tracer(instrumenting_module_name)
+    logger.info(
+        "Created tracer for scope '%s' from global provider",
+        instrumenting_module_name
+    )
+
     return tracer
 
 
@@ -88,10 +140,34 @@ def get_span_exporter(endpoint):
 
 
 def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
-    if is_otel_available():
-        headers = headers or {}
-        return TraceContextTextMapPropagator().extract(headers)
+    """Extract trace context from headers using W3C Trace Context propagation.
+
+    Args:
+        headers: HTTP headers dict that may contain traceparent/tracestate
+
+    Returns:
+        Context object if trace headers found, None otherwise
+    """
+    if not is_otel_available():
+        logger.debug("OTEL not available, cannot extract trace context")
+        return None
+
+    headers = headers or {}
+
+    if "traceparent" in headers:
+        logger.debug("Extracting trace context from headers (traceparent present)")
     else:
+        logger.debug("No traceparent header found in request")
+
+    try:
+        context = TraceContextTextMapPropagator().extract(headers)
+        logger.debug("Successfully extracted trace context: %s", context is not None)
+        return context
+    except Exception as e:
+        logger.debug(
+            "Failed to extract trace context: %s",
+            e
+        )
         return None
 
 
@@ -109,9 +185,11 @@ def inject_trace_context(span, carrier: dict[str, str] | None = None) -> dict[st
         - Injection fails due to exception (returns carrier, guaranteed dict after line 117)
     """
     if not is_otel_available():
+        logger.debug("OTEL not available, skipping trace context injection")
         return carrier
 
     if span is None:
+        logger.debug("Span is None, skipping trace context injection")
         return carrier
 
     try:
@@ -124,9 +202,15 @@ def inject_trace_context(span, carrier: dict[str, str] | None = None) -> dict[st
         context = trace.set_span_in_context(span)
         TraceContextTextMapPropagator().inject(carrier, context=context)
 
+        logger.debug("Injected trace context into carrier (traceparent set)")
+
         return carrier
-    except Exception:
+    except Exception as e:
         # Injection failure should not break request processing
+        logger.debug(
+            "Failed to inject trace context: %s",
+            e
+        )
         return carrier
 
 

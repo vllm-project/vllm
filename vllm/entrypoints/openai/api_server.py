@@ -941,19 +941,39 @@ async def run_server_worker(
         app = build_app(args)
 
         # Initialize tracer provider in API process for journey tracing
-        # This ensures API spans have valid SpanContext for parent-child linkage
+        # This sets the global TracerProvider via set_tracer_provider()
+        # Later, _create_api_span() retrieves it via get_tracer_provider()
         observability_config = engine_client.vllm_config.observability_config
+
         if observability_config.enable_journey_tracing:
             endpoint = observability_config.otlp_traces_endpoint
             if endpoint:
                 try:
                     from vllm.tracing import init_tracer, is_otel_available
                     if is_otel_available():
-                        init_tracer("vllm.api", endpoint)
-                        logger.debug("Initialized tracer for API process: %s", endpoint)
+                        logger.info(
+                            "Initializing vllm.api tracer with endpoint: %s",
+                            endpoint
+                        )
+                        api_tracer = init_tracer("vllm.api", endpoint)
+                        logger.info(
+                            "Successfully initialized vllm.api tracer: %s",
+                            type(api_tracer).__name__
+                        )
+                        logger.info(
+                            "Tracer registered with global provider and can be retrieved via get_tracer_provider()"
+                        )
+                    else:
+                        logger.error(
+                            "OpenTelemetry not available, cannot initialize API tracer"
+                        )
                 except Exception as e:
                     # Tracing should never break server startup
-                    logger.warning("Failed to initialize API tracer: %s", e)
+                    logger.error(
+                        "Failed to initialize API tracer: %s",
+                        e,
+                        exc_info=True
+                    )
 
         await init_app_state(engine_client, app.state, args)
 

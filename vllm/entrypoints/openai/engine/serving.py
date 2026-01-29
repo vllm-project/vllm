@@ -376,6 +376,10 @@ class OpenAIServing:
         Extracts incoming trace context from headers (if present) and creates
         parent span that will be linked to child span in engine-core.
 
+        Uses OpenTelemetry's global tracer provider to get the vllm.api tracer.
+        The singleton pattern in init_tracer() ensures the global provider
+        has the OTLP exporter configured.
+
         Args:
             request_id: The request ID (e.g., chatcmpl-xxx)
             trace_headers: Optional trace headers from request
@@ -383,27 +387,56 @@ class OpenAIServing:
         Returns:
             Span object if tracer available, None otherwise
         """
-        try:
-            from vllm.tracing import SpanAttributes, extract_trace_context
-            from opentelemetry import trace
-            from opentelemetry.trace import SpanKind
-        except ImportError:
+        # Check if tracing is enabled first (avoid OTEL imports if not needed)
+        if not await self._get_is_tracing_enabled():
+            logger.debug(
+                "Journey tracing not enabled for request %s, skipping span creation",
+                request_id
+            )
             return None
 
-        # Get tracer from global provider (set by engine during init)
+        logger.debug(
+            "Creating API span for request %s (has_trace_headers=%s)",
+            request_id,
+            trace_headers is not None
+        )
+
         try:
-            tracer_provider = trace.get_tracer_provider()
-            tracer = tracer_provider.get_tracer("vllm.api")
-        except Exception:
+            from vllm.tracing import SpanAttributes, extract_trace_context
+            from opentelemetry.trace import SpanKind, get_tracer_provider
+        except ImportError as e:
+            logger.debug(
+                "Failed to import OpenTelemetry for request %s: %s",
+                request_id,
+                e
+            )
             return None
+
+        # Get tracer from global provider (singleton ensures OTLP exporter configured)
+        tracer_provider = get_tracer_provider()
+        tracer = tracer_provider.get_tracer("vllm.api")
+        logger.debug(
+            "Got vllm.api tracer from global provider for request %s: %s",
+            request_id,
+            type(tracer).__name__
+        )
 
         # Extract incoming trace context (if client provided traceparent header)
         parent_context = None
         if trace_headers:
             try:
                 parent_context = extract_trace_context(trace_headers)
-            except Exception:
-                pass  # Continue without parent context
+                logger.debug(
+                    "Extracted trace context for request %s: %s",
+                    request_id,
+                    parent_context is not None
+                )
+            except Exception as e:
+                logger.debug(
+                    "Failed to extract trace context for request %s: %s",
+                    request_id,
+                    e
+                )
 
         # Create parent span (becomes child if parent_context exists, root otherwise)
         try:
@@ -413,14 +446,29 @@ class OpenAIServing:
                 context=parent_context,
                 start_time=time.time_ns(),
             )
-        except Exception:
+            logger.debug(
+                "Created API span 'llm_request' for request %s (scope=vllm.api)",
+                request_id
+            )
+        except Exception as e:
+            logger.debug(
+                "Failed to create API span for request %s: %s",
+                request_id,
+                e,
+                exc_info=True
+            )
             return None
 
         # Set basic attributes
         try:
             api_span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, request_id)
-        except Exception:
-            pass  # Continue even if attribute setting fails
+            logger.debug("Set request_id attribute on API span for %s", request_id)
+        except Exception as e:
+            logger.debug(
+                "Failed to set attributes on API span for %s: %s",
+                request_id,
+                e
+            )
 
         # Emit ARRIVED event immediately (best-effort)
         try:
@@ -430,8 +478,18 @@ class OpenAIServing:
                     attributes={SpanAttributes.EVENT_TS_MONOTONIC: time.monotonic()},
                     timestamp=time.time_ns(),
                 )
-        except Exception:
-            pass  # Event emission is optional, don't fail span creation
+                logger.debug("Emitted api.ARRIVED event for request %s", request_id)
+            else:
+                logger.debug(
+                    "API span is not recording for request %s, skipping api.ARRIVED event",
+                    request_id
+                )
+        except Exception as e:
+            logger.debug(
+                "Failed to emit api.ARRIVED event for %s: %s",
+                request_id,
+                e
+            )
 
         return api_span
 

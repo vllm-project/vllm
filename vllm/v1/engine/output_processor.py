@@ -606,8 +606,10 @@ class OutputProcessor:
                 self._update_stats_from_finished(
                     req_state, finish_reason, iteration_stats
                 )
-                if self.tracer:
-                    self.do_tracing(engine_core_output, req_state, iteration_stats)
+                # NOTE: OutputProcessor tracing is disabled in favor of journey tracing.
+                # Journey tracing creates spans at vllm.api and vllm.scheduler scopes.
+                # The do_tracing() method was creating duplicate llm_request spans under
+                # the wrong scope (vllm.llm_engine) and causing provider conflicts.
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,

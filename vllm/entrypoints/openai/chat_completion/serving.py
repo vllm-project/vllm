@@ -1560,6 +1560,19 @@ class OpenAIServingChat(OpenAIServing):
                 yield "data: [DONE]\n\n"
                 return  # Explicit return prevents fall-through to success path
 
+            # Set completion_tokens on API span before finalizing
+            api_span, _, _ = self._get_api_span_info(request_metadata.request_id)
+            if api_span:
+                try:
+                    if api_span.is_recording():
+                        from vllm.tracing import SpanAttributes
+                        api_span.set_attribute(
+                            SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
+                            num_completion_tokens
+                        )
+                except Exception:
+                    pass  # Defensive: attribute setting failures don't break request
+
             # SUCCESS: Finalize with DEPARTED before [DONE]
             # This ensures DEPARTED is emitted even if exception occurs during [DONE] yield
             self._finalize_api_span(
@@ -2007,6 +2020,19 @@ class OpenAIServingChat(OpenAIServing):
                             is_streaming=False,
                             delta=False,
                         )
+
+            # Set completion_tokens on API span before finalizing
+            api_span, _, _ = self._get_api_span_info(request_metadata.request_id)
+            if api_span:
+                try:
+                    if api_span.is_recording():
+                        from vllm.tracing import SpanAttributes
+                        api_span.set_attribute(
+                            SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
+                            num_generated_tokens
+                        )
+                except Exception:
+                    pass  # Defensive: attribute setting failures don't break request
 
             # Success: finalize with DEPARTED immediately before return
             # This minimizes the window where exception could lose DEPARTED
