@@ -31,7 +31,7 @@ from einops import rearrange
 from torchvision.transforms import v2
 from transformers.utils import logging
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
