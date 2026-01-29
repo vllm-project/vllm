@@ -131,19 +131,9 @@ scaled_fp4_grouped_quantize = _lazy_import_wrapper(
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer.fp4_quantization", "block_scale_interleave"
 )
-
-block_scale_interleave = _lazy_import_wrapper(
-    "flashinfer.fp4_quantization", "block_scale_interleave"
-)
-
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
-
-trtllm_mxintw4a16_block_scale_moe = _lazy_import_wrapper(
-    "flashinfer", "trtllm_mxint4_block_scale_moe"
-)
-
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",

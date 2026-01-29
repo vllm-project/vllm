@@ -1701,6 +1701,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert self.kernel_backend == "Flashinfer"
         return flashinfer_trtllm_mxint4_moe(
             x=x,
             router_logits=router_logits,
@@ -1742,6 +1743,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             quant_type_id=self.quant_type.id,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
+            activation=layer.activation,
             expert_map=layer.expert_map,
             g_idx1=layer.w13_weight_g_idx,
             g_idx2=layer.w2_weight_g_idx,
