@@ -15,6 +15,7 @@ from mistral_common.protocol.transcription.request import (
 )
 from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.envs import VLLM_ENGINE_ITERATION_TIMEOUT_S
 from vllm.inputs.data import PromptType, TokensPrompt
@@ -215,24 +216,26 @@ class VoxtralRealtimeBuffer:
     info=VoxtralProcessingInfo,
     dummy_inputs=VoxtralDummyInputsBuilder,
 )
+@support_torch_compile
 class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        assert (
+            not vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ), (
+            "Voxtral streaming doesn't support full cudagraphs yet. "
+            "Please use PIECEWISE."
+        )
+
         self.time_embedding: TimeEmbedding = TimeEmbedding(
             dim=self.config.text_config.hidden_size
         )
 
         audio_config = self.tokenizer.instruct.audio_encoder.audio_config
-        _n_delay_tokens = (
-            audio_config.frame_rate * audio_config.transcription_delay_ms / 1000
-        )
-        assert _n_delay_tokens.is_integer(), (
-            f"n_delay_tokens must be integer, got {_n_delay_tokens}"
-        )
-
-        self.n_delay_tokens = int(_n_delay_tokens)
+        self.n_delay_tokens = audio_config.num_delay_tokens
 
     # for realtime transcription
     @classmethod
@@ -341,8 +344,9 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
         # sum pool text and audio embeddings
         inputs_embeds = audio_text_embeds + text_embeds
 
-        time_tensor = torch.tensor(
-            [self.n_delay_tokens],
+        time_tensor = torch.full(
+            (1,),
+            fill_value=self.n_delay_tokens,
             device=inputs_embeds.device,
             dtype=inputs_embeds.dtype,
         )
