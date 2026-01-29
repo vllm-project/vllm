@@ -172,8 +172,16 @@ class MultiHeadedAttentionSANM(nn.Module):
         # We assume d_v always equals d_k
         self.d_k = n_feat // n_head
         self.h = n_head
-        self.out_proj = nn.Linear(n_feat, n_feat)
-        self.linear_q_k_v = nn.Linear(in_feat, n_feat * 3)
+        self.out_proj = ColumnParallelLinear(
+            input_size=n_feat,
+            output_size=n_feat,
+            bias=True,
+        )
+        self.linear_q_k_v = ColumnParallelLinear(
+            input_size=in_feat,
+            output_size=n_feat * 3,
+            bias=True,
+        )
         self.attn = None
 
         self.fsmn_block = nn.Conv1d(
@@ -218,7 +226,7 @@ class MultiHeadedAttentionSANM(nn.Module):
 
         """
         b, t, d = x.size()
-        q_k_v = self.linear_q_k_v(x)
+        q_k_v, _ = self.linear_q_k_v(x)
         q, k, v = torch.split(q_k_v, int(self.h * self.d_k), dim=-1)
         q_h = torch.reshape(q, (b, t, self.h, self.d_k)).transpose(
             1, 2
@@ -266,7 +274,8 @@ class MultiHeadedAttentionSANM(nn.Module):
             x.transpose(1, 2).contiguous().view(n_batch, -1, self.h * self.d_k)
         )  # (batch, time1, d_model)
 
-        return self.out_proj(x)  # (batch, time1, d_model)
+        out, _ = self.out_proj(x)  # (batch, time1, d_model)
+        return out
 
     def forward(self, x, mask, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
         """Compute scaled dot product attention.
