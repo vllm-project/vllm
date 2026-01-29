@@ -89,7 +89,6 @@ class EncoderLayerSANM(nn.Module):
         size,
         self_attn,
         feed_forward,
-        dropout_rate,
         normalize_before=True,
     ):
         """Construct an EncoderLayer object."""
@@ -101,8 +100,6 @@ class EncoderLayerSANM(nn.Module):
         self.in_size = in_size
         self.size = size
         self.normalize_before = normalize_before
-
-        self.dropout_rate = dropout_rate
 
     def forward(
         self, x, mask, cache=None, mask_shfit_chunk=None, mask_att_chunk_encoder=None
@@ -345,20 +342,10 @@ class SenseVoiceEncoderSmall(nn.Module):
         linear_units: int = 2048,
         num_blocks: int = 6,
         tp_blocks: int = 0,
-        dropout_rate: float = 0.1,
-        positional_dropout_rate: float = 0.1,
         attention_dropout_rate: float = 0.0,
-        stochastic_depth_rate: float = 0.0,
-        input_layer: str | None = "conv2d",
-        pos_enc_class=SinusoidalPositionEncoder,
         normalize_before: bool = True,
-        concat_after: bool = False,
-        positionwise_layer_type: str = "linear",
-        positionwise_conv_kernel_size: int = 1,
-        padding_idx: int = -1,
         kernel_size: int = 11,
         sanm_shift: int = 0,
-        selfattention_layer_type: str = "sanm",
         **kwargs,
     ):
         super().__init__()
@@ -372,7 +359,6 @@ class SenseVoiceEncoderSmall(nn.Module):
         positionwise_layer_args = (
             output_size,
             linear_units,
-            # dropout_rate,
         )
 
         encoder_selfattn_layer = MultiHeadedAttentionSANM
@@ -400,7 +386,6 @@ class SenseVoiceEncoderSmall(nn.Module):
                     output_size,
                     encoder_selfattn_layer(*encoder_selfattn_layer_args0),
                     positionwise_layer(*positionwise_layer_args),
-                    dropout_rate,
                 )
                 for i in range(1)
             ]
@@ -412,7 +397,6 @@ class SenseVoiceEncoderSmall(nn.Module):
                     output_size,
                     encoder_selfattn_layer(*encoder_selfattn_layer_args),
                     positionwise_layer(*positionwise_layer_args),
-                    dropout_rate,
                 )
                 for i in range(num_blocks - 1)
             ]
@@ -425,7 +409,6 @@ class SenseVoiceEncoderSmall(nn.Module):
                     output_size,
                     encoder_selfattn_layer(*encoder_selfattn_layer_args),
                     positionwise_layer(*positionwise_layer_args),
-                    dropout_rate,
                 )
                 for i in range(tp_blocks)
             ]
