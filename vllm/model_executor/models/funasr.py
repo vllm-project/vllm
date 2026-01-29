@@ -158,13 +158,8 @@ class MultiHeadedAttentionSANM(nn.Module):
         n_head,
         in_feat,
         n_feat,
-        dropout_rate,
         kernel_size,
         sanm_shift=0,
-        lora_list=None,
-        lora_rank=8,
-        lora_alpha=16,
-        lora_dropout=0.1,
     ):
         """Construct an MultiHeadedAttention object."""
         super().__init__()
@@ -375,7 +370,6 @@ class SenseVoiceEncoderSmall(nn.Module):
             attention_heads,
             input_size,
             output_size,
-            attention_dropout_rate,
             kernel_size,
             sanm_shift,
         )
@@ -383,7 +377,6 @@ class SenseVoiceEncoderSmall(nn.Module):
             attention_heads,
             output_size,
             output_size,
-            attention_dropout_rate,
             kernel_size,
             sanm_shift,
         )
