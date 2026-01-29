@@ -11,7 +11,7 @@ import torch
 # Use relative import to support build-from-source installation in vLLM
 
 try:
-    from . import _vllm_fa2_C  # noqa: F401
+    from . import _vllm_fa2_C  # type: ignore[attr-defined]  # noqa: F401
 
     FA2_UNAVAILABLE_REASON = None
     FA2_AVAILABLE = True
@@ -20,7 +20,7 @@ except ImportError as e:
     FA2_AVAILABLE = False
 
 try:
-    from . import _vllm_fa3_C  # noqa: F401
+    from . import _vllm_fa3_C  # type: ignore[attr-defined]  # noqa: F401
 
     FA3_UNAVAILABLE_REASON = None
     FA3_AVAILABLE = True
@@ -74,23 +74,25 @@ def _is_fa4_supported(device=None) -> tuple[bool, str | None]:
 
 
 def is_fa_version_supported(fa_version: int, device=None) -> bool:
-    assert fa_version in [2, 3, 4], f"Unsupported FA version: {fa_version}"
     if fa_version == 2:
         return _is_fa2_supported(device)[0]
     elif fa_version == 3:
         return _is_fa3_supported(device)[0]
     elif fa_version == 4:
         return _is_fa4_supported(device)[0]
+    else:
+        raise ValueError(f"Unsupported FA version: {fa_version}")
 
 
 def fa_version_unsupported_reason(fa_version: int, device=None) -> str | None:
-    assert fa_version in [2, 3, 4], f"Unsupported FA version: {fa_version}"
     if fa_version == 2:
         return _is_fa2_supported(device)[1]
     elif fa_version == 3:
         return _is_fa3_supported(device)[1]
     elif fa_version == 4:
         return _is_fa4_supported(device)[1]
+    else:
+        raise ValueError(f"Unsupported FA version: {fa_version}")
 
 
 #
