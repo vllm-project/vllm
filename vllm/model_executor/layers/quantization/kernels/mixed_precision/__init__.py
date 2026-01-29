@@ -5,9 +5,6 @@ import vllm.envs as envs
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.allspark import (  # noqa: E501
     AllSparkLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.bitblas import (  # noqa: E501
-    BitBLASLinearKernel,
-)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.conch import (  # noqa: E501
     ConchLinearKernel,
 )
@@ -45,7 +42,6 @@ _POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
     AllSparkLinearKernel,
     MarlinLinearKernel,
     Dynamic4bitLinearKernel,
-    BitBLASLinearKernel,
     ConchLinearKernel,
     ExllamaLinearKernel,
     XPUwNa16LinearKernel,

@@ -180,27 +180,40 @@ class CudaPlatformBase(Platform):
             use_cutlass_mla = False
             use_flashinfer_mla = False
 
+            from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
+
             if vllm_config.attention_config.backend is None:
                 # Default case
-                if cls.is_device_capability_family(100) and not use_sparse:
-                    # Blackwell => Force FlashInfer MLA (unless sparse, i.e. DSv3.2).
+                hf_text_config = model_config.hf_text_config
+                qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
+                if (
+                    cls.is_device_capability_family(100)
+                    and not use_sparse
+                    and qk_nope_head_dim == 128
+                ):
+                    # Blackwell => Force FlashInfer MLA (unless sparse, i.e. DSv3.2)
+                    # and only if qk_nope_head_dim == 128 (kernel constraint)
                     use_flashinfer_mla = True
                     # Set the backend in AttentionConfig so it's used during
                     # backend selection
                     vllm_config.attention_config.backend = (
                         AttentionBackendEnum.FLASHINFER_MLA
                     )
-                else:
-                    # Not Blackwell
+                elif cls.is_device_capability_family(100) and not use_sparse:
+                    # Fall back to CUTLASS_MLA as 2nd priority on Blackwell
+                    use_cutlass_mla = True
+                elif is_flashmla_dense_supported()[0]:
+                    # Non-Blackwell with FlashMLA support
                     use_flashmla = True
+                else:
+                    # Fallback: will use Triton MLA or other compatible backend
+                    pass
             else:
                 # Forced case
                 backend = vllm_config.attention_config.backend
                 use_flashmla = backend == AttentionBackendEnum.FLASHMLA
                 use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
                 use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
-
-            from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 
             if (
                 use_flashmla

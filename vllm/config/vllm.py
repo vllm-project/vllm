@@ -102,6 +102,18 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
     ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
 
+def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if using AITER RMSNorm and AITER Triton GEMMs
+    and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
+
+    return (
+        envs.VLLM_ROCM_USE_AITER
+        and envs.VLLM_ROCM_USE_AITER_RMSNORM
+        and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        and cfg.model_config.get_hidden_size() == 2880
+    )
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
@@ -112,6 +124,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_attn_quant": False,
             "enable_sp": False,
             "fuse_gemm_comms": False,
+            "fuse_act_padding": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -127,6 +140,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_attn_quant": False,
             "enable_sp": False,
             "fuse_gemm_comms": False,
+            "fuse_act_padding": enable_norm_pad_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -142,6 +156,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
+            "fuse_act_padding": enable_norm_pad_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -157,6 +172,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
+            "fuse_act_padding": enable_norm_pad_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -263,6 +279,12 @@ class VllmConfig:
         vllm_factors.append(__version__)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
+            if (
+                self.compilation_config
+                and getattr(self.compilation_config, "compile_mm_encoder", False)
+                and self.model_config.multimodal_config
+            ):
+                vllm_factors.append(self.model_config.multimodal_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.cache_config:
@@ -999,6 +1021,17 @@ class VllmConfig:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
+        if self.cache_config.mamba_cache_mode == "align":
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                assert (
+                    self.scheduler_config.long_prefill_token_threshold
+                    >= self.cache_config.block_size
+                )
+            assert not self.scheduler_config.disable_chunked_mm_input, (
+                "Chunked MM input is required because we need the flexibility to "
+                "schedule a multiple of block_size tokens even if they are in the "
+                "middle of a mm input"
+            )
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()
