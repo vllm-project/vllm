@@ -666,7 +666,7 @@ steps:
       VARIANT: "rocm700"
 
   # ROCm Job 5: Build ROCm Release Docker Image
-  - label: ":docker: Build release image - x86_64 - ROCm"
+  - label: ":rocm: :docker: Build ROCm Release Docker Image"
     id: build-rocm-release-image
     depends_on:
       - step: build-rocm-base-wheels
