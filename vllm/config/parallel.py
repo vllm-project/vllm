@@ -81,11 +81,21 @@ class EPLBConfig:
     Whether to use non-blocking EPLB.
     """
 
-    max_num_transfers_per_layer: int = 1200
+    max_num_transfers: int = 2000
     """
-    The maximum number of p2p transfers that EPLB will execute for each layer.
-    This is a per-rank maximum. This value should only be deacreased if a 
-    particular workload is hanging in EPLB.
+    The maximum number of tensor transfers that EPLB will execute for each layer.
+    This is a global, not a per-rank, maximum. This value should only be 
+    deacreased if a particular workload is hanging in EPLB. If EPLB determines 
+    that the number of transfers is greater than the max, transfers will be 
+    arbitrarily reverted until that number is below the max.
+
+    The number of transfers for a particular layer is equal to the number of 
+    experts being transfered multiplied by the number of tensors associated
+    with each expert.
+
+    NOTE: Limiting the number of transfers can prevent the EPLB algorithm from 
+    achieving optimal placement and may have an adverse effect on model 
+    performance.
     """
 
     policy: EPLBPolicyOption = "default"
@@ -97,7 +107,7 @@ class EPLBConfig:
             raise ValueError("Async EPLB is only supported with the default policy.")
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
-        if self.max_num_transfers_per_layer and self.max_num_transfers_per_layer <= 0:
+        if self.max_num_transfers and self.max_num_transfers <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
         return self
 

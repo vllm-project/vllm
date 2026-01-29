@@ -821,9 +821,7 @@ class EplbState:
                 eplb_model_state.physical_to_logical_map,
             )
 
-            max_num_transfers = (
-                self.parallel_config.eplb_config.max_num_transfers_per_layer
-            )
+            max_num_transfers = self.parallel_config.eplb_config.max_num_transfers
             cap_num_transfers(
                 eplb_model_state.physical_to_logical_map,
                 new_physical_to_logical_map,
