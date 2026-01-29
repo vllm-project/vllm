@@ -122,7 +122,6 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
 
         # Content: handle the newline immediately after </think>.
         if content_to_output is not None:
-            self.end_offset -= 1
             # If we have content, reasoning must have ended.
             self._pending_reasoning_newline = False
 

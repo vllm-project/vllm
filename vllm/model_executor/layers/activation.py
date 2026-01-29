@@ -34,14 +34,11 @@ def swiglustep_and_mul_out(
     """
     # Prefer the fused custom op when available (CUDA); fallback to PyTorch ops
     # otherwise.
-    if x.is_cuda and hasattr(torch.ops._C, "swiglustep_and_mul"):
-        torch.ops._C.swiglustep_and_mul(out, x, limit)
-    else:
-        gate, up = x.chunk(2, dim=-1)
-        gate = F.silu(gate)
-        gate = gate.clamp(max=limit)
-        up = up.clamp(min=-limit, max=limit)
-        out.copy_(gate * up)
+    gate, up = x.chunk(2, dim=-1)
+    gate = F.silu(gate)
+    gate = gate.clamp(max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    out.copy_(gate * up)
     return out
 
 
