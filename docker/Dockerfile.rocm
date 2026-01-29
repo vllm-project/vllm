@@ -93,7 +93,7 @@ FROM fetch_vllm AS build_vllm
 RUN cd vllm \
     && pip install -r requirements/rocm.txt \
     && python setup.py clean --all  \
-    && CMAKE_PREFIX_PATH=${SITE_PACKAGES}/torch/share/cmake python setup.py bdist_wheel --dist-dir=dist
+    && python setup.py bdist_wheel --dist-dir=dist
 FROM scratch AS export_vllm
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/dist/*.whl /
