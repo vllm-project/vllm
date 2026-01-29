@@ -79,7 +79,7 @@ from .interfaces import (
 )
 from .llama4 import Llama4ForCausalLM
 from .utils import AutoWeightsLoader, StageMissingLayer, maybe_prefix
-from .vision import run_dp_sharded_vision_model
+from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Llama4ImagePatchInputs(TensorSchema):
