@@ -17,7 +17,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A8Fp8,
     CompressedTensorsW4A16Fp4,
-    CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8,
@@ -300,28 +299,6 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
             assert qkv_proj.scheme.pack_factor == pack_factor
             assert qkv_proj.scheme.symmetric == symmetric
             assert qkv_proj.scheme.has_g_idx == has_g_idx
-
-        llm.apply_model(check_model)
-
-        output = llm.generate_greedy("Hello my name is", max_tokens=4)
-        assert output
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
-)
-def test_compressed_tensors_w4a16_marlin24(vllm_runner):
-    model_path = "nm-testing/llama7b-one-shot-2_4-w4a16-marlin24-t"
-    with vllm_runner(model_path, enforce_eager=True) as llm:
-
-        def check_model(model):
-            layer = model.model.layers[0]
-
-            qkv_proj = layer.self_attn.qkv_proj
-
-            assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            assert isinstance(qkv_proj.scheme, CompressedTensorsW4A16Sparse24)
-            assert qkv_proj.weight_packed.dtype is torch.int32
 
         llm.apply_model(check_model)
 

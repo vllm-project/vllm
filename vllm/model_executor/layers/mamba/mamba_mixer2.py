@@ -5,6 +5,8 @@
 import torch
 from torch import nn
 
+from vllm.platforms import current_platform
+
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -564,6 +566,12 @@ class MambaMixer2(MambaBase, CustomOp):
         if self._split_gate_proj:
             self._wrap_gate_and_in_proj_weight_loaders()
 
+        # Check if running on Blackwell (SM100+) for kernel tuning
+        self.is_blackwell = current_platform.is_device_capability_family(100)
+
+        # Check if running on Blackwell (SM100+) for kernel tuning
+        self.is_blackwell = current_platform.is_device_capability_family(100)
+        
     def _wrap_gate_and_in_proj_weight_loaders(self) -> None:
         """Ensure legacy fused in_proj weights populate gate_proj too."""
         gate_named_params = dict(self.gate_proj.named_parameters(recurse=True))
@@ -676,6 +684,7 @@ class MambaMixer2(MambaBase, CustomOp):
             "Unable to split fused in_proj parameter "
             f"{param_name!r} with shape {loaded_weight.shape}."
         )
+
 
     def forward_native(
         self,
@@ -1136,7 +1145,30 @@ class MambaMixer2(MambaBase, CustomOp):
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
                 out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
+                is_blackwell=self.is_blackwell,
             )
+
+            return preallocated_ssm_out_d
+
+        should_use_multi_stream = (
+            has_prefill
+            and has_decode
+            and self._prefill_decode_stream is not None
+            and self._prefill_decode_events is not None
+            and not is_compiling
+        )
+        if should_use_multi_stream:
+            event_main, event_aux = self._prefill_decode_events
+            maybe_execute_in_parallel(
+                _run_prefill,
+                _run_decode,
+                event_main,
+                event_aux,
+                self._prefill_decode_stream,
+            )
+        else:
+            _run_prefill()
+            _run_decode()
 
             return preallocated_ssm_out_d
 

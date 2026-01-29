@@ -53,7 +53,6 @@ from vllm.multimodal.parse import (
     ModalityData,
     ModalityDataItems,
     MultiModalDataItems,
-    MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
     PromptReplacement,
@@ -174,6 +173,12 @@ class MiniCPMOMultiModalDataParser(MiniCPMVMultiModalDataParser):
 class MiniCPMOProcessingInfo(MiniCPMVProcessingInfo):
     audio_pattern = "(<audio>./</audio>)"
 
+    def get_data_parser(self):
+        return MiniCPMOMultiModalDataParser(
+            target_sr=self.get_default_audio_sampling_rate(),
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {**super().get_supported_mm_limits(), "audio": None}
 
@@ -274,11 +279,6 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder[MiniCPMOProcessingIn
 
 
 class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MiniCPMOMultiModalDataParser(
-            target_sr=self.info.get_default_audio_sampling_rate()
-        )
-
     def get_audio_prompt_texts(
         self,
         audio_lens: int,
@@ -300,10 +300,8 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         if (audios := mm_data.get("audios")) is None:
             return {}
 
-        parsed_audios = (
-            self._get_data_parser()
-            .parse_mm_data({"audio": audios})
-            .get_items("audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems))
+        parsed_audios = self.data_parser.parse_mm_data({"audio": audios}).get_items(
+            "audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems)
         )
 
         if isinstance(parsed_audios, MiniCPMOAudioEmbeddingItems):
