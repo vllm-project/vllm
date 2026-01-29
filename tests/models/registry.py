@@ -949,6 +949,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen3-ASR-1.7B",
         max_model_len=4096,
         min_transformers_version="4.57",
+        is_available_online=False,
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
