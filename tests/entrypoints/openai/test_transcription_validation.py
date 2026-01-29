@@ -122,13 +122,21 @@ async def test_transcription_endpoint_is_supported(foscolo, model_name):
     # Some of these models are too heavy to run on CI, so at least check
     # that the endpoint is correctly registered
     model_name = "google/gemma-3n-E2B-it"
-    server_args = ["--enforce-eager", "--max-model-len", "1024", "--max-num-seqs", "1"]
+    server_args = [
+        "--enforce-eager",
+        "--max-model-len",
+        "1024",
+        "--max-num-seqs",
+        "1",
+        "--load-format",
+        "dummy",
+    ]
 
     with RemoteOpenAIServer(
         model_name,
         server_args,
         max_wait_seconds=480,
-        override_hf_configs={"num_hidden_layers": 4, "load_format": "dummy"},
+        override_hf_configs={"num_hidden_layers": 4},
     ) as remote_server:
         client = remote_server.get_async_client()
         transcription = await client.audio.transcriptions.create(
