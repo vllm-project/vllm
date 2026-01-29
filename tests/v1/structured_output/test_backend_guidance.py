@@ -27,7 +27,7 @@ def test_backend_guidance_rollback_terminated():
     # it should be reverted in case EOS is not accepted by the target
     # model.
     vllm_config = VllmConfig(
-        decoding_config=StructuredOutputsConfig(
+        structured_outputs_config=StructuredOutputsConfig(
             backend="guidance",
         )
     )
@@ -101,7 +101,7 @@ def test_grammar_bitmask_with_specdec():
         def grammar_bitmask(req: Request, tokens: list[int]) -> None:
             structured_output_manager.grammar_bitmask(
                 requests={req.request_id: req},
-                structured_output_request_ids={req.request_id: 0},
+                structured_output_request_ids=[req.request_id],
                 scheduled_spec_decode_tokens={req.request_id: tokens},
             )
             # At this point, we rolled-back, so should not be terminated
