@@ -48,7 +48,7 @@ async def main():
             token_times.append((token_count, time.monotonic()))
             print(
                 f"Token {token_count} arrived:"
-                + f"T={token_times[-1][1] - token_times[0][1]:.3f}s"
+                f"T={token_times[-1][1] - token_times[0][1]:.3f}s"
             )
         return output
 
@@ -91,7 +91,7 @@ async def main():
         if gap > 0.5:  # Log significant gaps
             print(
                 f"  Gap of {gap:.3f}s"
-                + f" between token {token_times[i - 1][0]} and {token_times[i][0]}"
+                f" between token {token_times[i - 1][0]} and {token_times[i][0]}"
             )
 
     print(
