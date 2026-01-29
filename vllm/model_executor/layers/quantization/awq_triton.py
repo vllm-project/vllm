@@ -174,7 +174,7 @@ def awq_gemm_kernel(
     a_ptrs = a_ptr + offsets_a
     b_ptrs = b_ptr + offsets_b
 
-    for k in tl.static_range(NUM_K_TILES):
+    for k in range(0, NUM_K_TILES):
         masks_k = offsets_k < K
         masks_a = masks_am[:, None] & masks_k[None, :]
         a = tl.load(a_ptrs, mask=masks_a, other=0.0)
@@ -1012,6 +1012,7 @@ def _awq_gemm_triton(
     )
 
     result = torch.zeros((split_k_iters, M, N), dtype=scales.dtype, device=input.device)
+
     # A = input, B = qweight, C = result
     # A = M x K, B = K x N, C = M x N
     ctx = (
@@ -1027,6 +1028,7 @@ def _awq_gemm_triton(
     with ctx:
         if envs.VLLM_USE_TRITON_AWQ_GEMV and M == 1:
             block_size_m = 1
+
         awq_gemm_kernel[grid](
             input,
             qweight,
