@@ -74,6 +74,42 @@ def get_auto_numa_nodes() -> list[int] | None:
     return numa_nodes
 
 
+def _get_gpu_index(parallel_config, local_rank: int) -> int:
+    """Compute the actual GPU index for NUMA node lookup.
+
+    When data parallelism is used with mp backend on a single node,
+    the local_rank within each DP rank's executor needs to be offset
+    by the DP rank to get the actual GPU index.
+
+    This mirrors the logic in gpu_worker.py:init_device() which adjusts
+    local_rank for GPU device selection.
+
+    Args:
+        parallel_config: The parallel configuration
+        local_rank: Local rank within the current executor (0 to TP*PP-1)
+
+    Returns:
+        The actual GPU index to use for numa_node array lookup
+    """
+    # Mirror the logic from gpu_worker.py:init_device()
+    if (
+        parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
+        and parallel_config.data_parallel_backend != "ray"
+        and parallel_config.nnodes_within_dp == 1
+    ):
+        dp_local_rank = parallel_config.data_parallel_rank_local
+        if dp_local_rank is None:
+            dp_local_rank = parallel_config.data_parallel_index
+
+        tp_pp_world_size = (
+            parallel_config.pipeline_parallel_size
+            * parallel_config.tensor_parallel_size
+        )
+        return local_rank + dp_local_rank * tp_pp_world_size
+
+    return local_rank
+
+
 @contextmanager
 def configure_subprocess(vllm_config: "VllmConfig", local_rank: int):
     """Configure NUMA binding for worker subprocess before it starts.
@@ -111,17 +147,23 @@ def configure_subprocess(vllm_config: "VllmConfig", local_rank: int):
         numa_nodes = get_auto_numa_nodes()
 
     if numa_nodes is not None:
+        # Compute actual GPU index accounting for data parallelism
+        gpu_index = _get_gpu_index(parallel_config, local_rank)
+
         # Validate array bounds
-        if local_rank >= len(numa_nodes):
+        if gpu_index >= len(numa_nodes):
             raise ValueError(
-                f"local_rank {local_rank} exceeds numa_node array size "
-                f"{len(numa_nodes)}. Ensure --numa-node has enough elements "
-                "or check that CUDA_VISIBLE_DEVICES matches your GPU count."
+                f"GPU index {gpu_index} (local_rank={local_rank}) exceeds "
+                f"numa_node array size {len(numa_nodes)}. Ensure --numa-node "
+                "has enough elements for all GPUs across all DP ranks."
             )
 
-        numa_node = numa_nodes[local_rank]
+        numa_node = numa_nodes[gpu_index]
         logger.info(
-            "Binding worker (local_rank=%s) to NUMA node %s", local_rank, numa_node
+            "Binding worker (local_rank=%s, gpu_index=%s) to NUMA node %s",
+            local_rank,
+            gpu_index,
+            numa_node,
         )
         numactl_args = f"--cpunodebind={numa_node} --membind={numa_node}"
         executable, debug_str = _create_numactl_executable(numactl_args)
@@ -147,10 +189,23 @@ def _create_numactl_executable(numactl_args: str) -> tuple[str, str]:
 
     Returns:
         Tuple of (script_path, debug_string)
+
+    Raises:
+        RuntimeError: If numactl is not installed on the system
     """
     # Check cache first - reuse wrapper for same NUMA config
     if numactl_args in _wrapper_cache:
         return _wrapper_cache[numactl_args], f"numactl {numactl_args}"
+
+    # Verify numactl is available
+    from shutil import which
+
+    if which("numactl") is None:
+        raise RuntimeError(
+            "numactl is required for NUMA binding but is not installed. "
+            "Install it with: apt-get install numactl (Debian/Ubuntu) or "
+            "yum install numactl (RHEL/CentOS)"
+        )
 
     old_executable = os.fsdecode(multiprocessing.spawn.get_executable())
 
