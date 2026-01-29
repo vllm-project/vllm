@@ -20,8 +20,8 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.gpu.async_utils import AsyncOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.gpu.async_utils import AsyncOutput, async_copy_to_np
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     build_slot_mappings_by_layer,
@@ -167,6 +167,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
 
+        # Draft tokens transfer to scheduler - for spec-dec + struct outputs.
+        self.draft_tokens_copy_stream = torch.cuda.Stream()
+        self.draft_tokens_copy_event = torch.cuda.Event()
+        self.draft_req_ids: list[str] = []
+        self.draft_tokens_np: np.ndarray | None = None
+
+        # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
     def update_max_model_len(self, max_model_len: int) -> None:
@@ -641,6 +648,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
+            has_structured_output_reqs=scheduler_output.has_structured_output_requests,
         )
 
     @torch.inference_mode()
@@ -943,6 +951,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
 
+            self.draft_tokens_np = None
+            self.draft_req_ids = input_batch.req_ids
+            if input_batch.has_structured_output_reqs:
+                # For spec decoding + structured outputs, we must transfer the
+                # draft tokens back to the scheduler for grammar validation.
+                current_stream = torch.cuda.current_stream(self.device)
+                with torch.cuda.stream(self.draft_tokens_copy_stream):
+                    self.draft_tokens_copy_stream.wait_stream(current_stream)
+                    self.draft_tokens_np = async_copy_to_np(draft_tokens)
+                    self.draft_tokens_copy_event.record()
+
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
+
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        if self.draft_tokens_np is None:
+            return None
+        self.draft_tokens_copy_event.synchronize()
+        return DraftTokenIds(self.draft_req_ids, self.draft_tokens_np.tolist())
