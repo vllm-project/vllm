@@ -13,9 +13,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.layer import Attention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -45,7 +42,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
@@ -88,9 +84,6 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import (
-    is_deep_gemm_supported,
-)
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -424,6 +417,7 @@ class Fp8LinearMethod(LinearMethodBase):
     ) -> torch.Tensor:
         if self.block_quant:
             assert self.weight_block_size is not None
+
             return self.w8a8_block_fp8_linear.apply(
                 input=x,
                 weight=layer.weight,
@@ -833,9 +827,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # TODO(rob): convert this to MK.
         if layer.enable_eplb:
             raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
-        assert (
-            layer.activation == "silu"
-        ), f"Expected 'silu' activation but got {layer.activation}"
+        assert layer.activation == "silu", (
+            f"Expected 'silu' activation but got {layer.activation}"
+        )
 
         if self.block_quant:
             import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
@@ -847,11 +841,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
             routing_method_type = layer.routing_method_type
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                routing_logits=(
-                    router_logits.to(torch.float32)
-                    if routing_method_type == RoutingMethodType.DeepSeekV3
-                    else router_logits
-                ),
+                routing_logits=router_logits.to(torch.float32)
+                if routing_method_type == RoutingMethodType.DeepSeekV3
+                else router_logits,
                 routing_bias=e_score_correction_bias,
                 x=x,
                 w13_weight=layer.w13_weight,

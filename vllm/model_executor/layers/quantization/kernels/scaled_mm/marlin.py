@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 
 import torch
 
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    FP8ScaledMMLinearLayerConfig,
     FP8W8A16LinearKernel,
-    FP8W8A16LinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
@@ -28,7 +29,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8W8A16LinearKernel):
         return is_fp8_marlin_supported()
 
     @classmethod
-    def can_implement(cls, c: FP8W8A16LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
         per_channel_weight_scales = (
             c.weight_quant_key.scale.group_shape.is_per_channel()
@@ -50,10 +51,9 @@ class MarlinFP8ScaledMMLinearKernel(FP8W8A16LinearKernel):
         return True, None
 
     def __init__(
-        self,
-        c: FP8W8A16LinearLayerConfig,
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
-        super().__init__(c)
+        super().__init__(c, layer_param_names)
 
         self.per_tensor_weight_scales = (
             c.weight_quant_key.scale.group_shape.is_per_tensor()
@@ -61,18 +61,13 @@ class MarlinFP8ScaledMMLinearKernel(FP8W8A16LinearKernel):
         self.per_channel_weight_scales = (
             c.weight_quant_key.scale.group_shape.is_per_channel()
         )
-        self.input_dtype = c.input_dtype
-        self.is_block_quant = c.is_block_quant
-        self.size_k_first = not self.is_block_quant
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_q, _, _, _, _ = self._get_layer_params(layer)
+        w_q, _, _, _ = self._get_layer_params(layer)
         weight = w_q.t()
-        w_q_name, _, _, _, _ = self.layer_param_names
+        w_q_name, _, _, _ = self.layer_param_names
         replace_parameter(layer, w_q_name, weight.data)
-        prepare_fp8_layer_for_marlin(
-            layer, size_k_first=self.size_k_first, input_dtype=self.input_dtype
-        )
+        prepare_fp8_layer_for_marlin(layer)
         del layer.input_scale
 
     def apply_weights(
@@ -88,6 +83,5 @@ class MarlinFP8ScaledMMLinearKernel(FP8W8A16LinearKernel):
             workspace=layer.workspace,
             size_n=layer.output_size_per_partition,
             size_k=layer.input_size_per_partition,
-            input_dtype=self.input_dtype,
             bias=bias,
         )
