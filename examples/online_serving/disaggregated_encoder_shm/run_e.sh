@@ -16,10 +16,9 @@ CUDA_VISIBLE_DEVICES=0 vllm serve "/model_path" \
     --max-num-batched-tokens 114688 \
     --max-num-seqs 128 \
     --ec-transfer-config '{
-        "ec_connector": "ECExampleConnectorSHM",
+        "ec_connector": "SHMConnector",
         "ec_role": "ec_producer",
         "ec_ip": "127.0.0.1",
-        "ec_connector_module_path":"vllm.distributed.ec_transfer.ec_connector.example_connector_shm",
         "ec_connector_extra_config": {
             "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'",
             "listen_ports": [30161]
