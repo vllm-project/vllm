@@ -1501,7 +1501,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             qk_rope_head_dim=self.qk_rope_head_dim,
             v_head_dim=self.v_head_dim,
             vllm_config=vllm_config,
-            device=torch.device("cuda"),
+            device=vllm_config.device_config.device,
         )
 
         # Set _pad_v based on the selected backend
