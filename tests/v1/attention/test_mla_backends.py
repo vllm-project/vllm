@@ -567,6 +567,11 @@ def run_attention_backend(
         act_dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
         impl.process_weights_after_loading(act_dtype)
 
+        # Initialize DCP attributes (normally set by MLAAttention.forward
+        # before calling forward_mha, see mla_attention.py:511-512)
+        if impl.dcp_world_size == -1:
+            impl.dcp_world_size = 1
+
         # Create mock MLA layer
         mock_layer = MockMLAAttentionLayer(
             impl=impl,
