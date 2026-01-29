@@ -164,10 +164,9 @@ def extract_trace_context(headers: Mapping[str, str] | None) -> Context | None:
         logger.debug("Successfully extracted trace context: %s", context is not None)
         return context
     except Exception as e:
-        logger.warning(
+        logger.debug(
             "Failed to extract trace context: %s",
-            e,
-            exc_info=True
+            e
         )
         return None
 
@@ -208,10 +207,9 @@ def inject_trace_context(span, carrier: dict[str, str] | None = None) -> dict[st
         return carrier
     except Exception as e:
         # Injection failure should not break request processing
-        logger.warning(
+        logger.debug(
             "Failed to inject trace context: %s",
-            e,
-            exc_info=True
+            e
         )
         return carrier
 

@@ -1867,7 +1867,7 @@ class Scheduler(SchedulerInterface):
                     request.request_id
                 )
             else:
-                logger.warning(
+                logger.debug(
                     "Core span is not recording for request %s",
                     request.request_id
                 )

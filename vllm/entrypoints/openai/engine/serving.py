@@ -480,7 +480,7 @@ class OpenAIServing:
                 )
                 logger.debug("Emitted api.ARRIVED event for request %s", request_id)
             else:
-                logger.warning(
+                logger.debug(
                     "API span is not recording for request %s, skipping api.ARRIVED event",
                     request_id
                 )
