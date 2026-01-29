@@ -93,6 +93,11 @@ class ObservabilityConfig:
     """Sampling rate for step batch summary events. Range [0.0, 1.0].
     Default 0.01 = 1% of steps. Only applies when step_tracing_enabled is True."""
 
+    step_tracing_rich_subsample_rate: float = Field(default=0.001, ge=0.0, le=1.0)
+    """Subsampling rate for rich per-request snapshots within sampled steps. Range [0.0, 1.0].
+    Default 0.001 = 0.1% of steps get detailed per-request data. Only applies when
+    step_tracing_enabled is True AND the step is batch-summary-sampled."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""

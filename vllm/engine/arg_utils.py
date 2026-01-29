@@ -528,6 +528,13 @@ class EngineArgs:
     )
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     enable_journey_tracing: bool = ObservabilityConfig.enable_journey_tracing
+    step_tracing_enabled: bool = ObservabilityConfig.step_tracing_enabled
+    step_tracing_sample_rate: float = get_field(
+        ObservabilityConfig, "step_tracing_sample_rate"
+    )
+    step_tracing_rich_subsample_rate: float = get_field(
+        ObservabilityConfig, "step_tracing_rich_subsample_rate"
+    )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
@@ -1081,6 +1088,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--step-tracing-sample-rate",
             **observability_kwargs["step_tracing_sample_rate"],
+        )
+        observability_group.add_argument(
+            "--step-tracing-rich-subsample-rate",
+            **observability_kwargs["step_tracing_rich_subsample_rate"],
         )
 
         # Scheduler arguments
@@ -1739,6 +1750,9 @@ class EngineArgs:
             enable_mm_processor_stats=self.enable_mm_processor_stats,
             enable_logging_iteration_details=self.enable_logging_iteration_details,
             enable_journey_tracing=self.enable_journey_tracing,
+            step_tracing_enabled=self.step_tracing_enabled,
+            step_tracing_sample_rate=self.step_tracing_sample_rate,
+            step_tracing_rich_subsample_rate=self.step_tracing_rich_subsample_rate,
         )
 
         # Compilation config overrides

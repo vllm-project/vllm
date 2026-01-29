@@ -176,6 +176,12 @@ class Scheduler(SchedulerInterface):
         # Tests: can inject deterministic hash-based sampler
         import random
         self._step_sampler: Any = lambda step_id, rate: random.random() < rate
+        # Rich subsample rate for detailed per-request snapshots
+        self._step_tracing_rich_subsample_rate = (
+            self.observability_config.step_tracing_rich_subsample_rate
+        )
+        # Injectable rich sampler (same signature as step sampler)
+        self._rich_sampler: Any = lambda step_id, rate: random.random() < rate
 
         if self._enable_step_tracing:
             if endpoint is None:
@@ -462,6 +468,79 @@ class Scheduler(SchedulerInterface):
         except Exception as e:
             # Tracing failures must not crash the scheduler
             logger.debug("Failed to emit step batch summary: %s", e)
+
+    def _emit_rich_request_snapshots(
+        self,
+        output: SchedulerOutput,
+        curr_step: int,
+    ) -> None:
+        """Emit per-request snapshot events for running requests.
+
+        Emits one OTEL span event per running request with detailed progress:
+        - Request phase (PREFILL/DECODE)
+        - Token counts (prompt, computed, output)
+        - Preemption count
+        - KV cache metrics (allocated/cached blocks)
+
+        This is a subsampled observability layer on top of batch summary events.
+
+        Args:
+            output: The SchedulerOutput for this step
+            curr_step: The scheduler step ID
+        """
+        if not self._enable_step_tracing or self._step_span is None:
+            return
+
+        try:
+            from vllm.tracing import SpanAttributes
+            from vllm.v1.core.kv_cache_observability import get_per_request_kv_metrics
+
+            # Emit one event per running request at SchedulerOutput construction point
+            # Source of truth: self.running (same set used to build SchedulerOutput)
+            for req in self.running:
+                try:
+                    # Get KV metrics using PR #4 utilities
+                    kv_metrics = get_per_request_kv_metrics(req, self.kv_cache_manager)
+
+                    # Determine phase using scheduler's logic
+                    phase = "PREFILL" if req.num_output_tokens == 0 else "DECODE"
+
+                    # Build attributes dict with required fields
+                    attributes = {
+                        SpanAttributes.STEP_ID: curr_step,
+                        SpanAttributes.REQUEST_ID: req.request_id,
+                        SpanAttributes.REQUEST_PHASE: phase,
+                        SpanAttributes.REQUEST_NUM_PROMPT_TOKENS: req.num_prompt_tokens,
+                        SpanAttributes.REQUEST_NUM_COMPUTED_TOKENS: req.num_computed_tokens,
+                        SpanAttributes.REQUEST_NUM_OUTPUT_TOKENS: req.num_output_tokens,
+                        SpanAttributes.REQUEST_NUM_PREEMPTIONS: req.num_preemptions,
+                        SpanAttributes.REQUEST_SCHEDULED_TOKENS_THIS_STEP: output.num_scheduled_tokens.get(
+                            req.request_id, 0
+                        ),
+                        SpanAttributes.KV_BLOCKS_ALLOCATED_GPU: kv_metrics.blocks_allocated_gpu,
+                        SpanAttributes.KV_BLOCKS_CACHED_GPU: kv_metrics.blocks_cached_gpu,
+                    }
+
+                    # Optional field: effective_prompt_len (only if available)
+                    if kv_metrics.effective_prompt_len is not None:
+                        attributes[SpanAttributes.REQUEST_EFFECTIVE_PROMPT_LEN] = (
+                            kv_metrics.effective_prompt_len
+                        )
+
+                    # Emit event on same span as batch summary
+                    self._step_span.add_event("step.REQUEST_SNAPSHOT", attributes=attributes)
+
+                except Exception as e:
+                    # Per-request failures shouldn't stop other requests
+                    logger.debug(
+                        "Failed to emit rich snapshot for request %s: %s",
+                        req.request_id,
+                        e,
+                    )
+
+        except Exception as e:
+            # Tracing failures must not crash the scheduler
+            logger.debug("Failed to emit rich request snapshots: %s", e)
 
     def schedule(self) -> SchedulerOutput:
         # Increment the scheduler step counter at the start of each schedule call.
@@ -1053,8 +1132,15 @@ class Scheduler(SchedulerInterface):
         # Emit step batch summary event if step tracing enabled and sampled
         # IMPORTANT: Emit BEFORE _update_after_schedule() to capture state at
         # SchedulerOutput construction point (as specified in plan)
+        batch_summary_was_sampled = False
         if self._enable_step_tracing and self._step_sampler(curr_step, self._step_tracing_sample_rate):
             self._emit_step_batch_summary(scheduler_output, curr_step, step_start_ns)
+            batch_summary_was_sampled = True
+
+        # Emit rich per-request snapshots if batch summary was sampled and rich subsampled
+        # This is a second probabilistic gate for high-cardinality per-request data
+        if batch_summary_was_sampled and self._rich_sampler(curr_step, self._step_tracing_rich_subsample_rate):
+            self._emit_rich_request_snapshots(scheduler_output, curr_step)
 
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)

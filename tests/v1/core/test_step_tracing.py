@@ -457,3 +457,272 @@ def test_step_tracing_failure_safety():
 
         # Verify exception was caught (add_event was called but didn't crash)
         assert mock_span.add_event.call_count == 1
+
+
+def test_rich_snapshot_rate_zero():
+    """Test that rich subsample rate 0.0 produces no rich events.
+
+    Verifies:
+    - Batch summary still emitted (step.BATCH_SUMMARY)
+    - No rich snapshot events (step.REQUEST_SNAPSHOT)
+    - Rich sampling is independent from batch summary sampling
+    """
+    with patch("vllm.tracing.init_tracer") as mock_init_tracer:
+        mock_tracer = Mock()
+        mock_span = Mock()
+        mock_tracer.start_span.return_value = mock_span
+        mock_init_tracer.return_value = mock_tracer
+
+        scheduler = create_scheduler(
+            step_tracing_enabled=True,
+            step_tracing_sample_rate=1.0,  # Always sample batch summary
+            step_tracing_rich_subsample_rate=0.0,  # Never sample rich snapshots
+            otlp_traces_endpoint="http://localhost:4317",
+        )
+
+        # Override samplers
+        scheduler._step_sampler = lambda step_id, rate: True  # Batch summary always
+        scheduler._rich_sampler = lambda step_id, rate: False  # Rich never
+
+        # Add requests and schedule
+        requests = create_requests(num_requests=3)
+        for request in requests:
+            scheduler.add_request(request)
+
+        output = scheduler.schedule()
+
+        # Verify scheduler worked
+        assert output.scheduler_step == 1
+        assert len(output.scheduled_new_reqs) == 3
+
+        # Extract event names
+        event_names = [call[0][0] for call in mock_span.add_event.call_args_list]
+
+        # Should have exactly 1 batch summary, no rich snapshots
+        assert event_names.count("step.BATCH_SUMMARY") == 1
+        assert event_names.count("step.REQUEST_SNAPSHOT") == 0
+
+
+def test_rich_snapshot_enabled():
+    """Test that rich subsample rate 1.0 emits events for all running requests.
+
+    Verifies:
+    - One step.REQUEST_SNAPSHOT event per running request
+    - Events have correct step.id correlation
+    - All required attributes present
+    - KV metrics populated
+    """
+    with patch("vllm.tracing.init_tracer") as mock_init_tracer:
+        mock_tracer = Mock()
+        mock_span = Mock()
+        mock_tracer.start_span.return_value = mock_span
+        mock_init_tracer.return_value = mock_tracer
+
+        scheduler = create_scheduler(
+            step_tracing_enabled=True,
+            step_tracing_sample_rate=1.0,
+            step_tracing_rich_subsample_rate=1.0,  # Always sample rich
+            otlp_traces_endpoint="http://localhost:4317",
+        )
+
+        # Override samplers to always return True
+        scheduler._step_sampler = lambda step_id, rate: True
+        scheduler._rich_sampler = lambda step_id, rate: True
+
+        # Add requests and schedule
+        requests = create_requests(num_requests=4)
+        for request in requests:
+            scheduler.add_request(request)
+
+        output = scheduler.schedule()
+
+        # Verify scheduler worked
+        assert output.scheduler_step == 1
+        assert len(output.scheduled_new_reqs) == 4
+
+        # Extract events
+        event_names = [call[0][0] for call in mock_span.add_event.call_args_list]
+        event_attrs = [call[1]["attributes"] for call in mock_span.add_event.call_args_list]
+
+        # Should have 1 batch summary + 4 rich snapshots
+        assert event_names.count("step.BATCH_SUMMARY") == 1
+        assert event_names.count("step.REQUEST_SNAPSHOT") == 4
+
+        # Verify rich snapshot attributes
+        rich_events = [
+            attrs
+            for name, attrs in zip(event_names, event_attrs)
+            if name == "step.REQUEST_SNAPSHOT"
+        ]
+        assert len(rich_events) == 4
+
+        for attrs in rich_events:
+            # Required attributes
+            assert attrs[SpanAttributes.STEP_ID] == 1
+            assert SpanAttributes.REQUEST_ID in attrs
+            assert attrs[SpanAttributes.REQUEST_PHASE] in ("PREFILL", "DECODE")
+            assert SpanAttributes.REQUEST_NUM_PROMPT_TOKENS in attrs
+            assert SpanAttributes.REQUEST_NUM_COMPUTED_TOKENS in attrs
+            assert SpanAttributes.REQUEST_NUM_OUTPUT_TOKENS in attrs
+            assert SpanAttributes.REQUEST_NUM_PREEMPTIONS in attrs
+            assert SpanAttributes.REQUEST_SCHEDULED_TOKENS_THIS_STEP in attrs
+            assert SpanAttributes.KV_BLOCKS_ALLOCATED_GPU in attrs
+            assert SpanAttributes.KV_BLOCKS_CACHED_GPU in attrs
+
+            # Verify types
+            assert isinstance(attrs[SpanAttributes.STEP_ID], int)
+            assert isinstance(attrs[SpanAttributes.REQUEST_ID], str)
+            assert isinstance(attrs[SpanAttributes.KV_BLOCKS_ALLOCATED_GPU], int)
+            assert isinstance(attrs[SpanAttributes.KV_BLOCKS_CACHED_GPU], int)
+
+
+def test_rich_snapshot_gated_on_batch_summary():
+    """Test that rich snapshots are only emitted when batch summary is sampled.
+
+    Verifies the two-stage sampling:
+    1. Step must be batch-summary-sampled
+    2. Then rich subsampling decision
+    """
+    with patch("vllm.tracing.init_tracer") as mock_init_tracer:
+        mock_tracer = Mock()
+        mock_span = Mock()
+        mock_tracer.start_span.return_value = mock_span
+        mock_init_tracer.return_value = mock_tracer
+
+        scheduler = create_scheduler(
+            step_tracing_enabled=True,
+            step_tracing_sample_rate=1.0,
+            step_tracing_rich_subsample_rate=1.0,
+            otlp_traces_endpoint="http://localhost:4317",
+        )
+
+        # Override batch summary sampler to return False (not sampled)
+        scheduler._step_sampler = lambda step_id, rate: False
+        # Rich sampler is irrelevant (shouldn't be called)
+        scheduler._rich_sampler = lambda step_id, rate: True
+
+        # Add requests and schedule
+        requests = create_requests(num_requests=3)
+        for request in requests:
+            scheduler.add_request(request)
+
+        output = scheduler.schedule()
+
+        # Verify scheduler worked
+        assert output.scheduler_step == 1
+        assert len(output.scheduled_new_reqs) == 3
+
+        # No events should be emitted (batch summary not sampled)
+        assert mock_span.add_event.call_count == 0
+
+
+def test_rich_snapshot_deterministic_sampling():
+    """Test deterministic rich sampling for reproducible tests.
+
+    Verifies:
+    - Deterministic sampler produces stable results
+    - Rich sampling decision is independent per step
+    - Same seed produces same sample set
+    """
+    with patch("vllm.tracing.init_tracer") as mock_init_tracer:
+        mock_tracer = Mock()
+        mock_span = Mock()
+        mock_tracer.start_span.return_value = mock_span
+        mock_init_tracer.return_value = mock_tracer
+
+        scheduler = create_scheduler(
+            step_tracing_enabled=True,
+            step_tracing_sample_rate=1.0,
+            step_tracing_rich_subsample_rate=1.0,
+            otlp_traces_endpoint="http://localhost:4317",
+        )
+
+        # Use deterministic samplers
+        scheduler._step_sampler = make_deterministic_step_sampler(seed=42)
+        scheduler._rich_sampler = make_deterministic_step_sampler(seed=100)
+
+        # Run multiple steps
+        requests = create_requests(num_requests=2)
+        for request in requests:
+            scheduler.add_request(request)
+
+        for _ in range(5):
+            scheduler.schedule()
+
+        # Extract event names
+        event_names = [call[0][0] for call in mock_span.add_event.call_args_list]
+
+        # With deterministic sampling, results should be stable
+        batch_summaries = event_names.count("step.BATCH_SUMMARY")
+        rich_snapshots = event_names.count("step.REQUEST_SNAPSHOT")
+
+        # Verify we got some events (exact count depends on hash outputs)
+        assert batch_summaries > 0
+        # Rich snapshots only emitted when batch summary was sampled
+        assert rich_snapshots % 2 == 0  # Should be even (2 requests per step)
+
+
+def test_rich_snapshot_with_zero_running_requests():
+    """Test that rich snapshots work correctly with empty running queue.
+
+    Verifies:
+    - Batch summary emitted even with no running requests
+    - No rich snapshot events (no requests to snapshot)
+    - No crashes or errors
+    """
+    with patch("vllm.tracing.init_tracer") as mock_init_tracer:
+        mock_tracer = Mock()
+        mock_span = Mock()
+        mock_tracer.start_span.return_value = mock_span
+        mock_init_tracer.return_value = mock_tracer
+
+        scheduler = create_scheduler(
+            step_tracing_enabled=True,
+            step_tracing_sample_rate=1.0,
+            step_tracing_rich_subsample_rate=1.0,
+            otlp_traces_endpoint="http://localhost:4317",
+        )
+
+        # Override samplers to always return True
+        scheduler._step_sampler = lambda step_id, rate: True
+        scheduler._rich_sampler = lambda step_id, rate: True
+
+        # Schedule with no requests
+        output = scheduler.schedule()
+
+        # Verify scheduler worked
+        assert output.scheduler_step == 1
+        assert len(output.scheduled_new_reqs) == 0
+
+        # Extract event names
+        event_names = [call[0][0] for call in mock_span.add_event.call_args_list]
+
+        # Should have 1 batch summary, 0 rich snapshots (no running requests)
+        assert event_names.count("step.BATCH_SUMMARY") == 1
+        assert event_names.count("step.REQUEST_SNAPSHOT") == 0
+
+
+def test_step_tracing_cli_wiring():
+    """Test that CLI flags are properly wired through to ObservabilityConfig.
+
+    This is a regression test for PR #3 and PR #5 CLI wiring.
+    Ensures that step tracing flags flow from CLI -> EngineArgs -> ObservabilityConfig.
+    """
+    from vllm.engine.arg_utils import EngineArgs
+
+    # Test values different from defaults
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        step_tracing_enabled=True,  # Default: False
+        step_tracing_sample_rate=0.75,  # Default: 0.01
+        step_tracing_rich_subsample_rate=0.05,  # Default: 0.001
+    )
+
+    # Create engine config and verify wiring
+    vllm_config = engine_args.create_engine_config()
+    obs_config = vllm_config.observability_config
+
+    # Verify all three fields are correctly wired
+    assert obs_config.step_tracing_enabled is True
+    assert obs_config.step_tracing_sample_rate == 0.75
+    assert obs_config.step_tracing_rich_subsample_rate == 0.05

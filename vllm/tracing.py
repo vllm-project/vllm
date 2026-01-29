@@ -275,6 +275,18 @@ class SpanAttributes:
     KV_BLOCKS_TOTAL_GPU = "kv.blocks_total_gpu"
     KV_BLOCKS_FREE_GPU = "kv.blocks_free_gpu"
 
+    # Rich request snapshot attributes (per-request step snapshots)
+    REQUEST_ID = "request.id"
+    REQUEST_PHASE = "request.phase"
+    REQUEST_NUM_PROMPT_TOKENS = "request.num_prompt_tokens"
+    REQUEST_NUM_COMPUTED_TOKENS = "request.num_computed_tokens"
+    REQUEST_NUM_OUTPUT_TOKENS = "request.num_output_tokens"
+    REQUEST_NUM_PREEMPTIONS = "request.num_preemptions"
+    REQUEST_SCHEDULED_TOKENS_THIS_STEP = "request.scheduled_tokens_this_step"
+    KV_BLOCKS_ALLOCATED_GPU = "kv.blocks_allocated_gpu"
+    KV_BLOCKS_CACHED_GPU = "kv.blocks_cached_gpu"
+    REQUEST_EFFECTIVE_PROMPT_LEN = "request.effective_prompt_len"
+
 
 def contains_trace_headers(headers: Mapping[str, str]) -> bool:
     return any(h in headers for h in TRACE_HEADERS)

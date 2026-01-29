@@ -62,6 +62,7 @@ def create_scheduler(
     otlp_traces_endpoint: str | None = None,
     step_tracing_enabled: bool = False,
     step_tracing_sample_rate: float = 0.01,
+    step_tracing_rich_subsample_rate: float = 0.001,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -141,6 +142,7 @@ def create_scheduler(
         otlp_traces_endpoint=otlp_traces_endpoint,
         step_tracing_enabled=step_tracing_enabled,
         step_tracing_sample_rate=step_tracing_sample_rate,
+        step_tracing_rich_subsample_rate=step_tracing_rich_subsample_rate,
     )
 
     vllm_config = VllmConfig(
