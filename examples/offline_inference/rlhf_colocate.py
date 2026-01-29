@@ -30,6 +30,7 @@ https://docs.ray.io/en/latest/placement-groups.html
 
 import gc
 import os
+import sys
 
 import ray
 import torch
@@ -39,6 +40,11 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm import LLM
+
+
+if torch.version.hip is not None:
+    print("Skipping test for ROCm. Ray is unsupported on vLLM ROCm.")
+    sys.exit(0)
 
 
 class MyLLM(LLM):
