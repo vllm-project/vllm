@@ -163,9 +163,13 @@ class InternParallelAttention(nn.Module):
             )
 
         use_data_parallel = is_vit_use_data_parallel()
-        self.tp_size = (
-            1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        # if the number of heads is not divisible by tp_size,
+        # we also disable Attention's TP
+        tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        use_data_parallel = (
+            use_data_parallel or (self.num_heads + num_dummy_heads) % self.tp_size != 0
         )
+        self.tp_size = 1 if use_data_parallel else tp_size
         self.tp_rank = 0 if use_data_parallel else get_tensor_model_parallel_rank()
 
         # Additional dummy heads are used to enable TP for common GPU counts.
@@ -289,20 +293,17 @@ class InternVisionEncoderLayer(nn.Module):
         self.norm_type = config.norm_type
         self.attn_cls = attn_cls
 
-        use_data_parallel = is_vit_use_data_parallel()
         self.attn = self._init_attn(
             config,
             quant_config,
             num_dummy_heads=num_dummy_heads,
             prefix=f"{prefix}.attn",
-            use_data_parallel=use_data_parallel,
         )
 
         self.mlp = InternMLP(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
         )
         self.norm1 = NORM2FN[self.norm_type](self.embed_dim, eps=config.layer_norm_eps)
         self.norm2 = NORM2FN[self.norm_type](self.embed_dim, eps=config.layer_norm_eps)
@@ -318,22 +319,11 @@ class InternVisionEncoderLayer(nn.Module):
         num_dummy_heads: int,
         prefix: str = "",
     ):
-        # fallback to sdpa attention if tp unavailable
-        use_data_parallel = is_vit_use_data_parallel()
-        tp_size = 1 if use_data_parallel else get_tensor_model_parallel_world_size()
-        num_heads = config.num_attention_heads
-
-        # if the number of heads is not divisible by tp_size,
-        # we also disable Attention's TP
-        use_data_parallel = (
-            use_data_parallel or (num_heads + num_dummy_heads) % tp_size != 0
-        )
         return self.attn_cls(
             config,
             quant_config=quant_config,
             num_dummy_heads=num_dummy_heads,
             prefix=prefix,
-            use_data_parallel=use_data_parallel,
         )
 
     def forward(
