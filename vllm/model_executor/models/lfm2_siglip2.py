@@ -351,15 +351,22 @@ class Siglip2Encoder(nn.Module):
         inputs_embeds: torch.Tensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: int | torch.Tensor,
+        return_layer_idx: int | None = None,
     ) -> torch.Tensor:
+        """
+        Args:
+            return_layer_idx: If None, return final hidden states.
+                If specified (0-indexed), return that layer's output early.
+        """
         hidden_states = inputs_embeds
-        for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(
+        for idx, encoder_layer in enumerate(self.layers):
+            hidden_states = encoder_layer(
                 hidden_states,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
-            hidden_states = layer_outputs
+            if return_layer_idx is not None and idx == return_layer_idx:
+                return hidden_states
         return hidden_states
 
 
@@ -401,19 +408,39 @@ class Siglip2VisionTransformer(nn.Module):
         spatial_shapes: torch.LongTensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
+        select_layer: int = -1,
     ) -> torch.Tensor:
         r"""
         spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
             Tensor containing the spatial dimensions (height, width)
         of the input images.
+        select_layer (`int`, defaults to -1):
+            The layer index to return hidden states from. Use -1 for the last
+            layer (with post_layernorm), -2 for second-to-last, etc.
         """
         hidden_states = self.embeddings(pixel_values_packed, spatial_shapes)
+
+        num_layers = len(self.encoder.layers)
+        # Normalize select_layer to 0-indexed layer output
+        # select_layer=-1 means last layer (index num_layers-1)
+        # select_layer=-2 means second-to-last (index num_layers-2)
+        target_layer_idx = select_layer if select_layer >= 0 else num_layers + select_layer
+
+        # Only pass return_layer_idx if we need an intermediate layer
+        return_layer_idx = None if target_layer_idx == num_layers - 1 else target_layer_idx
+
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            return_layer_idx=return_layer_idx,
         )
-        return self.post_layernorm(encoder_outputs)
+
+        # Only apply post_layernorm for the last layer
+        if target_layer_idx == num_layers - 1:
+            encoder_outputs = self.post_layernorm(encoder_outputs)
+
+        return encoder_outputs
 
 
 class Siglip2Model(torch.nn.Module):
@@ -437,12 +464,22 @@ class Siglip2Model(torch.nn.Module):
         spatial_shapes: torch.LongTensor,
         cu_seqlens: torch.Tensor,
         max_seqlen: torch.Tensor,
+        select_layer: int = -1,
     ) -> torch.Tensor:
+        """Forward pass through the vision model.
+
+        Args:
+            select_layer: Which layer's hidden states to return.
+                -1: Last layer with post_layernorm (default)
+                -2: Second-to-last layer without post_layernorm
+                Other negative/positive indices select the corresponding layer.
+        """
         return self.vision_model(
             pixel_values_packed=pixel_values_packed,
             spatial_shapes=spatial_shapes,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            select_layer=select_layer,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
