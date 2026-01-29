@@ -424,10 +424,21 @@ class Siglip2VisionTransformer(nn.Module):
         # Normalize select_layer to 0-indexed layer output
         # select_layer=-1 means last layer (index num_layers-1)
         # select_layer=-2 means second-to-last (index num_layers-2)
-        target_layer_idx = select_layer if select_layer >= 0 else num_layers + select_layer
+        target_layer_idx = (
+            select_layer if select_layer >= 0 else num_layers + select_layer
+        )
+
+        if not 0 <= target_layer_idx < num_layers:
+            raise ValueError(
+                f"select_layer index ({select_layer}) is out of range for "
+                f"{num_layers} layers. The valid range is "
+                f"[-{num_layers}, {num_layers - 1}]."
+            )
 
         # Only pass return_layer_idx if we need an intermediate layer
-        return_layer_idx = None if target_layer_idx == num_layers - 1 else target_layer_idx
+        return_layer_idx = (
+            None if target_layer_idx == num_layers - 1 else target_layer_idx
+        )
 
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
