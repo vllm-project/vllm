@@ -38,7 +38,8 @@ class EncoderRunner:
         self.req_id_to_mm_features.pop(req_id, None)
 
     def prepare_mm_inputs(
-        self, scheduled_encoder_inputs: dict[str, list[int]]
+        self,
+        scheduled_encoder_inputs: dict[str, list[int]],
     ) -> tuple[list[str], list[tuple[str, MultiModalKwargsItem]]]:
         mm_hashes: list[str] = []
         mm_kwargs: list[tuple[str, MultiModalKwargsItem]] = []
