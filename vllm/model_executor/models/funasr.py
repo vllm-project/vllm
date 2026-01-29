@@ -336,8 +336,8 @@ class MultiHeadedAttentionSANM(nn.Module):
 class SinusoidalPositionEncoder(torch.nn.Module):
     """ """
 
-    def __int__(self, d_model=80, dropout_rate=0.1):
-        pass
+    def __init__(self, d_model=80, dropout_rate=0.1):
+        super().__init__()
 
     def encode(
         self,
