@@ -1153,6 +1153,35 @@ def get_moe_wna16_block_config(
         return {}
     if not use_moe_wna16_cuda:
         # triton moe wna16 kernel
+        capability = current_platform.get_device_capability()
+        is_volta = (
+            current_platform.is_cuda()
+            and capability is not None
+            and capability == (7, 0)
+        )
+        if is_volta:
+            # Volta tuning derived from local benchmarks (int4).
+            m = max(1, num_valid_tokens // max(1, real_top_k))
+            if m <= 1:
+                return {
+                    "BLOCK_SIZE_N": 64,
+                    "BLOCK_SIZE_K": 32,
+                    "num_warps": 4,
+                    "num_stages": 1,
+                }
+            if m <= 2:
+                return {
+                    "BLOCK_SIZE_N": 32,
+                    "BLOCK_SIZE_K": 32,
+                    "num_warps": 2,
+                    "num_stages": 1,
+                }
+            return {
+                "BLOCK_SIZE_N": 32,
+                "BLOCK_SIZE_K": 32,
+                "num_warps": 2,
+                "num_stages": 2,
+            }
         if num_valid_tokens // real_top_k == 1:
             # if bs=1, use a smaller BLOCK_SIZE_N
             return {"BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 64}
@@ -1211,8 +1240,13 @@ def get_moe_wna16_block_config(
 def should_moe_wna16_use_cuda(
     num_valid_tokens: int, group_size: int, num_experts: int, bit: int
 ):
+    # CUDA WNA16 MoE kernel requires SM75+ (Turing and later).
+    # Volta (SM70) falls back to the Triton kernel.
+    capability = current_platform.get_device_capability()
     return (
         current_platform.is_cuda()
+        and capability is not None
+        and capability >= (7, 5)
         and bit == 4
         and group_size in [32, 64, 128]
         and num_valid_tokens / num_experts <= 6

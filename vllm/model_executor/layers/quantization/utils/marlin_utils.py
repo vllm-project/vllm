@@ -229,6 +229,10 @@ def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
 def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
     if current_platform.is_rocm():
         return False
+    # Marlin requires compute capability >= 7.5 (Turing)
+    capability_tuple = current_platform.get_device_capability()
+    if capability_tuple is None or capability_tuple.to_int() < 75:
+        return False
     hidden_size = layer.hidden_size
     intermediate_size_per_partition = layer.intermediate_size_per_partition
     # apply_router_weight_on_input is not supported for moe marlin
