@@ -4,7 +4,7 @@
 import pytest
 import requests
 
-from tests.utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer, VLLM_PATH
 from vllm.entrypoints.pooling.score.protocol import ScoreResponse
 from vllm.multimodal.utils import encode_image_url, fetch_image
 
@@ -40,7 +40,7 @@ def server():
         "--max-model-len",
         "8192",
         "--chat-template",
-        "examples/pooling/score/template/qwen3_vl_reranker.jinja",
+        str(VLLM_PATH / "examples/pooling/score/template/qwen3_vl_reranker.jinja"),
     ]
 
     with RemoteOpenAIServer(
