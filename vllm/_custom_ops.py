@@ -479,6 +479,7 @@ def rms_norm_per_block_quant(
     )
     return output, scales
 
+
 # fused silu_and_mul + block quant
 def silu_and_mul_per_block_quant(
     input: torch.Tensor,
@@ -491,18 +492,16 @@ def silu_and_mul_per_block_quant(
     assert input.shape[-1] % 2 == 0, (
         f"input last dim must be even (gate||up layout), got {input.shape[-1]}"
     )
-    
+
     # Output is half the width of input (after silu_and_mul)
     num_tokens = input.shape[0]
     hidden_size = input.shape[-1] // 2  # Divide by 2 because input is [gate || up]
-    
+
     # Allocate output tensor (FP8 or INT8)
     output = torch.empty(
-        (num_tokens, hidden_size), 
-        device=input.device, 
-        dtype=quant_dtype
+        (num_tokens, hidden_size), device=input.device, dtype=quant_dtype
     )
-    
+
     # Allocate scales tensor
     num_groups = hidden_size // group_size  # Directly use group_size
     if is_scale_transposed:
@@ -517,7 +516,20 @@ def silu_and_mul_per_block_quant(
             device=input.device,
             dtype=torch.float32,
         )
-    
+
+    if envs.VLLM_USE_TRITON_SILU_MUL_QUANT:
+        from vllm.model_executor.layers.quantization.triton_quantization import (
+            silu_and_mul_per_block_quant_triton,
+        )
+
+        return silu_and_mul_per_block_quant_triton(
+            input,
+            group_size,
+            quant_dtype,
+            scale_ub,
+            is_scale_transposed,
+        )
+
     # Call the C++ kernel
     torch.ops._C.silu_and_mul_per_block_quant(
         output,
@@ -527,8 +539,9 @@ def silu_and_mul_per_block_quant(
         scale_ub,
         is_scale_transposed,
     )
-    
+
     return output, scales
+
 
 # quantization ops
 # awq
