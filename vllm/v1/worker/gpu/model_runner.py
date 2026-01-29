@@ -950,21 +950,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_rejected,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-
-            self.draft_tokens_np = None
-            self.draft_req_ids = input_batch.req_ids
-            if input_batch.has_structured_output_reqs:
-                # For spec decoding + structured outputs, we must transfer the
-                # draft tokens back to the scheduler for grammar validation.
-                current_stream = torch.cuda.current_stream(self.device)
-                with torch.cuda.stream(self.draft_tokens_copy_stream):
-                    self.draft_tokens_copy_stream.wait_stream(current_stream)
-                    self.draft_tokens_np = async_copy_to_np(draft_tokens)
-                    self.draft_tokens_copy_event.record()
+            self._copy_draft_tokens_to_cpu_if_needed(input_batch, draft_tokens)
 
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
+
+    def _copy_draft_tokens_to_cpu_if_needed(
+        self, input_batch: InputBatch, draft_tokens: torch.Tensor
+    ) -> None:
+        if not input_batch.has_structured_output_reqs:
+            self.draft_tokens_np = None
+            self.draft_req_ids = []
+            return
+        # For spec decoding + structured outputs, we must transfer the
+        # draft tokens back to the scheduler for grammar validation.
+        self.draft_req_ids = input_batch.req_ids
+        current_stream = torch.cuda.current_stream(self.device)
+        with torch.cuda.stream(self.draft_tokens_copy_stream):
+            self.draft_tokens_copy_stream.wait_stream(current_stream)
+            self.draft_tokens_np = async_copy_to_np(draft_tokens)
+            self.draft_tokens_copy_event.record()
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if self.draft_tokens_np is None:
