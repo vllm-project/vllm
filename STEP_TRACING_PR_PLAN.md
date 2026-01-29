@@ -21,18 +21,39 @@ This plan implements **step-level tracing** as an extension to vLLM's existing r
 
 ---
 
+## Implementation Progress
+
+| PR | Status | Branch | Commit | Notes |
+|----|--------|--------|--------|-------|
+| PR #3 | ✅ **MERGED** | `step-batch-summary-tracing` | 4c1afa8f5 | Step batch summary (CLI args defined, wiring fixed in PR #5) |
+| PR #4 | ✅ **MERGED** | `kv-metrics-observability-utils` | 94aab4cb9 | KV cache observability utilities |
+| PR #5 | ✅ **COMPLETE** | `pr5ofstepstream` | f951860dc | Rich request snapshots + CLI wiring fix (ready for PR) |
+| PR #1 | ⏸️ DEFERRED | - | - | Timestamp precision (orthogonal, low priority) |
+| PR #2 | ⏸️ DEFERRED | - | - | Journey sampling (orthogonal, low priority) |
+
+**Current HEAD**: ab555b83e (main branch, PR #5 not yet merged)
+
+**Key Outcomes**:
+- Step-level tracing infrastructure complete (PR #3)
+- KV observability utilities available (PR #4)
+- Per-request rich snapshots implemented (PR #5)
+- Step tracing test suite passing (all tests green)
+- CLI flags properly wired (PR #5 fix): `--step-tracing-enabled`, `--step-tracing-sample-rate`, `--step-tracing-rich-subsample-rate`
+
+---
+
 ## A. PR Dependency Graph
 
 ```
-PR #1: Timestamp Precision Upgrade (INDEPENDENT)
+PR #1: Timestamp Precision Upgrade (INDEPENDENT) ⏸️ DEFERRED
 
-PR #2: Journey Tracing Sampling Knob (INDEPENDENT)
+PR #2: Journey Tracing Sampling Knob (INDEPENDENT) ⏸️ DEFERRED
 
-PR #3: Step Batch Summary Stream (INDEPENDENT)
+PR #3: Step Batch Summary Stream (INDEPENDENT) ✅ MERGED
   ↓
-  ├─→ PR #4: KV/Cache Metrics Utilities (parallel to PR #3)
+  ├─→ PR #4: KV/Cache Metrics Utilities (parallel to PR #3) ✅ MERGED
   │
-  └─→ PR #5: Rich Request Snapshot Stream (needs PR #3 + PR #4)
+  └─→ PR #5: Rich Request Snapshot Stream (needs PR #3 + PR #4) ✅ COMPLETE
 ```
 
 **Dependency Notes**:
@@ -42,12 +63,12 @@ PR #3: Step Batch Summary Stream (INDEPENDENT)
 - **PR #4** can be developed in parallel to PR #3 (no dependency)
 - **PR #5** depends on both PR #3 (step ID) and PR #4 (KV metrics utilities)
 
-**Recommended Implementation Order** (cleanest landing sequence):
-1. PR #3 (step batch summary) - establishes `scheduler_steps` span + core payload
-2. PR #4 (KV utils) - pure helpers + tests
-3. PR #5 (rich snapshots) - consumes both
-4. PR #2 (journey sampling) - orthogonal, low risk
-5. PR #1 (dual-write) - orthogonal, can land anytime
+**Implementation Order** (as completed):
+1. ✅ PR #3 (step batch summary) - establishes `scheduler_steps` span + core payload (commit 4c1afa8f5)
+2. ✅ PR #4 (KV utils) - pure helpers + tests (commit 94aab4cb9)
+3. ✅ PR #5 (rich snapshots) - consumes both (commit f951860dc, ready for PR)
+4. ⏸️ PR #2 (journey sampling) - deferred (orthogonal, low priority)
+5. ⏸️ PR #1 (dual-write) - deferred (orthogonal, low priority)
 
 ---
 
@@ -266,7 +287,7 @@ def _make_deterministic_sampler(seed: int = 0) -> Callable[[str, float], bool]:
 
 **Critical Files**:
 - `vllm/config/observability.py` - Add step tracing config fields
-- `vllm/engine/arg_utils.py` - Add CLI flags
+- `vllm/engine/arg_utils.py` - Add CLI flag definitions (NOTE: Wiring to EngineArgs → ObservabilityConfig was missing in PR #3, fixed later in PR #5)
 - `vllm/v1/core/sched/scheduler.py` - Add step span creation and batch summary emission logic
 - `vllm/tracing.py` - Add span attribute constants for step batch summary
 - `tests/v1/core/test_scheduler.py` - Add deterministic step batch summary tests
@@ -429,6 +450,7 @@ def get_per_request_kv_metrics(request: Request, manager: KVCacheManager) -> Per
 - **Source of truth**: `scheduler.running` at SchedulerOutput construction point (same set used to build SchedulerOutput)
 - Payload: Per-request progress, token counts (from SchedulerOutput), KV metrics (via PR #4 utilities)
 - **Payload rule**: Only include cheaply available quantities (Request fields, SchedulerOutput data, PR #4 utilities - no expensive iteration)
+- **Also fixes PR #3 CLI wiring bug**: Wire all three step tracing flags through `EngineArgs` to `ObservabilityConfig` (regression test added)
 
 **PRESERVED**:
 - Journey tracing unchanged (orthogonal)
@@ -469,11 +491,11 @@ def get_per_request_kv_metrics(request: Request, manager: KVCacheManager) -> Per
 
 **Critical Files**:
 - `vllm/config/observability.py` - Add `step_tracing_rich_subsample_rate: float`
-- `vllm/engine/arg_utils.py` - Add CLI flag
+- `vllm/engine/arg_utils.py` - Add CLI flag + wire all step tracing flags to EngineArgs/ObservabilityConfig (fixes PR #3 bug)
 - `vllm/v1/core/sched/scheduler.py` - Add rich snapshot emission (after batch summary, iterate `self.running`)
 - `vllm/v1/core/kv_cache_observability.py` - Use utilities from PR #4
 - `vllm/tracing.py` - Add span attribute constants for rich snapshot
-- `tests/v1/core/test_scheduler.py` - Add rich snapshot tests
+- `tests/v1/core/test_step_tracing.py` - Add rich snapshot tests + CLI wiring regression test
 
 ---
 
@@ -619,7 +641,7 @@ if self.step_tracing_enabled and batch_summary_was_sampled:
 | `request.phase` | `str` | N/A | "PREFILL" or "DECODE" | `"PREFILL"` if `req.num_output_tokens == 0` else `"DECODE"` |
 | `request.num_prompt_tokens` | `int` | count | Total prompt tokens | `request.num_prompt_tokens` |
 | `request.num_computed_tokens` | `int` | count | Tokens computed so far | `request.num_computed_tokens` |
-| `request.num_output_tokens` | `int` | count | Output tokens generated | `len(request._output_token_ids)` |
+| `request.num_output_tokens` | `int` | count | Output tokens generated | `request.num_output_tokens` (property) |
 | `request.num_preemptions` | `int` | count | Preemption count | `request.num_preemptions` |
 | `request.scheduled_tokens_this_step` | `int` | count | Tokens scheduled in this step | `output.num_scheduled_tokens[request_id]` |
 | `kv.blocks_allocated_gpu` | `int` | count | GPU KV blocks allocated | Via `get_per_request_kv_metrics()` from PR #4 |
@@ -760,38 +782,41 @@ def _make_deterministic_sampler(seed: int = 0) -> Callable[[str, float], bool]:
 
 ## E. Verification Checklist
 
-### PR #1: Timestamp Precision
+### PR #1: Timestamp Precision (DEFERRED)
 - [ ] Both `ts.monotonic` and `ts.monotonic_ns` present on all journey events
 - [ ] `ts.monotonic` unchanged (backward compatible)
 - [ ] New constant `JOURNEY_TS_MONOTONIC_NS` added
 - [ ] Values consistent (computed from same source OR loose tolerance to avoid CI flakiness)
 
-### PR #2: Sampling
+### PR #2: Sampling (DEFERRED)
 - [ ] CLI flag accepted, invalid rates rejected
 - [ ] Sampling works (0.0 → no spans, 1.0 → all spans)
 - [ ] Deterministic test validates exact sample set
 - [ ] Sampling state cleaned up (no memory leak)
 
-### PR #3: Batch Summary
-- [ ] CLI flags accepted, disabled by default
-- [ ] Step span lifecycle policy implemented (deterministic hook or documented open span)
-- [ ] All required attributes present and correct
-- [ ] Batch composition sums validate
-- [ ] Empty schedule emits batch summary
+### PR #3: Batch Summary ✅ COMPLETE
+- [x] CLI flags accepted, disabled by default
+- [x] Step span lifecycle policy implemented (long-lived span)
+- [x] All required attributes present and correct
+- [x] Batch composition sums validate
+- [x] Empty schedule emits batch summary
+- [x] CLI wiring regression test added
 
-### PR #4: KV Utilities
-- [ ] New module exists, uses only existing interfaces
-- [ ] GPU metrics always present (from existing exposed fields)
-- [ ] Optional fields handled gracefully (None if unavailable)
-- [ ] No new KV subsystem APIs, methods, or Request fields added
-- [ ] Any metric not cheaply accessible via existing read-only interfaces is omitted or optional
+### PR #4: KV Utilities ✅ COMPLETE
+- [x] New module exists, uses only existing interfaces
+- [x] GPU metrics always present (from existing exposed fields)
+- [x] Optional fields handled gracefully (None if unavailable)
+- [x] No new KV subsystem APIs, methods, or Request fields added
+- [x] All metrics cheaply accessible via existing read-only interfaces
 
-### PR #5: Rich Snapshot
-- [ ] CLI flag accepted, subsampling works correctly
-- [ ] Event count matches running request count at SchedulerOutput construction
-- [ ] All required attributes present
-- [ ] Only cheaply available quantities included
-- [ ] Snapshot uses same request set as SchedulerOutput
+### PR #5: Rich Snapshot ✅ COMPLETE
+- [x] CLI flag accepted, subsampling works correctly
+- [x] Event count matches running request count at SchedulerOutput construction
+- [x] All required attributes present
+- [x] Only cheaply available quantities included
+- [x] Snapshot uses same request set as SchedulerOutput
+- [x] Two-stage sampling implemented (batch → rich subsample)
+- [x] CLI wiring tested (regression protection)
 
 ---
 
