@@ -63,6 +63,8 @@ from vllm.transformers_utils.configs import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
+from vllm.platforms import current_platform
+
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 
 logger = init_logger(__name__)
@@ -320,7 +322,7 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             model_config.multimodal_config.mm_encoder_tp_mode == "data"
         )
         self.hidden_size = config.text_config.hidden_size
-        self.device = torch.cuda.current_device()
+        self.device = current_platform.current_device()
         # Build vision tower directly with KimiK25VisionConfig
         self.vision_tower = MoonViT3dPretrainedModel(
             config.vision_config,
