@@ -44,6 +44,8 @@ def __getattr__(name: str):
 
         return MEDIA_CONNECTOR_REGISTRY
 
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 def encode_audio_base64(
     audio: np.ndarray,
