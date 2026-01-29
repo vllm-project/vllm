@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for tool_parsers/utils.py"""
 
-import pytest
 from json import JSONDecodeError
+
+import pytest
 
 from vllm.tool_parsers.utils import safe_json_loads
 
@@ -19,7 +20,7 @@ class TestSafeJsonLoads:
 
     def test_single_json_array(self):
         """Test parsing a single valid JSON array."""
-        input_str = '[1, 2, 3]'
+        input_str = "[1, 2, 3]"
         result = safe_json_loads(input_str)
         assert result == [1, 2, 3]
 
@@ -56,13 +57,13 @@ class TestSafeJsonLoads:
 
     def test_empty_json_object(self):
         """Test parsing an empty JSON object."""
-        input_str = '{}'
+        input_str = "{}"
         result = safe_json_loads(input_str)
         assert result == {}
 
     def test_empty_json_array(self):
         """Test parsing an empty JSON array."""
-        input_str = '[]'
+        input_str = "[]"
         result = safe_json_loads(input_str)
         assert result == []
 
@@ -74,25 +75,25 @@ class TestSafeJsonLoads:
 
     def test_json_primitive_number(self):
         """Test parsing a JSON primitive number."""
-        input_str = '42'
+        input_str = "42"
         result = safe_json_loads(input_str)
         assert result == 42
 
     def test_json_primitive_boolean(self):
         """Test parsing JSON boolean values."""
-        assert safe_json_loads('true') is True
-        assert safe_json_loads('false') is False
+        assert safe_json_loads("true") is True
+        assert safe_json_loads("false") is False
 
     def test_json_null(self):
         """Test parsing JSON null."""
-        input_str = 'null'
+        input_str = "null"
         result = safe_json_loads(input_str)
         assert result is None
 
     def test_invalid_json_raises_error(self):
         """Test that invalid JSON raises JSONDecodeError."""
         with pytest.raises(JSONDecodeError):
-            safe_json_loads('not valid json')
+            safe_json_loads("not valid json")
 
     def test_incomplete_json_raises_error(self):
         """Test that incomplete JSON raises JSONDecodeError."""
@@ -102,7 +103,7 @@ class TestSafeJsonLoads:
     def test_empty_string_raises_error(self):
         """Test that empty string raises JSONDecodeError."""
         with pytest.raises(JSONDecodeError):
-            safe_json_loads('')
+            safe_json_loads("")
 
     def test_complex_tool_arguments(self):
         """Test parsing complex tool call arguments."""
@@ -111,5 +112,5 @@ class TestSafeJsonLoads:
         assert result == {
             "location": "San Francisco, CA",
             "units": "fahrenheit",
-            "forecast_days": 5
+            "forecast_days": 5,
         }
