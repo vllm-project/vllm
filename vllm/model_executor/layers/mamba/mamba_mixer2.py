@@ -43,6 +43,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import (
+    current_stream,
     direct_register_custom_op,
     mamba_gate_stream,
     mamba_prefill_decode_stream,
@@ -312,6 +313,10 @@ class MambaMixer2(MambaBase, CustomOp):
 
         self.groups_ssm_state_size = self.n_groups * self.ssm_state_size
         self.conv_dim = intermediate_size + 2 * self.groups_ssm_state_size
+        # Use fused in_proj when multi-stream is disabled to avoid
+        # extra GEMM and kernel-launch overhead.
+        self._enable_mamba_multi_stream = not envs.VLLM_DISABLE_MAMBA_MULTI_STREAM
+        self._split_gate_proj = self._enable_mamba_multi_stream
 
         if n_groups % self.tp_size == 0:
             self.conv1d = MergedColumnParallelLinear(
@@ -326,25 +331,36 @@ class MambaMixer2(MambaBase, CustomOp):
                 prefix=f"{prefix}.conv1d",
             )
 
-            # Gate projection is split out so it can run independently
-            # and overlap with the conv+SSM path on a separate CUDA stream.
-            self.gate_proj = ColumnParallelLinear(
-                input_size=hidden_size,
-                output_size=intermediate_size,
-                bias=use_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.gate_proj",
-                return_bias=False,
-            )
-
-            self.in_proj = MergedColumnParallelLinear(
-                input_size=hidden_size,
-                output_sizes=[
+            if self._split_gate_proj:
+                # Gate projection is split out so it can run independently
+                # and overlap with the conv+SSM path on a separate CUDA stream.
+                self.gate_proj = ColumnParallelLinear(
+                    input_size=hidden_size,
+                    output_size=intermediate_size,
+                    bias=use_bias,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.gate_proj",
+                    return_bias=False,
+                )
+                in_proj_output_sizes = [
                     intermediate_size,
                     self.groups_ssm_state_size,
                     self.groups_ssm_state_size,
                     self.num_heads,
-                ],
+                ]
+            else:
+                self.gate_proj = None
+                in_proj_output_sizes = [
+                    intermediate_size,
+                    intermediate_size,
+                    self.groups_ssm_state_size,
+                    self.groups_ssm_state_size,
+                    self.num_heads,
+                ]
+
+            self.in_proj = MergedColumnParallelLinear(
+                input_size=hidden_size,
+                output_sizes=in_proj_output_sizes,
                 bias=use_bias,
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj",
@@ -361,26 +377,33 @@ class MambaMixer2(MambaBase, CustomOp):
                 prefix=f"{prefix}.conv1d",
             )
 
-            # Gate projection is split out so it can run independently
-            # and overlap with the conv+SSM path on a separate CUDA stream.
-            self.gate_proj = ColumnParallelLinear(
-                input_size=hidden_size,
-                output_size=intermediate_size,
-                bias=use_bias,
-                quant_config=quant_config,
-                prefix=f"{prefix}.gate_proj",
-                return_bias=False,
-            )
+            if self._split_gate_proj:
+                # Gate projection is split out so it can run independently
+                # and overlap with the conv+SSM path on a separate CUDA stream.
+                self.gate_proj = ColumnParallelLinear(
+                    input_size=hidden_size,
+                    output_size=intermediate_size,
+                    bias=use_bias,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.gate_proj",
+                    return_bias=False,
+                )
+                in_proj_output_size = self.conv_dim + self.num_heads
+            else:
+                self.gate_proj = None
+                in_proj_output_size = (
+                    self.intermediate_size + self.conv_dim + self.num_heads
+                )
 
             self.in_proj = ColumnParallelLinear(
                 input_size=hidden_size,
-                output_size=self.conv_dim + self.num_heads,
+                output_size=in_proj_output_size,
                 bias=use_bias,
                 quant_config=quant_config,
                 prefix=f"{prefix}.in_proj",
             )
 
-            # - because in_proj is a concatenation of 4 weights, we
+            # - because in_proj is a concatenation of multiple weights, we
             #   need to interleave them before sharding
             # - use the custom weight loader mamba_v2_sharded_weight_loader
             #   for conv1d.bias, covn1d.weight and in_proj.weight
@@ -433,16 +456,21 @@ class MambaMixer2(MambaBase, CustomOp):
             if quant_config is None:
                 # - quant layers do not have a weight loader
                 delattr(self.in_proj.weight, "weight_loader")
+                in_proj_loader_settings = [intermediate_settings]
+                if not self._split_gate_proj:
+                    in_proj_loader_settings.append(intermediate_settings)
+                in_proj_loader_settings.extend(
+                    [
+                        group_shard_settings,
+                        group_shard_settings,
+                        head_settings,  # for dt
+                    ]
+                )
                 set_weight_attrs(
                     self.in_proj.weight,
                     {
                         "weight_loader": mamba_v2_sharded_weight_loader(
-                            [
-                                intermediate_settings,  # for hidden states
-                                group_shard_settings,
-                                group_shard_settings,
-                                head_settings,  # for dt
-                            ],
+                            in_proj_loader_settings,
                             self.tp_size,
                             tp_rank,
                         )
@@ -517,8 +545,6 @@ class MambaMixer2(MambaBase, CustomOp):
         self.tped_intermediate_size = self.intermediate_size // self.tp_size
         self.tped_conv_size = self.conv_dim // self.tp_size
         self.tped_dt_size = self.num_heads // self.tp_size
-
-        self._enable_mamba_multi_stream = not envs.VLLM_DISABLE_MAMBA_MULTI_STREAM
         self._prefill_decode_stream = (
             mamba_prefill_decode_stream()
             if self._enable_mamba_multi_stream
@@ -535,13 +561,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # Dedicated gate stream so the gate projection can overlap
         # with conv+SSM; we only synchronize at the gated norm.
-        self._gate_stream = (
-            mamba_gate_stream() if self._enable_mamba_multi_stream else None
-        )
-        self._gate_event: torch.cuda.Event | None = None
-        if self._gate_stream is not None:
-            self._gate_event = torch.cuda.Event()
-
+        self._gate_stream = mamba_gate_stream() if self._split_gate_proj else None
         self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
             hidden_states_B_C,
             [
@@ -551,7 +571,8 @@ class MambaMixer2(MambaBase, CustomOp):
             ],
             dim=-1,
         )
-        self._wrap_gate_and_in_proj_weight_loaders()
+        if self._split_gate_proj:
+            self._wrap_gate_and_in_proj_weight_loaders()
 
     def _wrap_gate_and_in_proj_weight_loaders(self) -> None:
         """Ensure legacy fused in_proj weights populate gate_proj too."""
@@ -670,47 +691,67 @@ class MambaMixer2(MambaBase, CustomOp):
     ):
         pass
 
+    def gate_in_proj_forward(
+        self,
+        hidden_states: torch.Tensor,
+        mup_vector: torch.Tensor | None = None,
+        *,
+        allow_gate_stream: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._split_gate_proj:
+            gate_mup = None
+            ssm_mup = None
+            if mup_vector is not None:
+                gate_mup = mup_vector[..., : self.tped_intermediate_size]
+                ssm_mup = mup_vector[..., self.tped_intermediate_size :]
+
+            def _apply_gate_proj() -> torch.Tensor:
+                gate = self.gate_proj(hidden_states)
+                if gate_mup is not None:
+                    gate = gate * gate_mup
+                return gate
+
+            # Gate projection runs on a dedicated stream so the conv+SSM path
+            # can start immediately on the default stream. Synchronize only
+            # right before the gated RMSNorm.
+            num_tokens = hidden_states.shape[0]
+            use_gate_stream = (
+                allow_gate_stream
+                and self._gate_stream is not None
+                and hidden_states.is_cuda
+                and num_tokens <= envs.VLLM_MAMBA_GATE_STREAM_TOKEN_THRESHOLD
+            )
+            if use_gate_stream:
+                main_stream = current_stream()
+                self._gate_stream.wait_stream(main_stream)
+                with torch.cuda.stream(self._gate_stream):
+                    gate = _apply_gate_proj()
+            else:
+                gate = _apply_gate_proj()
+
+            # Linear projection for conv + SSM (gate-free).
+            projected_states, _ = self.in_proj(hidden_states)
+            if ssm_mup is not None:
+                projected_states = projected_states * ssm_mup
+        else:
+            # Fused in_proj keeps gate + SSM paths together.
+            projected_states, _ = self.in_proj(hidden_states)
+            if mup_vector is not None:
+                projected_states = projected_states * mup_vector
+            gate = projected_states[..., : self.tped_intermediate_size]
+
+        return gate, projected_states
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
-        gate_mup = None
-        ssm_mup = None
-        if mup_vector is not None:
-            gate_mup = mup_vector[..., : self.tped_intermediate_size]
-            ssm_mup = mup_vector[..., self.tped_intermediate_size :]
-
-        is_compiling = torch.compiler.is_compiling()
-
-        # 1. Gate projection runs on a dedicated stream so the conv+SSM path
-        # can start immediately on the default stream. Synchronize only
-        # right before the gated RMSNorm.
-        gate_event = None
-        current_stream = None
-        if (
-            self._gate_stream is not None
-            and self._gate_event is not None
-            and hidden_states.is_cuda
-            and not is_compiling
-        ):
-            current_stream = torch.cuda.current_stream(hidden_states.device)
-            self._gate_stream.wait_stream(current_stream)
-            with torch.cuda.stream(self._gate_stream):
-                gate = self.gate_proj(hidden_states)
-                if gate_mup is not None:
-                    gate = gate * gate_mup
-                gate_event = self._gate_event
-                gate_event.record()
-        else:
-            gate = self.gate_proj(hidden_states)
-            if gate_mup is not None:
-                gate = gate * gate_mup
-
-        # 2. Linear projection for conv + SSM (gate-free).
-        projected_states, _ = self.in_proj(hidden_states)
-        if ssm_mup is not None:
-            projected_states = projected_states * ssm_mup
+        gate, projected_states = torch.ops.vllm.mamba_gate_in_proj(
+            hidden_states,
+            mup_vector,
+            self.prefix,
+        )
 
         # 3. Prepare inputs for conv + SSM
         ssm_output = torch.empty(
@@ -731,10 +772,10 @@ class MambaMixer2(MambaBase, CustomOp):
             self.prefix,
         )
 
-        if gate_event is not None:
-            assert current_stream is not None
-            current_stream.wait_event(gate_event)
-            gate.record_stream(current_stream)
+        torch.ops.vllm.mamba_gate_sync(
+            gate,
+            self.prefix,
+        )
 
         # 5. gated MLP
         # GatedRMSNorm internally applying SiLU to the gate
@@ -752,8 +793,14 @@ class MambaMixer2(MambaBase, CustomOp):
         projected_states: torch.Tensor,
         output: torch.Tensor,
     ):
+        ssm_projected_states = projected_states
+        if not self._split_gate_proj:
+            ssm_projected_states = projected_states[
+                ..., self.tped_intermediate_size :
+            ]
+
         hidden_states_B_C, dt = torch.split(
-            projected_states,
+            ssm_projected_states,
             [self.tped_conv_size, self.tped_dt_size],
             dim=-1,
         )
@@ -1140,6 +1187,93 @@ class MambaMixer2(MambaBase, CustomOp):
     @property
     def mamba_type(self) -> str:
         return "mamba2"
+
+
+def mamba_gate_in_proj(
+    hidden_states: torch.Tensor,
+    mup_vector: torch.Tensor | None,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    allow_gate_stream = not torch.cuda.is_current_stream_capturing()
+    return self.gate_in_proj_forward(
+        hidden_states,
+        mup_vector,
+        allow_gate_stream=allow_gate_stream,
+    )
+
+
+def mamba_gate_in_proj_fake(
+    hidden_states: torch.Tensor,
+    mup_vector: torch.Tensor | None,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    num_tokens = hidden_states.shape[0]
+    if self._split_gate_proj:
+        gate = torch.empty(
+            (num_tokens, self.tped_intermediate_size),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        proj_size = self.tped_conv_size + self.tped_dt_size
+        projected_states = torch.empty(
+            (num_tokens, proj_size),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+    else:
+        proj_size = (
+            self.tped_intermediate_size + self.tped_conv_size + self.tped_dt_size
+        )
+        projected_states = torch.empty(
+            (num_tokens, proj_size),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        # Match real op: gate is a view into projected_states.
+        gate = projected_states[..., : self.tped_intermediate_size]
+    return gate, projected_states
+
+
+direct_register_custom_op(
+    op_name="mamba_gate_in_proj",
+    op_func=mamba_gate_in_proj,
+    fake_impl=mamba_gate_in_proj_fake,
+)
+
+
+def mamba_gate_sync(
+    gate: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    if (
+        self._gate_stream is None
+        or not gate.is_cuda
+        or torch.cuda.is_current_stream_capturing()
+    ):
+        return
+    main_stream = current_stream()
+    main_stream.wait_stream(self._gate_stream)
+    gate.record_stream(main_stream)
+
+
+def mamba_gate_sync_fake(
+    gate: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="mamba_gate_sync",
+    op_func=mamba_gate_sync,
+    fake_impl=mamba_gate_sync_fake,
+)
 
 
 def mamba_mixer2(

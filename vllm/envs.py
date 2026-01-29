@@ -247,6 +247,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_DISABLE_MAMBA_MULTI_STREAM: bool = False
+    VLLM_MAMBA_GATE_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -1592,6 +1593,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable multi-stream overlap for Mamba prefill/decode and gate.
     "VLLM_DISABLE_MAMBA_MULTI_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_MAMBA_MULTI_STREAM", "0"))
+    ),
+    # Limits when we run Mamba gate projection in a separate stream.
+    # For large token counts, overlap is often compute-bound and adds
+    # launch overhead without benefit. Tune per model/GPU.
+    "VLLM_MAMBA_GATE_STREAM_TOKEN_THRESHOLD": lambda: int(
+        int(os.getenv("VLLM_MAMBA_GATE_STREAM_TOKEN_THRESHOLD", 256))
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
