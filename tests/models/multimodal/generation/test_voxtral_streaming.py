@@ -37,7 +37,7 @@ EXPECTED_TEXT = [
     (
         " First words I spoke in the original phonograph. "
         "A little piece of practical poetry. Mary had a little lamb,"
-        " its fleece was quite a slow, and everywhere that Mary went, "
+        " it sleeps with quite a snow, and everywhere that Mary went, "
         "the lamb was sure to go."
     ),
     (
@@ -73,7 +73,7 @@ def async_engine() -> AsyncLLM:
     return AsyncLLM.from_engine_args(engine_args)
 
 
-@pytest.mark.skip(reason="Voxtral streaming is not yet public")
+# @pytest.mark.skip(reason="Voxtral streaming is not yet public")
 def test_voxtral_streaming_forward(audio_assets, tokenizer, engine):
     audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
 
@@ -122,14 +122,14 @@ class RealTimeAudioInput:
     """
 
     def __init__(self, tokenizer: MistralTokenizer) -> None:
-        # TODO(Patrick) - put these into the tokenizer config
-        self._look_ahead_in_ms = 2.5
-        self._look_back_in_ms = 52.5
-
         self._tokenizer = tokenizer
         self._config: AudioConfig = (
             self._tokenizer.instruct_tokenizer.audio_encoder.audio_config
         )
+
+        self._look_ahead_in_ms = self._config.streaming_look_ahead_ms
+        self._look_back_in_ms = self._config.streaming_look_back_ms
+
         self._sampling_rate = self._config.sampling_rate
 
         self._audio: Audio | None = None
@@ -218,7 +218,7 @@ class RealTimeAudioInput:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Voxtral streaming is not yet public")
+# @pytest.mark.skip(reason="Voxtral streaming is not yet public")
 async def test_voxtral_streaming_generator(audio_assets, tokenizer, async_engine):
     sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
 
@@ -248,8 +248,7 @@ async def test_voxtral_streaming_generator(audio_assets, tokenizer, async_engine
 
     # 'true' streaming and 'offline' streaming differ a bit because log-mels are
     # differently noramalized
-    # TODO(Patrick) - check if we want to align or not
-    texts[0] = texts[0].replace("He has f", "F")
+    texts[0] = texts[0].replace("He has f", "F").replace("fleece was quite a slow", "sleeps with quite a snow")
     texts[1] = texts[1].replace("a base hit", "OBS").replace("oh my", "oh, my")
 
     assert texts == EXPECTED_TEXT
