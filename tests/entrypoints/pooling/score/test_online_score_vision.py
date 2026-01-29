@@ -6,7 +6,7 @@ import requests
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.score.protocol import ScoreResponse
-from vllm.utils.mm_utils import encode_base64_content_from_url
+from vllm.multimodal.utils import encode_image_url, fetch_image
 
 MODEL_NAME = "Qwen/Qwen3-VL-Reranker-2B"
 HF_OVERRIDES = {
@@ -28,7 +28,7 @@ documents = [
     },
     {
         "type": "image_url",
-        "image_url": encode_base64_content_from_url(image_url),
+        "image_url": {"url": encode_image_url(fetch_image(image_url))},
     },
 ]
 

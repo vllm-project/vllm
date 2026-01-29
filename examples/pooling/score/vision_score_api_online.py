@@ -18,8 +18,10 @@ e.g.
 
 import argparse
 import pprint
+
 import requests
-from vllm.utils.mm_utils import encode_base64_content_from_url, DEFAULT_HEADERS
+
+from vllm.multimodal.utils import encode_image_url, fetch_image
 
 query = "A woman playing with her dog on a beach at sunset."
 document = (
@@ -38,7 +40,7 @@ documents = [
     },
     {
         "type": "image_url",
-        "image_url": encode_base64_content_from_url(image_url),
+        "image_url": {"url": encode_image_url(fetch_image(image_url))},
     },
 ]
 
@@ -55,12 +57,12 @@ def main(args):
     models_url = base_url + "/v1/models"
     score_url = base_url + "/score"
 
-    response = requests.get(models_url, headers=DEFAULT_HEADERS)
+    response = requests.get(models_url)
     model = response.json()["data"][0]["id"]
 
     print("Query: string & Document: string")
     prompt = {"model": model, "queries": query, "documents": document}
-    response = requests.post(score_url, headers=DEFAULT_HEADERS, json=prompt)
+    response = requests.post(score_url, json=prompt)
     pprint.pprint(response.json())
 
     print("Query: string & Document: text")
@@ -69,7 +71,7 @@ def main(args):
         "queries": query,
         "documents": {"content": [documents[0]]},
     }
-    response = requests.post(score_url, headers=DEFAULT_HEADERS, json=prompt)
+    response = requests.post(score_url, json=prompt)
     pprint.pprint(response.json())
 
     print("Query: string & Document: image url")
@@ -78,7 +80,7 @@ def main(args):
         "queries": query,
         "documents": {"content": [documents[1]]},
     }
-    response = requests.post(score_url, headers=DEFAULT_HEADERS, json=prompt)
+    response = requests.post(score_url, json=prompt)
     pprint.pprint(response.json())
 
     print("Query: string & Document: image base64")
@@ -87,7 +89,7 @@ def main(args):
         "queries": query,
         "documents": {"content": [documents[2]]},
     }
-    response = requests.post(score_url, headers=DEFAULT_HEADERS, json=prompt)
+    response = requests.post(score_url, json=prompt)
     pprint.pprint(response.json())
 
 
