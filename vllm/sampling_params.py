@@ -16,6 +16,7 @@ from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.serial_utils import PydanticMsgspecMixin
+from vllm.config.model import LogprobsMode
 
 logger = init_logger(__name__)
 
@@ -252,6 +253,11 @@ class SamplingParams(
 
     skip_reading_prefix_cache: bool | None = None
 
+    """Override logprobs_mode for this request.
+    If set, this will override the logprobs_mode for this request.
+    If None, the logprobs_mode will be determined by in `ModelConfig`."""
+    logprobs_mode_override: LogprobsMode | None = None
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -282,6 +288,7 @@ class SamplingParams(
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
+        logprobs_mode_override: LogprobsMode | None = None,
         skip_clone: bool = False,
     ) -> "SamplingParams":
         if logit_bias is not None:
@@ -323,6 +330,7 @@ class SamplingParams(
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
+            logprobs_mode_override=logprobs_mode_override,
             skip_clone=skip_clone,
         )
 
@@ -632,3 +640,4 @@ class BeamSearchParams(
     temperature: float = 0.0
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
+    logprobs_mode_override: LogprobsMode | None = None

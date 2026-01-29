@@ -69,14 +69,24 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
         predict_bonus_token: bool = False,
-        logprobs_mode_override: LogprobsMode | None = None,
     ) -> SamplerOutput:
-        logprobs_mode = logprobs_mode_override or self.logprobs_mode
+        # Use float32 for the logits.
+        logits = logits.to(torch.float32)
+
+        logprobs_mode = self.logprobs_mode
+        if sampling_metadata.logprobs_mode_override is not None:
+            logprobs_mode = sampling_metadata.logprobs_mode_override
+            if isinstance(logprobs_mode, list):
+                for i in range(len(logprobs_mode)):
+                    if logprobs_mode[i] is None:
+                        logprobs_mode[i] = self.logprobs_mode
+        # logger.info(f"sampling_metadata: {sampling_metadata}")
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.
         # This is different from the V0 sampler, which uses the logits that
         # is used for sampling (after penalties and temperature scaling).
         num_logprobs = sampling_metadata.max_num_logprobs
+        raw_indices = None  # "raw_logprobs" or "raw_logits" requests indices
         if num_logprobs is not None:
             if logprobs_mode == "raw_logprobs":
                 raw_logprobs = self.compute_logprobs(logits)
@@ -85,9 +95,24 @@ class Sampler(nn.Module):
                     raw_logprobs = logits.clone()
                 else:
                     raw_logprobs = logits.to(torch.float32)
+            elif isinstance(logprobs_mode, list):
+                raw_logprobs = logits.clone()
 
-        # Use float32 for the logits.
-        logits = logits.to(torch.float32)
+                raw_logprobs_indices = [
+                    i
+                    for i, mode in enumerate(logprobs_mode)
+                    if mode == "raw_logprobs"
+                ]
+                if raw_logprobs_indices:
+                    selected_logits = logits[raw_logprobs_indices]
+                    computed = self.compute_logprobs(selected_logits)
+                    raw_logprobs[raw_logprobs_indices] = computed
+                
+                raw_indices = raw_logprobs_indices + [
+                    i
+                    for i, mode in enumerate(logprobs_mode)
+                    if mode == "raw_logits"
+                ]
 
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token
@@ -95,6 +120,8 @@ class Sampler(nn.Module):
         # Sample the next token.
         sampled, processed_logprobs = self.sample(logits, sampling_metadata)
         if processed_logprobs is not None:
+            if raw_indices:
+                processed_logprobs[raw_indices] = raw_logprobs[raw_indices]
             raw_logprobs = processed_logprobs
         # Convert sampled token ids to int64 (long) type to ensure compatibility
         # with subsequent operations that may use these values as indices.
@@ -148,7 +175,6 @@ class Sampler(nn.Module):
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        logprobs_mode_override: LogprobsMode | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Sample logits based on sampling metadata.
 
@@ -156,7 +182,13 @@ class Sampler(nn.Module):
         may update the logits tensor in-place.
         """
 
-        logprobs_mode = logprobs_mode_override or self.logprobs_mode
+        logprobs_mode = self.logprobs_mode
+        if sampling_metadata.logprobs_mode_override is not None:
+            logprobs_mode = sampling_metadata.logprobs_mode_override
+            if isinstance(logprobs_mode, list):
+                for i in range(len(logprobs_mode)):
+                    if logprobs_mode[i] is None:
+                        logprobs_mode[i] = self.logprobs_mode
         assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
         if sampling_metadata.all_random:
             greedy_sampled = None
@@ -169,6 +201,17 @@ class Sampler(nn.Module):
                         processed_logprobs = logits
                     elif logprobs_mode == "processed_logprobs":
                         processed_logprobs = self.compute_logprobs(logits)
+                    elif isinstance(logprobs_mode, list):
+                        processed_logprobs = logits
+                        processed_indices = [
+                            i
+                            for i, mode in enumerate(logprobs_mode)
+                            if mode == "processed_logprobs"
+                        ]
+                        if processed_indices:
+                            selected_logits = logits[processed_indices]
+                            computed = self.compute_logprobs(selected_logits)
+                            processed_logprobs[processed_indices] = computed
                 return greedy_sampled, processed_logprobs
 
         assert sampling_metadata.temperature is not None

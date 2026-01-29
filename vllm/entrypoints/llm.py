@@ -647,6 +647,7 @@ class LLM:
             logprobs=2 * beam_width,
             max_tokens=1,
             temperature=temperature,
+            logprobs_mode_override="processed_logprobs",
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []

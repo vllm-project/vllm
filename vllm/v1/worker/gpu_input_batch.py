@@ -24,6 +24,7 @@ from vllm.v1.sample.logits_processor import (
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
+from vllm.config.model import LogprobsMode
 
 
 @dataclass
@@ -223,6 +224,9 @@ class InputBatch:
 
         self.num_logprobs: dict[str, int] = {}
 
+        self.logprobs_mode: list[LogprobsMode] = [None for _ in range(max_num_reqs)]
+        self.non_default_logprobs_mode: int = 0
+
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
@@ -383,6 +387,10 @@ class InputBatch:
                     else sampling_params.logprobs
                 )
 
+            if sampling_params.logprobs_mode_override is not None:
+                self.logprobs_mode[req_index] = sampling_params.logprobs_mode_override
+                self.non_default_logprobs_mode += 1
+
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
                 if self.allowed_token_ids_mask_cpu_tensor is None:
@@ -509,6 +517,9 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        if self.logprobs_mode[req_index]:
+            self.logprobs_mode[req_index] = None
+            self.non_default_logprobs_mode -= 1
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
@@ -853,6 +864,7 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            logprobs_mode_override=self.logprobs_mode_override,
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:
@@ -1028,3 +1040,11 @@ class InputBatch:
     @property
     def no_allowed_token_ids(self) -> bool:
         return len(self.has_allowed_token_ids) == 0
+
+    @property
+    def logprobs_mode_override(self) -> list | None:
+        if self.non_default_logprobs_mode==0:
+            return None
+        logprobs_mode = self.logprobs_mode[:self.num_reqs]
+        return (logprobs_mode[0] if len(set(logprobs_mode))==1
+            else logprobs_mode)
