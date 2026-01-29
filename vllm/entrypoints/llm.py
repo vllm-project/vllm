@@ -841,7 +841,7 @@ class LLM:
     ) -> list[EnginePrompt | EngineEncDecPrompt]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
-        a format that can be pasesed to [LLM._add_request][].
+        a format that can be passed to `_add_request`.
 
         Refer to [LLM.generate][] for a complete description of the arguments.
 
