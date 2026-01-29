@@ -51,7 +51,7 @@ docker run --rm --runtime=habana --name=${container_name} --network=host \
   -e PT_HPU_LAZY_MODE=1 \
   "${image_name}" \
   /bin/bash -c '
-  timeout 120s python -u vllm-gaudi/tests/upstream_tests/generate.py --model facebook/opt-125m
+  cd vllm; timeout 120s python -u examples/offline_inference/basic/generate.py --model facebook/opt-125m
 '
 
 EXITCODE=$?
