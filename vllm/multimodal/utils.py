@@ -150,7 +150,7 @@ def argsort_mm_positions(
 
 
 def group_mm_kwargs_by_modality(
-    mm_kwargs: list[MultiModalKwargsItem],
+    mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
     *,
     device: torch.types.Device = None,
     pin_memory: bool = False,
@@ -166,9 +166,9 @@ def group_mm_kwargs_by_modality(
     Yields:
         A tuple `(modality, num_items, grouped_kwargs)`.
     """
-    for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):
-        items_lst = list(items)
-        mm_kwargs_items = MultiModalKwargsItems.from_seq(items_lst)
+    for modality, group in groupby(mm_kwargs, key=lambda x: x[0]):
+        items_lst = [item for _, item in group]
+        mm_kwargs_items = MultiModalKwargsItems({modality: items_lst})
         mm_kwargs_data = mm_kwargs_items.get_data(
             device=device,
             pin_memory=pin_memory,
