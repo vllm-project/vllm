@@ -779,7 +779,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         """
         # Skip if sharing KV cache with an earlier attention layer
         if self.kv_sharing_target_layer_name is not None:
-            return kv_cache
+            return
 
         key_cache, value_cache = kv_cache.unbind(0)
 
