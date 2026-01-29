@@ -58,12 +58,11 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-
-from vllm.platforms import current_platform
 
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 
