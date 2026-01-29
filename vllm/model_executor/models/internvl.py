@@ -1153,7 +1153,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
                 quant_config=quant_config,
                 num_hidden_layers_override=num_hidden_layers,
                 prefix=prefix,
-                use_data_parallel=self.use_data_parallel,
             )
         else:
             return InternVisionPatchModel(config.vision_config)

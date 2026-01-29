@@ -1335,7 +1335,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1428,7 +1427,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1526,7 +1524,6 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
@@ -1624,7 +1621,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             config.vision_config,
             quant_config=quant_config,
             prefix=prefix,
-            use_data_parallel=self.use_data_parallel,
         )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
