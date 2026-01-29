@@ -1395,6 +1395,7 @@ class VllmConfig:
                     hidden_size, tp_size, element_size
                 )
 
+            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
             if min_token_num is not None and (
                 max_num_batched_tokens is not None
                 and min_token_num < max_num_batched_tokens
