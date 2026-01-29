@@ -1,20 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
-
-import torch
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.import_utils import LazyLoader
+
+if TYPE_CHECKING:
+    import torch
+else:
+    torch = LazyLoader("torch", globals(), "torch")
 
 logger = init_logger(__name__)
 
 
-_S = TypeVar("_S", bound=list[int] | torch.Tensor)
+_S = TypeVar("_S", list[int], "torch.Tensor")
 
 
 def merge_kwargs(
@@ -79,6 +83,13 @@ class TokenizeParams:
 
     max_output_tokens: int = 0
     """Maximum requested number of output tokens."""
+
+    pad_prompt_tokens: int | None = None
+    """
+    Number of tokens to pad to:
+    - `None` means no padding.
+    - `-1` maps to `max_input_tokens`.
+    """
 
     truncate_prompt_tokens: int | None = None
     """
@@ -157,6 +168,9 @@ class TokenizeParams:
             tokenization_kwargs = {}
 
         max_length = tokenization_kwargs.pop("max_length", self.max_input_tokens)
+        pad_prompt_tokens = tokenization_kwargs.pop(
+            "pad_prompt_tokens", self.pad_prompt_tokens
+        )
         truncate_prompt_tokens = tokenization_kwargs.pop(
             "truncate_prompt_tokens", self.truncate_prompt_tokens
         )
@@ -169,6 +183,15 @@ class TokenizeParams:
         )
 
         # https://huggingface.co/docs/transformers/en/pad_truncation
+        if padding := tokenization_kwargs.pop("padding", None):
+            if padding == "max_length":
+                pad_prompt_tokens = max_length
+            elif padding in (False, "do_not_pad"):
+                pad_prompt_tokens = None
+            else:
+                # To emit the below warning
+                tokenization_kwargs["padding"] = padding
+
         if truncation := tokenization_kwargs.pop("truncation", None):
             if truncation in (True, "longest_first"):
                 truncate_prompt_tokens = max_length
@@ -194,6 +217,7 @@ class TokenizeParams:
                 if max_total_tokens is None or max_length is None
                 else max_total_tokens - max_length
             ),
+            pad_prompt_tokens=pad_prompt_tokens,
             truncate_prompt_tokens=truncate_prompt_tokens,
             do_lower_case=do_lower_case,
             add_special_tokens=add_special_tokens,
@@ -203,7 +227,7 @@ class TokenizeParams:
     def get_encode_kwargs(self) -> dict[str, Any]:
         """The arguments to pass to `tokenizer.encode`."""
         max_length = self.truncate_prompt_tokens
-        if max_length is None or max_length < 0:
+        if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
 
         return dict(
@@ -245,23 +269,37 @@ class TokenizeParams:
 
         return prompt
 
+    def _apply_padding(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
+        """Apply padding to a token sequence."""
+        pad_length = self.pad_prompt_tokens
+        if pad_length is not None and pad_length < 0:
+            pad_length = self.max_input_tokens
+
+        if pad_length is None or pad_length <= len(tokens):
+            return tokens
+
+        if tokenizer is None:
+            raise ValueError("Cannot pad tokens when `skip_tokenizer_init=True`")
+        if not isinstance(tokens, list):
+            raise ValueError("Cannot pad tokens for embedding inputs")
+
+        return tokens + [tokenizer.pad_token_id] * (pad_length - len(tokens))
+
     def _apply_truncation(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply truncation to a token sequence."""
         max_length = self.truncate_prompt_tokens
-        # NOTE: We don't want to set `max_length` if it is None
-        # Otherwise no error is raised by `self._apply_length_check`
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
 
         if max_length is None or max_length >= len(tokens):
             return tokens
         if max_length == 0:
-            return tokens[:0]  # type: ignore[return-value]
+            return tokens[:0]
 
         if getattr(tokenizer, "truncation_side", "left") == "left":
-            return tokens[-max_length:]  # type: ignore[return-value]
+            return tokens[-max_length:]
 
-        return tokens[:max_length]  # type: ignore[return-value]
+        return tokens[:max_length]
 
     def _apply_length_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply length checks to a token sequence."""
@@ -284,6 +322,7 @@ class TokenizeParams:
     def _validate_tokens(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply all validators to a token sequence."""
         for validator in (
+            self._apply_padding,
             self._apply_truncation,
             self._apply_length_check,
         ):
