@@ -1,50 +1,89 @@
-# FP8 INC
+# Intel Quantization Support
 
-vLLM supports FP8 (8-bit floating point) weight and activation quantization using Intel® Neural Compressor (INC) on Intel® Gaudi® 2 and Intel® Gaudi® 3 AI accelerators.
-Currently, quantization is validated only in Llama models.
+[AutoRound](https://github.com/intel/auto-round) is Intel’s advanced quantization algorithm designed for large language models(LLMs). It produces highly efficient **INT2, INT3, INT4, INT8, MXFP8, MXFP4, NVFP4**, and **GGUF** quantized models, balancing accuracy and inference performance. AutoRound is also part of the [Intel® Neural Compressor](https://github.com/intel/neural-compressor). For a deeper introduction, see the [AutoRound step-by-step guide](https://github.com/intel/auto-round/blob/main/docs/step_by_step.md).
 
-Intel Gaudi supports quantization of various modules and functions, including, but not limited to `Linear`, `KVCache`, `Matmul` and `Softmax`. For more information, please refer to:
-[Supported Modules\\Supported Functions\\Custom Patched Modules](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#supported-modules).
+## Key Features
 
-!!! note
-    Measurement files are required to run quantized models with vLLM on Gaudi accelerators. The FP8 model calibration procedure is described in the [vLLM HPU extension](https://github.com/HabanaAI/vllm-hpu-extension/tree/main/calibration/README.md) package.
+✅ Superior Accuracy Delivers strong performance even at 2–3 bits [example models](https://huggingface.co/collections/OPEA/2-3-bits)
 
-!!! note
-    `QUANT_CONFIG` is an environment variable that points to the measurement or quantization [JSON config file](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Quantization/Inference_Using_FP8.html#supported-json-config-file-options).
-    The measurement configuration file is used during the calibration procedure to collect measurements for a given model. The quantization configuration is used during inference.
+✅ Fast Mixed `Bits`/`Dtypes` Scheme Generation Automatically configure in minutes
 
-## Run Online Inference Using FP8
+✅ Support for exporting **AutoRound, AutoAWQ, AutoGPTQ, and GGUF** formats
 
-Once you've completed the model calibration process and collected the measurements, you can run FP8 inference with vLLM using the following command:
+✅ **10+ vision-language models (VLMs)** are supported
+
+✅ **Per-layer mixed-bit quantization** for fine-grained control
+
+✅ **RTN (Round-To-Nearest) mode** for quick quantization with slight accuracy loss
+
+✅ **Multiple quantization recipes**: best, base, and light
+
+✅ Advanced utilities such as immediate packing and support for **10+ backends**
+
+## Supported Recipes on Intel Platforms
+
+On Intel platforms, AutoRound recipes are being enabled progressively by format and hardware. Currently, vLLM supports:
+
+- **`W4A16`**: weight-only, 4-bit weights with 16-bit activations
+- **`W8A16`**: weight-only, 8-bit weights with 16-bit activations
+
+Additional recipes and formats will be supported in future releases.
+
+## Quantizing a Model
+
+### Installation
 
 ```bash
-export QUANT_CONFIG=/path/to/quant/config/inc/meta-llama-3.1-405b-instruct/maxabs_measure_g3.json
-vllm serve meta-llama/Llama-3.1-405B-Instruct --quantization inc --kv-cache-dtype fp8_inc --tensor-parallel-size 8
+uv pip install auto-round
 ```
 
-!!! tip
-    When using FP8 models, you may experience timeouts caused by the long compilation time of FP8 operations. To mitigate this problem, you can use the below environment variables:
-    `VLLM_ENGINE_ITERATION_TIMEOUT_S` - to adjust the vLLM server timeout. You can set the value in seconds, e.g., 600 equals 10 minutes.
-    `VLLM_RPC_TIMEOUT` - to adjust the RPC protocol timeout used by the OpenAI-compatible API. This value is in microseconds, e.g., 600000 equals 10 minutes.
+### Quantize with CLI
 
-## Run Offline Inference Using FP8
+```bash
+auto-round \
+    --model Qwen/Qwen3-0.6B \
+    --scheme W4A16 \
+    --format auto_round \
+    --output_dir ./tmp_autoround
+```
 
-To run offline inference (after completing the model calibration process):
-
-* Set the "QUANT_CONFIG" environment variable to point to a JSON configuration file with QUANTIZE mode.
-* Pass `quantization=inc` and `kv_cache_dtype=fp8_inc` as parameters to the `LLM` object.
-* Call shutdown method of the model_executor at the end of the run.
+### Quantize with Python API
 
 ```python
-from vllm import LLM
-llm = LLM("llama3.1/Meta-Llama-3.1-8B-Instruct", quantization="inc", kv_cache_dtype="fp8_inc")
-...
-# Call llm.generate on the required prompts and sampling params.
-...
-llm.llm_engine.model_executor.shutdown()
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from auto_round import AutoRound
+
+model_name = "Qwen/Qwen3-0.6B"
+autoround = AutoRound(model_name, scheme="W4A16")
+
+# the best accuracy, 4-5X slower, low_gpu_mem_usage could save ~20G but ~30% slower
+# autoround = AutoRound(model, tokenizer, nsamples=512, iters=1000, low_gpu_mem_usage=True, bits=bits, group_size=group_size, sym=sym)
+
+# 2-3X speedup, slight accuracy drop at W4G128
+# autoround = AutoRound(model, tokenizer, nsamples=128, iters=50, lr=5e-3, bits=bits, group_size=group_size, sym=sym )
+
+output_dir = "./tmp_autoround"
+# format= 'auto_round'(default), 'auto_gptq', 'auto_awq'
+autoround.quantize_and_save(output_dir, format="auto_round")
 ```
 
-## Device for the Model's Weights Uploading
+## Deploying AutoRound Quantized Models in vLLM
 
-The unquantized weights are first loaded onto the CPU, then quantized and transferred to the target device (HPU) for model execution.
-This reduces the device memory footprint of model weights, as only quantized weights are stored in the device memory.
+```bash
+vllm serve Intel/DeepSeek-R1-0528-Qwen3-8B-int4-AutoRound \
+    --gpu-memory-utilization 0.8 \
+    --max-model-len 4096
+```
+
+!!! note
+     To deploy `wNa16` models on Intel GPU/CPU, please add `--enforce-eager` for now.
+
+## Evaluating the Quantized Model with vLLM
+
+```bash
+lm_eval --model vllm \
+  --model_args pretrained="Intel/DeepSeek-R1-0528-Qwen3-8B-int4-AutoRound,max_model_len=8192,max_num_batched_tokens=32768,max_num_seqs=128,gpu_memory_utilization=0.8,dtype=bfloat16,max_gen_toks=2048,enforce_eager=True" \
+  --tasks gsm8k \
+  --num_fewshot 5 \
+  --batch_size 128
+```

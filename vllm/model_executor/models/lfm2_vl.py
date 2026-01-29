@@ -34,12 +34,12 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -50,7 +50,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .siglip2 import Siglip2Model
+from .lfm2_siglip2 import Siglip2Model
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -354,10 +354,8 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
             tok_kwargs,
         )
 
-        parsed_images = (
-            self._get_data_parser()
-            .parse_mm_data({"image": images})
-            .get_items("image", ImageProcessorItems)
+        parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
+            "image", ImageProcessorItems
         )
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
@@ -450,29 +448,78 @@ class Lfm2VLMultiModalProjector(nn.Module):
             bias=config.projector_bias,
         )
 
-    def forward(self, image_features: torch.Tensor):
-        image_features = self.pixel_unshuffle(image_features)
-        if self.projector_use_layernorm:
-            image_features = self.layer_norm(image_features)
-        hidden_states = self.linear_1(image_features)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
-        return hidden_states
+    def forward(
+        self,
+        vision_features_packed: torch.Tensor,
+        spatial_shapes: torch.Tensor,
+    ) -> torch.Tensor:
+        """Project packed vision features without materializing padded tensors.
 
-    def pixel_unshuffle(self, hidden_states: torch.Tensor):
-        batch_size, width, height, channels = hidden_states.size()
-        hidden_states = hidden_states.reshape(
-            batch_size, width, height // self.factor, channels * self.factor
+        Args:
+            vision_features_packed: (total_tokens, hidden_size) packed in tile order.
+            spatial_shapes: (num_tiles, 2) on CPU (height, width) per tile.
+
+        Returns:
+            projected_packed: (total_projected_tokens, text_hidden_size)
+        """
+        assert spatial_shapes.device.type == "cpu", (
+            "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
+            "variable-length packing."
         )
-        hidden_states = hidden_states.permute(0, 2, 1, 3)
-        hidden_states = hidden_states.reshape(
-            batch_size,
-            height // self.factor,
-            width // self.factor,
-            channels * self.factor**2,
-        )
-        hidden_states = hidden_states.permute(0, 2, 1, 3)
-        return hidden_states
+        factor = self.factor
+        device = vision_features_packed.device
+        hidden_size = vision_features_packed.shape[-1]
+
+        spatial_shapes_list: list[list[int]] = spatial_shapes.tolist()
+        lengths_list = [h * w for h, w in spatial_shapes_list]
+
+        gather_idx_parts: list[torch.Tensor] = []
+        offset = 0
+
+        dh = torch.arange(factor, dtype=torch.int64)
+        dw = torch.arange(factor, dtype=torch.int64)
+        dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing="ij")
+        dh_flat = dh_grid.reshape(-1)
+        dw_flat = dw_grid.reshape(-1)
+
+        for (height, width), length in zip(spatial_shapes_list, lengths_list):
+            if length <= 0:
+                continue
+            if height % factor != 0 or width % factor != 0:
+                raise ValueError(
+                    "spatial_shapes must be divisible by downsample_factor: "
+                    f"got ({height}, {width}) with factor={factor}."
+                )
+            height_out = height // factor
+            width_out = width // factor
+
+            rows_out = torch.arange(height_out, dtype=torch.int64)
+            cols_out = torch.arange(width_out, dtype=torch.int64)
+            rr, cc = torch.meshgrid(rows_out, cols_out, indexing="ij")
+            rr = rr.reshape(-1)
+            cc = cc.reshape(-1)
+
+            token_idx = (rr[:, None] * factor + dh_flat[None, :]) * width + (
+                cc[:, None] * factor + dw_flat[None, :]
+            )
+            gather_idx_parts.append(token_idx.reshape(-1) + offset)
+            offset += length
+
+        if gather_idx_parts:
+            gather_idx = torch.cat(gather_idx_parts).to(device=device)
+            gathered = vision_features_packed.index_select(0, gather_idx)
+            unshuffled = gathered.reshape(-1, factor * factor * hidden_size)
+        else:
+            unshuffled = vision_features_packed.new_empty(
+                (0, factor * factor * hidden_size)
+            )
+
+        if self.projector_use_layernorm:
+            unshuffled = self.layer_norm(unshuffled)
+        hidden_states = self.linear_1(unshuffled)
+        hidden_states = self.act(hidden_states)
+        projected_packed = self.linear_2(hidden_states)
+        return projected_packed
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -546,37 +593,35 @@ class Lfm2VLForConditionalGeneration(
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
-        if vision_config.model_type == "siglip2_vision_model":
-            self.vision_tower = Siglip2Model(
-                config=vision_config,
-                quant_config=quant_config,
-                multimodal_config=multimodal_config,
-                prefix=maybe_prefix(prefix, "vision_tower"),
-            )
-        else:
-            raise ValueError(
-                f"Unsupported visual tokenizer model_type: {vision_config.model_type}"
+        with self._mark_tower_model(vllm_config, "image"):
+            if vision_config.model_type == "siglip2_vision_model":
+                self.vision_tower = Siglip2Model(
+                    config=vision_config,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "vision_tower"),
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported visual tokenizer type: {vision_config.model_type}"
+                )
+
+            self.multi_modal_projector = Lfm2VLMultiModalProjector(
+                config=config,
+                use_data_parallel=self.use_data_parallel,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
-        self.multi_modal_projector = Lfm2VLMultiModalProjector(
-            config=config,
-            use_data_parallel=self.use_data_parallel,
-            prefix=f"{prefix}.multi_modal_projector",
-        )
-
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language"),
-            architectures=config.text_config.architectures,
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language"),
+                architectures=config.text_config.architectures,
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -599,61 +644,90 @@ class Lfm2VLForConditionalGeneration(
         pixel_values: torch.FloatTensor,
         spatial_shapes: torch.Tensor,
     ) -> torch.Tensor:
+        assert spatial_shapes.device.type == "cpu", (
+            "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
+            "variable-length packing."
+        )
+
         pixel_values = pixel_values.to(
             dtype=self.vision_tower.vision_model.embeddings.patch_embedding.weight.dtype
         )  # fp16 compatibility
 
         # LFM2-VL's HF processor pads patch sequences with trailing zeros.
-        # Derive the valid-patch mask from spatial_shapes instead of carrying
-        # pixel_attention_mask through the vLLM multimodal pipeline.
-        max_seq_len = pixel_values.shape[1]
+        # Pack patch tokens upfront so the vision tower runs entirely unpadded.
+        spatial_shapes_list: list[list[int]] = spatial_shapes.tolist()
+        lengths_list = [h * w for h, w in spatial_shapes_list]
+        total_tokens = int(sum(lengths_list))
         lengths_cpu = (spatial_shapes[:, 0] * spatial_shapes[:, 1]).to(
             dtype=torch.int32
         )
         max_seqlen = (
-            lengths_cpu.max().reshape(1).to(device=pixel_values.device)
+            lengths_cpu.max().reshape(1)
             if lengths_cpu.numel()
-            else torch.tensor([0], dtype=torch.int32, device=pixel_values.device)
+            else torch.tensor([0], dtype=torch.int32)
         )
-        lengths = lengths_cpu.to(device=pixel_values.device)
-        packed_mask = (
-            torch.arange(max_seq_len, device=pixel_values.device)[None, :]
-            < lengths[:, None]
+
+        if total_tokens == 0:
+            return []
+
+        packed_pixel_values = pixel_values.new_empty(
+            (total_tokens, pixel_values.shape[-1])
+        )
+        offset = 0
+        for i, length in enumerate(lengths_list):
+            if length <= 0:
+                continue
+            packed_pixel_values[offset : offset + length].copy_(
+                pixel_values[i, :length]
+            )
+            offset += length
+        packed_pixel_values = packed_pixel_values.unsqueeze(0)
+
+        lengths = torch.tensor(
+            lengths_list, dtype=torch.int32, device=pixel_values.device
         )
         cu_seqlens = torch.zeros(
             lengths.shape[0] + 1,
             dtype=torch.int32,
-            device=lengths.device,
+            device=pixel_values.device,
         )
         cu_seqlens[1:] = torch.cumsum(lengths, dim=0)
 
         with set_forward_context(None, self.vllm_config):
             vision_outputs = self.vision_tower(
-                pixel_values=pixel_values,
+                pixel_values_packed=packed_pixel_values,
                 spatial_shapes=spatial_shapes,
-                packed_mask=packed_mask,
                 cu_seqlens=cu_seqlens,
                 max_seqlen=max_seqlen,
             )
-        image_outputs = getattr(vision_outputs, "last_hidden_state", vision_outputs)
+        image_outputs_packed = getattr(
+            vision_outputs, "last_hidden_state", vision_outputs
+        )
+        vision_features_packed = image_outputs_packed[0]
 
-        image_features = []
+        factor = self.multi_modal_projector.factor
+        projected_lengths_list: list[int] = []
+        for (height, width), length in zip(spatial_shapes_list, lengths_list):
+            if length <= 0:
+                projected_lengths_list.append(0)
+                continue
+            if height % factor != 0 or width % factor != 0:
+                raise ValueError(
+                    "spatial_shapes must be divisible by downsample_factor: "
+                    f"got ({height}, {width}) with factor={factor}."
+                )
+            projected_lengths_list.append((height // factor) * (width // factor))
 
-        # spatial_shapes is on CPU (keep_on_cpu=True), so .tolist() is instant
-        spatial_shapes_list = spatial_shapes.tolist()
-        for img_idx, (feature_org_h, feature_org_w) in enumerate(spatial_shapes_list):
-            feature_len = feature_org_h * feature_org_w
-            feature = image_outputs[img_idx, :feature_len]
+        projected_packed = self.multi_modal_projector(
+            vision_features_packed=vision_features_packed,
+            spatial_shapes=spatial_shapes,
+        )
 
-            # reshape to original height and width
-            feature = feature.reshape(1, feature_org_h, feature_org_w, -1)
-
-            # project the image representation
-            img_embedding = self.multi_modal_projector(feature)
-
-            # flatten here to handle variable length in naflex
-            img_embedding = img_embedding.reshape(-1, img_embedding.size(-1))
-            image_features.append(img_embedding)
+        image_features: list[torch.Tensor] = []
+        offset = 0
+        for out_len in projected_lengths_list:
+            image_features.append(projected_packed[offset : offset + out_len])
+            offset += out_len
 
         return image_features
 
@@ -693,7 +767,7 @@ class Lfm2VLForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -714,8 +788,7 @@ class Lfm2VLForConditionalGeneration(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.language_model.compute_logits(hidden_states)
-        return logits
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)

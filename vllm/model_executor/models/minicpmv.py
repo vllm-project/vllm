@@ -71,7 +71,8 @@ from vllm.multimodal.parse import (
     VideoItem,
     VideoProcessorItems,
 )
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
@@ -80,7 +81,6 @@ from vllm.multimodal.processing import (
     ResolvedPromptUpdate,
     _seq2text,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import flatten_2d_lists
@@ -557,6 +557,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_data_parser(self):
+        return MiniCPMVMultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_model_version(self):
         return get_version_by_config(self.get_hf_config())
 
@@ -736,9 +741,6 @@ class MiniCPMVDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
 
 class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MiniCPMVMultiModalDataParser()
-
     def get_image_prompt_texts(self, image_size: ImageSize, image_idx: int = 0) -> str:
         return self.info.get_slice_image_placeholder(
             image_size,
@@ -765,10 +767,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (images := mm_data.get("images")) is None:
             return {}
 
-        parsed_images = (
-            self._get_data_parser()
-            .parse_mm_data({"image": images})
-            .get_items("image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems))
+        parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
+            "image", (MiniCPMVImageEmbeddingItems, ImageProcessorItems)
         )
 
         if isinstance(parsed_images, MiniCPMVImageEmbeddingItems):
@@ -793,10 +793,8 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if (videos := mm_data.get("videos")) is None:
             return {}
 
-        parsed_videos = (
-            self._get_data_parser()
-            .parse_mm_data({"video": videos})
-            .get_items("video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems))
+        parsed_videos = self.data_parser.parse_mm_data({"video": videos}).get_items(
+            "video", (MiniCPMVVideoEmbeddingItems, VideoProcessorItems)
         )
 
         if isinstance(parsed_videos, MiniCPMVVideoEmbeddingItems):
@@ -1028,25 +1026,29 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.multimodal_config = multimodal_config
 
         self.version = get_version_by_config(self.config)
-        self.llm = self.init_llm(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "llm")
-        )
-        self.vpm = self.init_vision_module(
-            config, quant_config, prefix=maybe_prefix(prefix, "vpm")
-        )
-        self.vision_dim = (
-            self.vpm.embed_dim
-            if self.version == (2, 0)
-            else self.vpm.embeddings.embed_dim
-        )
-        self.embed_dim = self.config.hidden_size
 
-        self.resampler = self.init_resampler(
-            self.embed_dim,
-            self.vision_dim,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "resampler"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.llm = self.init_llm(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "llm")
+            )
+
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vpm = self.init_vision_module(
+                config, quant_config, prefix=maybe_prefix(prefix, "vpm")
+            )
+            self.vision_dim = (
+                self.vpm.embed_dim
+                if self.version == (2, 0)
+                else self.vpm.embeddings.embed_dim
+            )
+            self.embed_dim = self.config.hidden_size
+
+            self.resampler = self.init_resampler(
+                self.embed_dim,
+                self.vision_dim,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "resampler"),
+            )
 
         self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
 
@@ -1134,9 +1136,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         return multimodal_embeddings
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.llm
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
@@ -1146,7 +1145,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
