@@ -98,7 +98,7 @@ def test_grammar_bitmask_with_specdec():
         def grammar_bitmask(req: Request, tokens: list[int]) -> None:
             structured_output_manager.grammar_bitmask(
                 requests={req.request_id: req},
-                structured_output_request_ids={req.request_id: 0},
+                structured_output_request_ids=[req.request_id],
                 scheduled_spec_decode_tokens={req.request_id: tokens},
             )
             # At this point, we rolled-back, so should not be terminated
