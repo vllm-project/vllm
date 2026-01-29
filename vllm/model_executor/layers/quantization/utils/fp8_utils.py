@@ -523,6 +523,26 @@ class W8A8BlockFp8LinearOp:
     ) -> torch.Tensor:
         assert input_scale is None
         assert self.input_quant_op is not None
+
+        # Pad K dimension to multiple of block size if needed for Triton kernel.
+        # This handles models like DeepSeek-V2-Lite where intermediate_size
+        # (10944) is not divisible by the block size (128).
+        block_k = self.act_quant_group_shape.col
+        k = input_2d.shape[-1]
+        if k % block_k != 0:
+            pad_k = block_k - (k % block_k)
+            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
+            weight = torch.nn.functional.pad(weight, (0, pad_k))
+            # Compute how many additional K-blocks we need after padding.
+            # Original: ceil(k/block_k), padded: ceil((k+pad_k)/block_k)
+            orig_k_blocks = triton.cdiv(k, block_k)
+            new_k_blocks = triton.cdiv(k + pad_k, block_k)
+            extra_k_blocks = new_k_blocks - orig_k_blocks
+            if extra_k_blocks > 0:
+                weight_scale = torch.nn.functional.pad(
+                    weight_scale, (0, extra_k_blocks)
+                )
+
         q_input, input_scale = self.input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             q_input,
