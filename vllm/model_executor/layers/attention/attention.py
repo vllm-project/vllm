@@ -9,7 +9,11 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
@@ -442,9 +446,27 @@ class Attention(nn.Module, AttentionLayerBase):
                     # torch can only dispatch custom op if a tensor is passed
                     key is not None or value is not None
                 ):
+                    if (
+                        is_forward_context_available()
+                        and get_forward_context().all_attention_layers is not None
+                    ):
+                        layer_name_for_kv_cache_update_op = "from_forward_context"
+                    else:
+                        layer_name_for_kv_cache_update_op = self.layer_name
+
+                    # Avoid strings in the graph.
+                    # NB: We don't care about "unified_attention_with_output" accepting
+                    # a string yet because:
+                    # - with dynamo graph partition unified_attention_with_output isn't
+                    #   compiled with standalone_compile
+                    # - with inductor graph partition we compile the full forward graph
+                    #   so it's OK to bake strings in.
+                    # When we revisit cold start times for inductor graph partition
+                    # it's likely we'll have to do something similar!
                     kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                        key, value, self.layer_name
+                        key, value, layer_name_for_kv_cache_update_op
                     )
+
                 torch.ops.vllm.unified_attention_with_output(
                     query,
                     key,
@@ -629,6 +651,12 @@ def unified_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     forward_context = get_forward_context()
+    if layer_name == "from_forward_context":
+        assert forward_context.all_attention_layers is not None
+        layer_name = forward_context.all_attention_layers[
+            forward_context.attention_layer_index
+        ]
+        forward_context.attention_layer_index += 1
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 

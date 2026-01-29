@@ -238,6 +238,12 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
+    # Same situation as all_moe_layers; we use this to improve cold compile times
+    # for unified_kv_cache_update accepting a string and do want a better long
+    # term situation.
+    all_attention_layers: list[str] | None = None
+    attention_layer_index: int = 0
+
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -274,9 +280,17 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
 ):
+    all_attention_layers = None
+    # attn_metadata can be a list for DBO.
+    # However, each of the DBO threads will set their own forward_context
+    # to be a dict before running the forward pass.
+    if attn_metadata is not None and not isinstance(attn_metadata, list):
+        all_attention_layers = list(attn_metadata.keys())
+
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
         all_moe_layers=vllm_config.compilation_config.static_all_moe_layers,
+        all_attention_layers=all_attention_layers,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},

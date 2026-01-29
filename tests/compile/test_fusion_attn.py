@@ -390,6 +390,10 @@ def test_attention_quant_pattern(
         forward_ctx = get_forward_context()
         forward_ctx.attn_metadata = model_unfused.build_attn_metadata(batch_size)
 
+        # Need to set to None for testing, otherwise vLLM
+        # assumes the forward gets run once under the forward_context.
+        forward_ctx.all_attention_layers = None
+
         # Run model directly without fusion
         # Still compile so query QuantFP8 has closer numerics
         compiled_unfused = torch.compile(model_unfused, fullgraph=True)
