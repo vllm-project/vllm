@@ -168,7 +168,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
 
         # Draft tokens transfer to scheduler - for spec-dec + struct outputs.
-        self.draft_tokens_copy_stream = torch.cuda.Stream()
+        self.draft_tokens_copy_stream = torch.cuda.Stream(self.device)
         self.draft_tokens_copy_event = torch.cuda.Event()
         self.draft_req_ids: list[str] = []
         self.draft_tokens_np: np.ndarray | None = None

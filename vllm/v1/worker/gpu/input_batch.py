@@ -75,6 +75,7 @@ class InputBatch:
     cu_num_logits: torch.Tensor
     cu_num_logits_np: np.ndarray
 
+    # Whether any requests in batch use structured output.
     has_structured_output_reqs: bool
 
     @classmethod
