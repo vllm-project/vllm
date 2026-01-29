@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 def swiglustep_and_mul_out(
     out: torch.Tensor,
     x: torch.Tensor,
-    limit: float,
+    limit: float = 7.0,
 ) -> torch.Tensor:
     """Out-variant of swiglustep activation.
 
@@ -337,9 +337,7 @@ class SwigluStepAndMul(CustomOp):
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
-    # --8<-- [end:swiglustep_and_mul]
-
-    def __init__(self, limit: float):
+    def __init__(self, limit: float = 7.0):
         super().__init__()
         if limit is None:
             raise ValueError("SwigluStepAndMul requires limit to be set.")

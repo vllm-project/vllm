@@ -316,11 +316,8 @@ class FusedMoEBlock(nn.Module):
         )
         if swiglu_limit not in (None, 0):
             swiglu_limit = float(swiglu_limit)
-            swiglu_activation_by_limit = {
-                7.0: "swiglustep_clip_7",
-                16.0: "swiglustep_clip_16",
-            }
-            activation = swiglu_activation_by_limit.get(swiglu_limit, activation)
+            assert swiglu_limit == 7.0, "swiglu_limit in fused moe block only suport 7.0 now."
+            activation = "swiglustep"
             logger.info(
                 f"step3p5 layer_idx: {layer_idx}, activation: {activation}, "
                 f"limit: {swiglu_limit}"
