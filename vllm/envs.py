@@ -252,7 +252,8 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
-
+    VLLM_DISABLE_LOG_LOGO: bool = False
+    VLLM_LORA_DISABLE_PDL: bool = False
 
 def get_default_cache_root():
     return os.getenv(
@@ -1203,6 +1204,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM_E8M0": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0", "1"))
     ),
+    # Whether to create TMA-aligned scale tensor when DeepGEMM is used.
+    "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
+        int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
+    ),
+
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine

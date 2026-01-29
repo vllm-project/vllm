@@ -519,17 +519,6 @@ class MambaMixer2(MambaBase, CustomOp):
             intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
         )
 
-        # - get hidden_states, B and C after depthwise convolution.
-        self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
-            hidden_states_B_C,
-            [
-                self.intermediate_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-            ],
-            dim=-1,
-        )
-
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -562,6 +551,7 @@ class MambaMixer2(MambaBase, CustomOp):
         # Dedicated gate stream so the gate projection can overlap
         # with conv+SSM; we only synchronize at the gated norm.
         self._gate_stream = mamba_gate_stream() if self._split_gate_proj else None
+        # Split hidden_states_B_C into (hidden, B, C) with TP-local sizes.
         self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
             hidden_states_B_C,
             [
@@ -576,31 +566,31 @@ class MambaMixer2(MambaBase, CustomOp):
 
     def _wrap_gate_and_in_proj_weight_loaders(self) -> None:
         """Ensure legacy fused in_proj weights populate gate_proj too."""
-        gate_params = dict(self.gate_proj.named_parameters(recurse=True))
-        gate_base_loaders: dict[str, LoaderFunction] = {}
+        gate_named_params = dict(self.gate_proj.named_parameters(recurse=True))
+        gate_weight_loaders: dict[str, LoaderFunction] = {}
 
-        for name, gate_param in gate_params.items():
-            base_loader = getattr(gate_param, "weight_loader", None)
-            if base_loader is None:
+        for name, gate_param in gate_named_params.items():
+            gate_loader = getattr(gate_param, "weight_loader", None)
+            if gate_loader is None:
                 continue
-            gate_base_loaders[name] = base_loader
+            gate_weight_loaders[name] = gate_loader
 
         for name, in_proj_param in self.in_proj.named_parameters(recurse=True):
-            gate_param = gate_params.get(name)
-            gate_base_loader = gate_base_loaders.get(name)
-            if gate_param is None or gate_base_loader is None:
+            gate_param = gate_named_params.get(name)
+            gate_loader = gate_weight_loaders.get(name)
+            if gate_param is None or gate_loader is None:
                 continue
-            base_loader = getattr(in_proj_param, "weight_loader", None)
-            if base_loader is None:
+            in_proj_loader = getattr(in_proj_param, "weight_loader", None)
+            if in_proj_loader is None:
                 continue
 
             def _in_proj_loader(
                 param: torch.Tensor,
                 loaded_weight: torch.Tensor,
                 *args,
-                _base_loader: LoaderFunction = base_loader,
+                _in_proj_base_loader: LoaderFunction = in_proj_loader,
                 _gate_param: torch.Tensor = gate_param,
-                _gate_base_loader: LoaderFunction = gate_base_loader,
+                _gate_base_loader: LoaderFunction = gate_loader,
                 _param_name: str = name,
                 **kwargs,
             ) -> None:
@@ -612,10 +602,10 @@ class MambaMixer2(MambaBase, CustomOp):
                         param_name=_param_name,
                     )
                 except ValueError:
-                    _base_loader(param, loaded_weight, *args, **kwargs)
+                    _in_proj_base_loader(param, loaded_weight, *args, **kwargs)
                     return
                 _gate_base_loader(_gate_param, gate_weight, *args, **kwargs)
-                _base_loader(param, in_proj_weight, *args, **kwargs)
+                _in_proj_base_loader(param, in_proj_weight, *args, **kwargs)
 
             in_proj_param.weight_loader = _in_proj_loader  # type: ignore[assignment]
 
@@ -627,12 +617,14 @@ class MambaMixer2(MambaBase, CustomOp):
         *,
         param_name: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Already split or shared weights: keep as-is.
         if (
             loaded_weight.shape == gate_param.shape
             and loaded_weight.shape == in_proj_param.shape
         ):
             return loaded_weight, loaded_weight
 
+        # Scalar weights (e.g. placeholders) should match both shapes.
         if (
             loaded_weight.numel() == 1
             and gate_param.numel() == 1
@@ -646,16 +638,17 @@ class MambaMixer2(MambaBase, CustomOp):
         tp_size = getattr(
             gate_param, "tp_size", get_tensor_model_parallel_world_size()
         )
-        dims_to_try: list[int] = []
+        candidate_dims: list[int] = []
         for attr in ("output_dim", "input_dim"):
             dim = getattr(gate_param, attr, None)
-            if dim is not None and dim not in dims_to_try:
-                dims_to_try.append(dim)
-        dims_to_try += [
-            dim for dim in range(loaded_weight.dim()) if dim not in dims_to_try
-        ]
+            if dim is not None and dim not in candidate_dims:
+                candidate_dims.append(dim)
+        # Fall back to any remaining dimension if not tagged.
+        candidate_dims.extend(
+            dim for dim in range(loaded_weight.dim()) if dim not in candidate_dims
+        )
 
-        for dim in dims_to_try:
+        for dim in candidate_dims:
             if (
                 dim >= loaded_weight.dim()
                 or dim >= gate_param.dim()
@@ -702,6 +695,7 @@ class MambaMixer2(MambaBase, CustomOp):
             gate_mup = None
             ssm_mup = None
             if mup_vector is not None:
+                # Split the mup vector for the gate vs SSM paths.
                 gate_mup = mup_vector[..., : self.tped_intermediate_size]
                 ssm_mup = mup_vector[..., self.tped_intermediate_size :]
 
@@ -903,6 +897,7 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=0,
         )
 
+        # Avoid aux streams during compilation/capture.
         is_compiling = torch.compiler.is_compiling()
 
         def _run_prefill() -> torch.Tensor | None:
@@ -1145,14 +1140,14 @@ class MambaMixer2(MambaBase, CustomOp):
 
             return preallocated_ssm_out_d
 
-        use_multi_stream = (
+        should_use_multi_stream = (
             has_prefill
             and has_decode
             and self._prefill_decode_stream is not None
             and self._prefill_decode_events is not None
             and not is_compiling
         )
-        if use_multi_stream:
+        if should_use_multi_stream:
             event_main, event_aux = self._prefill_decode_events
             maybe_execute_in_parallel(
                 _run_prefill,
