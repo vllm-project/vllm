@@ -402,7 +402,10 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        if self.vllm_config.model_config.enable_sleep_mode:
+        if (
+            self.vllm_config.model_config.enable_sleep_mode
+            or envs.VLLM_CUDA_FABRIC_MEMORY
+        ):
             from vllm.device_allocator.cumem import CuMemAllocator
 
             allocator = CuMemAllocator.get_instance()

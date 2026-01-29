@@ -2,6 +2,7 @@
 // Important: allocation size, CUdeviceptr and CUmemGenericAllocationHandle*
 // need to be unsigned long long
 #include <iostream>
+#include <cstring>
 
 #include "cumem_allocator_compat.h"
 
@@ -48,6 +49,17 @@ static inline unsigned long long my_min(unsigned long long a,
 
 static const char* PYARGS_PARSE = "KKKO";
 #endif
+
+static bool use_cuda_fabric_memory() {
+  static int vmm_fabric_memory = -1;
+
+  if (vmm_fabric_memory == -1) {
+    const char* env = getenv("VLLM_CUDA_FABRIC_MEMORY");
+    vmm_fabric_memory = (env && (!strcmp(env, "true") || !strcmp(env, "1") ||
+                                 !strcmp(env, "True") || !strcmp(env, "TRUE")));
+  }
+  return vmm_fabric_memory == 1;
+}
 
 extern "C" {
 
@@ -114,6 +126,17 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
       device));
   if (flag) {  // support GPUDirect RDMA if possible
     prop.allocFlags.gpuDirectRDMACapable = 1;
+  }
+
+  if (use_cuda_fabric_memory()) {
+  #if defined(CUDA_VERSION) && (CUDA_VERSION >= 12040)
+    prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  #else
+    std::cerr << "Cannot use CUDA Fabric memory with CUDA " << CUDA_VERSION
+              << std::endl;
+    error_code = CU_ERROR_NOT_SUPPORTED;
+    return;
+  #endif
   }
 #endif
 
