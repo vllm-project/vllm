@@ -39,7 +39,7 @@ from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -83,6 +83,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -780,6 +781,7 @@ class HunYuanVLForConditionalGeneration(
     SupportsPP,
     SupportsQuant,
     SupportsXDRoPE,
+    SupportsEagle3,
 ):
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
@@ -965,6 +967,13 @@ class HunYuanVLForConditionalGeneration(
                 image_embeddings = self._process_image_input(multimodal_input)
                 multimodal_embeddings += tuple(image_embeddings)
         return multimodal_embeddings
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.language_model.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,
