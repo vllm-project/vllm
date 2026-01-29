@@ -1083,12 +1083,10 @@ class FusedMoEConfig:
     router_logits_dtype: torch.dtype | None = None
 
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
-
     has_bias: bool = False
-
     is_act_and_mul: bool = True
-
     is_lora_enabled: bool = False
+    disable_inplace: bool = True
 
     def __post_init__(self):
         if self.dp_size > 1:
