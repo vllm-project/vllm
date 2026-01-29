@@ -181,6 +181,7 @@ class Step3p5Attention(nn.Module):
         rope_parameters: dict[str, Any] = {
             "rope_type": "default",
             "partial_rotary_factor": partial_rotary_factor,
+            "rope_theta": self.rope_theta
         }
         if rope_scaling is not None:
             if not isinstance(rope_scaling, dict):
@@ -188,8 +189,6 @@ class Step3p5Attention(nn.Module):
                     "rope_scaling must be a dict for Step3p5Attention."
                 )
             rope_parameters.update(rope_scaling)
-        rope_parameters["rope_theta"] = self.rope_theta
-        rope_parameters["partial_rotary_factor"] = partial_rotary_factor
 
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
@@ -296,18 +295,13 @@ class FusedMoEBlock(nn.Module):
         assert config.moe_dynamic_exp_p == 1, "Only support dynamic exp p=1"
 
         self.use_moe_router_bias = config.use_moe_router_bias
-        self.routed_scaling_factor = getattr(config, "moe_router_scaling_factor",
-                                             1.0)
-        if self.routed_scaling_factor is None:
-            self.routed_scaling_factor = 1.0
-        if self.use_moe_router_bias:
-            self.router_bias = nn.Parameter(torch.zeros(config.moe_num_experts,
-                                                        dtype=torch.float32),
-                                            requires_grad=False)
-            custom_routing_function = self.router_bias_func
-        else:
-            custom_routing_function = None
+        assert self.use_moe_router_bias == True, "Only support use_moe_router_bias == true."
+        self.routed_scaling_factor = config.moe_router_scaling_factor
+        self.router_bias = nn.Parameter(torch.zeros(config.moe_num_experts,
+                                                   dtype=torch.float32),
+                                                   requires_grad=False)
         self.need_fp32_gate = config.need_fp32_gate
+        assert self.need_fp32_gate, "Router logits must use FP32 precision for numerical stability."
         layer_idx = int(prefix.split("layers.")[1].split(".")[0])
         activation = "silu"
         swiglu_limits = config.swiglu_limits or []
@@ -316,7 +310,7 @@ class FusedMoEBlock(nn.Module):
         )
         if swiglu_limit not in (None, 0):
             swiglu_limit = float(swiglu_limit)
-            assert swiglu_limit == 7.0, "swiglu_limit in fused moe block only suport 7.0 now."
+            assert swiglu_limit == 7.0, "Swiglu limit in fused moe block only suport 7.0 now."
             activation = "swiglustep"
             logger.info(
                 f"step3p5 layer_idx: {layer_idx}, activation: {activation}, "
@@ -334,7 +328,7 @@ class FusedMoEBlock(nn.Module):
             quant_config=quant_config,
             activation=activation,
             prefix=f"{prefix}.experts",
-            custom_routing_function=custom_routing_function,
+            custom_routing_function=self.router_bias_func,
             routed_scaling_factor=config.moe_router_scaling_factor,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
@@ -356,8 +350,7 @@ class FusedMoEBlock(nn.Module):
         if renormalize:
             expert_topk_weight = expert_topk_weight / (
                 torch.sum(expert_topk_weight, dim=-1, keepdim=True) + 1e-20)
-        if self.routed_scaling_factor != 1.0:
-            expert_topk_weight *= self.routed_scaling_factor
+        expert_topk_weight *= self.routed_scaling_factor
         return expert_topk_weight, indices.to(torch.int32)
 
     def forward(
@@ -366,11 +359,8 @@ class FusedMoEBlock(nn.Module):
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if self.need_fp32_gate:
-            router_logits = hidden_states.to(
-                torch.float32) @ self.gate.weight.to(torch.float32).t()
-        else:
-            router_logits, _ = self.gate(hidden_states)
+        router_logits = hidden_states.to(
+            torch.float32) @ self.gate.weight.to(torch.float32).t()
         shared_out, final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits)
 

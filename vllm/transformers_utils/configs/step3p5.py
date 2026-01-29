@@ -23,25 +23,17 @@ class Step3p5Config(PretrainedConfig):
         moe_intermediate_size: int = 10240,
         moe_num_experts: int = 16,
         moe_top_k: int = 4,
-        max_pos_interp_ratio: float = 1,
         moe_layer_offset: int = 0,
         moe_dynamic_exp_p: float = 1.0,
         rope_theta: Optional[Union[float, list[float]]] = 500000,
         rope_scaling: Optional[dict[str, Any]] = None,
         head_dim: Optional[int] = None,
         share_expert_dim: Optional[int] = None,
-        allgather_dtype: Optional[str] = None,
-        share_q_dim: Optional[int] = None,
         norm_expert_weight: bool = True,
         bos_token_id: Optional[Union[list[int], int]] = None,
         eos_token_id: Optional[Union[list[int], int]] = None,
         moe_router_activation: str = "softmax",
         moe_router_scaling_factor: float = 1.0,
-        qk_nope_head_dim: Optional[int] = None,
-        qk_rope_head_dim: Optional[int] = None,
-        v_head_dim: Optional[int] = None,
-        q_lora_rank: Optional[int] = None,
-        kv_lora_rank: Optional[int] = None,
         att_impl_type: str = "MFA",
         use_head_wise_attn_gate: bool = False,
         use_moe_router_bias: bool = False,
@@ -51,10 +43,8 @@ class Step3p5Config(PretrainedConfig):
         yarn_only_types: Optional[list[str]] = None,
         attention_other_setting: Optional[dict[str, Any]] = None,
         num_nextn_predict_layers: int = 0,
-        swa_num_attention_heads: Optional[int] = None,
         swiglu_limits: Optional[list[float]] = None,
         swiglu_limits_shared: Optional[list[float]] = None,
-        zero_centered: bool = True,
         max_position_embeddings: Optional[int] = None,
         **kwargs,
     ):
@@ -72,7 +62,6 @@ class Step3p5Config(PretrainedConfig):
         self.moe_num_experts = moe_num_experts
         self.num_experts_per_tok = moe_top_k
         self.moe_top_k = moe_top_k
-        self.max_pos_interp_ratio = max_pos_interp_ratio
         self.moe_layer_offset = moe_layer_offset
         self.moe_dynamic_exp_p = moe_dynamic_exp_p
 
@@ -83,21 +72,13 @@ class Step3p5Config(PretrainedConfig):
             self.share_expert_dim = self.moe_intermediate_size * self.moe_top_k
         else:
             self.share_expert_dim = share_expert_dim
-        self.share_q_dim = share_q_dim
         self.norm_expert_weight = norm_expert_weight
-
-        self.allgather_dtype = allgather_dtype
 
         self.max_position_embeddings = max_position_embeddings
         self.moe_router_activation = moe_router_activation
         self.moe_router_scaling_factor = moe_router_scaling_factor
         self.use_moe_router_bias = use_moe_router_bias
         self.need_fp32_gate = need_fp32_gate
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.v_head_dim = v_head_dim
-        self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank
 
         self.att_impl_type = att_impl_type
         self.use_head_wise_attn_gate = use_head_wise_attn_gate
@@ -106,10 +87,8 @@ class Step3p5Config(PretrainedConfig):
         self.yarn_only_types = yarn_only_types
         self.attention_other_setting = attention_other_setting
         self.num_nextn_predict_layers = num_nextn_predict_layers
-        self.swa_num_attention_heads = swa_num_attention_heads
         self.swiglu_limits = swiglu_limits
         self.swiglu_limits_shared = swiglu_limits_shared
-        self.zero_centered = zero_centered
 
         resolved_bos_token_id = 1 if bos_token_id is None else bos_token_id
         resolved_eos_token_id = [2, 3] if eos_token_id is None else eos_token_id
