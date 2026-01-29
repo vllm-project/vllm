@@ -105,14 +105,6 @@ class VoxtralProcessorAdapter:
     def begin_audio_token_id(self) -> int:
         return self._audio_processor.special_ids.begin_audio
 
-    # @cached_property
-    # def begin_transcript_token_id(self) -> int:
-    #     return self._audio_processor.special_ids.begin_transcript
-
-    # @cached_property
-    # def end_transcript_token_id(self) -> int:
-    #     return self._audio_processor.special_ids.end_transcript
-
     @cached_property
     def sampling_rate(self) -> int:
         return self._audio_processor.audio_config.sampling_rate

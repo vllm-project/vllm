@@ -5,7 +5,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 import torch
-from typing_extensions import deprecated
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
@@ -199,52 +198,6 @@ def sanity_check_mm_encoder_outputs(
         "instead. This is most likely due to incorrect implementation "
         "of the model's `embed_multimodal` method."
     )
-
-
-@deprecated("`scatter_mm_placeholders` is deprecated and will be removed in v0.15.0.")
-def scatter_mm_placeholders(
-    embeds: torch.Tensor,
-    is_embed: torch.Tensor | None,
-) -> torch.Tensor:
-    """
-    Scatter the multimodal embeddings into a contiguous tensor that represents
-    the placeholder tokens.
-
-    [`vllm.multimodal.processing.PromptUpdateDetails.is_embed`][].
-
-    Args:
-        embeds: The multimodal embeddings.
-            Shape: `(num_embeds, embed_dim)`
-        is_embed: A boolean mask indicating which positions in the placeholder
-            tokens need to be filled with multimodal embeddings.
-            Shape: `(num_placeholders, num_embeds)`
-    """
-    if is_embed is None:
-        return embeds
-
-    placeholders = embeds.new_full(
-        (is_embed.shape[0], embeds.shape[-1]),
-        fill_value=torch.nan,
-    )
-    placeholders[is_embed] = embeds
-    return placeholders
-
-
-@deprecated("`gather_mm_placeholders` is deprecated and will be removed in v0.15.0.")
-def gather_mm_placeholders(
-    placeholders: torch.Tensor,
-    is_embed: torch.Tensor | None,
-) -> torch.Tensor:
-    """
-    Reconstructs the embeddings from the placeholder tokens.
-
-    This is the operation of [`scatter_mm_placeholders`]
-    [vllm.v1.worker.utils.scatter_mm_placeholders].
-    """
-    if is_embed is None:
-        return placeholders
-
-    return placeholders[is_embed]
 
 
 def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
