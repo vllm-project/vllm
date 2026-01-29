@@ -91,8 +91,6 @@ class EncoderLayerSANM(nn.Module):
         feed_forward,
         dropout_rate,
         normalize_before=True,
-        concat_after=False,
-        stochastic_depth_rate=0.0,
     ):
         """Construct an EncoderLayer object."""
         super().__init__()
@@ -103,10 +101,7 @@ class EncoderLayerSANM(nn.Module):
         self.in_size = in_size
         self.size = size
         self.normalize_before = normalize_before
-        self.concat_after = concat_after
-        if self.concat_after:
-            self.concat_linear = nn.Linear(size + size, size)
-        self.stochastic_depth_rate = stochastic_depth_rate
+
         self.dropout_rate = dropout_rate
 
     def forward(
@@ -124,64 +119,29 @@ class EncoderLayerSANM(nn.Module):
             torch.Tensor: Mask tensor (#batch, time).
 
         """
-        skip_layer = False
-        # with stochastic depth, residual connection `x + f(x)` becomes
-        # `x <- x + 1 / (1 - p) * f(x)` at training time.
         stoch_layer_coeff = 1.0
-        if self.training and self.stochastic_depth_rate > 0:
-            skip_layer = torch.rand(1).item() < self.stochastic_depth_rate
-            stoch_layer_coeff = 1.0 / (1 - self.stochastic_depth_rate)
-
-        if skip_layer:
-            if cache is not None:
-                x = torch.cat([cache, x], dim=1)
-            return x, mask
 
         residual = x
-        if self.normalize_before:
-            x = self.norm1(x)
+        x = self.norm1(x)
 
-        if self.concat_after:
-            x_concat = torch.cat(
-                (
-                    x,
-                    self.self_attn(
-                        x,
-                        mask,
-                        mask_shfit_chunk=mask_shfit_chunk,
-                        mask_att_chunk_encoder=mask_att_chunk_encoder,
-                    ),
-                ),
-                dim=-1,
+        if self.in_size == self.size:
+            x = residual + stoch_layer_coeff * self.self_attn(
+                x,
+                mask,
+                mask_shfit_chunk=mask_shfit_chunk,
+                mask_att_chunk_encoder=mask_att_chunk_encoder,
             )
-            if self.in_size == self.size:
-                x = residual + stoch_layer_coeff * self.concat_linear(x_concat)
-            else:
-                x = stoch_layer_coeff * self.concat_linear(x_concat)
         else:
-            if self.in_size == self.size:
-                x = residual + stoch_layer_coeff * self.self_attn(
-                    x,
-                    mask,
-                    mask_shfit_chunk=mask_shfit_chunk,
-                    mask_att_chunk_encoder=mask_att_chunk_encoder,
-                )
-            else:
-                x = stoch_layer_coeff * self.self_attn(
-                    x,
-                    mask,
-                    mask_shfit_chunk=mask_shfit_chunk,
-                    mask_att_chunk_encoder=mask_att_chunk_encoder,
-                )
-        if not self.normalize_before:
-            x = self.norm1(x)
+            x = stoch_layer_coeff * self.self_attn(
+                x,
+                mask,
+                mask_shfit_chunk=mask_shfit_chunk,
+                mask_att_chunk_encoder=mask_att_chunk_encoder,
+            )
 
         residual = x
-        if self.normalize_before:
-            x = self.norm2(x)
+        x = self.norm2(x)
         x = residual + stoch_layer_coeff * self.feed_forward(x)
-        if not self.normalize_before:
-            x = self.norm2(x)
 
         return x, mask, cache, mask_shfit_chunk, mask_att_chunk_encoder
 
