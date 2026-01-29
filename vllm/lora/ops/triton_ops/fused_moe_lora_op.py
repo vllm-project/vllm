@@ -163,7 +163,7 @@ def _fused_moe_lora_kernel(
     num_slice_c: tl.constexpr,
     # top_k_num or 1 depending on input token
     # is expanded by top_k or not
-    input_token_stride: tl.constexpr,
+    token_mapping_factor: tl.constexpr,
     # whether use naive block assignment
     naive_block_assignment: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
@@ -257,7 +257,7 @@ def _fused_moe_lora_kernel(
 
     # get a_ptrs,b_ptrs
     a_ptrs = cur_a_ptr + (
-        offs_token[:, None] // input_token_stride * stride_am
+        offs_token[:, None] // token_mapping_factor * stride_am
         + offs_k[None, :] * stride_ak
     )
 
@@ -414,7 +414,7 @@ def _fused_moe_lora_shrink(
         slice_c_size=a_intermediate_cache1.numel() // num_slices,
         num_slice_a=1,
         num_slice_c=num_slices,
-        input_token_stride=1 if mul_routed_weight else top_k_num,
+        token_mapping_factor=1 if mul_routed_weight else top_k_num,
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=False,
         ADD_INPUTS=False,
@@ -529,7 +529,7 @@ def _fused_moe_lora_expand(
         slice_c_size=slice_c_size,
         num_slice_a=num_slices,
         num_slice_c=num_slices,
-        input_token_stride=1,
+        token_mapping_factor=1,
         naive_block_assignment=sorted_token_ids is None,
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         ADD_INPUTS=True,
