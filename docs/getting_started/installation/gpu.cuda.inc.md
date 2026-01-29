@@ -264,7 +264,7 @@ docker.io/vllm/vllm-openai:latest \
 --model Qwen/Qwen3-0.6B
 ```
 
-You can add any other [engine-args](../configuration/engine_args.md) you need after the image tag (`vllm/vllm-openai:latest`).
+You can add any other [engine-args](https://docs.vllm.ai/en/latest/configuration/engine_args/) you need after the image tag (`vllm/vllm-openai:latest`).
 
 !!! note
     You can either use the `ipc=host` flag or `--shm-size` flag to allow the
@@ -300,7 +300,7 @@ You can add any other [engine-args](../configuration/engine_args.md) you need af
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 
-You can build and run vLLM from source via the provided [docker/Dockerfile](../../docker/Dockerfile). To build vLLM:
+You can build and run vLLM from source via the provided [docker/Dockerfile](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile). To build vLLM:
 
 ```bash
 # optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
@@ -322,10 +322,10 @@ DOCKER_BUILDKIT=1 docker build . \
     If you have not changed any C++ or CUDA kernel code, you can use precompiled wheels to significantly reduce Docker build time.
 
     *   **Enable the feature** by adding the build argument: `--build-arg VLLM_USE_PRECOMPILED="1"`.
-    *   **How it works**: By default, vLLM automatically finds the correct wheels from our [Nightly Builds](../contributing/ci/nightly_builds.md) by using the merge-base commit with the upstream `main` branch.
+    *   **How it works**: By default, vLLM automatically finds the correct wheels from our [Nightly Builds](https://docs.vllm.ai/en/latest/contributing/ci/nightly_builds/) by using the merge-base commit with the upstream `main` branch.
     *   **Override commit**: To use wheels from a specific commit, provide the `--build-arg VLLM_PRECOMPILED_WHEEL_COMMIT=<commit_hash>` argument.
 
-    For a detailed explanation, refer to the documentation on 'Set up using Python-only build (without compilation)' part in [Build wheel from source](../contributing/ci/nightly_builds.md#precompiled-wheels-usage), these args are similar.
+    For a detailed explanation, refer to the documentation on 'Set up using Python-only build (without compilation)' part in [Build wheel from source](https://docs.vllm.ai/en/latest/contributing/ci/nightly_builds/#precompiled-wheels-usage), these args are similar.
 
 **Building vLLM's Docker Image from Source for Arm64/aarch64**
 

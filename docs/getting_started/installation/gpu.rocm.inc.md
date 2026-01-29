@@ -262,7 +262,7 @@ AMD also offers nightly prebuilt docker image from [Docker Hub](https://hub.dock
 # --8<-- [end:amd-prebuilt-images]
 # --8<-- [start:build-image-from-source]
 
-You can build and run vLLM from source via the provided [docker/Dockerfile.rocm](../../docker/Dockerfile.rocm).
+You can build and run vLLM from source via the provided [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm).
 
 ??? info "(Optional) Build an image with ROCm software stack"
 
