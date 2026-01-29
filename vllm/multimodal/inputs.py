@@ -27,12 +27,12 @@ from vllm.utils.collection_utils import full_groupby, is_list_of
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.jsontree import json_map_leaves
 
+from .media import MediaWithBytes
+
 if TYPE_CHECKING:
     import torch
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
-
-    from .media import MediaWithBytes
 else:
     torch = LazyLoader("torch", globals(), "torch")
 
@@ -58,7 +58,7 @@ Represents a single audio
 item, which can be passed to a HuggingFace `AudioProcessor`.
 """
 
-ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor", "MediaWithBytes[HfImageItem]"]
+ImageItem: TypeAlias = Union[HfImageItem, "torch.Tensor", MediaWithBytes[HfImageItem]]
 """
 A `transformers.image_utils.ImageInput` representing a single image
 item, which can be passed to a HuggingFace `ImageProcessor`.
