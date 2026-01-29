@@ -47,7 +47,7 @@ docker push vllm/vllm-openai:v${RELEASE_VERSION}-x86_64
 docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-x86_64-cu130 vllm/vllm-openai:x86_64-cu130
 docker tag vllm/vllm-openai:x86_64-cu130 vllm/vllm-openai:latest-x86_64-cu130
 docker tag vllm/vllm-openai:x86_64-cu130 vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu130
-docker push vllm/vllm-openai:latest-x86_64
+docker push vllm/vllm-openai:latest-x86_64-cu130
 docker push vllm/vllm-openai:v${RELEASE_VERSION}-x86_64-cu130
 
 docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-aarch64 vllm/vllm-openai:aarch64
