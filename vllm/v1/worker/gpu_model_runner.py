@@ -1418,7 +1418,9 @@ class GPUModelRunner(
             # During CUDA graph capture, we need to use realistic encoder lengths
             # so that max_seqlen_k is captured with the correct value.
             max_encoder_len = getattr(
-                self.model_config.hf_config, "max_source_positions", self.max_encoder_len
+                self.model_config.hf_config,
+                "max_source_positions",
+                self.max_encoder_len,
             )
             self.encoder_seq_lens.np[:num_reqs] = max_encoder_len
 
