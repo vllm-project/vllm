@@ -105,7 +105,9 @@ class ServingScores(OpenAIServing):
 
         engine_prompts: list[TokensPrompt] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
-            text_token_prompt = self._validate_input(request, tok_result, input_text)
+            text_token_prompt = self._validate_input(
+                request, tok_result["input_ids"], input_text
+            )
 
             engine_prompts.append(
                 TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])

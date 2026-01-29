@@ -53,9 +53,12 @@ def _get_num_special_tokens_for_pair(tokenizer: TokenizerLike) -> int:
     first and falling back to computing dynamically if needed.
     """
     # Try HuggingFace method with pair=True
-    if hasattr(tokenizer, "num_special_tokens_to_add"):
+    # Use getattr to bypass type checker since TokenizerLike protocol
+    # doesn't define the 'pair' parameter that HuggingFace tokenizers have
+    method = getattr(tokenizer, "num_special_tokens_to_add", None)
+    if method is not None:
         try:
-            return tokenizer.num_special_tokens_to_add(pair=True)
+            return method(pair=True)
         except TypeError:
             pass  # pair parameter not supported
 
