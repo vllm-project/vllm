@@ -245,8 +245,8 @@ def test_minimax_m2_streaming_different_intervals_multiple_invokes(
 <invoke name="search_web"><parameter name="query_tag">["technology", "events"]
 </parameter><parameter name="query_list">["OpenAI", "latest", "release"]
 </parameter></invoke><invoke name="search_web"><parameter name="query_tag">
-["technology", "events"]</parameter><parameter name="query_list">
-["Gemini", "latest", "release"]</parameter></invoke></minimax:tool_call>"""
+["technology", "events"]</parameter><parameter name="query_list">["Gemini", 
+"latest", "release"]</parameter></invoke></minimax:tool_call>"""
     tokens = minimax_tokenizer.encode(text)
 
     interval_sizes = list(range(1, 21))
@@ -318,7 +318,7 @@ def test_minimax_m2_streaming_different_intervals_multiple_invokes(
         args = entry2["arguments"]
         assert args == {
             "query_tag": '["technology", "events"]',
-            "query_list": '["Gemini", "latest", "release"]',
+            "query_list": '["Gemini", \n"latest", "release"]',
         }
 
         assert len(parser.streamed_args_for_tool) == 2
@@ -347,7 +347,7 @@ def test_minimax_m2_streaming_different_intervals_multiple_invokes(
             },
             {
                 "query_tag": '["technology", "events"]',
-                "query_list": '["Gemini", "latest", "release"]',
+                "query_list": '["Gemini", \n"latest", "release"]',
             },
         ]
         expected = "".join(json.dumps(call) for call in expected_calls)

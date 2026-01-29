@@ -44,7 +44,7 @@ class PartialInvoke:
     def __repr__(self):
         return (
             f"PartialInvoke(name={self.name!r}, parameters={self.parameters}"
-            + f", invoke_completed={self.invoke_completed})"
+            f", invoke_completed={self.invoke_completed})"
         )
 
 
@@ -623,15 +623,16 @@ class MinimaxM2ToolParser(ToolParser):
                 self.current_tool_id = self._generate_tool_call_id()
 
                 for j in range(len(invoke.parameters)):
-                    param_name, param_value = invoke.parameters[j]
-                    param_value = param_value.replace('"', '\\"')
-                    if j == 0:
-                        json_fragment = "{" + f'"{param_name}": "{param_value}"'
-                    else:
-                        json_fragment = f', "{param_name}": "{param_value}"'
+                    param_json = json.dumps(
+                        dict([invoke.parameters[j]]), ensure_ascii=False
+                    )
+                    param_json = param_json[1:-1]  # Strip {}
+                    json_fragment = "{" + param_json if j == 0 else f", {param_json}"
                     arguments_json += json_fragment
                     self.param_count += 1
                 if invoke.invoke_completed:
+                    if len(invoke.parameters) == 0:
+                        arguments_json += "{"
                     arguments_json += "}"
 
                 delta_tool_calls.append(
@@ -647,15 +648,16 @@ class MinimaxM2ToolParser(ToolParser):
                 )
             else:
                 for j in range(self.param_count, len(invoke.parameters)):
-                    param_name, param_value = invoke.parameters[j]
-                    param_value = param_value.replace('"', '\\"')
-                    if j == 0:
-                        json_fragment = "{" + f'"{param_name}": "{param_value}"'
-                    else:
-                        json_fragment = f', "{param_name}": "{param_value}"'
+                    param_json = json.dumps(
+                        dict([invoke.parameters[j]]), ensure_ascii=False
+                    )
+                    param_json = param_json[1:-1]  # Strip {}
+                    json_fragment = "{" + param_json if j == 0 else f", {param_json}"
                     arguments_json += json_fragment
                     self.param_count += 1
                 if invoke.invoke_completed:
+                    if len(invoke.parameters) == 0:
+                        arguments_json += "{"
                     arguments_json += "}"
 
                 delta_tool_calls.append(
