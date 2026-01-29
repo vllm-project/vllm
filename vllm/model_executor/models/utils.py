@@ -634,6 +634,11 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
         return module
 
+    def is_moe_weights(name):
+        if "w13_weight" in name or "w2_weight" in name:
+            return True
+        return False
+
     pin_memory = (
         is_pin_memory_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
     )
@@ -642,11 +647,19 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
     offloaded_parameters = False
-    for p in module.parameters():
+    for name, p in module.named_parameters():
         if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
             # we use per-parameter offloading
             # one module might have some parameters offloaded and some not
             break
+
+        logger.info(f"Offloading parameter {name} to CPU")
+
+        if not is_moe_weights(name):
+            logger.info(f"Parameter {name} is not MoE weights")
+            continue
+
+        logger.info(f"Parameter {name} is MoE weights")
 
         cpu_data = p.data.to(device="cpu")
         if pin_memory:
