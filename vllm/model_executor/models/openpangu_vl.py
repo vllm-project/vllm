@@ -94,7 +94,6 @@ class OpenPanguVisionAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -126,7 +125,6 @@ class OpenPanguVisionAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
-            multimodal_config=multimodal_config,
         )
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
 
@@ -232,7 +230,6 @@ class OpenPanguVisionBlock(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         vision_config=None,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -245,7 +242,6 @@ class OpenPanguVisionBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
         self.mlp = OpenPanguVisionMLP(
@@ -385,7 +381,6 @@ class OpenPanguVisionTransformer(nn.Module):
         hidden_size,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
         interleaved=False,
     ) -> None:
@@ -404,13 +399,9 @@ class OpenPanguVisionTransformer(nn.Module):
         self.hidden_act = vision_config.hidden_act
 
         head_dim = self.hidden_size // self.num_heads
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend if multimodal_config else None
-        )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
         )
 
         if self.attn_backend not in {
@@ -436,7 +427,6 @@ class OpenPanguVisionTransformer(nn.Module):
                     vision_config=vision_config,
                     norm_layer=norm_layer,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
                 )
                 for layer_idx in range(vision_config.depth)
@@ -849,10 +839,8 @@ class OpenPanguVLForConditionalGeneration(
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.vllm_config = vllm_config
-        self.multimodal_config = multimodal_config
         quant_config = vllm_config.quant_config
         self.visual = OpenPanguVisionTransformer(
             vision_config=config.vision_config,
@@ -860,7 +848,6 @@ class OpenPanguVLForConditionalGeneration(
             hidden_size=config.hidden_size,
             norm_eps=getattr(config.vision_config, "rms_norm_eps", 1e-6),
             quant_config=self._maybe_ignore_quant_config(quant_config),
-            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "visual"),
         )
 
