@@ -56,7 +56,7 @@ def _create_random_request(
     for j, position in enumerate(mm_positions):
         identifier = f"{request_id}_hash_{j}"
         mm_feature = MultiModalFeatureSpec(
-            data=MultiModalKwargsItem.dummy("dummy_m"),
+            data=MultiModalKwargsItem.dummy(),
             mm_position=position,
             identifier=identifier,
             modality="image",
