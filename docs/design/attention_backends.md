@@ -102,8 +102,8 @@ Priority is **1 = highest** (tried first).
 
 | Priority | Backend |
 |----------|---------|
-| 1 | `FLASHINFER` |
-| 2 | `FLASH_ATTN` |
+| 1 | `FLASH_ATTN` |
+| 2 | `FLASHINFER` |
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
 
@@ -111,8 +111,8 @@ Priority is **1 = highest** (tried first).
 
 | Priority | Backend |
 |----------|---------|
-| 1 | `FLASH_ATTN` |
-| 2 | `FLASHINFER` |
+| 1 | `FLASHINFER` |
+| 2 | `FLASH_ATTN` |
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
 
@@ -122,22 +122,22 @@ Priority is **1 = highest** (tried first).
 
 | Priority | Backend |
 |----------|---------|
+| 1 | `FLASH_ATTN_MLA` |
+| 2 | `FLASHMLA` |
+| 3 | `FLASHINFER_MLA` |
+| 4 | `TRITON_MLA` |
+| 5 | `FLASHMLA_SPARSE` |
+
+**Ampere/Hopper (SM 8.x-9.x):**
+
+| Priority | Backend |
+|----------|---------|
 | 1 | `FLASHINFER_MLA` |
 | 2 | `CUTLASS_MLA` |
 | 3 | `FLASH_ATTN_MLA` |
 | 4 | `FLASHMLA` |
 | 5 | `TRITON_MLA` |
 | 6 | `FLASHMLA_SPARSE` |
-
-**Ampere/Hopper (SM 8.x-9.x):**
-
-| Priority | Backend |
-|----------|---------|
-| 1 | `FLASH_ATTN_MLA` |
-| 2 | `FLASHMLA` |
-| 3 | `FLASHINFER_MLA` |
-| 4 | `TRITON_MLA` |
-| 5 | `FLASHMLA_SPARSE` |
 
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
 
@@ -191,7 +191,6 @@ configuration.
 |---------|-------------|--------------|--------|---------|-------|
 | TRT-LLM Ragged‡ | TensorRT-LLM ragged attention | 10.x | Default on SM100 | `-ac.use_trtllm_ragged_deepseek_prefill=0` | DeepSeek R1 dims only |
 | FlashInfer | FlashInfer CUTLASS backend | 10.x | `-ac.disable_flashinfer_prefill=0` | `-ac.disable_flashinfer_prefill=1` | DeepSeek R1 dims only |
-| cuDNN | cuDNN-based attention | 10.x | `-ac.use_cudnn_prefill=1` | `-ac.use_cudnn_prefill=0` |  |
 | FlashAttention | FlashAttention varlen (FA2/FA3) | Any | Default fallback | Use other backends | FA3 on SM90, FA2 otherwise |
 
 > **‡** TRT-LLM Ragged is the default on Blackwell (SM100).
