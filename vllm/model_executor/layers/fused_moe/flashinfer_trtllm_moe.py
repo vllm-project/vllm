@@ -70,7 +70,7 @@ def _supports_routing_method(
             RoutingMethodType.RenormalizeNaive,
         ]
     elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
-        # NOTE(rob): kernel requires Llama4.
+        # NOTE(dbari): as above, potentially allow others here.
         return routing_method in [
             RoutingMethodType.Llama4,
             RoutingMethodType.Renormalize,
