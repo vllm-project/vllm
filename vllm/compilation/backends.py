@@ -33,7 +33,6 @@ from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .compiler_interface import (
     CompilerInterface,
@@ -94,10 +93,8 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
     if compilation_config.backend == "inductor":
         # Use standalone compile only if requested, version is new enough,
         # and the symbol actually exists in this PyTorch build.
-        if (
-            envs.VLLM_USE_STANDALONE_COMPILE
-            and is_torch_equal_or_newer("2.8.0.dev")
-            and hasattr(torch._inductor, "standalone_compile")
+        if envs.VLLM_USE_STANDALONE_COMPILE and hasattr(
+            torch._inductor, "standalone_compile"
         ):
             logger.debug("Using InductorStandaloneAdaptor")
             return InductorStandaloneAdaptor(
