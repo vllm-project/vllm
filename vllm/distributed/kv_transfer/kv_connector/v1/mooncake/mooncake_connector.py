@@ -350,11 +350,7 @@ class MooncakeConnectorScheduler:
         elif params.get("do_remote_decode"):
             assert not self.is_kv_consumer
             if not params.get("transfer_id"):
-                logger.warning(
-                    "Got invalid KVTransferParams: %s. This "
-                    "request will not utilize KVTransfer",
-                    params,
-                )
+                logger.warning("Missing transfer_id in kv_transfer_params from router!")
             else:
                 # Add an empty list to worker to create event.
                 self._reqs_need_send[request.request_id] = (request, [])
@@ -507,10 +503,6 @@ class MooncakeConnectorWorker:
         self.device_kv_caches: dict[str, torch.Tensor] = {}
         self.reqs_need_send: dict[TransferId, SendBlockMeta] = {}
 
-        # Only used by prefillers.
-        host, port = get_mooncake_bootstrap_addr(vllm_config)
-        self.bootstrap_addr = make_zmq_path("http", host, port)
-
         # For kv_both, we will act both prefiller and decoder.
         if not self.is_kv_consumer:
             # Background threads for sending kvcaches to D.
@@ -533,6 +525,7 @@ class MooncakeConnectorWorker:
 
             # Start bootstrap server on global rank 0.
             if should_launch_bootstrap_server(vllm_config):
+                _, port = get_mooncake_bootstrap_addr(vllm_config)
                 self.bootstrap_server = MooncakeBootstrapServer(
                     vllm_config, "0.0.0.0", port
                 )
@@ -597,7 +590,8 @@ class MooncakeConnectorWorker:
             self._mooncake_receiver_t.join()
 
     async def register_worker_with_bootstrap(self):
-        url = self.bootstrap_addr + "/register"
+        host, port = get_mooncake_bootstrap_addr(self.vllm_config)
+        url = make_zmq_path("http", host, port) + "/register"
         worker_addr = make_zmq_path("tcp", self.hostname, self.side_channel_port)
         payload = RegisterWorkerPayload(
             engine_id=self.engine_id,
@@ -735,6 +729,9 @@ class MooncakeConnectorWorker:
                 # Timeout, abort all pending requests.
                 for task in wait_tasks:
                     task.cancel()
+                logger.warning(
+                    "Timeout waiting for P side ready: %s", list(pending_reqs)
+                )
                 response = MooncakeXferResponse(
                     status=MooncakeXferResponseStatus.FINISH,
                     err_reqs=list(pending_reqs),
@@ -760,7 +757,11 @@ class MooncakeConnectorWorker:
                     if not send_meta.need_send:
                         self.resolve_need_send(send_meta, remote_tp_ranks)
                     ready_reqs.append((d_req_id, send_meta))
-                # Otherwise (expired, very unlikely), forget it. Do not let D retry.
+                else:
+                    # Otherwise (expired, very unlikely), just forget it.
+                    logger.warning(
+                        "Request %s expired before sending on P side.", d_req_id
+                    )
 
             src_ptrs, dst_ptrs, lengths, err_reqs = await self._build_transfer_params(
                 ready_reqs, meta
@@ -806,8 +807,8 @@ class MooncakeConnectorWorker:
                 # we need to check whether all headers are sent.
                 # If not, we should set expire_time to normal and skip the below.
                 send_meta.sending -= 1
-                send_meta.sended += 1
-                if send_meta.sended == send_meta.need_send:
+                send_meta.sent += 1
+                if send_meta.sent == send_meta.need_send:
                     del self.reqs_need_send[send_meta.transfer_id]
                     self.finished_sending_reqs.add(send_meta.p_req_id)
 
@@ -822,6 +823,9 @@ class MooncakeConnectorWorker:
         send_meta.need_send = len(remote_tp_ranks)
         if send_meta.need_send != 1:
             logger.error("Mooncake: Heterogeneous TP is not supported yet.")
+            raise NotImplementedError(
+                "Mooncake: Heterogeneous TP is not supported yet."
+            )
 
     async def _build_transfer_params(
         self,
@@ -1150,7 +1154,9 @@ class MooncakeConnectorWorker:
         count = len(remote_tp_ranks)
         if count != 1:
             logger.error("Mooncake: Heterogeneous TP is not supported yet.")
-            return
+            raise NotImplementedError(
+                "Mooncake: Heterogeneous TP is not supported yet."
+            )
         for pull_meta in pull_metas.values():
             pull_meta.pull_tasks_count = count
         for remote_tp_rank in remote_tp_ranks:
@@ -1190,7 +1196,7 @@ class MooncakeConnectorWorker:
                     self.handle_new_engine_id(remote_engine_id, pull_metas)
                 )
             else:
-                   self.receive_kv(remote_engine_id, pull_metas)
+                self.receive_kv(remote_engine_id, pull_metas)
 
     async def record_send_reqs(self, metadata: MooncakeConnectorMetadata):
         for p_req_id, (transfer_id, block_ids) in metadata.reqs_to_send.items():
