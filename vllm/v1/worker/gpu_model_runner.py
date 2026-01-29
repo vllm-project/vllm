@@ -1598,6 +1598,13 @@ class GPUModelRunner(
             current_indices_gpu, new_num_computed, valid_counts = async_update_data
             self.num_computed_tokens.gpu[current_indices_gpu] = new_num_computed
             self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
+            self.positions.gpu[:total_num_scheduled_tokens] = (
+                self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
+                + arange_gpu
+            )
+            self.seq_lens.gpu[:num_reqs] = (
+                self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
+            )
 
         # Copy mrope_position_delta for M-RoPE models.
         if self.uses_mrope:
@@ -3936,6 +3943,7 @@ class GPUModelRunner(
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                skip_seq_lens_adjustment=self.use_async_spec_decode,
             )
 
         return draft_token_ids

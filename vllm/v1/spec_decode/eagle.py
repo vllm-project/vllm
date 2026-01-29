@@ -262,6 +262,7 @@ class SpecDecodeBaseProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        skip_seq_lens_adjustment: bool = False,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -436,8 +437,14 @@ class SpecDecodeBaseProposer:
         # In padded drafter batch, we need to adjust the sequence lengths
         # to remove the "padding" (i.e. rejected tokens).
         # Only apply this adjustment when we have rejected tokens
-        # (i.e., not the first proposal).
-        if self.num_speculative_tokens > 1 and num_rejected_tokens_gpu is not None:
+        # (i.e., not the first proposal) and seq_lens is not already corrected.
+        # When async spec decode uses corrected values for positions/seq_lens,
+        # this adjustment should be skipped to avoid double-correction.
+        if (
+            self.num_speculative_tokens > 1
+            and num_rejected_tokens_gpu is not None
+            and not skip_seq_lens_adjustment
+        ):
             common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
             # Invalidate the CPU-side shadows to avoid H<>D sync.
             common_attn_metadata._seq_lens_cpu = None
