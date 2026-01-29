@@ -248,11 +248,7 @@ async def test_voxtral_streaming_generator(audio_assets, tokenizer, async_engine
 
     # 'true' streaming and 'offline' streaming differ a bit because log-mels are
     # differently noramalized
-    texts[0] = (
-        texts[0]
-        .replace("He has f", "F")
-        .replace("fleece was quite a slow", "sleeps with quite a snow")
-    )
+    texts[0] = texts[0].replace("He has f", "F").replace("its fleece was quite a slow", "it sleeps with quite a snow")
     texts[1] = texts[1].replace("a base hit", "OBS").replace("oh my", "oh, my")
 
     assert texts == EXPECTED_TEXT
