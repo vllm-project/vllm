@@ -246,7 +246,6 @@ from vllm.v1.attention.backend import (
     SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     get_per_layer_parameters,
@@ -951,7 +950,7 @@ def _flashinfer_concat_mla_k(
 
     Args:
         k: Output tensor, shape [num_tokens, num_heads, nope_dim + rope_dim].
-           Modified in-place.
+            Modified in-place.
         k_nope: The nope part of k, shape [num_tokens, num_heads, nope_dim].
         k_pe: The rope part of k (shared), shape [num_tokens, 1, rope_dim].
               This is broadcast to all heads.
