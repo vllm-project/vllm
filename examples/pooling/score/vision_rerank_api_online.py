@@ -61,8 +61,8 @@ def main(args):
     response = requests.get(models_url)
     model = response.json()["data"][0]["id"]
 
-    print("Query: string & Document: string")
-    prompt = {"model": model, "query": query, "documents": document}
+    print("Query: string & Document: list of string")
+    prompt = {"model": model, "query": query, "documents": [document]}
     response = requests.post(rerank_url, json=prompt)
     pprint.pprint(response.json())
 
