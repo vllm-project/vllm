@@ -267,6 +267,9 @@ logger = init_logger(__name__)
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
+    NOTE: Please read the comment at the top of the file before trying to
+    understand this class
+
     This class takes query, and compressed key/value tensors as input.
     The class does the following:
 
