@@ -321,8 +321,9 @@ class TpKVTopology:
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
+        _MOCK_BLOCK_SIZE = 16
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks=1, block_size=16, num_kv_heads=4, head_size=1
+            num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=4, head_size=1
         )
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
@@ -339,7 +340,8 @@ class TpKVTopology:
 
             if self._cross_layers_blocks:
                 # prepend layers dimension
-                kv_cache_shape = (80,) + kv_cache_shape
+                _MOCK_NUM_LAYERS = 80
+                kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
                 try:
                     kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
                         include_num_layers_dimension=self._cross_layers_blocks
@@ -355,7 +357,7 @@ class TpKVTopology:
             # is logical while in the cross layers case it is the physical
             # position. This matches the shape of the actual kv cache tensors
             # passed at register_kv_caches()/register_cross_layers_kv_cache()
-            block_size_position = kv_cache_shape.index(16)
+            block_size_position = kv_cache_shape.index(_MOCK_BLOCK_SIZE)
 
             assert block_size_position is not None
             self._block_size_position = -(len(kv_cache_shape) - block_size_position)
