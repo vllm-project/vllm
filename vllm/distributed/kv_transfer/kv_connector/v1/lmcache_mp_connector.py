@@ -349,13 +349,14 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
         self.requests: list[LMCacheMPRequestMetadata] = []
-        self.executing_request_ids_at_this_step: set[str] = set()
+        # New request IDs this step - for double-free prevention in async scheduling
+        self.new_req_ids: set[str] = set()
 
     def add_request_metadata(self, request_metadata: LMCacheMPRequestMetadata):
         self.requests.append(request_metadata)
 
-    def add_new_executing_request_ids_at_this_step(self, request_ids: set[str]):
-        self.executing_request_ids_at_this_step.update(request_ids)
+    def set_new_req_ids(self, request_ids: set[str]):
+        self.new_req_ids = request_ids
 
     def __len__(self):
         return len(self.requests)
@@ -363,8 +364,8 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     # For debugging
     def __str__(self):
         request_strs = []
-        for req_id in self.executing_request_ids_at_this_step:
-            request_strs.append(f"NewRequestArrived(request_id={req_id})")
+        if self.new_req_ids:
+            request_strs.append(f"NewReqs({self.new_req_ids})")
         for req_meta in self.requests:
             request_strs.append(
                 f"RequestMetadata(request_id={req_meta.request_id}, "
@@ -418,8 +419,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
         self.vllm_block_size = vllm_config.cache_config.block_size
-
-        self._executing_request_ids: set[str] = set()
 
     @property
     def role(self) -> KVConnectorRole:
@@ -568,12 +567,13 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        # first, add the executing request ids to internal state
+        # Register new request IDs for double-free prevention (async scheduling).
+        # Use hasattr for merge-order independence: if LMCache doesn't have
+        # track_new_reqs yet, skip gracefully (feature disabled).
         meta = self._get_connector_metadata()
-        self.worker_adapter.add_new_executing_request_ids_at_this_step_worker(meta.executing_request_ids_at_this_step)
-        val = self.worker_adapter.get_finished(finished_req_ids)
-        # logger.error("Finished req ids: %s, %s", val[0], val[1])
-        return val
+        if hasattr(self.worker_adapter, "track_new_reqs"):
+            self.worker_adapter.track_new_reqs(meta.new_req_ids)
+        return self.worker_adapter.get_finished(finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
@@ -741,9 +741,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self._process_new_requests(scheduler_output, metadata)
         self._process_cached_requests(scheduler_output, metadata)
 
-        metadata.add_new_executing_request_ids_at_this_step(
-            self._get_new_executing_request_ids_at_this_step(scheduler_output)
-        )
+        metadata.set_new_req_ids(self._collect_new_req_ids(scheduler_output))
 
         if len(metadata) > 0:
             logger.debug("Final connector metadata: %s", metadata)
@@ -782,8 +780,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
-        # Remove from existing scheduling request id, to prevent memory leak.
-        self.scheduler_adapter.remove_from_executing_request_ids(request.request_id)
+        # Untrack request from scheduler-side tracking to prevent memory leak.
+        self.scheduler_adapter.untrack_request(request.request_id)
 
         return True, None
 
@@ -917,15 +915,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
 
-
-    def _get_new_executing_request_ids_at_this_step(
-        self, scheduler_output: SchedulerOutput,
-    ) -> list[str]:
-
-        reqs = scheduler_output.scheduled_new_reqs
-        for req in reqs:
-            self.scheduler_adapter.maybe_add_to_executing_request_ids(req.req_id)
-        return self.scheduler_adapter.get_executing_request_ids_at_this_step()
+    def _collect_new_req_ids(self, scheduler_output: SchedulerOutput) -> set[str]:
+        """Collect newly scheduled request IDs for double-free prevention."""
+        for req in scheduler_output.scheduled_new_reqs:
+            self.scheduler_adapter.track_request(req.req_id)
+        return self.scheduler_adapter.pop_new_reqs_this_step()
 
     def _get_request_tracker(self, request_id: str) -> LMCacheMPRequestTracker:
         assert request_id in self.request_trackers, (
