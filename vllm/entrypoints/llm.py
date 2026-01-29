@@ -777,7 +777,7 @@ class LLM:
 
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case"),
+            do_lower_case=encoder_config.get("do_lower_case", False),
             # For Whisper, special tokens should be provided by the user based
             # on the task and language of their request. Also needed to avoid
             # appending an EOS token to the prompt which disrupts generation.
@@ -881,7 +881,7 @@ class LLM:
 
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
-            do_lower_case=encoder_config.get("do_lower_case"),
+            do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=False,
         ).with_kwargs(tokenization_kwargs)
 

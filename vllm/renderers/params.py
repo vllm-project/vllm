@@ -98,7 +98,7 @@ class TokenizeParams:
     - `-1` maps to `max_input_tokens`.
     """
 
-    do_lower_case: bool | None = None
+    do_lower_case: bool = False
     """Whether to normalize text to lower case before tokenization."""
 
     add_special_tokens: bool = True

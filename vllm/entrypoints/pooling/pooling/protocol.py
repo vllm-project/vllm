@@ -37,7 +37,7 @@ class PoolingCompletionRequest(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            do_lower_case=encoder_config.get("do_lower_case"),
+            do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
         )
@@ -67,7 +67,7 @@ class PoolingChatRequest(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=0,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            do_lower_case=encoder_config.get("do_lower_case"),
+            do_lower_case=encoder_config.get("do_lower_case", False),
             add_special_tokens=self.add_special_tokens,
             max_total_tokens_param="max_model_len",
         )
