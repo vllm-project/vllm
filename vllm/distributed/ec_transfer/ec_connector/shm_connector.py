@@ -69,8 +69,12 @@ class SHMConnector(ECConnectorBase):
         ec_extra_config = getattr(transfer_config, "ec_connector_extra_config", {})
         self.listen_ports = ec_extra_config.get("listen_ports", None)
         if not self.listen_ports:
-            raise ValueError("Producer/Consumer must have 'listen_ports' in ec_connector_extra_config.")
-        self.consumer_sock_addrs = [(transfer_config.ec_ip, addr_port) for addr_port in self.listen_ports]
+            raise ValueError(
+                "Producer/Consumer must have 'listen_ports' in ec_connector_extra_config."
+                )
+        self.consumer_sock_addrs = [
+            (transfer_config.ec_ip, addr_port) for addr_port in self.listen_ports
+            ]
         logger.debug("Consumer addrs is: %s", self.consumer_sock_addrs)
 
         self.thread_executor = ThreadPoolExecutor(
@@ -78,7 +82,9 @@ class SHMConnector(ECConnectorBase):
         )
         if transfer_config.ec_role == "ec_producer":
             self.send_queue = queue.Queue[tuple[str, torch.Tensor]]()
-            self.zmq_paths = [make_zmq_path("tcp", host, port) for host, port in self.consumer_sock_addrs]
+            self.zmq_paths = [
+                make_zmq_path("tcp", host, port) for host, port in self.consumer_sock_addrs
+                ]
             self.thread_executor.submit(self.producer_run)
             logger.debug("============ Producer Mode ===============")
         elif transfer_config.ec_role == "ec_consumer":
@@ -125,8 +131,10 @@ class SHMConnector(ECConnectorBase):
                 encoder_cache[mm_data.mm_hash] = func(*list_args)
                 logger.debug("recv tensor for hash %s", mm_data.mm_hash)
             except Exception as e:
-                logger.error(f"Unhandled Cache Miss {mm_data.mm_hash}, error code: {str(e)}")
-                
+                logger.error(
+                    f"Unhandled Cache Miss {mm_data.mm_hash}, error code: {str(e)}"
+                    )
+
     def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
         """
         Queue the encoder cache to consumers.
@@ -275,29 +283,33 @@ class SHMConnector(ECConnectorBase):
             try:
                 feat_key, tensor = self.send_queue.get()
                 shared_handle = reduce_tensor(tensor.detach().clone())
-                send_data = {
-                    "key": feat_key,
-                    "value": shared_handle
-                }
+                send_data = {"key": feat_key,"value": shared_handle}
                 future_list = []
                 for path in self.zmq_paths:
-                    future = self.thread_executor.submit(self.shared_handle_send, path, send_data)
+                    future = self.thread_executor.submit(
+                        self.shared_handle_send, path, send_data
+                        )
                     future_list.append(future)
                 ack_count = 0
                 for future in as_completed(future_list):
                     try:
-                        task_result =  future.result()
+                        task_result = future.result()
                         if task_result == b"ACK":
                             ack_count += 1
-                    except Exception as e:
+                    except Exception:
                         raise ValueError(f"Unexpected ACK response: {task_result}")
                 if len(self.zmq_paths) == ack_count:
                     filename = self._generate_filename_debug(feat_key)
-                    logger.debug("rank %s send the feat key %s, filename %s", get_world_group().local_rank, feat_key,
-                                filename)
+                    logger.debug(
+                        "rank %s send the feat key %s, filename %s", 
+                        get_world_group().local_rank, 
+                        feat_key, 
+                        filename)
                 self.send_queue.task_done()
             except Exception as e:
-                logger.error(f"put key: {feat_key} into store fail, error code: {str(e)}")
+                logger.error(
+                    f"put key: {feat_key} into store fail, error code: {str(e)}"
+                    )
                 if 'feat_key' in locals():
                     self.send_queue.task_done()
                 continue
@@ -313,7 +325,9 @@ class SHMConnector(ECConnectorBase):
                 self.handle_caches[feat_key] = share_handle
                 self.recv_queue.task_done()
             except Exception as e:
-                logger.error(f"get key: {feat_key} into store fail, error code: {str(e)}")
+                logger.error(
+                    f"get key: {feat_key} into store fail, error code: {str(e)}"
+                    )
                 if 'feat_key' in locals():
                     self.recv_queue.task_done()
                 continue
@@ -325,7 +339,9 @@ class SHMConnector(ECConnectorBase):
         """
         local_rank = get_world_group().local_rank
         tp_size = len(self.consumer_sock_addrs)
-        side_channel_host, handshake_port = self.consumer_sock_addrs[local_rank % tp_size]
+        side_channel_host, handshake_port = self.consumer_sock_addrs[
+            local_rank % tp_size
+            ]
         path = make_zmq_path("tcp", side_channel_host, handshake_port)
         logger.debug("Starting listening on path: %s", path)
 
@@ -347,10 +363,7 @@ class SHMConnector(ECConnectorBase):
                     logger.error("Failed to decode message: %s", e)
 
 
-def ensure_zmq_send(
-        socket: zmq.Socket,
-        data: list,
-        max_retries: int = 3):
+def ensure_zmq_send(socket: zmq.Socket, data: list, max_retries: int = 3):
     """Reliably send data over a ZMQ socket with a retry mechanism."""
     retries_left = max_retries
     while True:
@@ -361,31 +374,27 @@ def ensure_zmq_send(
             retries_left -= 1
             if retries_left > 0:
                 logger.warning(
-                    f"Send failed: {e}, retrying... ({retries_left} "
-                    "attempts left)")
+                    f"Send failed: {e}, retrying... ({retries_left} attempts left)")
                 time.sleep(0.1)
             else:
                 logger.error(f"Send failed after all retries: {e}")
-                raise RuntimeError(f"Failed to send data after {max_retries} "
-                                   f"retries: {e}")
-
+                raise RuntimeError(
+                    f"Failed to send data after {max_retries} retries: {e}")
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any,
-            addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     """
-    Context manager for managing ZMQ life-cycle. 
+    Context manager for managing ZMQ life-cycle.
     Handles context creation, socket binding/connection, and clean destruction.
     """
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
         raise ValueError(f"Unexpected socket type: {socket_type}")
-    ctx: Optional[zmq.Context] = None
+    ctx: zmq.Context | None = None
     try:
         ctx = zmq.Context()
-        yield make_zmq_socket(ctx=ctx,
-                              path=addr,
-                              socket_type=socket_type,
-                              bind=socket_type == zmq.ROUTER)
+        yield make_zmq_socket(
+            ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER
+            )
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
