@@ -346,7 +346,7 @@ class Fp8LinearMethod(LinearMethodBase):
             self.w8a8_block_fp8_linear = init_fp8_block_scaled_linear_kernel(
                 weight_quant_key=weight_quant_key,
                 activation_quant_key=activation_quant_key,
-                out_dtype=torch.get_default_dtype(),
+                out_dtype=self.out_dtype,
                 module_name=self.__class__.__name__,
             )
         else:
@@ -361,7 +361,7 @@ class Fp8LinearMethod(LinearMethodBase):
             self.fp8_linear = init_fp8_linear_kernel(
                 activation_quant_key=activation_quant_key,
                 weight_quant_key=kFp8StaticTensorSym,
-                out_dtype=torch.get_default_dtype(),
+                out_dtype=self.out_dtype,
                 module_name=self.__class__.__name__,
             )
 

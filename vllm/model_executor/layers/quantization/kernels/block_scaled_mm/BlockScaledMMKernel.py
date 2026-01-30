@@ -87,6 +87,7 @@ class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8BlockPara
         bias: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
+        maybe_out_dtype = self.config.out_dtype
         params = self._get_layer_params(layer)
         weight = params.weight
         weight_scale_inv = params.weight_scale_inv
@@ -96,21 +97,21 @@ class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8BlockPara
         # View input as 2D matrix for fp8 methods
         input_2d = x.view(-1, x.shape[-1])
         output_shape = [*x.shape[:-1], weight.shape[0]]
-        output_dtype = x.dtype
+        out_dtype = input_2d.dtype if maybe_out_dtype is None else maybe_out_dtype
 
         q_input, input_scale = self.input_quant_op(input_2d, input_scale, scale_up)
 
         output = self.apply_block_scaled_mm(
             A=q_input,
             B=weight,
-            out_dtype=output_dtype,
+            out_dtype=out_dtype,
             As=input_scale,
             Bs=weight_scale_inv,
         )
 
         if bias is not None:
             output = output + bias
-        return output.to(dtype=output_dtype).view(*output_shape)
+        return output.to(dtype=out_dtype).view(*output_shape)
 
     @abstractmethod
     def apply_block_scaled_mm(

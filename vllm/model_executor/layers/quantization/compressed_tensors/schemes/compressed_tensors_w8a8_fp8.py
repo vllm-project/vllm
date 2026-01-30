@@ -27,10 +27,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     validate_fp8_block_shape,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    FP8_DTYPE,
     GroupShape,
-    QuantKey,
-    ScaleDesc,
+    create_fp8_quant_key,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kFp8StaticTokenSym,
@@ -79,20 +77,16 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             assert not self.is_static_input_scheme
             self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
 
-            weight_scale_desc = ScaleDesc(
-                dtype=torch.float32,
-                static=False,
-                group_shape=GroupShape(*self.weight_block_size),
+            weight_quant_key = create_fp8_quant_key(
+                static=True, group_shape=GroupShape(*self.weight_block_size)
             )
-            weight_quant_key = QuantKey(FP8_DTYPE, weight_scale_desc)
-            act_scale_desc = ScaleDesc(
-                FP8_DTYPE, static=False, group_shape=self.act_q_group_shape
+            activation_quant_key = create_fp8_quant_key(
+                static=False, group_shape=self.act_q_group_shape
             )
-            activation_quant_key = QuantKey(FP8_DTYPE, act_scale_desc)
             self.w8a8_block_fp8_linear = init_fp8_block_scaled_linear_kernel(
                 weight_quant_key=weight_quant_key,
                 activation_quant_key=activation_quant_key,
-                out_dtype=torch.get_default_dtype(),
+                out_dtype=self.out_dtype,
                 module_name=self.__class__.__name__,
             )
         else:
