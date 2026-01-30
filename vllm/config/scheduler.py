@@ -130,7 +130,6 @@ class SchedulerConfig:
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
 
-    # FIX: Restored missing field causing KeyError in docs build
     external_parameters: dict[str, Any] | None = Field(default=None)
     """A dictionary of external parameters for custom scheduler implementations.
     If a user-defined scheduler requires additional configuration values, they
@@ -264,9 +263,10 @@ class SchedulerConfig:
                 self.scheduler_cls
                 == "vllm.v1.core.sched.ewsjf_scheduler.scheduler.EWSJFScheduler"
             ):
+                # FIX: Explicit string concatenation for shorter lines
                 self.scheduler_cls = (
-                    "vllm.v1.core.sched.ewsjf_scheduler."
-                    "async_scheduler.AsyncEWSJFScheduler"
+                    "vllm.v1.core.sched.ewsjf_scheduler.async_scheduler"
+                    ".AsyncEWSJFScheduler"
                 )
             else:
                 self.scheduler_cls = "vllm.v1.core.sched.async_scheduler.AsyncScheduler"
