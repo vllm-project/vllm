@@ -260,8 +260,9 @@ class SchedulerConfig:
         module_dir = os.path.dirname(module_file)
 
         config_path = os.path.join(module_dir, "config.json")
-        if os.path.exists(config_path):
-            with open(config_path, "r") as f:
+        # Load config.json only if no external parameters were provided
+        if self.external_parameters is None and os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
                 self.external_parameters = json.load(f)
 
     @model_validator(mode="after")
