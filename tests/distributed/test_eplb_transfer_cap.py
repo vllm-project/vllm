@@ -103,22 +103,16 @@ def test_apply_transfer_cap_undo_three_cycle():
     """Test undoing cycles when over cap."""
     old = torch.tensor([0, 1, 2, 3, 4, 5])
     new = torch.tensor([1, 0, 3, 4, 2, 5])
-    # 2-cycle at positions 0,1 (2 transfers)
-    # 3-cycle at positions 2,3,4 (3 transfers)
-    # Total: 5 transfers
+    # Cycle 1: 0->1
+    # Cycle 2: 2->3->4
 
     apply_transfer_cap(old, new, max_transfers=3)
 
-    # Will undo the 2-cycle first (smallest), leaving 3 transfers
+    # Will undo the smallest cycle first, leaving 3 transfers
     num_transfers = (old != new).sum().item()
     assert num_transfers == 3
     # Positions 0 and 1 should be reverted
-    assert new[0].item() == 0
-    assert new[1].item() == 1
-    # Positions 2, 3, 4 should still have the 3-cycle
-    assert new[2].item() == 3
-    assert new[3].item() == 4
-    assert new[4].item() == 2
+    assert new.tolist() == [0, 1, 3, 4, 2, 5]
 
 
 def test_apply_transfer_cap_all_cycles_same_size():
@@ -126,10 +120,10 @@ def test_apply_transfer_cap_all_cycles_same_size():
     new = torch.tensor([1, 0, 3, 2, 5, 4])
     apply_transfer_cap(old, new, max_transfers=4)
 
-    # Should keep 2 cycles (4 transfers), undo 1 cycle
+    # Should keep 2 cycles (4 transfers), and undo 1 cycle
     num_transfers = (old != new).sum().item()
     assert num_transfers == 4
-    assert sorted(new.tolist()) == [0, 1, 2, 3, 4, 5]
+    assert new.tolist() == [0, 1, 3, 2, 5, 4]
 
 
 def test_apply_transfer_cap_maintains_permutation():
@@ -139,10 +133,8 @@ def test_apply_transfer_cap_maintains_permutation():
 
     # Should have at most 6 transfers (3 swaps, rounded up)
     num_transfers = (old != new).sum().item()
-    assert num_transfers <= 6
-
-    # Must be valid permutation
-    assert sorted(new.tolist()) == list(range(8))
+    assert num_transfers == 4
+    assert new.tolist() == [0, 1, 2, 3, 5, 4, 7, 6]
 
 
 def test_apply_transfer_cap_single_large_cycle():
