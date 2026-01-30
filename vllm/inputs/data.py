@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
 
 import torch
 from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
+
+from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import (
@@ -357,3 +360,15 @@ def to_enc_dec_tuple_list(
         (enc_dec_prompt["encoder_prompt"], enc_dec_prompt["decoder_prompt"])
         for enc_dec_prompt in enc_dec_prompts
     ]
+
+
+@dataclass
+class StreamingInput:
+    """Input data for a streaming generation request.
+
+    This is used with generate() to support multi-turn streaming sessions
+    where inputs are provided via an async generator.
+    """
+
+    prompt: PromptType
+    sampling_params: SamplingParams | None = None

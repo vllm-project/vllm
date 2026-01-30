@@ -68,6 +68,7 @@ from vllm.model_executor.models.interfaces import (
     supports_eagle3,
     supports_mrope,
     supports_multimodal_pruning,
+    supports_realtime,
     supports_transcription,
     supports_xdrope,
 )
@@ -2540,6 +2541,9 @@ class GPUModelRunner(
                 return ["transcription"]
 
             supported_tasks.append("transcription")
+
+        if supports_realtime(model):
+            supported_tasks.append("realtime")
 
         return supported_tasks
 
