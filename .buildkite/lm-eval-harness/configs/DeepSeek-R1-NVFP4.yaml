@@ -8,6 +8,7 @@ tasks:
         value: 0.89
 limit: 1319
 num_fewshot: 5
+batch_size: 1
 kv_cache_dtype: nvfp4
 attention_backend: FLASHINFER_MLA
 env_vars:
