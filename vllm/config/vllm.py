@@ -773,6 +773,18 @@ class VllmConfig:
                 # override related settings when enforce eager
                 self.compilation_config.max_cudagraph_capture_size = 0
                 self.compilation_config.cudagraph_capture_sizes = []
+            elif current_platform.is_cuda_alike:
+                from vllm.model_executor.layers.batch_invariant import (
+                    batch_invariance_requires_eager_mode,
+                )
+
+                if batch_invariance_requires_eager_mode():
+                    self.compilation_config.mode = CompilationMode.NONE
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+                    self.compilation_config.max_cudagraph_capture_size = 0
+                    self.compilation_config.cudagraph_capture_sizes = []
+                else:
+                    self.compilation_config.cudagraph_num_of_warmups = 1
             else:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 

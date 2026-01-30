@@ -1049,6 +1049,25 @@ def override_envs_for_invariance(
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
 
 
+def batch_invariance_requires_eager_mode() -> bool:
+    """
+    Check if batch invariance requires eager mode (no torch.compile).
+    On Blackwell, batch invariance fails with torch.compile enabled.
+    See: https://github.com/vllm-project/vllm/issues/32992
+    """
+    if not vllm_is_batch_invariant():
+        return False
+
+    if current_platform.is_cuda_alike and current_platform.has_device_capability(100):
+        logger.warning(
+            "Batch invariance on Blackwell requires disabling torch.compile. "
+            "See: https://github.com/vllm-project/vllm/issues/32992"
+        )
+        return True
+
+    return False
+
+
 def init_batch_invariance(
     attention_backend: AttentionBackendEnum | None,
 ):
