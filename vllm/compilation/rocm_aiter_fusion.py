@@ -565,6 +565,9 @@ class RopeReshapeKVCachePattern:
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
+            q = q.view(-1, self.num_heads, self.head_dim)
+            k = k.view(-1, self.num_kv_heads, self.head_dim)
+            v = v.view(-1, self.num_kv_heads, self.head_dim)
             dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
             return q, k, v, dummy
 
