@@ -289,17 +289,11 @@ class MultiConnector(KVConnectorBase_V1):
         # Currently no connectors return non-None
         return None
 
-    def get_kv_connector_kv_cache_events(self):
-        """Merge KV cache events from all sub-connectors."""
-        result = None
-        for c in self._connectors:
-            events = c.get_kv_connector_kv_cache_events()
-            if events is not None:
-                if result is None:
-                    result = events
-                else:
-                    result.add_events(events.get_all_events())
-        return result
+    # TODO: Add a generic implementation of 'get_kv_connector_kv_cache_events'
+    # method for the MultiConnector. It should be able to get events from
+    # multiple connectors, handling the case where only a subset of the
+    # requested connectors implements the 'get_kv_connector_kv_cache_events'
+    # WIP: https://github.com/vllm-project/vllm/pull/31811
 
     # ==============================
     # Scheduler-side methods
