@@ -45,4 +45,4 @@ class SamplingMetadata:
     spec_token_ids: list[list[int]] | None = None
 
     # Override the logprobs_mode
-    logprobs_mode_override: list[LogprobsMode] | None = None
+    logprobs_mode_override: LogprobsMode | list[LogprobsMode] | None = None
