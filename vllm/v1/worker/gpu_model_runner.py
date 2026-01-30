@@ -556,7 +556,12 @@ class GPUModelRunner(
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
         )
-        self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self.seq_lens = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
+        self.optimistic_seq_lens_cpu = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, pin_memory=self.pin_memory
+        )
         self.num_computed_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
@@ -809,7 +814,7 @@ class GPUModelRunner(
         if len(token_type_id_requests) == 0:
             return model_kwargs
 
-        seq_lens = self.seq_lens.gpu[:num_reqs]
+        seq_lens = self.seq_lens[:num_reqs]
         token_type_ids = []
 
         for i in range(num_reqs):
@@ -1522,20 +1527,20 @@ class GPUModelRunner(
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
         # Compute optimistic seq_lens (assumes all draft tokens from previous
-        # iteration accepted). Store in seq_lens.np for use by
+        # iteration accepted). Store in optimistic_seq_lens_cpu for use by
         # _build_attention_metadata (max_seq_len) and discard_request_mask.
-        # seq_lens.gpu will be computed later using the same optimistic values.
-        self.seq_lens.np[:num_reqs] = (
+        # seq_lens (GPU) will be computed later using the same optimistic values.
+        self.optimistic_seq_lens_cpu[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
         )
-        self.seq_lens.np[num_reqs:].fill(0)
+        self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
 
         # Record which requests should not be sampled,
         # so that we could clear the sampled tokens before returning
         self.discard_request_mask.np[:num_reqs] = (
-            self.seq_lens.np[:num_reqs] < num_tokens_np
+            self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
         )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
@@ -1597,10 +1602,10 @@ class GPUModelRunner(
             self.num_computed_tokens.gpu[req_indices_gpu].to(torch.int64)
             + self.arange.gpu[:total_num_scheduled_tokens]
         )
-        self.seq_lens.gpu[:num_reqs] = (
+        self.seq_lens[:num_reqs] = (
             self.num_computed_tokens.gpu[:num_reqs] + num_scheduled_tokens_gpu
         )
-        self.seq_lens.gpu[num_reqs:].fill_(0)
+        self.seq_lens[num_reqs:].fill_(0)
 
         self.num_accepted_tokens.np[:num_reqs] = (
             self.input_batch.num_accepted_tokens_cpu[:num_reqs]
@@ -1739,7 +1744,7 @@ class GPUModelRunner(
             # window size when capturing to make sure the correct kernel is selected.
             max_seq_len = self.max_model_len
         else:
-            max_seq_len = self.seq_lens.np[:num_reqs].max().item()
+            max_seq_len = self.optimistic_seq_lens_cpu.numpy()[:num_reqs].max().item()
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
@@ -1777,14 +1782,14 @@ class GPUModelRunner(
             seq_lens_cpu = None
             num_computed_tokens_cpu = None
         else:
-            seq_lens_cpu = self.seq_lens.cpu[:num_reqs_padded]
+            seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
             num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
                 :num_reqs_padded
             ]
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
-            seq_lens=self.seq_lens.gpu[:num_reqs_padded],
+            seq_lens=self.seq_lens[:num_reqs_padded],
             _seq_lens_cpu=seq_lens_cpu,
             _num_computed_tokens_cpu=num_computed_tokens_cpu,
             num_reqs=num_reqs_padded,
@@ -1798,7 +1803,7 @@ class GPUModelRunner(
 
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
-                self.seq_lens.cpu[:num_reqs],
+                self.optimistic_seq_lens_cpu[:num_reqs],
                 self.dcp_world_size,
                 self.dcp_rank,
                 self.parallel_config.cp_kv_cache_interleave_size,
@@ -2679,7 +2684,7 @@ class GPUModelRunner(
         )
 
         hidden_states = hidden_states[:num_scheduled_tokens]
-        seq_lens_cpu = self.seq_lens.cpu[:num_reqs]
+        seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs]
 
         pooling_metadata = self.input_batch.get_pooling_metadata()
         pooling_metadata.build_pooling_cursor(
@@ -4543,9 +4548,9 @@ class GPUModelRunner(
                 seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]
             else:
                 seq_lens = max_query_len  # type: ignore[assignment]
-            self.seq_lens.np[:num_reqs] = seq_lens
-            self.seq_lens.np[num_reqs:] = 0
-            self.seq_lens.copy_to_gpu()
+            self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
+            self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
+            self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
 
             cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
