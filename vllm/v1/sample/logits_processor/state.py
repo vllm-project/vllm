@@ -163,3 +163,10 @@ class LogitsProcessors:
     def all(self) -> Iterator["LogitsProcessor"]:
         """Iterator over all logits processors."""
         return chain(self.argmax_invariant, self.non_argmax_invariant)
+
+    def any_needs_output_token_ids(self) -> bool:
+        """Check if any logits processor needs output token IDs."""
+        return any(
+            lp.needs_output_token_ids()
+            for lp in chain(self.argmax_invariant, self.non_argmax_invariant)
+        )

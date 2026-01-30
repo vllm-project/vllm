@@ -61,6 +61,9 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
     def is_argmax_invariant(self) -> bool:
         return False
 
+    def needs_output_token_ids(self) -> bool:
+        return True
+
     def _add_request(
         self,
         params: SamplingParams,

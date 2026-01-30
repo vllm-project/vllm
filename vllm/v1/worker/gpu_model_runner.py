@@ -515,16 +515,20 @@ class GPUModelRunner(
             block_sizes=[self.cache_config.block_size],
             kernel_block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
-            logitsprocs=build_logitsprocs(
-                self.vllm_config,
-                self.device,
-                self.pin_memory,
-                self.is_pooling_model,
-                custom_logitsprocs,
+            logitsprocs=(
+                logitsprocs := build_logitsprocs(
+                    self.vllm_config,
+                    self.device,
+                    self.pin_memory,
+                    self.is_pooling_model,
+                    custom_logitsprocs,
+                )
             ),
-            # We currently don't know whether a particular custom logits processor
-            # uses output token ids so we set this conservatively.
-            logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
+            # Check if any logits processor (builtin or custom) needs output token
+            # IDs. This ensures the async scheduling system populates token IDs.
+            logitsprocs_need_output_token_ids=(
+                bool(custom_logitsprocs) or logitsprocs.any_needs_output_token_ids()
+            ),
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
