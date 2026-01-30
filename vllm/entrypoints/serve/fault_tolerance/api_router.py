@@ -9,10 +9,8 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.api_server import validate_json_request
-from vllm.entrypoints.openai.protocol import (
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)

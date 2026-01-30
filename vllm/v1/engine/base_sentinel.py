@@ -185,12 +185,13 @@ class BaseSentinel:
         self,
         method_name: str,
         target_downstream_sentinels: set[bytes],
-        response_timeout: int = 5,
+        timeout: int = 5,
         **kwargs,
     ):
         """
         Broadcast a command to downstream sentinels and collect responses.
         """
+        kwargs["timeout"] = timeout
         method_uuid = broadcast_instruction(
             self.downstream_cmd_socket,
             target_downstream_sentinels,
@@ -202,7 +203,7 @@ class BaseSentinel:
             self.downstream_cmd_socket,
             target_downstream_sentinels,
             method_name,
-            response_timeout,
+            timeout,
             method_uuid,
         )
 
