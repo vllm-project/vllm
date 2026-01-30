@@ -176,7 +176,7 @@ def get_text_token_prompts(
     if model_type in MM_DATA_PATCHES:
         mm_data = MM_DATA_PATCHES[model_type](mm_data)
 
-    parsed_data = processor.parse_mm_data(mm_data, validate=False)
+    parsed_data = processor.info.parse_mm_data(mm_data, validate=False)
     mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
 
     text_prompt: str | None
