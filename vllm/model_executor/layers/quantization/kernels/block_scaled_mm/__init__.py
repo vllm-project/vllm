@@ -15,9 +15,8 @@ from .cuda import CudaBlockScaledMMKernel
 
 logger = init_logger(__name__)
 
-__all__ = [
-    "init_fp8_block_scaled_linear_kernel",
-]
+__all__ = ["init_fp8_block_scaled_linear_kernel"]
+
 
 _PLATFORM_PRIORITIES: dict[PlatformEnum, type[Fp8BlockScaledMMKernel]] = {
     PlatformEnum.CUDA: CudaBlockScaledMMKernel,
@@ -39,24 +38,13 @@ def init_fp8_block_scaled_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
     out_dtype: torch.dtype,
-    force_kernel: type[Fp8BlockScaledMMKernel] | None = None,
+    module_name: str | None = None,
 ) -> Fp8BlockScaledMMKernel:
     config = Fp8BlockMMScaledConfig(
         activation_quant_key=activation_quant_key,
         weight_quant_key=weight_quant_key,
         out_dtype=out_dtype,
     )
-
-    if force_kernel is not None:
-        can_dispatch, reason = is_supported_and_can_implement_kernel(
-            force_kernel, config
-        )
-        if can_dispatch:
-            return force_kernel(config)
-        logger.warning_once(
-            f"enforced kernel {force_kernel.__name__} not applicable. \
-            Falling back to another kernel."
-        )
 
     platform_enum = current_platform._enum
 
@@ -67,6 +55,10 @@ def init_fp8_block_scaled_linear_kernel(
             prioritized_kernel, config
         )
         if can_dispatch:
+            module_prefix = f"[{module_name}] " if module_name else ""
+            logger.info_once(
+                f"{module_prefix} Selected kernel: {prioritized_kernel.__name__}"
+            )
             return prioritized_kernel(config)
         else:
             logger.warning_once(f"{reason}")
@@ -76,8 +68,12 @@ def init_fp8_block_scaled_linear_kernel(
                     kernel, config
                 )
                 if can_dispatch:
+                    module_prefix = f"[{module_name}] " if module_name else ""
                     logger.warning_once(
                         f"fall back quantization kernel: {kernel.__name__}"
+                    )
+                    logger.info_once(
+                        f"{module_prefix}Selected kernel: {kernel.__name__} (fallback)"
                     )
                     return kernel(config)
 
