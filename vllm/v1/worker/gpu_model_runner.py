@@ -1456,14 +1456,14 @@ class GPUModelRunner(
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
+        int,  # num_tokens for model forward
     ]:
         """
         :return: tuple[
-            logits_indices, spec_decode_metadata,
+            logits_indices, spec_decode_metadata, num_tokens
         ]
         """
         total_num_tokens = scheduler_output.total_num_scheduled_tokens
-        self._num_tokens_for_forward = total_num_tokens  # May be updated by PCP
         assert total_num_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
@@ -1506,7 +1506,6 @@ class GPUModelRunner(
                     self.reorder_batch_threshold,
                 )
             )
-            self._num_tokens_for_forward = total_num_tokens
             # Use local cumsum for query_start_loc
             cu_num_tokens = np.cumsum(self.pcp_manager.local_num_scheduled)
 
@@ -1685,6 +1684,7 @@ class GPUModelRunner(
         return (
             logits_indices,
             spec_decode_metadata,
+            total_num_tokens,
         )
 
     def _build_attention_metadata(
@@ -3395,10 +3395,9 @@ class GPUModelRunner(
             num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output, num_scheduled_tokens_np
+            logits_indices, spec_decode_metadata, local_total_num_tokens = (
+                self._prepare_inputs(scheduler_output, num_scheduled_tokens_np)
             )
-            local_total_num_tokens = self._num_tokens_for_forward
 
             # For PCP, use local counts; otherwise use global
             if self.pcp_world_size > 1:
@@ -3827,6 +3826,45 @@ class GPUModelRunner(
             )
 
         return async_output
+
+    def _pp_broadcast_prev_sampled_token_ids(
+        self, sampled_token_ids: torch.Tensor
+    ) -> None:
+        """Broadcast sampled token ids (GPU) from last PP stage"""
+        pp = get_pp_group()
+        assert pp.is_last_rank
+        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+        assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
+            "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
+        )
+        torch.distributed.broadcast(
+            sampled_token_ids, src=pp.rank, group=pp.device_group
+        )
+
+    def _pp_receive_prev_sampled_token_ids_to_input_batch(self) -> None:
+        """Receive sampled token ids broadcast from last PP stage"""
+        pp = get_pp_group()
+        assert not pp.is_last_rank
+        num_reqs = self.input_batch.num_reqs
+        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+        recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
+        torch.distributed.broadcast(recv, src=pp.last_rank, group=pp.device_group)
+        self.input_batch.prev_sampled_token_ids = recv
+
+        # construct `prev_req_id_to_index` here so `_prepare_input_ids`
+        # can map req_id -> previous batch row
+        discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[0]
+        discard_req_indices_set = set(discard_req_indices)
+        prev_req_id_to_index: dict[str, int] = {}
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            if i in discard_req_indices_set:
+                continue
+            prev_req_id_to_index[req_id] = i
+            # PP+async scheduling: advance per-request local cached output length by
+            # appending a placeholder (-1) token id.
+            if (req_state := self.requests.get(req_id)) is not None:
+                req_state.output_token_ids.append(-1)
+        self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
