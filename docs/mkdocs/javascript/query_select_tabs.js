@@ -8,7 +8,7 @@ window.addEventListener("load", function () {
   }
 
   // Only if there's a tabbed-labels div
-  const labelsDiv = document.querySelector("div.tabbed-set");
+  const labelsDiv = document.querySelector("div.tabbed-labels");
   if (!labelsDiv) {
     return;
   }
