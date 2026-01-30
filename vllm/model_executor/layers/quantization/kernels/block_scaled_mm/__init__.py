@@ -29,7 +29,15 @@ def is_supported_and_can_implement_kernel(
 ) -> tuple[bool, str]:
     is_supported, reason = kernel.is_supported()
     if not is_supported:
-        return False, f"{kernel.__name__} not supported, due to {reason}"
+        return False, f"{kernel.__name__} not supported. {reason}"
+
+    can_implement, failure_reason = kernel.can_implement(config)
+    if not can_implement:
+        return (
+            False,
+            f"{kernel.__name__} not supported for \
+            requested config {config}. {failure_reason}.",
+        )
 
     return True, ""
 
@@ -52,7 +60,8 @@ def init_fp8_block_scaled_linear_kernel(
     if platform_enum in _PLATFORM_PRIORITIES:
         prioritized_kernel = _PLATFORM_PRIORITIES[platform_enum]
         can_dispatch, reason = is_supported_and_can_implement_kernel(
-            prioritized_kernel, config
+            prioritized_kernel,
+            config,
         )
         if can_dispatch:
             module_prefix = f"[{module_name}] " if module_name else ""
@@ -62,16 +71,12 @@ def init_fp8_block_scaled_linear_kernel(
             return prioritized_kernel(config)
         else:
             logger.warning_once(f"{reason}")
+
             fall_back_kernels = prioritized_kernel.ordered_fallback_kernels()
             for kernel in fall_back_kernels:
-                can_dispatch, reason = is_supported_and_can_implement_kernel(
-                    kernel, config
-                )
+                can_dispatch, _ = is_supported_and_can_implement_kernel(kernel, config)
                 if can_dispatch:
                     module_prefix = f"[{module_name}] " if module_name else ""
-                    logger.warning_once(
-                        f"fall back quantization kernel: {kernel.__name__}"
-                    )
                     logger.info_once(
                         f"{module_prefix}Selected kernel: {kernel.__name__} (fallback)"
                     )
