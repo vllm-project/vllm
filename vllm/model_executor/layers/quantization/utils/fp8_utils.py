@@ -490,7 +490,7 @@ class W8A8BlockFp8LinearOp:
         if input_scale is not None:
             q_input = input_2d
         else:
-            q_input, input_scale = self.input_quant_op(input_2d, use_triton=True)
+            q_input, input_scale = self.input_quant_op(input_2d, use_triton=use_triton)
 
         return gemm_a8w8_blockscale_op(
             q_input,
