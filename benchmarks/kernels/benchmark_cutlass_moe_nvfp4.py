@@ -196,7 +196,7 @@ def bench_run(
             g2_alphas=w2_gs,
         )
 
-        kernel = mk.FusedMoEModularKernel(
+        kernel = mk.FusedMoEModularKernel.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp4(
                 make_dummy_moe_config(),
@@ -241,7 +241,7 @@ def bench_run(
             g2_alphas=w2_gs,
         )
 
-        kernel = mk.FusedMoEModularKernel(
+        kernel = mk.FusedMoEModularKernel.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp4(
                 make_dummy_moe_config(),
