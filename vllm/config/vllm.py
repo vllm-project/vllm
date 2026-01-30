@@ -458,6 +458,30 @@ class VllmConfig:
             hf_config.architectures = architectures
 
         model_config = copy.deepcopy(self.model_config)
+
+        if (
+            model_config.is_multimodal_model
+            and hasattr(model_config.hf_config, "tie_word_embeddings")
+            and not hasattr(hf_config.get_text_config(), "tie_word_embeddings")
+        ):
+            # In Transformers v5, tie_word_embeddings belongs to the config of the class
+            # that can see both layers to be tied. For example:
+            #
+            # SomeVLModel:
+            #   self.language_model = SomeLanguageModel()
+            #   self.vision_model = SomeVisionModel()
+            #
+            # SomeVLModelForMultimodalLM:
+            #   self.model = SomeVLModel()
+            #   self.lm_head = nn.Linear()
+            #
+            # Therefore, tie_word_embeddings is defined in SomeVLModelForMultimodalLM's
+            # config and is not present in SomeVLModel's config. In vLLM, the lm_head
+            # belongs to the language_model, so we must ensure that tie_word_embeddings
+            # is set in the language_model's config.
+            tie_word_embeddings = model_config.hf_config.tie_word_embeddings
+            hf_config.get_text_config().tie_word_embeddings = tie_word_embeddings
+
         model_config.hf_config = hf_config
         model_config.model_arch_config = model_config.get_model_arch_config()
 
