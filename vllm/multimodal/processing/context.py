@@ -655,36 +655,6 @@ class BaseProcessingInfo:
 
             raise ValueError(msg)
 
-    def parse_mm_data(
-        self,
-        mm_data: MultiModalDataDict,
-        *,
-        validate: bool = True,
-    ) -> MultiModalDataItems:
-        """
-        Normalize
-        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
-        to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
-        before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
-        """
-        mm_items = self.data_parser.parse_mm_data(mm_data)
-
-        if validate:
-            mm_config = self.ctx.model_config.get_multimodal_config()
-            if not mm_config.enable_mm_embeds:
-                for modality, items in mm_items.items():
-                    if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
-                        raise ValueError(
-                            f"You must set `--enable-mm-embeds` to input "
-                            f"`{modality}_embeds`"
-                        )
-
-            for modality, items in mm_items.items():
-                self.validate_num_items(modality, len(items))
-
-        return mm_items
-
     def get_mm_max_tokens_per_item(
         self,
         seq_len: int,
