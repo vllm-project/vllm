@@ -1,0 +1,14 @@
+model_name: "nvidia/DeepSeek-R1-0528-FP4-v2"
+tasks:
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,strict-match"
+        value: 0.89
+      - name: "exact_match,flexible-extract"
+        value: 0.89
+limit: 1319
+num_fewshot: 5
+kv_cache_dtype: nvfp4
+attention_backend: CUTLASS_MLA
+env_vars:
+  VLLM_USE_FLASHINFER_MOE_FP4: "0"

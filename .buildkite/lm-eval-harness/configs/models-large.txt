@@ -4,4 +4,4 @@ Mixtral-8x7B-Instruct-v0.1.yaml
 Qwen2-57B-A14-Instruct.yaml
 DeepSeek-V2-Lite-Chat.yaml
 NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.yaml
-Qwen3-30B-A3B-NVFP4.yaml
+DeepSeek-R1-0528-FP4-v2.yaml
