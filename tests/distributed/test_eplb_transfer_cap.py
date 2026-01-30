@@ -9,7 +9,6 @@ from vllm.distributed.eplb.eplb_state import (
 
 
 def test_find_cycles_no_changes():
-    """Test when old and new are identical."""
     old = torch.tensor([0, 1, 2, 3, 4])
     new = torch.tensor([0, 1, 2, 3, 4])
     cycles = find_cycles(old, new)
@@ -17,18 +16,18 @@ def test_find_cycles_no_changes():
 
 
 def test_find_cycles_single_swap():
-    """Test a 2-cycle (swap)."""
+    # Swap positions 1 and 3
     old = torch.tensor([0, 1, 2, 3, 4])
-    new = torch.tensor([0, 3, 2, 1, 4])  # Swap experts at positions 1 and 3
+    new = torch.tensor([0, 3, 2, 1, 4])
     cycles = find_cycles(old, new)
     assert len(cycles) == 1
     assert set(cycles[0]) == {1, 3}
 
 
 def test_find_cycles_multiple_swaps():
-    """Test multiple independent 2-cycles."""
+    # Swap positions (0, 1) and (2, 3)
     old = torch.tensor([0, 1, 2, 3, 4])
-    new = torch.tensor([1, 0, 3, 2, 4])  # Swap at 0↔1 and 2↔3
+    new = torch.tensor([1, 0, 3, 2, 4])
     cycles = find_cycles(old, new)
     assert len(cycles) == 2
     cycle_sets = [set(c) for c in cycles]
@@ -37,35 +36,28 @@ def test_find_cycles_multiple_swaps():
 
 
 def test_find_cycles_three_cycle():
-    """Test a 3-cycle."""
     old = torch.tensor([3, 0, 2, 1, 4])
     new = torch.tensor([1, 0, 3, 2, 4])
-    # Position 0: expert 3 → expert 1
-    # Position 2: expert 2 → expert 3
-    # Position 3: expert 1 → expert 2
-    # This is a 3-cycle: 0→3→2→0
+    # Cycle 0->3->2->0
     cycles = find_cycles(old, new)
     assert len(cycles) == 1
     assert set(cycles[0]) == {0, 2, 3}
 
 
 def test_find_cycles_four_cycle():
-    """Test a 4-cycle."""
     old = torch.tensor([0, 1, 2, 3, 4])
     new = torch.tensor([1, 2, 3, 0, 4])
-    # Position 0: 0→1, Position 1: 1→2, Position 2: 2→3, Position 3: 3→0
+    # Cycle 0->1->2->3->0
     cycles = find_cycles(old, new)
     assert len(cycles) == 1
     assert set(cycles[0]) == {0, 1, 2, 3}
 
 
 def test_find_cycles_mixed():
-    """Test mixture of 2-cycle and 3-cycle."""
     old = torch.tensor([0, 1, 2, 3, 4, 5])
     new = torch.tensor([1, 0, 3, 4, 2, 5])
-    # Positions 0↔1 form a 2-cycle
-    # Positions 2→3→4→2 form a 3-cycle
-    # Position 5 unchanged
+    # Cycle 1: 0->1
+    # Cycle 2: 2->3->4->2
     cycles = find_cycles(old, new)
     assert len(cycles) == 2
     cycle_sets = [set(c) for c in cycles]
@@ -74,46 +66,40 @@ def test_find_cycles_mixed():
 
 
 def test_apply_transfer_cap_under_limit():
-    """Test when transfers are already under the cap."""
     old = torch.tensor([0, 1, 2, 3, 4])
-    new = torch.tensor([1, 0, 2, 3, 4])  # 2 transfers (1 swap)
+    new = torch.tensor([1, 0, 2, 3, 4])
     apply_transfer_cap(old, new, max_transfers=4)
     expected = torch.tensor([1, 0, 2, 3, 4])
     assert torch.equal(new, expected)
 
 
 def test_apply_transfer_cap_exact_limit():
-    """Test when transfers exactly match the cap."""
     old = torch.tensor([0, 1, 2, 3, 4])
-    new = torch.tensor([1, 0, 2, 3, 4])  # 2 transfers
+    new = torch.tensor([1, 0, 2, 3, 4])
     apply_transfer_cap(old, new, max_transfers=2)
     expected = torch.tensor([1, 0, 2, 3, 4])
     assert torch.equal(new, expected)
 
 
 def test_apply_transfer_cap_undo_one_swap():
-    """Test undoing one 2-cycle."""
     old = torch.tensor([0, 1, 2, 3, 4])
-    new = torch.tensor([1, 0, 3, 2, 4])  # Two 2-cycles (4 transfers)
+    new = torch.tensor([1, 0, 3, 2, 4])
     apply_transfer_cap(old, new, max_transfers=2)
 
-    # Should undo one cycle (the smaller indices one: 0↔1)
+    # Should undo one cycle (0->1)
     num_transfers = (old != new).sum().item()
     assert num_transfers == 2
     assert sorted(new.tolist()) == [0, 1, 2, 3, 4]
 
 
 def test_apply_transfer_cap_undo_three_cycle():
-    """Test undoing a 3-cycle."""
     old = torch.tensor([3, 0, 2, 1, 4])
-    new = torch.tensor([1, 0, 3, 2, 4])  # 3-cycle (3 transfers)
+    new = torch.tensor([1, 0, 3, 2, 4])
     apply_transfer_cap(old, new, max_transfers=1)
 
-    # Should undo the entire 3-cycle (can't partially undo)
+    # Should undo all cycles
     assert torch.equal(new, old)
 
-
-def test_apply_transfer_cap_keeps_smallest_cycles():
     """Test undoing cycles when over cap."""
     old = torch.tensor([0, 1, 2, 3, 4, 5])
     new = torch.tensor([1, 0, 3, 4, 2, 5])
@@ -136,9 +122,8 @@ def test_apply_transfer_cap_keeps_smallest_cycles():
 
 
 def test_apply_transfer_cap_all_cycles_same_size():
-    """Test when all cycles are the same size."""
     old = torch.tensor([0, 1, 2, 3, 4, 5])
-    new = torch.tensor([1, 0, 3, 2, 5, 4])  # Three 2-cycles
+    new = torch.tensor([1, 0, 3, 2, 5, 4])
     apply_transfer_cap(old, new, max_transfers=4)
 
     # Should keep 2 cycles (4 transfers), undo 1 cycle
@@ -148,9 +133,8 @@ def test_apply_transfer_cap_all_cycles_same_size():
 
 
 def test_apply_transfer_cap_maintains_permutation():
-    """Test that result is always a valid permutation."""
     old = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
-    new = torch.tensor([1, 0, 3, 2, 5, 4, 7, 6])  # 4 swaps, 8 transfers
+    new = torch.tensor([1, 0, 3, 2, 5, 4, 7, 6])
     apply_transfer_cap(old, new, max_transfers=5)
 
     # Should have at most 6 transfers (3 swaps, rounded up)
@@ -162,14 +146,12 @@ def test_apply_transfer_cap_maintains_permutation():
 
 
 def test_apply_transfer_cap_single_large_cycle():
-    """Test worst case: single cycle that includes all expert transfers."""
+    # Cycle 0->1->2->3->4->0
     old = torch.tensor([0, 1, 2, 3, 4])
-    new = torch.tensor([4, 0, 1, 2, 3])  # 5-cycle
+    new = torch.tensor([4, 0, 1, 2, 3])
 
     apply_transfer_cap(old, new, max_transfers=3)
 
-    # Can't partially undo a cycle, so entire cycle is undone
-    # Result: 0 transfers instead of the desired 3
     assert torch.equal(new, old)
     num_transfers = (old != new).sum().item()
     assert num_transfers == 0
