@@ -4,7 +4,7 @@
 
 from typing import Annotated, Any
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
 from vllm import PoolingParams
 from vllm.config.pooler import get_use_activation
@@ -12,6 +12,29 @@ from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
+
+
+class MultimodalEmbeddingInput(BaseModel):
+    """Input type for multimodal embeddings.
+    
+    Supports text, image, and instruction inputs for embedding generation.
+    At least one of text or image must be provided.
+    
+    Examples:
+        >>> # Text only
+        >>> MultimodalEmbeddingInput(text="Hello world")
+        >>> # Image only
+        >>> MultimodalEmbeddingInput(image="https://example.com/image.jpg")
+        >>> # Text and image with instruction
+        >>> MultimodalEmbeddingInput(
+        ...     instruction="Represent this image for retrieval",
+        ...     text="A cat",
+        ...     image="https://example.com/cat.jpg"
+        ... )
+    """
+    instruction: str | None = None
+    text: str | None = None
+    image: str | None = None
 
 
 class PoolingBasicRequestMixin(OpenAIBaseModel):
@@ -43,7 +66,14 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
 
 class CompletionRequestMixin(OpenAIBaseModel):
     # --8<-- [start:completion-params]
-    input: list[int] | list[list[int]] | str | list[str]
+    input: (
+        list[int]
+        | list[list[int]]
+        | str
+        | list[str]
+        | MultimodalEmbeddingInput
+        | list[MultimodalEmbeddingInput]
+    )
     # --8<-- [end:completion-params]
 
     # --8<-- [start:completion-extra-params]

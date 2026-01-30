@@ -22,7 +22,10 @@ class EmbeddingCompletionRequest(
 ):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/embeddings
-    pass
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
+    )
 
 
 class EmbeddingChatRequest(
