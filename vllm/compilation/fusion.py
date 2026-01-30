@@ -541,6 +541,7 @@ class RMSNormNvfp4QuantPattern:
                 input=result_rms,
                 output_scale=output_scale,
                 input_scale=input_scale,
+                is_sf_swizzled_layout=True,
             )
             return at[1], at[2]
 
