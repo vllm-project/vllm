@@ -113,7 +113,7 @@ def create_batched_mm_kwargs(
 
     mm_kwargs = processor.apply(
         prompt=token_prompt if text_prompt is None else text_prompt,
-        mm_data=resized_mm_data,
+        mm_items=processor.info.parse_mm_data(resized_mm_data),
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
     )["mm_kwargs"].require_data()

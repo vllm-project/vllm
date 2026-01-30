@@ -176,7 +176,7 @@ def get_text_token_prompts(
     if model_type in MM_DATA_PATCHES:
         mm_data = MM_DATA_PATCHES[model_type](mm_data)
 
-    parsed_data = processor.data_parser.parse_mm_data(mm_data)
+    parsed_data = processor.parse_mm_data(mm_data, validate=False)
     mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
 
     text_prompt: str | None
@@ -335,17 +335,18 @@ def _test_processing_correctness_one(
     model_type = model_config.hf_config.model_type
 
     text_prompt, token_prompt = get_text_token_prompts(baseline_processor, mm_data)
+    mm_items = baseline_processor.info.parse_mm_data(mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
     baseline_tokenized_result = baseline_processor.apply(
         token_prompt,
-        mm_data=mm_data,
+        mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
     cached_tokenized_result = cached_processor.apply(
         token_prompt,
-        mm_data=mm_data,
+        mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
@@ -359,12 +360,12 @@ def _test_processing_correctness_one(
     if text_prompt is not None:
         baseline_text_result = baseline_processor.apply(
             text_prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs={},
         )
         cached_text_result = cached_processor.apply(
             text_prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs={},
         )
 

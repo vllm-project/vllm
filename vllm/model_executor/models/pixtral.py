@@ -299,9 +299,11 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         res = tokenizer.mistral.encode_chat_completion(request)
         dummy_tokens = res.tokens
 
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
+
         return ProcessorInputs(
             prompt=dummy_tokens,
-            mm_data=dummy_mm_data,
+            mm_items=dummy_mm_items,
             tokenization_kwargs=tokenization_kwargs,
         )
 
