@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional, Union
+from typing import Any
 
 from transformers.configuration_utils import PretrainedConfig
 
@@ -25,27 +25,27 @@ class Step3p5Config(PretrainedConfig):
         moe_top_k: int = 4,
         moe_layer_offset: int = 0,
         moe_dynamic_exp_p: float = 1.0,
-        rope_theta: Optional[Union[float, list[float]]] = 500000,
-        rope_scaling: Optional[dict[str, Any]] = None,
-        head_dim: Optional[int] = None,
-        share_expert_dim: Optional[int] = None,
+        rope_theta: float | list[float] | None = 500000,
+        rope_scaling: dict[str, Any] | None = None,
+        head_dim: int | None = None,
+        share_expert_dim: int | None = None,
         norm_expert_weight: bool = True,
-        bos_token_id: Optional[Union[list[int], int]] = None,
-        eos_token_id: Optional[Union[list[int], int]] = None,
+        bos_token_id: list[int] | int | None = None,
+        eos_token_id: list[int] | int | None = None,
         moe_router_activation: str = "softmax",
         moe_router_scaling_factor: float = 1.0,
         att_impl_type: str = "GQA",
         use_head_wise_attn_gate: bool = False,
         use_moe_router_bias: bool = True,
         need_fp32_gate: bool = True,
-        layer_types: Optional[list[str]] = None,
-        use_rope_layers: Optional[list[bool]] = None,
-        yarn_only_types: Optional[list[str]] = None,
-        attention_other_setting: Optional[dict[str, Any]] = None,
+        layer_types: list[str] | None = None,
+        use_rope_layers: list[bool] | None = None,
+        yarn_only_types: list[str] | None = None,
+        attention_other_setting: dict[str, Any] | None = None,
         num_nextn_predict_layers: int = 0,
-        swiglu_limits: Optional[list[float]] = None,
-        swiglu_limits_shared: Optional[list[float]] = None,
-        max_position_embeddings: Optional[int] = None,
+        swiglu_limits: list[float] | None = None,
+        swiglu_limits_shared: list[float] | None = None,
+        max_position_embeddings: int | None = None,
         **kwargs,
     ):
         self.hidden_size = hidden_size
