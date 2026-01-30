@@ -69,6 +69,7 @@ class CustomQwen2Decoder(nn.Module):
     def _create_custom_model(self, Qwen2Model, config):
         """Qwen2Model"""
 
+
         class CustomQwen2ModelInner(Qwen2Model):
             def __init__(self, config):
                 super().__init__(config)
