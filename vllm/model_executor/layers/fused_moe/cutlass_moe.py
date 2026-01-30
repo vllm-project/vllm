@@ -1311,10 +1311,11 @@ class CutlassExpertsW4A16Bf16(mk.FusedMoEPermuteExpertsUnpermute):
         c_strides2: torch.Tensor,
         s_strides1: torch.Tensor,
         s_strides2: torch.Tensor,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         group_size: int,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config=moe_config, quant_config=quant_config)
         self.out_dtype = out_dtype
         self.a_strides1 = a_strides1
         self.a_strides2 = a_strides2
@@ -1326,13 +1327,53 @@ class CutlassExpertsW4A16Bf16(mk.FusedMoEPermuteExpertsUnpermute):
         self.s_strides2 = s_strides2
         self.group_size = group_size
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        raise NotImplementedError(
+            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "This method should not be called."
         )
 
     def supports_chunking(self) -> bool:
@@ -1385,6 +1426,8 @@ class CutlassExpertsW4A16Bf16(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         assert self.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
+        assert a1q_scale is None, "activation scale is not needed for W4A16 Cutlass MoE"
+        assert a2_scale is None, "activation scale is not needed for W4A16 Cutlass MoE"
         assert hidden_states.dtype == torch.bfloat16, (
             f"Invalid input dtype: {hidden_states.dtype}"
         )
@@ -1392,7 +1435,7 @@ class CutlassExpertsW4A16Bf16(mk.FusedMoEPermuteExpertsUnpermute):
         expert_num_tokens = None
 
         use_batched_format = (
-            self.activation_formats[0] == mk.FusedMoEActivationFormat.BatchedExperts
+            self.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
         )
         assert not use_batched_format, "batched format not supported"
 
@@ -1442,6 +1485,7 @@ def cutlass_moe_w4a16_bf16(
     s_strides1: torch.Tensor,
     s_strides2: torch.Tensor,
     quant_config: FusedMoEQuantConfig,
+    moe_config: FusedMoEConfig,
     activation: str = "silu",
     expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
@@ -1515,6 +1559,7 @@ def cutlass_moe_w4a16_bf16(
             c_strides2=c_strides2,
             s_strides1=s_strides1,
             s_strides2=s_strides2,
+            moe_config=moe_config,
             quant_config=quant_config,
             group_size=group_size,
         ),

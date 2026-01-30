@@ -9,6 +9,9 @@ from test_cutlass_w4a8_moe import cutlass_quantize
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
     int4_w4a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
@@ -132,12 +135,26 @@ def test_cutlass_w4a16_moe(
 
     s_strides2 = torch.zeros((expert_num, 2), device=device, dtype=torch.int64)
     s_strides2[:, 0] = hidden_size
+
     quant_config = int4_w4a16_moe_quant_config(
         w1_scale=w13_scales_cutlass,
         w2_scale=w2_scales_cutlass,
         w1_zp=None,
         w2_zp=None,
         block_shape=[0, group_size],
+    )
+    moe_config = FusedMoEConfig(
+        num_experts=expert_num,
+        experts_per_token=topk,
+        hidden_dim=hidden_size,
+        intermediate_size_per_partition=intermediate_size,
+        num_local_experts=expert_num,
+        activation="silu",
+        device=device,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+        is_act_and_mul=True,
+        routing_method=RoutingMethodType.DeepSeekV3,
     )
     w13_cutlass, b_strides1 = ops.cutlass_reorder_int4b_grouped(w13_cutlass)
     w2_cutlass, b_strides2 = ops.cutlass_reorder_int4b_grouped(w2_cutlass)
@@ -148,6 +165,7 @@ def test_cutlass_w4a16_moe(
         topk_weights,
         topk_ids,
         quant_config=quant_config,
+        moe_config=moe_config,
         activation="silu",
         global_num_experts=expert_num,
         expert_map=None,

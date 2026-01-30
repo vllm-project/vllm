@@ -2523,6 +2523,7 @@ class CompressedTensorsW4A16CutlassMoEMethod(CompressedTensorsMoEMethod):
         assert intermediate_size_per_partition % 256 == 0, (
             f"{intermediate_size_per_partition=} must be divisible by 256"
         )
+        assert(params_dtype == torch.bfloat16), f"params_dtype must be bfloat16 for W4A16 Cutlass MoE, got {params_dtype}"
         # storage type, pack 8xint4 into int32
         params_dtype = torch.int32
 
@@ -2693,6 +2694,7 @@ class CompressedTensorsW4A16CutlassMoEMethod(CompressedTensorsMoEMethod):
             c_strides2=self.a_strides1_c_strides2,
             s_strides1=self.s_strides1,
             s_strides2=self.s_strides2,
+            moe_config=self.moe,
             quant_config=self.moe_quant_config,
             group_size=self.group_size,
         )
@@ -2727,6 +2729,7 @@ class CompressedTensorsW4A16CutlassMoEMethod(CompressedTensorsMoEMethod):
             layer.w2_weight_packed,
             topk_weights,
             topk_ids,
+            moe_config=self.moe,
             quant_config=self.moe_quant_config,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
