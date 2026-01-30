@@ -105,9 +105,9 @@ class OpenAIToolParser(ToolParser):
         request = super().adjust_request(request)
 
         if request.tool_choice == "required" and request.tools:
-            if request.extra_args is None:
-                request.extra_args = {}
-            request.extra_args["harmony_tool_required"] = True
+            if request.vllm_xargs is None:
+                request.vllm_xargs = {}
+            request.vllm_xargs["harmony_tool_required"] = True
             request.structured_outputs = None
 
         return request

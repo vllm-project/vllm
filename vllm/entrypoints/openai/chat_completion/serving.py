@@ -326,6 +326,9 @@ class OpenAIServingChat(OpenAIServing):
                 conversation, engine_prompts = self._make_request_with_harmony(
                     request, should_include_tools
                 )
+                # Apply tool_choice adjustments (e.g., tool_choice="required")
+                if tool_parser is not None and tokenizer is not None:
+                    request = tool_parser(tokenizer).adjust_request(request)
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(e)
