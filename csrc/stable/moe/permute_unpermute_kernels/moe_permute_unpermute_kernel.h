@@ -2,8 +2,7 @@
 // reference from tensorrt_llm moe kernel implementation archive in
 // https://github.com/BBuf/tensorrt-llm-moe/tree/master
 
-#include <c10/core/ScalarType.h>
-#include <torch/all.h>
+#include <torch/csrc/stable/tensor.h>
 #include "dispatch.h"
 #include <cub/cub.cuh>
 #include <cub/device/device_radix_sort.cuh>
@@ -12,12 +11,12 @@
 #include "cutlass/array.h"
 
 template <typename T>
-inline T* get_ptr(torch::Tensor& t) {
+inline T* get_ptr(torch::stable::Tensor& t) {
   return reinterpret_cast<T*>(t.data_ptr());
 }
 
 template <typename T>
-inline const T* get_ptr(const torch::Tensor& t) {
+inline const T* get_ptr(const torch::stable::Tensor& t) {
   return reinterpret_cast<const T*>(t.data_ptr());
 }
 

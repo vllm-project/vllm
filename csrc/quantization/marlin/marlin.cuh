@@ -2,10 +2,16 @@
 
 #ifndef _marlin_cuh
   #define _marlin_cuh
-  #include <torch/all.h>
 
-  #include <ATen/cuda/CUDAContext.h>
-  #include <c10/cuda/CUDAGuard.h>
+  // TODO: Remove this conditional once stable ABI migration is complete.
+  // These headers are not needed by the kernel code itself, only by the
+  // non-stable ops.cu that uses marlin.cuh.
+  #ifndef TORCH_TARGET_VERSION
+    #include <torch/all.h>
+    #include <ATen/cuda/CUDAContext.h>
+    #include <c10/cuda/CUDAGuard.h>
+  #endif
+
   #include <cuda.h>
   #include <cuda_fp16.h>
   #include <cuda_runtime.h>

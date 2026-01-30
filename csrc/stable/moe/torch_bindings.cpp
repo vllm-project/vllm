@@ -1,25 +1,26 @@
+#include "stable/moe/moe_ops.h"
 #include "core/registration.h"
-#include "moe_ops.h"
 
-TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
+#include <torch/csrc/stable/library.h>
+
+// Use STABLE_TORCH_LIBRARY_FRAGMENT since the _moe_C library is defined in the
+// non-stable _moe_C extension via TORCH_LIBRARY.
+STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
   // Apply topk softmax to the gating outputs.
   m.def(
       "topk_softmax(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
       "bias) -> ()");
-  m.impl("topk_softmax", torch::kCUDA, &topk_softmax);
 
   // Apply topk sigmoid to the gating outputs.
   m.def(
       "topk_sigmoid(Tensor! topk_weights, Tensor! topk_indices, Tensor! "
       "token_expert_indices, Tensor gating_output, bool renormalize, Tensor? "
       "bias) -> ()");
-  m.impl("topk_sigmoid", torch::kCUDA, &topk_sigmoid);
 
   // Calculate the result of moe by summing up the partial results
   // from all selected experts.
   m.def("moe_sum(Tensor input, Tensor! output) -> ()");
-  m.impl("moe_sum", torch::kCUDA, &moe_sum);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.
@@ -29,7 +30,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad,"
       "                     Tensor? maybe_expert_map) -> ()");
-  m.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size, but for the batched case.
@@ -39,8 +39,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor! sorted_token_ids,"
       "                     Tensor! experts_ids,"
       "                     Tensor! num_tokens_post_pad) -> ()");
-  m.impl("batched_moe_align_block_size", torch::kCUDA,
-         &batched_moe_align_block_size);
 
   // Aligning the number of tokens to be processed by each expert such
   // that it is divisible by the block size.
@@ -57,7 +55,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor !adapter_enabled,"
       "                     Tensor !lora_ids,"
       "                     Tensor? maybe_expert_map) -> () ");
-  m.impl("moe_lora_align_block_size", torch::kCUDA, &moe_lora_align_block_size);
 
 #ifndef USE_ROCM
   m.def(
@@ -67,33 +64,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "Tensor expert_ids, Tensor num_tokens_post_pad, "
       "int top_k, int BLOCK_SIZE_M, int BLOCK_SIZE_N, int BLOCK_SIZE_K, "
       "int bit) -> Tensor");
-
-  m.impl("moe_wna16_gemm", torch::kCUDA, &moe_wna16_gemm);
-
-  m.def(
-      "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"
-      "Tensor! b_q_weight, Tensor? b_bias_or_none,"
-      "Tensor! b_scales, Tensor? a_scales, Tensor? global_scale, Tensor? "
-      "b_zeros_or_none,"
-      "Tensor? g_idx_or_none, Tensor? perm_or_none, Tensor! workspace,"
-      "Tensor sorted_token_ids,"
-      "Tensor! expert_ids, Tensor! num_tokens_past_padded,"
-      "Tensor! topk_weights, int moe_block_size, int top_k, "
-      "bool mul_topk_weights, int b_type_id,"
-      "int size_m, int size_n, int size_k,"
-      "bool is_full_k, bool use_atomic_add,"
-      "bool use_fp32_reduce, bool is_zp_float,"
-      "int thread_k, int thread_n, int blocks_per_sm) -> Tensor");
-
-  m.def(
-      "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
-      "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "
-      "b_zeros, Tensor! g_idx, Tensor! perm, Tensor! workspace, "
-      "int b_q_type, SymInt size_m, "
-      "SymInt size_n, SymInt size_k, bool is_k_full, int num_experts, int "
-      "topk, "
-      "int moe_block_size, bool replicate_input, bool apply_weights)"
-      " -> Tensor");
 
   m.def(
       "moe_permute(Tensor input, Tensor topk_ids,"
@@ -109,13 +79,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "int topk, Tensor! hidden_states)->()");
 
   m.def("moe_permute_unpermute_supported() -> bool");
-  m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);
 
   // Row shuffle for MoE
   m.def(
       "shuffle_rows(Tensor input_tensor, Tensor dst2src_map, Tensor! "
       "output_tensor) -> ()");
-  m.impl("shuffle_rows", torch::kCUDA, &shuffle_rows);
 
   // Apply grouped topk routing to select experts.
   m.def(
@@ -123,8 +91,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "topk_group, int topk, bool renormalize, float "
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
-  m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
 #endif
 }
 
-REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
+STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
+  m.impl("topk_softmax", TORCH_BOX(&topk_softmax));
+  m.impl("topk_sigmoid", TORCH_BOX(&topk_sigmoid));
+  m.impl("moe_sum", TORCH_BOX(&moe_sum));
+  m.impl("moe_align_block_size", TORCH_BOX(&moe_align_block_size));
+  m.impl("batched_moe_align_block_size",
+         TORCH_BOX(&batched_moe_align_block_size));
+  m.impl("moe_lora_align_block_size", TORCH_BOX(&moe_lora_align_block_size));
+
+#ifndef USE_ROCM
+  m.impl("moe_wna16_gemm", TORCH_BOX(&moe_wna16_gemm));
+  // moe_permute and moe_unpermute are registered in moe_permute_unpermute_op.cu
+  m.impl("shuffle_rows", TORCH_BOX(&shuffle_rows));
+  m.impl("grouped_topk", TORCH_BOX(&grouped_topk));
+#endif  // USE_ROCM
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_moe_C, CompositeExplicitAutograd, m) {
+  m.impl("moe_permute_unpermute_supported",
+         TORCH_BOX(&moe_permute_unpermute_supported));
+}
+
+REGISTER_EXTENSION(_moe_C_stable_libtorch)

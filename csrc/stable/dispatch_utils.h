@@ -146,3 +146,23 @@
       STD_TORCH_CHECK(false, "Expects rank 2, 3 or 4 tensors but got ", \
                       NUM_DIMS);                                        \
   }
+
+// Integral type dispatch (Int, Long)
+#define VLLM_STABLE_DISPATCH_CASE_INTEGRAL_TYPES(...)                \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Int, __VA_ARGS__) \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Long, __VA_ARGS__)
+
+#define VLLM_STABLE_DISPATCH_INTEGRAL_TYPES(TYPE, NAME, ...) \
+  THO_DISPATCH_SWITCH(TYPE, NAME,                            \
+                      VLLM_STABLE_DISPATCH_CASE_INTEGRAL_TYPES(__VA_ARGS__))
+
+// Integral and unsigned type dispatch (Int, Long, UInt32)
+#define VLLM_STABLE_DISPATCH_CASE_INTEGRAL_AND_UNSIGNED_TYPES(...)    \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Int, __VA_ARGS__)  \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Long, __VA_ARGS__) \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::UInt32, __VA_ARGS__)
+
+#define VLLM_STABLE_DISPATCH_INTEGRAL_AND_UNSIGNED_TYPES(TYPE, NAME, ...) \
+  THO_DISPATCH_SWITCH(                                                    \
+      TYPE, NAME,                                                         \
+      VLLM_STABLE_DISPATCH_CASE_INTEGRAL_AND_UNSIGNED_TYPES(__VA_ARGS__))

@@ -2,6 +2,7 @@
 
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/macros.h>
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/util/shim_utils.h>
 

@@ -676,6 +676,7 @@ class precompiled_wheel_utils:
                     "vllm/_C.abi3.so",
                     "vllm/_C_stable_libtorch.abi3.so",
                     "vllm/_moe_C.abi3.so",
+                    "vllm/_moe_C_stable_libtorch.abi3.so",
                     "vllm/_flashmla_C.abi3.so",
                     "vllm/_flashmla_extension_C.abi3.so",
                     "vllm/_sparse_flashmla_C.abi3.so",
@@ -961,7 +962,10 @@ def get_requirements() -> list[str]:
 ext_modules = []
 
 if _is_cuda() or _is_hip():
+    # _moe_C is a non-stable extension for moe_wna16_marlin_gemm which uses
+    # float8_e8m0fnu dtype not yet supported by the stable ABI
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+    ext_modules.append(CMakeExtension(name="vllm._moe_C_stable_libtorch"))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
     # Optional since this doesn't get built (produce an .so file). This is just
     # copying the relevant .py files from the source repository.
@@ -991,6 +995,7 @@ if _is_cuda():
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
     if _is_cuda() or _is_hip():
+        ext_modules.append(CMakeExtension(name="vllm._moe_C"))
         ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 package_data = {

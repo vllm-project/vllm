@@ -217,8 +217,16 @@ class Platform:
             import vllm._C  # noqa: F401
         except ImportError as e:
             logger.warning("Failed to import from vllm._C: %r", e)
+        # _C_stable_libtorch must be imported before _moe_C_stable_libtorch
+        # because it registers the _core_C.ScalarType custom class
+        with contextlib.suppress(ImportError):
+            import vllm._C_stable_libtorch  # noqa: F401
+        # _moe_C must be imported before _moe_C_stable_libtorch because it
+        # defines the _moe_C library with TORCH_LIBRARY
         with contextlib.suppress(ImportError):
             import vllm._moe_C  # noqa: F401
+        with contextlib.suppress(ImportError):
+            import vllm._moe_C_stable_libtorch  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(

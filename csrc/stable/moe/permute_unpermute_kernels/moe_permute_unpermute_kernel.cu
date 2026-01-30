@@ -1,4 +1,5 @@
 
+#include <cuda.h>
 #include "moe_permute_unpermute_kernel.h"
 
 // moe_permute kernels require at least CUDA 12.0
@@ -48,9 +49,10 @@ void CubKeyValueSorter::run(void* workspace, size_t const workspace_size,
   size_t expected_ws_size = getWorkspaceSize(num_key_value_pairs, num_experts_);
   size_t actual_ws_size = workspace_size;
 
-  TORCH_CHECK(expected_ws_size <= workspace_size,
-              "[CubKeyValueSorter::run] The allocated workspace is too small "
-              "to run this problem.");
+  STD_TORCH_CHECK(
+      expected_ws_size <= workspace_size,
+      "[CubKeyValueSorter::run] The allocated workspace is too small "
+      "to run this problem.");
   cub::DeviceRadixSort::SortPairs(workspace, actual_ws_size, keys_in, keys_out,
                                   values_in, values_out, num_key_value_pairs, 0,
                                   num_bits_, stream);

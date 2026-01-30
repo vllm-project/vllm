@@ -956,41 +956,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 #
-# _moe_C extension
+# _moe_C extension (non-stable ABI for moe_wna16_marlin_gemm which uses float8_e8m0fnu)
 #
 
-set(VLLM_MOE_EXT_SRC
-  "csrc/moe/torch_bindings.cpp"
-  "csrc/moe/moe_align_sum_kernels.cu"
-  "csrc/moe/topk_softmax_kernels.cu")
-
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_MOE_EXT_SRC
-    "csrc/moe/moe_wna16.cu"
-    "csrc/moe/grouped_topk_kernels.cu")
-endif()
+  set(VLLM_MOE_EXT_SRC
+    "csrc/moe/torch_bindings.cpp")
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  set(MOE_PERMUTE_SRC
-      "csrc/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
-      "csrc/moe/moe_permute_unpermute_op.cu")
-
-  list(APPEND VLLM_MOE_EXT_SRC "${MOE_PERMUTE_SRC}")
-endif()
-
-set_gencode_flags_for_srcs(
-  SRCS "${VLLM_MOE_EXT_SRC}"
-  CUDA_ARCHS "${CUDA_ARCHS}")
-
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  set(VLLM_MOE_WNA16_SRC
-    "csrc/moe/moe_wna16.cu")
-
-  set_gencode_flags_for_srcs(
-    SRCS "${VLLM_MOE_WNA16_SRC}"
-    CUDA_ARCHS "${CUDA_ARCHS}")
-
-  list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   # moe marlin arches
   # note that we always set `use_atomic_add=False` for moe marlin now,
   # so we don't need 9.0 for bf16 atomicAdd PTX
@@ -1012,37 +984,37 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     # Generate sources:
     set(MOE_MARLIN_GEN_SCRIPT
       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py)
-    file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
+    file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH_NONSTABLE)
     list(JOIN CUDA_ARCHS "," CUDA_ARCHS_STR)
-    set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH "${MOE_MARLIN_GEN_SCRIPT_HASH}(ARCH:${CUDA_ARCHS_STR})")
+    set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH_NONSTABLE "${MOE_MARLIN_GEN_SCRIPT_HASH_NONSTABLE}(ARCH:${CUDA_ARCHS_STR})")
 
-    message(STATUS "Marlin MOE generation script hash with arch: ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
-    message(STATUS "Last run Marlin MOE generate script hash with arch: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}")
+    message(STATUS "Marlin MOE (non-stable) generation script hash with arch: ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH_NONSTABLE}")
+    message(STATUS "Last run Marlin MOE (non-stable) generate script hash with arch: $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH_NONSTABLE}")
 
-    if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
-        OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH})
+    if (NOT DEFINED CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH_NONSTABLE}
+        OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH_NONSTABLE} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH_NONSTABLE})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
         PYTHONPATH=$ENV{PYTHONPATH}
           ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT} ${CUDA_ARCHS_STR}
-        RESULT_VARIABLE moe_marlin_generation_result
-        OUTPUT_VARIABLE moe_marlin_generation_output
-        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
-        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log
+        RESULT_VARIABLE moe_marlin_generation_result_nonstable
+        OUTPUT_VARIABLE moe_marlin_generation_output_nonstable
+        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation_nonstable.log
+        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation_nonstable.log
       )
 
-      if (NOT moe_marlin_generation_result EQUAL 0)
-        message(FATAL_ERROR "Marlin MOE generation failed."
-                            " Result: \"${moe_marlin_generation_result}\""
+      if (NOT moe_marlin_generation_result_nonstable EQUAL 0)
+        message(FATAL_ERROR "Marlin MOE (non-stable) generation failed."
+                            " Result: \"${moe_marlin_generation_result_nonstable}\""
                             "\nCheck the log for details: "
-                            "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
+                            "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation_nonstable.log")
       else()
-        set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH}
-            CACHE STRING "Last run Marlin MOE generate script hash" FORCE)
-        message(STATUS "Marlin MOE generation completed successfully.")
+        set(MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH_NONSTABLE ${MOE_MARLIN_GEN_SCRIPT_HASH_AND_ARCH_NONSTABLE}
+            CACHE STRING "Last run Marlin MOE (non-stable) generate script hash" FORCE)
+        message(STATUS "Marlin MOE (non-stable) generation completed successfully.")
       endif()
     else()
-      message(STATUS "Marlin MOE generation script has not changed, skipping generation.")
+      message(STATUS "Marlin MOE (non-stable) generation script has not changed, skipping generation.")
     endif()
 
     if (MARLIN_MOE_ARCHS)
@@ -1091,25 +1063,89 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
     list(APPEND VLLM_MOE_EXT_SRC "${MARLIN_MOE_OTHER_SRC}")
 
-    message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_OTHER_ARCHS}")
+    message(STATUS "Building Marlin MOE (non-stable) kernels for archs: ${MARLIN_MOE_OTHER_ARCHS}")
   else()
-    message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
+    message(STATUS "Not building Marlin MOE (non-stable) kernels as no compatible archs found"
                    " in CUDA target architectures")
   endif()
+
+  message(STATUS "Enabling moe extension (non-stable).")
+  define_extension_target(
+    _moe_C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_MOE_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
+    INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+    USE_SABI 3
+    WITH_SOABI)
 endif()
 
-message(STATUS "Enabling moe extension.")
+#
+# _moe_C_stable_libtorch extension
+#
+
+set(VLLM_MOE_STABLE_EXT_SRC
+  "csrc/stable/moe/torch_bindings.cpp"
+  "csrc/stable/moe/moe_align_sum_kernels.cu"
+  "csrc/stable/moe/topk_softmax_kernels.cu")
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_MOE_STABLE_EXT_SRC
+    "csrc/stable/moe/moe_wna16.cu"
+    "csrc/stable/moe/grouped_topk_kernels.cu")
+endif()
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  set(MOE_PERMUTE_SRC
+      "csrc/stable/moe/permute_unpermute_kernels/moe_permute_unpermute_kernel.cu"
+      "csrc/stable/moe/moe_permute_unpermute_op.cu")
+
+  list(APPEND VLLM_MOE_STABLE_EXT_SRC "${MOE_PERMUTE_SRC}")
+endif()
+
+set_gencode_flags_for_srcs(
+  SRCS "${VLLM_MOE_STABLE_EXT_SRC}"
+  CUDA_ARCHS "${CUDA_ARCHS}")
+
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  set(VLLM_MOE_WNA16_SRC
+    "csrc/stable/moe/moe_wna16.cu")
+
+  set_gencode_flags_for_srcs(
+    SRCS "${VLLM_MOE_WNA16_SRC}"
+    CUDA_ARCHS "${CUDA_ARCHS}")
+
+  list(APPEND VLLM_MOE_STABLE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
+
+  # Note: marlin_moe_wna16 is NOT included in the stable extension.
+  # moe_wna16_marlin_gemm uses float8_e8m0fnu dtype which is not yet supported
+  # by the stable ABI. It's built separately in the _moe_C extension above.
+endif()
+
+message(STATUS "Enabling moe stable extension.")
 define_extension_target(
-  _moe_C
+  _moe_C_stable_libtorch
   DESTINATION vllm
   LANGUAGE ${VLLM_GPU_LANG}
-  SOURCES ${VLLM_MOE_EXT_SRC}
+  SOURCES ${VLLM_MOE_STABLE_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
   WITH_SOABI)
+
+# Set TORCH_TARGET_VERSION for stable ABI compatibility.
+# This ensures we only use C-shim APIs available in PyTorch 2.10+.
+target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+  TORCH_TARGET_VERSION=0x020A000000000000ULL)
+
+# Needed to use cuda APIs from C-shim
+target_compile_definitions(_moe_C_stable_libtorch PRIVATE
+  USE_CUDA)
 
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #

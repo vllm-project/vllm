@@ -7,7 +7,7 @@
 #include <variant>
 
 // For STD_TORCH_CHECK (stable ABI equivalent of TORCH_CHECK)
-#include <torch/headeronly/util/shim_utils.h>
+#include <torch/headeronly/util/Exception.h>
 
 namespace vllm {
 
