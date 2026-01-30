@@ -101,6 +101,7 @@ steps:
   - tests/basic_correctness/test_cumem.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export BUILDKITE_ANALYTICS_DEBUG_ENABLED=true
   - pytest -v -s basic_correctness/test_cumem.py --sig=sig-ci --junit-xml=test-results-basic-correctness-1.xml
   - pytest -v -s basic_correctness/test_basic_correctness.py --sig=sig-ci --junit-xml=test-results-basic-correctness-2.xml
   - pytest -v -s basic_correctness/test_cpu_offload.py --sig=sig-ci --junit-xml=test-results-basic-correctness-3.xml
@@ -116,6 +117,7 @@ steps:
   - vllm/entrypoints
   - tests/entrypoints/
   commands:
+  - export BUILDKITE_ANALYTICS_DEBUG_ENABLED=true
   - pytest -v -s entrypoints/openai/tool_parsers --sig=sig-ci --junit-xml=test-results-entrypoints-1.xml
   - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling --sig=sig-ci --junit-xml=test-results-entrypoints-2.xml
   - buildkite-agent artifact upload 'test-results-*.xml' || true
