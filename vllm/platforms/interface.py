@@ -7,7 +7,7 @@ import platform
 import random
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -243,7 +243,7 @@ class Platform:
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: Optional["AttentionBackendEnum"] = None,
+        backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         """
         Get the vision attention backend class of a device.
@@ -589,14 +589,18 @@ class Platform:
     def __getattr__(self, key: str):
         device = getattr(torch, self.device_type, None)
         if device is not None and hasattr(device, key):
-            return getattr(device, key)
-        else:
-            logger.warning(
-                "Current platform %s does not have '%s' attribute.",
-                self.device_type,
-                key,
-            )
-            return None
+            attr = getattr(device, key)
+            # NOTE: `hasattr(device, key)=True` can only avoid AttributeError,
+            # but the value of this attr could be `None`.
+            if attr is not None:
+                return attr
+
+        logger.warning(
+            "Current platform %s does not have '%s' attribute.",
+            self.device_type,
+            key,
+        )
+        return None
 
     def get_global_graph_pool(self) -> Any:
         """

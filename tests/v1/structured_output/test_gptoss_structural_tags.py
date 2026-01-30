@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from vllm.entrypoints.tool_server import ToolServer
+from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.reasoning.gptoss_reasoning_parser import (
     GptOssReasoningParser,
     from_builtin_tool_to_tag,
