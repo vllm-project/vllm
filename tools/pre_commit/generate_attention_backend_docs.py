@@ -1084,7 +1084,7 @@ def generate_mla_section(
     ]
 
     for backend in prefill_backends:
-        row = "| {} | {} | {} | {} | {} | {} |".format(
+        row = "| `{}` | {} | {} | {} | {} | {} |".format(
             backend["name"],
             backend["description"],
             backend["compute_capability"],
