@@ -21,10 +21,12 @@ if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 elif current_platform.is_xpu():
     from vllm._ipex_ops import ipex_ops as ops
+
     fp8_mqa_logits = ops.fp8_mqa_logits
     fp8_paged_mqa_logits = ops.fp8_paged_mqa_logits
 
 logger = init_logger(__name__)
+
 
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -113,12 +115,10 @@ def sparse_attn_indexer(
 
             if current_platform.is_xpu():
                 topk_indices = ops.topk_with_bounds_torch(
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_tokens)
+                    logits, chunk.cu_seqlen_ks, chunk.cu_seqlen_ke, topk_tokens
+                )
                 topk_indices_buffer[
-                    chunk.token_start : chunk.token_end, :topk_indices.shape[-1]
+                    chunk.token_start : chunk.token_end, : topk_indices.shape[-1]
                 ] = topk_indices
             else:
                 num_rows = logits.shape[0]

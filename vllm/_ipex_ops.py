@@ -470,9 +470,9 @@ class ipex_ops:
         Returns:
             Logits tensor of shape [M, N], dtype `torch.float32`.
         """
-        kv, scale = kv
-        seq_len_kv = kv.shape[0]
-        k = kv.to(torch.bfloat16)
+        k, scale = kv
+        seq_len_kv = k.shape[0]
+        k = k.to(torch.bfloat16)
         q = q.to(torch.bfloat16)
 
         mask_lo = (
@@ -685,7 +685,6 @@ class ipex_ops:
         num_tokens = dst_k.size(0)
         head_dim = dst_k.size(1)
         cache_block_size = kv_cache.size(1)
-        num_blocks = block_table.size(1)
         quant_block_size = head_dim * 4 // dst_scale.size(1)
 
         # For each token, find which batch it belongs to using searchsorted

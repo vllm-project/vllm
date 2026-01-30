@@ -25,12 +25,13 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.attention.ops.triton_mla_sparse import triton_bf16_mla_sparse_interface
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
+
 
 class XPUMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -50,6 +51,7 @@ class XPUMLASparseBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["XPUMLASparseImpl"]:
         return XPUMLASparseImpl
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -87,9 +89,7 @@ class XPUMLASparseMetadata(AttentionMetadata):
 
 
 @dataclass
-class XPUMLASparseMetadataBuilder(
-    AttentionMetadataBuilder[XPUMLASparseMetadata]
-):
+class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
     def __init__(
@@ -214,7 +214,6 @@ class XPUMLASparseImpl(MLACommonBaseImpl[XPUMLASparseMetadata]):
             kv_c_and_k_pe_cache,
             topk_indices,
             sm_scale=self.softmax_scale,
-            d_v=self.mla_dims.d_v,
         )
 
         return output[:, : self.num_heads, :]
@@ -238,7 +237,7 @@ class XPUMLASparseImpl(MLACommonBaseImpl[XPUMLASparseMetadata]):
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported for XPUMLASparse Backend."
+                "fused output quant is not yet supported for XPUMLASparse Backend."
             )
 
         if attn_metadata is None:
