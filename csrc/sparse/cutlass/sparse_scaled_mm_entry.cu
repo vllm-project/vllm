@@ -98,7 +98,7 @@ std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a) {
 
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
-      "No compiled cutlass_sparse_compress for a compute capability less than "
+      "No compiled cutlass_sparse_compress for a compute capability equal to "
       "CUDA device capability: ",
       version_num);
 }
