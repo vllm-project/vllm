@@ -21,7 +21,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.gpu.async_utils import AsyncOutput, async_copy_to_np
+from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     build_slot_mappings_by_layer,
@@ -59,6 +59,7 @@ from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
+from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -167,11 +168,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
 
-        # Draft tokens transfer to scheduler - for spec-dec + struct outputs.
-        self.draft_tokens_copy_stream = torch.cuda.Stream(self.device)
-        self.draft_tokens_copy_event = torch.cuda.Event()
-        self.draft_req_ids: list[str] = []
-        self.draft_tokens_np: np.ndarray | None = None
+        # Draft tokens propagation - for spec-dec + struct outputs.
+        self.draft_tokens_handler = DraftTokensHandler(self.device)
 
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
@@ -950,30 +948,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_rejected,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            self._copy_draft_tokens_to_cpu_if_needed(input_batch, draft_tokens)
+            self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
 
-    def _copy_draft_tokens_to_cpu_if_needed(
-        self, input_batch: InputBatch, draft_tokens: torch.Tensor
-    ) -> None:
-        if not input_batch.has_structured_output_reqs:
-            self.draft_tokens_np = None
-            self.draft_req_ids = []
-            return
-        # For spec decoding + structured outputs, we must transfer the
-        # draft tokens back to the scheduler for grammar validation.
-        self.draft_req_ids = input_batch.req_ids
-        current_stream = torch.cuda.current_stream(self.device)
-        with torch.cuda.stream(self.draft_tokens_copy_stream):
-            self.draft_tokens_copy_stream.wait_stream(current_stream)
-            self.draft_tokens_np = async_copy_to_np(draft_tokens)
-            self.draft_tokens_copy_event.record()
-
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        if self.draft_tokens_np is None:
-            return None
-        self.draft_tokens_copy_event.synchronize()
-        return DraftTokenIds(self.draft_req_ids, self.draft_tokens_np.tolist())
+        return self.draft_tokens_handler.take_draft_tokens()
