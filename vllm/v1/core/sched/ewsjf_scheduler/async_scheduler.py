@@ -4,7 +4,6 @@
 from vllm.logger import init_logger
 from vllm.v1.core.sched.ewsjf_scheduler.scheduler import EWSJFScheduler
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
