@@ -249,6 +249,7 @@ def _test_processing_correctness(
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
+    model_config.multimodal_config.mm_processor_cache_gb = 4
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = model_cls._processor_factory
