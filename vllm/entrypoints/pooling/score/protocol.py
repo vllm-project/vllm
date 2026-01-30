@@ -74,8 +74,12 @@ ScoreRequest: TypeAlias = (
 
 
 class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
-    query: str | ScoreMultiModalParam
-    documents: list[str] | ScoreMultiModalParam
+    instruction: str | None = Field(
+        default=None,
+        description="Optional instruction to guide the reranking process.",
+    )
+    query: str | dict[str, Any] | ScoreMultiModalParam
+    documents: list[str] | list[dict[str, Any]] | ScoreMultiModalParam
     top_n: int = Field(default_factory=lambda: 0)
 
     # --8<-- [start:rerank-extra-params]

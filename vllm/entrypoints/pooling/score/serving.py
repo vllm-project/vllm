@@ -9,6 +9,10 @@ from typing import Any
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartTextParam,
+)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
@@ -65,6 +69,67 @@ class ServingScores(OpenAIServing):
         self.score_template = score_template
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
+
+    def _convert_documents_to_multimodal(
+        self,
+        documents: list[str] | list[dict[str, Any]] | ScoreMultiModalParam,
+    ) -> list[str] | list[ScoreContentPartParam]:
+        """
+        Convert documents in various formats to a standardized list format.
+        
+        Args:
+            documents: Can be:
+                - list[str]: Simple text documents
+                - list[dict[str, Any]]: Documents with {"text": "...", "image": "..."} format
+                - ScoreMultiModalParam: Already in multimodal format
+        
+        Returns:
+            list[str] or list[ScoreContentPartParam]: Standardized document list
+        """
+        if isinstance(documents, dict) and "content" in documents:
+            # Already in ScoreMultiModalParam format
+            return documents["content"]  # type: ignore[return-value]
+        
+        if not isinstance(documents, list):
+            return documents  # type: ignore[return-value]
+        
+        # Check if it's a list of dicts with text/image keys
+        if documents and isinstance(documents[0], dict):
+            converted_docs: list[ScoreContentPartParam] = []
+            for doc in documents:
+                if not isinstance(doc, dict):
+                    raise ValueError(f"Expected dict in documents list, got {type(doc)}")
+                
+                doc_parts: list[ScoreContentPartParam] = []
+                
+                # Handle text field
+                if "text" in doc:
+                    from vllm.entrypoints.chat_utils import ChatCompletionContentPartTextParam
+                    doc_parts.append(
+                        ChatCompletionContentPartTextParam(
+                            type="text", text=doc["text"]
+                        )
+                    )
+                
+                # Handle image field
+                if "image" in doc:
+                    from vllm.entrypoints.chat_utils import ChatCompletionContentPartImageParam
+                    image_url = doc["image"]
+                    doc_parts.append(
+                        ChatCompletionContentPartImageParam(
+                            type="image_url",
+                            image_url={"url": image_url},
+                        )
+                    )
+                
+                # If we have multiple parts for a single document, we need to handle them specially
+                # For now, we'll add each part as a separate content part
+                converted_docs.extend(doc_parts)
+            
+            return converted_docs
+        
+        # It's a simple list of strings
+        return documents  # type: ignore[return-value]
 
     async def _embedding_score(
         self,
@@ -279,8 +344,8 @@ class ServingScores(OpenAIServing):
 
     async def _run_scoring(
         self,
-        data_1: list[str] | str | ScoreMultiModalParam,
-        data_2: list[str] | str | ScoreMultiModalParam,
+        data_1: list[str] | str | dict[str, Any] | ScoreMultiModalParam,
+        data_2: list[str] | str | list[dict[str, Any]] | ScoreMultiModalParam,
         request: ScoreRequest | RerankRequest,
         request_id: str,
         raw_request: Request | None = None,
@@ -308,15 +373,25 @@ class ServingScores(OpenAIServing):
                 f"MultiModalParam is not supported for {self.model_config.architecture}"  # noqa: E501
             )
 
+        # Process data_1 (query)
         if isinstance(data_1, str):
             data_1 = [data_1]
         elif isinstance(data_1, dict):
-            data_1 = data_1.get("content")  # type: ignore[assignment]
+            if "content" in data_1:
+                # ScoreMultiModalParam format
+                data_1 = data_1.get("content")  # type: ignore[assignment]
+            elif "text" in data_1 or "image" in data_1:
+                # Single dict with {"text": "...", "image": "..."} format
+                data_1 = self._convert_documents_to_multimodal([data_1])  # type: ignore[assignment]
 
+        # Process data_2 (documents)
         if isinstance(data_2, str):
             data_2 = [data_2]
-        elif isinstance(data_2, dict):
+        elif isinstance(data_2, dict) and "content" in data_2:
             data_2 = data_2.get("content")  # type: ignore[assignment]
+        elif isinstance(data_2, list) and data_2 and isinstance(data_2[0], dict):
+            # Handle list[dict[str, Any]] format with {"text": "...", "image": "..."}
+            data_2 = self._convert_documents_to_multimodal(data_2)  # type: ignore[assignment]
 
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
@@ -476,7 +551,7 @@ class ServingScores(OpenAIServing):
         final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         model_name: str,
-        documents: list[str] | ScoreMultiModalParam,
+        documents: list[str] | list[dict[str, Any]] | ScoreMultiModalParam,
         top_n: int,
     ) -> RerankResponse:
         """
@@ -487,11 +562,47 @@ class ServingScores(OpenAIServing):
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
 
+            # Determine document representation
+            if isinstance(documents, dict) and "content" in documents:
+                # ScoreMultiModalParam format
+                document = RerankDocument(multi_modal=documents["content"][idx])
+            elif isinstance(documents, list):
+                if documents and isinstance(documents[0], dict) and ("text" in documents[0] or "image" in documents[0]):
+                    # list[dict[str, Any]] format with {"text": "...", "image": "..."}
+                    doc_dict = documents[idx]
+                    # For now, we store the text part if available, otherwise indicate it's multimodal
+                    text_content = doc_dict.get("text", "")
+                    if "image" in doc_dict:
+                        # If there's an image, we should indicate it's multimodal
+                        # Convert to ScoreContentPartParam format for consistency
+                        doc_parts: list[ScoreContentPartParam] = []
+                        if text_content:
+                            from vllm.entrypoints.chat_utils import ChatCompletionContentPartTextParam
+                            doc_parts.append(
+                                ChatCompletionContentPartTextParam(
+                                    type="text", text=text_content
+                                )
+                            )
+                        if "image" in doc_dict:
+                            from vllm.entrypoints.chat_utils import ChatCompletionContentPartImageParam
+                            doc_parts.append(
+                                ChatCompletionContentPartImageParam(
+                                    type="image_url",
+                                    image_url={"url": doc_dict["image"]},
+                                )
+                            )
+                        document = RerankDocument(text=text_content, multi_modal=doc_parts[0] if len(doc_parts) == 1 else None)
+                    else:
+                        document = RerankDocument(text=text_content)
+                else:
+                    # Simple list of strings
+                    document = RerankDocument(text=documents[idx])
+            else:
+                raise ValueError(f"Unsupported documents format: {type(documents)}")
+
             result = RerankResult(
                 index=idx,
-                document=RerankDocument(text=documents[idx])
-                if isinstance(documents, list)
-                else RerankDocument(multi_modal=documents["content"][idx]),
+                document=document,
                 relevance_score=classify_res.outputs.score,
             )
             results.append(result)
