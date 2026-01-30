@@ -286,7 +286,7 @@ def on_gfx942() -> bool:
 
 def on_gfx950() -> bool:
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
-    return any(arch in GPU_ARCH for arch in ["gfx950", "gfx1250"])
+    return any(arch in GPU_ARCH for arch in ["gfx950"])
 
 
 @cache

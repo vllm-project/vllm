@@ -1032,7 +1032,7 @@ except ImportError:
     # On ROCm, vllm_flash_attn is not available, try upstream flash_attn instead.
     # On CUDA, vllm_flash_attn should always be available (built with vLLM),
     # so we don't attempt the fallback there.
-    if current_platform.is_rocm():
+    if current_platform.is_rocm() and not rocm_aiter_ops.is_enabled():
         try:
             from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
         except ImportError:

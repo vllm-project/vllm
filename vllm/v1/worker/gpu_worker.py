@@ -272,7 +272,7 @@ class Worker(WorkerBase):
                 logger.info_once("Using V2 Model Runner", scope="local")
 
             # Set random seed.
-            set_random_seed(self.model_config.seed)
+            # set_random_seed(self.model_config.seed)
 
             # Now take memory snapshot after NCCL is initialized
             gc.collect()
@@ -687,7 +687,7 @@ class Worker(WorkerBase):
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        # set_random_seed(self.model_config.seed)
 
         return self.compilation_config.compilation_time
 
