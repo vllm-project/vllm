@@ -400,33 +400,10 @@ def validate_api_server_args(args):
         )
 
 
-def install_shutdown_handler_async(loop: asyncio.AbstractEventLoop):
-    """Install SIGTERM handler for async context (cancels all tasks)."""
-
-    def handler():
-        for task in asyncio.all_tasks(loop):
-            task.cancel()
-
-    loop.add_signal_handler(signal.SIGTERM, handler)
-
-
-def install_shutdown_handler_sync():
-    """Install SIGTERM handler for sync/multiprocess context.
-
-    TODO: raising from signal handlers is unsafe per python docs
-    (see https://docs.python.org/3/library/signal.html#note-on-signal-handlers-and-exceptions)
-    should use wakeup pipe with multiprocessing.connection.wait()
-    """
-
-    def handler(*_):
-        raise KeyboardInterrupt("terminated")
-
-    signal.signal(signal.SIGTERM, handler)
-
-
 @instrument(span_name="API server setup")
 def setup_server(args):
-    """Validate API server args and create socket ready to serve."""
+    """Validate API server args, set up signal handler, create socket
+    ready to serve."""
 
     log_version_and_model(logger, VLLM_VERSION, args.model)
     log_non_default_args(args)
@@ -452,6 +429,12 @@ def setup_server(args):
     # many concurrent requests active
     set_ulimit()
 
+    def signal_handler(*_) -> None:
+        # Interrupt server on sigterm while initializing
+        raise KeyboardInterrupt("terminated")
+
+    signal.signal(signal.SIGTERM, signal_handler)
+
     if args.uds:
         listen_address = f"unix:{args.uds}"
     else:
@@ -467,9 +450,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     # Add process-specific prefix to stdout and stderr.
     decorate_logs("APIServer")
-
-    # handle SIGTERM during init (replaced by serve_http's handlers once started)
-    install_shutdown_handler_async(asyncio.get_running_loop())
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
