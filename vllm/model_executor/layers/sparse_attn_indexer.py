@@ -30,6 +30,7 @@ elif current_platform.is_xpu():
 
 logger = init_logger(__name__)
 
+
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
     k_cache_prefix: str,
@@ -133,12 +134,10 @@ def sparse_attn_indexer(
 
             if current_platform.is_xpu():
                 topk_indices = ops.topk_with_bounds_torch(
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_tokens)
+                    logits, chunk.cu_seqlen_ks, chunk.cu_seqlen_ke, topk_tokens
+                )
                 topk_indices_buffer[
-                    chunk.token_start : chunk.token_end, :topk_indices.shape[-1]
+                    chunk.token_start : chunk.token_end, : topk_indices.shape[-1]
                 ] = topk_indices
             else:
                 num_rows = logits.shape[0]
