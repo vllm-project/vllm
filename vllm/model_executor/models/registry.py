@@ -286,6 +286,10 @@ _MULTIMODAL_MODELS = {
         "audioflamingo3",
         "AudioFlamingo3ForConditionalGeneration",
     ),
+    "MusicFlamingoForConditionalGeneration": (
+        "musicflamingo",
+        "MusicFlamingoForConditionalGeneration",
+    ),
     "AyaVisionForConditionalGeneration": (
         "aya_vision",
         "AyaVisionForConditionalGeneration",
