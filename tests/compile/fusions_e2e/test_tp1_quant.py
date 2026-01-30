@@ -49,9 +49,8 @@ def test_tp1_fp8_fusions(
 ):
     matches = matches_fn(n_layers)
 
-    # RMS Quant not supported for block quant on Blackwell
-    # TODO(luka)
-    if is_blackwell() and "qwen" in model_name.lower():
+    if "qwen" in model_name.lower() and "-quant_fp8" in custom_ops:
+        # RMS+Quant not supported for native group QuantFP8 on Blackwell
         matches = matches._replace(rms_quant_fusion=0)
 
     # Reduce size of model and skip weight loading time

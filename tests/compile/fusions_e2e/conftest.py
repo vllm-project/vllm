@@ -43,13 +43,16 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         with caplog_mp_spawn(logging.DEBUG) as log_holder:
             run_model(full_compilation_config, model_name, **model_kwargs)
 
+        print("Fusion results:")
         for match_name in matches_check:
             pattern = FUSION_LOG_PATTERNS[match_name]
-            log_matches = pattern.findall(log_holder.text)
+            log_matches = list(pattern.findall(log_holder.text))
 
             assert len(log_matches) == tp_size, (
                 f"Could not find {match_name} in \n: {log_holder.text}"
             )
+
+            print(f"- {match_name}={','.join(log_matches)}")
 
             for i, m in enumerate(log_matches):
                 expected_matches = getattr(matches, match_name)
