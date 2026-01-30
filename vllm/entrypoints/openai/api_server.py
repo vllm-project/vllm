@@ -189,6 +189,12 @@ def build_app(args: Namespace, supported_tasks: tuple["SupportedTask", ...]) -> 
 
         register_generate_api_routers(app)
 
+        from vllm.entrypoints.openai.generative_scores.api_router import (
+            register_generative_scores_api_routers,
+        )
+
+        register_generative_scores_api_routers(app)
+
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.translations.api_router import (
             attach_router as register_translations_api_router,
@@ -314,6 +320,14 @@ async def init_app_state(
         from vllm.entrypoints.openai.generate.api_router import init_generate_state
 
         await init_generate_state(
+            engine_client, state, args, request_logger, supported_tasks
+        )
+
+        from vllm.entrypoints.openai.generative_scores.api_router import (
+            init_generative_scores_state,
+        )
+
+        init_generative_scores_state(
             engine_client, state, args, request_logger, supported_tasks
         )
 

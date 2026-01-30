@@ -77,6 +77,9 @@ In addition, we have the following custom APIs:
     - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
     - Only applicable to [cross-encoder models](../models/pooling_models.md).
+- [Generative Scores API](#generative-scores-api) (`/v1/generative-scores`)
+    - Computes next-token probabilities for specified token IDs.
+    - Only applicable to [text generation models](../models/generative_models.md).
 
 ## Chat Template
 
@@ -1146,6 +1149,87 @@ The following extra parameters are supported:
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
 --8<-- "vllm/entrypoints/pooling/score/protocol.py:rerank-extra-params"
 ```
+
+### Generative Scores API
+
+The Generative Scores API computes the probability of specified token IDs appearing as the next token after a given query+item prompt. This is useful for classification tasks, sentiment analysis, or any scenario where you want to score the likelihood of specific tokens without generating them.
+
+Unlike traditional logprobs which are limited to top-k tokens, this API:
+- Returns probabilities for any specified token IDs in the vocabulary
+- Supports batch scoring of multiple items against a single query
+- Offers both subset softmax (normalize over label tokens only) and true model probabilities
+
+#### Example: Sentiment Classification
+
+```python
+import requests
+
+# Token IDs for "Yes" and "No" (model-specific)
+YES_TOKEN_ID = 2332
+NO_TOKEN_ID = 1223
+
+response = requests.post(
+    "http://localhost:8000/v1/generative-scores",
+    json={
+        "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+        "query": "<|user|>Is the following city the capital of France? ",
+        "items": [
+            "Paris <|assistant|>",
+            "London <|assistant|>",
+            "Berlin <|assistant|>"
+        ],
+        "label_token_ids": [YES_TOKEN_ID, NO_TOKEN_ID],
+        "apply_softmax": True,
+        "item_first": False
+    }
+)
+
+# Response:
+# {
+#   "results": [
+#     {"index": 0, "token_probs": {"2332": 0.95, "1223": 0.05}},  # Paris: Yes=95%
+#     {"index": 1, "token_probs": {"2332": 0.10, "1223": 0.90}},  # London: No=90%
+#     {"index": 2, "token_probs": {"2332": 0.05, "1223": 0.95}}   # Berlin: No=95%
+#   ]
+# }
+```
+
+#### Request Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | string | null | Model to use for scoring. |
+| `query` | string \| list[int] | required | Query text or pre-tokenized token IDs. |
+| `items` | list[string] \| list[list[int]] | required | Items to score against the query. |
+| `label_token_ids` | list[int] | required | Token IDs to compute probabilities for. |
+| `apply_softmax` | bool | true | If true, normalize over label tokens. If false, return true model probs. |
+| `item_first` | bool | false | If true, prepend items to query. Otherwise append. |
+| `temperature` | float | 0.0 | Temperature for logits (0.0 = greedy). |
+| `top_k` | int | 0 | Top-k filtering (0 = disabled for scoring). |
+| `top_p` | float | 1.0 | Top-p filtering (1.0 = disabled for scoring). |
+| `add_special_tokens` | bool | true | Whether to add special tokens when tokenizing. |
+
+#### Probability Computation
+
+The endpoint computes probabilities from the model's next-token distribution:
+
+1. **Prompt Construction**: For each item, build `prompt = query + item` (or `item + query` if `item_first=True`)
+2. **Forward Pass**: Run the model to get next-token logits
+3. **Probability Extraction**: Get logprobs for specified `label_token_ids`
+
+The `apply_softmax` parameter controls normalization:
+
+- **`apply_softmax=True`** (default): Softmax over only the label tokens
+  ```
+  P(token_i | prompt) = exp(logit_i) / Σ exp(logit_j) for j in label_token_ids
+  ```
+  Probabilities sum to 1 over the label tokens.
+
+- **`apply_softmax=False`**: True model probabilities
+  ```
+  P(token_i | prompt) = exp(logprob_i)  # logprob is already normalized over full vocab
+  ```
+  Probabilities are the actual model confidence over the full vocabulary.
 
 ## Ray Serve LLM
 
