@@ -101,7 +101,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "int n_local_expert,"
       "int topk, Tensor! permuted_input, Tensor! "
       "expert_first_token_offset, Tensor! inv_permuted_idx, Tensor! "
-      "permuted_idx, Tensor! m_indices)->()");
+      "permuted_idx)->()");
 
   m.def(
       "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"

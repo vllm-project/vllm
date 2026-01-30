@@ -40,7 +40,6 @@ def torch_permute(
     n_local_expert: int,
     start_expert: int,
     expert_map: torch.Tensor | None = None,
-    fill_invalid_expert: int = -1,
 ) -> list[torch.Tensor]:
     n_token = hidden_states.shape[0]
     if expert_map is not None:
@@ -70,14 +69,6 @@ def torch_permute(
     _, src2dst_idx = torch.sort(dst_row_id2src_row_id_map)
     valid_row_idx = []
     permuted_hidden_states = hidden_states[dst_row_id2src_row_id_map // topk, ...]
-    permuted_row_size = permuted_hidden_states.shape[0]
-    m_indices = torch.empty(permuted_row_size, device="cuda", dtype=torch.int32).fill_(
-        fill_invalid_expert
-    )
-    for i in range(1, n_local_expert + 1):
-        first_token_offset = expert_first_token_offset[i - 1]
-        last_token_offset = expert_first_token_offset[i]
-        m_indices[first_token_offset:last_token_offset] = i - 1
     src_row_id2dst_row_id_map = torch.arange(
         0, n_token * topk, device="cuda", dtype=torch.int32
     )[src2dst_idx].reshape((n_token, topk))
@@ -136,7 +127,6 @@ def test_moe_permute_unpermute(
 ):
     if not moe_permute_unpermute_supported():
         pytest.skip("moe_permute_unpermute is not supported on this platform.")
-    fill_invalid_expert = 0
     ep_rank = np.random.randint(0, ep_size)
     expert_map = None
     n_local_expert = n_expert
@@ -165,7 +155,6 @@ def test_moe_permute_unpermute(
         n_local_expert,
         start_expert,
         expert_map=expert_map,
-        fill_invalid_expert=fill_invalid_expert,
     )
 
     (
@@ -181,7 +170,6 @@ def test_moe_permute_unpermute(
         n_expert=n_expert,
         n_local_expert=n_local_expert,
         expert_map=expert_map,
-        fill_invalid_expert=fill_invalid_expert,
     )
 
     # check expert_first_token_offset

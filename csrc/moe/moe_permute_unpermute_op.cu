@@ -17,8 +17,7 @@ void moe_permute(
     torch::Tensor& permuted_input,             // [permuted_size, hidden]
     torch::Tensor& expert_first_token_offset,  // [n_local_expert + 1]
     torch::Tensor& inv_permuted_idx,           // [n_token, topk]
-    torch::Tensor& permuted_idx,               // [permute_size]
-    torch::Tensor& m_indices) {                // [align_expand_m]
+    torch::Tensor& permuted_idx) {             // [permute_size]
   TORCH_CHECK(expert_first_token_offset.scalar_type() == at::ScalarType::Long,
               "expert_first_token_offset must be int64");
   TORCH_CHECK(topk_ids.scalar_type() == at::ScalarType::Int,
@@ -177,8 +176,7 @@ void moe_permute(const torch::Tensor& input, const torch::Tensor& topk_ids,
                  int64_t n_expert, int64_t n_local_expert, int64_t topk,
                  torch::Tensor& permuted_input,
                  torch::Tensor& expert_first_token_offset,
-                 torch::Tensor& inv_permuted_idx, torch::Tensor& permuted_idx,
-                 torch::Tensor& m_indices) {
+                 torch::Tensor& inv_permuted_idx, torch::Tensor& permuted_idx) {
   TORCH_CHECK(false, "moe_permute is not supported on CUDA < 12.0");
 }
 

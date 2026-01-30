@@ -11,7 +11,6 @@ def moe_permute(
     n_expert: int,
     n_local_expert: int = -1,
     expert_map: torch.Tensor | None = None,
-    fill_invalid_expert: int = -1,
     permuted_hidden_states: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
@@ -26,8 +25,6 @@ def moe_permute(
     - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
         from the global expert space to the local expert space of the expert
         parallel shard.
-    - fill_invalid_expert(int): fill expert id in m_indices for invalid expert
-      to workaround DeepGemm unsupported -1 in m_indices
     - permuted_hidden_states (Optional[torch.Tensor]): Optional output tensor.
         If None, the output tensor will be created in this function.
     Returns:
@@ -38,8 +35,6 @@ def moe_permute(
        of each expert for standard grouped gemm.
     - inv_permuted_idx (torch.Tensor): idx map for moe_unpermute.
     - permuted_idx (torch.Tensor): idx map from hidden to permuted_hidden.
-    - m_indices: m_indices for grouped gemm in deepgemm,`m_indices[i]` records
-    the group which the j-th row of the LHS belong to.`
     """
     n_token, n_hidden = hidden_states.size()
     topk = topk_ids.size(1)
@@ -64,12 +59,6 @@ def moe_permute(
         0, n_token * topk, dtype=torch.int32, device=hidden_states.device
     ).reshape((n_token, topk))
 
-    m_indices = torch.full(
-        (permuted_row_size,),
-        fill_invalid_expert,
-        dtype=torch.int32,
-        device=hidden_states.device,
-    )
     expert_first_token_offset = torch.empty(
         n_local_expert + 1, dtype=torch.int64, device=hidden_states.device
     )
@@ -95,7 +84,6 @@ def moe_permute(
         expert_first_token_offset,
         inv_permuted_idx,
         permuted_idx,
-        m_indices,
     )
 
     if a1q_scale is not None and a1q_scale.dim() > 1:
@@ -105,7 +93,7 @@ def moe_permute(
         a1q_scale,
         expert_first_token_offset,
         inv_permuted_idx.flatten(),
-        m_indices,
+        permuted_idx,
     )
 
 
