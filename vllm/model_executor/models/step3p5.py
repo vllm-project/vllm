@@ -307,8 +307,6 @@ class FusedMoEBlock(nn.Module):
                 f"the number of experts {config.moe_num_experts}."
             )
 
-        assert config.moe_dynamic_exp_p == 1, "Only support dynamic exp p=1"
-
         self.use_moe_router_bias = config.use_moe_router_bias
         assert self.use_moe_router_bias, "Only support use_moe_router_bias is true."
         self.routed_scaling_factor = config.moe_router_scaling_factor

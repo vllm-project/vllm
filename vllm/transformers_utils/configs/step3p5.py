@@ -24,7 +24,6 @@ class Step3p5Config(PretrainedConfig):
         moe_num_experts: int = 16,
         moe_top_k: int = 4,
         moe_layer_offset: int = 0,
-        moe_dynamic_exp_p: float = 1.0,
         rope_theta: float | list[float] | None = 500000,
         rope_scaling: dict[str, Any] | None = None,
         head_dim: int | None = None,
@@ -63,7 +62,6 @@ class Step3p5Config(PretrainedConfig):
         self.num_experts_per_tok = moe_top_k
         self.moe_top_k = moe_top_k
         self.moe_layer_offset = moe_layer_offset
-        self.moe_dynamic_exp_p = moe_dynamic_exp_p
 
         self.rope_theta = rope_theta
         self.rope_scaling = rope_scaling
