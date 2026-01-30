@@ -798,10 +798,6 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
-        # Make sure there's a __len__ method
-        assert isinstance(eplb_model_state.model.expert_weights[0], Sized)
-        num_tensors_per_expert = len(eplb_model_state.model.expert_weights[0])
-
         # Get new expert mappings
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
@@ -831,6 +827,11 @@ class EplbState:
                     "The maximum number of EPLB transfers has been capped at %d",
                     max_num_transfers,
                 )
+
+                # Make sure there's a __len__ method
+                assert isinstance(eplb_model_state.model.expert_weights[0], Sized)
+                num_tensors_per_expert = len(eplb_model_state.model.expert_weights[0])
+
                 cap_num_transfers(
                     eplb_model_state.physical_to_logical_map,
                     new_physical_to_logical_map,
