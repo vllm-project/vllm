@@ -433,7 +433,7 @@ def make_fp8_moe_kernel(
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
-) -> tuple[mk.FusedMoEModularKernel, bool]:
+) -> tuple[mk.FusedMoEModularKernelBase, bool]:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -464,7 +464,7 @@ def make_fp8_moe_kernel(
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explict in
     # the new MoE runner class.
-    kernel = mk.FusedMoEModularKernel(
+    kernel = mk.FusedMoEModularKernelBase.make_mk(
         prepare_finalize,
         experts,
         shared_experts=(

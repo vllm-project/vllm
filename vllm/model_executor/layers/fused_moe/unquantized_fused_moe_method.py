@@ -63,7 +63,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.rocm_aiter_moe_enabled = (
             rocm_aiter_ops.is_fused_moe_enabled() and moe.is_act_and_mul
         )
-        self.kernel: mk.FusedMoEModularKernel | None = None
+        self.kernel: mk.FusedMoEModularKernelBase | None = None
         self._is_monolithic = current_platform.is_cpu() or current_platform.is_xpu()
 
     @property

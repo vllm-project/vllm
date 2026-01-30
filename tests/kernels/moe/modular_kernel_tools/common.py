@@ -620,7 +620,7 @@ def make_modular_kernel(
         config.N,
     )
 
-    modular_kernel = mk.FusedMoEModularKernel(
+    modular_kernel = mk.FusedMoEModularKernel.make_mk(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
     )

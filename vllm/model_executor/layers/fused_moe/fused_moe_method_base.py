@@ -27,7 +27,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         super().__init__()
         self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
-        self.moe_mk: mk.FusedMoEModularKernel | None = None
+        self.moe_mk: mk.FusedMoEModularKernelBase | None = None
 
     @property
     def supports_internal_mk(self) -> bool:

@@ -962,6 +962,40 @@ class FusedMoEModularKernelBase(torch.nn.Module):
             f"{fused_experts.activation_format()}"
         )
 
+    @staticmethod
+    def make_mk(
+        prepare_finalize: FusedMoEPrepareAndFinalizeBase,
+        fused_experts: FusedMoEPermuteExpertsUnpermuteBase,
+        shared_experts: torch.nn.Module | None = None,
+        moe_parallel_config: FusedMoEParallelConfig | None = None,
+    ) -> "FusedMoEModularKernelBase":
+        """
+        Factory method to create a FusedMoEModularKernelBase instance.
+        """
+        if isinstance(
+            prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
+        ) and isinstance(fused_experts, FusedMoEPermuteExpertsUnpermuteMonolithic):
+            return FusedMoEModularKernelMonolithic(
+                prepare_finalize,
+                fused_experts,
+                shared_experts,
+                moe_parallel_config,
+            )
+        elif isinstance(prepare_finalize, FusedMoEPrepareAndFinalize) and isinstance(
+            fused_experts, FusedMoEPermuteExpertsUnpermute
+        ):
+            return FusedMoEModularKernel(
+                prepare_finalize,
+                fused_experts,
+                shared_experts,
+                moe_parallel_config,
+            )
+        else:
+            raise ValueError(
+                "prepare_finalize and fused_experts must both be either "
+                "monolithic or non-monolithic"
+            )
+
     def _post_init_setup(self):
         """
         Resolve any leftover setup dependencies between self.prepare_finalize
