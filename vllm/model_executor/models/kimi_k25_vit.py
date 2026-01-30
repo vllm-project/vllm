@@ -660,13 +660,13 @@ class KimiK25MultiModalProjector(nn.Module):
             self.hidden_size,
             self.hidden_size,
             bias=True,
-            prefix=maybe_prefix(prefix, "linear_1"),
+            prefix=f"{prefix}.linear_1",
         )
         self.linear_2 = ReplicatedLinear(
             self.hidden_size,
             config.mm_hidden_size,
             bias=True,
-            prefix=maybe_prefix(prefix, "linear_2"),
+            prefix=f"{prefix}.linear_2",
         )
         self.act = GELUActivation()
 

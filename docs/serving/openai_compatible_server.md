@@ -59,6 +59,8 @@ We currently support the following OpenAI APIs:
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 - [Translation API](#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
+- [Realtime API](#realtime-api) (`/v1/realtime`)
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 
 In addition, we have the following custom APIs:
 
@@ -567,6 +569,96 @@ The following extra parameters are supported:
 --8<-- "vllm/entrypoints/openai/protocol.py:translation-extra-params"
 ```
 
+### Realtime API
+
+The Realtime API provides WebSocket-based streaming audio transcription, allowing real-time speech-to-text as audio is being recorded.
+
+!!! note
+    To use the Realtime API, please install with extra audio dependencies using `uv pip install vllm[audio]`.
+
+#### Audio Format
+
+Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono channel.
+
+#### Protocol Overview
+
+1. Client connects to `ws://host/v1/realtime`
+2. Server sends `session.created` event
+3. Client optionally sends `session.update` with model/params
+4. Client sends `input_audio_buffer.commit` when ready
+5. Client sends `input_audio_buffer.append` events with base64 PCM16 chunks
+6. Server sends `transcription.delta` events with incremental text
+7. Server sends `transcription.done` with final text + usage
+8. Repeat from step 5 for next utterance
+9. Optionally, client sends input_audio_buffer.commit with final=True
+    to signal audio input is finished. Useful when streaming audio files
+
+#### Client → Server Events
+
+| Event | Description |
+|-------|-------------|
+| `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
+| `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
+| `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
+
+#### Server → Client Events
+
+| Event | Description |
+|-------|-------------|
+| `session.created` | Connection established with session ID and timestamp |
+| `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text"}` |
+| `transcription.done` | Final transcription with usage stats |
+| `error` | Error notification with message and optional code |
+
+#### Python WebSocket Example
+
+??? code
+
+    ```python
+    import asyncio
+    import base64
+    import json
+    import websockets
+
+    async def realtime_transcribe():
+        uri = "ws://localhost:8000/v1/realtime"
+
+        async with websockets.connect(uri) as ws:
+            # Wait for session.created
+            response = await ws.recv()
+            print(f"Session: {response}")
+
+            # Commit buffer
+            await ws.send(json.dumps({
+                "type": "input_audio_buffer.commit"
+            }))
+
+            # Send audio chunks (example with file)
+            with open("audio.raw", "rb") as f:
+                while chunk := f.read(4096):
+                    await ws.send(json.dumps({
+                        "type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(chunk).decode()
+                    }))
+
+            # Signal all audio is sent
+            await ws.send(json.dumps({
+                "type": "input_audio_buffer.commit",
+                "final": True,
+            }))
+
+            # Receive transcription
+            while True:
+                response = json.loads(await ws.recv())
+                if response["type"] == "transcription.delta":
+                    print(response["delta"], end="", flush=True)
+                elif response["type"] == "transcription.done":
+                    print(f"\nFinal: {response['text']}")
+                    break
+
+    asyncio.run(realtime_transcribe())
+    ```
+
 ### Tokenizer API
 
 Our Tokenizer API is a simple wrapper over [HuggingFace-style tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
@@ -1067,4 +1159,4 @@ Key capabilities:
 
 The following example shows how to deploy a large model like DeepSeek R1 with Ray Serve LLM: [examples/online_serving/ray_serve_deepseek.py](../../examples/online_serving/ray_serve_deepseek.py).
 
-Learn more about Ray Serve LLM with the official [Ray Serve LLM documentation](https://docs.ray.io/en/latest/serve/llm/serving-llms.html).
+Learn more about Ray Serve LLM with the official [Ray Serve LLM documentation](https://docs.ray.io/en/latest/serve/llm/index.html).

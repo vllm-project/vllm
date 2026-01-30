@@ -249,7 +249,7 @@ class GlmOcrPatchMerger(Glm4vPatchMerger):
 class GlmOcrVisionTransformer(Glm4vVisionTransformer):
     def __init__(
         self,
-        vision_config: GlmOcrVisionConfig,
+        vision_config: "GlmOcrVisionConfig",
         norm_eps: float = 1e-5,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",

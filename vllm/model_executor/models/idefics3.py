@@ -349,10 +349,8 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
             tok_kwargs,
         )
 
-        parsed_images = (
-            self._get_data_parser()
-            .parse_mm_data({"image": images})
-            .get_items("image", ImageProcessorItems)
+        parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
+            "image", ImageProcessorItems
         )
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
