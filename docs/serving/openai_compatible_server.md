@@ -574,7 +574,7 @@ The following extra parameters are supported:
 The Realtime API provides WebSocket-based streaming audio transcription, allowing real-time speech-to-text as audio is being recorded.
 
 !!! note
-    To use the Realtime API, please install with extra audio dependencies using `pip install vllm[audio]`.
+    To use the Realtime API, please install with extra audio dependencies using `uv pip install vllm[audio]`.
 
 #### Audio Format
 

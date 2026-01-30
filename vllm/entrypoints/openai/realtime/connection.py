@@ -6,6 +6,7 @@ import base64
 import contextlib
 import json
 from collections.abc import AsyncGenerator
+from http import HTTPStatus
 from uuid import uuid4
 
 import numpy as np
@@ -13,7 +14,7 @@ from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from vllm import envs
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.openai.realtime.protocol import (
     ErrorEvent,
     InputAudioBufferAppend,
@@ -49,6 +50,8 @@ class RealtimeConnection:
 
         self._is_connected = False
         self._is_input_finished = False
+        self._is_model_validated = False
+
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
 
     async def handle_connection(self):
@@ -79,6 +82,17 @@ class RealtimeConnection:
         finally:
             await self.cleanup()
 
+    def _check_model(self, model: str | None) -> None | ErrorResponse:
+        if self.serving._is_model_supported(model):
+            return None
+
+        return self.serving.create_error_response(
+            message=f"The model `{model}` does not exist.",
+            err_type="NotFoundError",
+            status_code=HTTPStatus.NOT_FOUND,
+            param="model",
+        )
+
     async def handle_event(self, event: dict):
         """Route events to handlers.
 
@@ -90,8 +104,8 @@ class RealtimeConnection:
         event_type = event.get("type")
         if event_type == "session.update":
             logger.debug("Session updated: %s", event)
-            # TODO: Validate model change
-            # await self.serving.validate_model(event["model"])
+            self._check_model(event["model"])
+            self._is_model_validated = True
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
             try:
@@ -119,6 +133,16 @@ class RealtimeConnection:
                 await self.send_error("Invalid audio data", "invalid_audio")
 
         elif event_type == "input_audio_buffer.commit":
+            if not self._is_model_validated:
+                err_msg = (
+                    "Model not validated. Make sure to validate the"
+                    " model by sending a session.update event."
+                )
+                await self.send_error(
+                    err_msg,
+                    "model_not_validated",
+                )
+
             commit_event = InputAudioBufferCommit(**event)
             # final signals that the audio is finished
             if commit_event.final:
