@@ -134,14 +134,15 @@ class OpenAIServingGenerativeScores(OpenAIServing):
             return self.create_error_response(e)
 
         # Create sampling params for scoring
-        # We use max_tokens=1 with logprobs=-1 to get full vocab logprobs
-        # for the next token distribution
+        # We use max_tokens=1 with logprob_token_ids to efficiently get
+        # logprobs for only the specified label tokens (not full vocab)
         sampling_params = SamplingParams(
             max_tokens=1,
             temperature=request.temperature if request.temperature else 0.0,
             top_k=request.top_k if request.top_k is not None else 0,
             top_p=request.top_p if request.top_p is not None else 1.0,
-            logprobs=-1,  # Get all vocab logprobs
+            logprobs=len(request.label_token_ids),  # Request enough logprobs
+            logprob_token_ids=request.label_token_ids,  # Efficient: only these tokens
             n=1,
         )
 
@@ -283,9 +284,11 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         Returns:
             Tuple of (list of TokensPrompt, list of prompt token counts).
         """
+        # Get async tokenizer once for efficiency
+        async_tokenizer = self._get_async_tokenizer(tokenizer)
+
         # Tokenize query if it's a string
         if isinstance(request.query, str):
-            async_tokenizer = self._get_async_tokenizer(tokenizer)
             query_result = await async_tokenizer(
                 request.query,
                 add_special_tokens=request.add_special_tokens,
@@ -300,7 +303,6 @@ class OpenAIServingGenerativeScores(OpenAIServing):
         for item in request.items:
             # Tokenize item if it's a string
             if isinstance(item, str):
-                async_tokenizer = self._get_async_tokenizer(tokenizer)
                 # Don't add special tokens for items to avoid duplicate BOS/EOS
                 item_result = await async_tokenizer(
                     item,

@@ -12,7 +12,7 @@ These tests verify:
 import math
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -74,166 +74,7 @@ class MockModelConfig:
 
 
 # ============================================================================
-# Protocol Tests
-# ============================================================================
-
-
-class TestGenerativeScoreProtocol:
-    """Tests for protocol models."""
-
-    def test_request_basic_fields(self):
-        """Test request with basic required fields."""
-        request = GenerativeScoreRequest(
-            query="Is this city the capital?",
-            items=["Paris", "London"],
-            label_token_ids=[1234, 5678],
-        )
-        assert request.query == "Is this city the capital?"
-        assert request.items == ["Paris", "London"]
-        assert request.label_token_ids == [1234, 5678]
-        assert request.apply_softmax is True  # default
-        assert request.item_first is False  # default
-        assert request.temperature == 0.0  # default for scoring
-        assert request.top_k == 0  # default (disabled)
-        assert request.top_p == 1.0  # default (disabled)
-
-    def test_request_with_pretokenized_input(self):
-        """Test request with pre-tokenized token IDs."""
-        request = GenerativeScoreRequest(
-            query=[100, 200, 300],
-            items=[[400, 500], [600, 700, 800]],
-            label_token_ids=[1234, 5678],
-        )
-        assert request.query == [100, 200, 300]
-        assert request.items == [[400, 500], [600, 700, 800]]
-
-    def test_request_custom_options(self):
-        """Test request with custom options."""
-        request = GenerativeScoreRequest(
-            query="Test query",
-            items=["Item1"],
-            label_token_ids=[100],
-            apply_softmax=False,
-            item_first=True,
-            temperature=0.5,
-            add_special_tokens=False,
-        )
-        assert request.apply_softmax is False
-        assert request.item_first is True
-        assert request.temperature == 0.5
-        assert request.add_special_tokens is False
-
-    def test_response_structure(self):
-        """Test response model structure."""
-        response = GenerativeScoreResponse(
-            model="test-model",
-            results=[
-                GenerativeScoreItemResult(
-                    index=0,
-                    token_probs={"1234": 0.7, "5678": 0.3},
-                )
-            ],
-            usage={"prompt_tokens": 10, "total_tokens": 11, "completion_tokens": 1},
-        )
-        assert response.object == "generative_score"
-        assert response.model == "test-model"
-        assert len(response.results) == 1
-        assert response.results[0].token_probs["1234"] == 0.7
-
-
-# ============================================================================
-# Probability Computation Tests
-# ============================================================================
-
-
-class TestProbabilityComputation:
-    """Tests for probability computation logic."""
-
-    def test_compute_probabilities_with_softmax(self):
-        """Test subset softmax normalization (apply_softmax=True).
-
-        When apply_softmax=True, we normalize only over the label tokens.
-        softmax([logprob_a, logprob_b]) should sum to 1.
-        """
-        serving = OpenAIServingGenerativeScores.__new__(
-            OpenAIServingGenerativeScores
-        )
-
-        # Example logprobs (log probabilities from the model)
-        # These are already log(softmax(logits)) values
-        label_logprobs = {
-            100: -1.0,  # ~0.368 before normalization
-            200: -2.0,  # ~0.135 before normalization
-        }
-
-        probs = serving._compute_probabilities(label_logprobs, apply_softmax=True)
-
-        # With subset softmax, probs should sum to 1
-        total = sum(probs.values())
-        assert abs(total - 1.0) < 1e-6, f"Probabilities should sum to 1, got {total}"
-
-        # Check relative ordering is preserved
-        assert probs[100] > probs[200], "Higher logprob should have higher probability"
-
-        # Verify the math: softmax([−1, −2]) = [e^−1/(e^−1+e^−2), e^−2/(e^−1+e^−2)]
-        exp_neg1 = math.exp(-1)
-        exp_neg2 = math.exp(-2)
-        expected_prob_100 = exp_neg1 / (exp_neg1 + exp_neg2)
-        expected_prob_200 = exp_neg2 / (exp_neg1 + exp_neg2)
-        assert abs(probs[100] - expected_prob_100) < 1e-6
-        assert abs(probs[200] - expected_prob_200) < 1e-6
-
-    def test_compute_probabilities_without_softmax(self):
-        """Test true model probabilities (apply_softmax=False).
-
-        When apply_softmax=False, we return exp(logprob) which gives the
-        true model probability for each token over the full vocab.
-        """
-        serving = OpenAIServingGenerativeScores.__new__(
-            OpenAIServingGenerativeScores
-        )
-
-        # Example logprobs (already normalized over full vocab by the model)
-        label_logprobs = {
-            100: -1.0,  # exp(-1) ≈ 0.368
-            200: -2.0,  # exp(-2) ≈ 0.135
-        }
-
-        probs = serving._compute_probabilities(label_logprobs, apply_softmax=False)
-
-        # These should NOT sum to 1 (they're just exp of the logprobs)
-        expected_prob_100 = math.exp(-1.0)
-        expected_prob_200 = math.exp(-2.0)
-
-        assert abs(probs[100] - expected_prob_100) < 1e-6
-        assert abs(probs[200] - expected_prob_200) < 1e-6
-
-        # These probabilities don't sum to 1 (unless we happened to pick
-        # the only tokens with probability mass)
-        total = sum(probs.values())
-        assert total < 1.0, "True probs over subset shouldn't sum to 1"
-
-    def test_compute_probabilities_numerical_stability(self):
-        """Test that computation is numerically stable with extreme values."""
-        serving = OpenAIServingGenerativeScores.__new__(
-            OpenAIServingGenerativeScores
-        )
-
-        # Very negative logprobs (very unlikely tokens)
-        label_logprobs = {
-            100: -100.0,
-            200: -100.5,
-        }
-
-        # Should not overflow/underflow with subset softmax
-        probs = serving._compute_probabilities(label_logprobs, apply_softmax=True)
-        total = sum(probs.values())
-        assert abs(total - 1.0) < 1e-6
-        assert probs[100] > probs[200]
-
-
-# ============================================================================
-# Mock Engine Tests
+# Test Fixtures and Helpers
 # ============================================================================
 
 
@@ -266,7 +107,6 @@ def _create_mock_request_output(
     token_id: int = 100,
 ) -> RequestOutput:
     """Create a mock RequestOutput with specified logprobs."""
-    # Convert to Logprob objects
     logprobs_with_objs = {
         tid: Logprob(logprob=lp, rank=i + 1)
         for i, (tid, lp) in enumerate(logprobs_dict.items())
@@ -291,70 +131,223 @@ def _create_mock_request_output(
 
 
 # ============================================================================
-# Validation Tests
+# Protocol Tests (Parameterized)
+# ============================================================================
+
+
+class TestGenerativeScoreProtocol:
+    """Tests for protocol models - parameterized for efficiency."""
+
+    @pytest.mark.parametrize(
+        "query,items,label_ids,extra_kwargs,expected_attrs",
+        [
+            # Basic string input with defaults
+            (
+                "Is this city the capital?",
+                ["Paris", "London"],
+                [1234, 5678],
+                {},
+                {
+                    "apply_softmax": True,
+                    "item_first": False,
+                    "temperature": 0.0,
+                    "top_k": 0,
+                    "top_p": 1.0,
+                },
+            ),
+            # Pre-tokenized input
+            (
+                [100, 200, 300],
+                [[400, 500], [600, 700, 800]],
+                [1234],
+                {},
+                {"apply_softmax": True, "item_first": False},
+            ),
+            # Custom options
+            (
+                "Test query",
+                ["Item1"],
+                [100],
+                {
+                    "apply_softmax": False,
+                    "item_first": True,
+                    "temperature": 0.5,
+                    "add_special_tokens": False,
+                },
+                {
+                    "apply_softmax": False,
+                    "item_first": True,
+                    "temperature": 0.5,
+                    "add_special_tokens": False,
+                },
+            ),
+        ],
+        ids=["basic_defaults", "pretokenized", "custom_options"],
+    )
+    def test_request_construction(
+        self, query, items, label_ids, extra_kwargs, expected_attrs
+    ):
+        """Test request construction with various inputs and options."""
+        request = GenerativeScoreRequest(
+            query=query,
+            items=items,
+            label_token_ids=label_ids,
+            **extra_kwargs,
+        )
+        assert request.query == query
+        assert request.items == items
+        assert request.label_token_ids == label_ids
+        for attr, expected in expected_attrs.items():
+            assert getattr(request, attr) == expected, f"{attr} mismatch"
+
+    def test_response_structure(self):
+        """Test response model structure."""
+        response = GenerativeScoreResponse(
+            model="test-model",
+            results=[
+                GenerativeScoreItemResult(
+                    index=0,
+                    token_probs={"1234": 0.7, "5678": 0.3},
+                )
+            ],
+            usage={
+                "prompt_tokens": 10,
+                "total_tokens": 11,
+                "completion_tokens": 1,
+            },
+        )
+        assert response.object == "generative_score"
+        assert response.model == "test-model"
+        assert len(response.results) == 1
+        assert response.results[0].token_probs["1234"] == 0.7
+
+
+# ============================================================================
+# Probability Computation Tests (Parameterized - replaces 2 test classes)
+# ============================================================================
+
+
+class TestProbabilityComputation:
+    """Unified tests for probability computation - covers both softmax modes."""
+
+    @pytest.mark.parametrize(
+        "label_logprobs,apply_softmax,should_sum_to_one",
+        [
+            # apply_softmax=True cases (subset softmax, sums to 1)
+            ({100: -1.0, 200: -2.0}, True, True),
+            ({10: -0.5, 20: -1.5}, True, True),
+            # Numerical stability with extreme values
+            ({100: -100.0, 200: -100.5}, True, True),
+            # apply_softmax=False cases (true probs, don't sum to 1)
+            ({100: -1.0, 200: -2.0}, False, False),
+            ({10: -0.5, 20: -1.5}, False, False),
+        ],
+        ids=[
+            "softmax_basic",
+            "softmax_different_values",
+            "softmax_numerical_stability",
+            "true_probs_basic",
+            "true_probs_different_values",
+        ],
+    )
+    def test_compute_probabilities(
+        self, label_logprobs, apply_softmax, should_sum_to_one
+    ):
+        """Test probability computation with various inputs and modes."""
+        serving = OpenAIServingGenerativeScores.__new__(
+            OpenAIServingGenerativeScores
+        )
+
+        probs = serving._compute_probabilities(
+            label_logprobs, apply_softmax=apply_softmax
+        )
+
+        # Check sum behavior
+        total = sum(probs.values())
+        if should_sum_to_one:
+            assert abs(total - 1.0) < 1e-6, f"Expected sum=1, got {total}"
+        else:
+            assert total < 1.0, f"True probs should sum <1, got {total}"
+
+        # Verify ordering is preserved (higher logprob = higher prob)
+        sorted_logprobs = sorted(
+            label_logprobs.items(), key=lambda x: x[1], reverse=True
+        )
+        sorted_probs = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+        assert [x[0] for x in sorted_logprobs] == [x[0] for x in sorted_probs]
+
+        # Verify math for specific cases
+        if apply_softmax:
+            # softmax: exp(x_i - max) / sum(exp(x_j - max))
+            max_lp = max(label_logprobs.values())
+            exp_vals = {k: math.exp(v - max_lp) for k, v in label_logprobs.items()}
+            sum_exp = sum(exp_vals.values())
+            for token_id, logprob in label_logprobs.items():
+                expected = exp_vals[token_id] / sum_exp
+                assert abs(probs[token_id] - expected) < 1e-9
+        else:
+            # true probs: just exp(logprob)
+            for token_id, logprob in label_logprobs.items():
+                expected = math.exp(logprob)
+                assert abs(probs[token_id] - expected) < 1e-9
+
+
+# ============================================================================
+# Validation Tests (Parameterized)
 # ============================================================================
 
 
 class TestValidation:
-    """Tests for input validation."""
+    """Tests for input validation - parameterized."""
 
     @pytest.mark.asyncio
-    async def test_invalid_token_id_out_of_range(self):
-        """Test that out-of-range token IDs return an error."""
+    @pytest.mark.parametrize(
+        "request_kwargs,expected_error_substring",
+        [
+            # Out of range token ID
+            (
+                {
+                    "query": "test query",
+                    "items": ["item1"],
+                    "label_token_ids": [999999],
+                },
+                "out of vocabulary range",
+            ),
+            # Empty label_token_ids
+            (
+                {
+                    "query": "test query",
+                    "items": ["item1"],
+                    "label_token_ids": [],
+                },
+                "at least one token",
+            ),
+            # Empty items
+            (
+                {
+                    "query": "test query",
+                    "items": [],
+                    "label_token_ids": [100],
+                },
+                "at least one item",
+            ),
+        ],
+        ids=["invalid_token_id", "empty_label_tokens", "empty_items"],
+    )
+    async def test_validation_errors(self, request_kwargs, expected_error_substring):
+        """Test that invalid inputs return appropriate errors."""
         mock_engine = _create_mock_engine()
         serving = _create_serving(mock_engine)
 
-        request = GenerativeScoreRequest(
-            model=MODEL_NAME,
-            query="test query",
-            items=["item1"],
-            label_token_ids=[999999],  # Way beyond vocab size
-        )
-
+        request = GenerativeScoreRequest(model=MODEL_NAME, **request_kwargs)
         result = await serving.create_generative_score(request, None)
 
         assert isinstance(result, ErrorResponse)
-        assert "out of vocabulary range" in result.error.message.lower()
-
-    @pytest.mark.asyncio
-    async def test_empty_label_token_ids(self):
-        """Test that empty label_token_ids returns an error."""
-        mock_engine = _create_mock_engine()
-        serving = _create_serving(mock_engine)
-
-        request = GenerativeScoreRequest(
-            model=MODEL_NAME,
-            query="test query",
-            items=["item1"],
-            label_token_ids=[],  # Empty
-        )
-
-        result = await serving.create_generative_score(request, None)
-
-        assert isinstance(result, ErrorResponse)
-        assert "at least one token" in result.error.message.lower()
-
-    @pytest.mark.asyncio
-    async def test_empty_items(self):
-        """Test that empty items list returns an error."""
-        mock_engine = _create_mock_engine()
-        serving = _create_serving(mock_engine)
-
-        request = GenerativeScoreRequest(
-            model=MODEL_NAME,
-            query="test query",
-            items=[],  # Empty
-            label_token_ids=[100],
-        )
-
-        result = await serving.create_generative_score(request, None)
-
-        assert isinstance(result, ErrorResponse)
-        assert "at least one item" in result.error.message.lower()
+        assert expected_error_substring in result.error.message.lower()
 
 
 # ============================================================================
-# Integration-style Tests (with mocked engine)
+# Integration Tests (with mocked engine)
 # ============================================================================
 
 
@@ -367,12 +360,10 @@ class TestGenerativeScoreGeneration:
         mock_engine = _create_mock_engine()
         serving = _create_serving(mock_engine)
 
-        # Set up the mock to return logprobs for our label tokens
         label_token_ids = [1234, 5678]
         mock_logprobs = {
-            1234: -0.5,  # Higher probability
-            5678: -2.0,  # Lower probability
-            # Include some other tokens that would be in full vocab
+            1234: -0.5,
+            5678: -2.0,
             100: -3.0,
             200: -4.0,
         }
@@ -394,9 +385,8 @@ class TestGenerativeScoreGeneration:
 
         result = await serving.create_generative_score(request, None)
 
-        # Should succeed
         assert isinstance(result, GenerativeScoreResponse)
-        assert len(result.results) == 2  # One per item
+        assert len(result.results) == 2
 
         # Check probabilities are in valid range
         for item_result in result.results:
@@ -404,105 +394,43 @@ class TestGenerativeScoreGeneration:
                 assert 0.0 <= prob <= 1.0
 
     @pytest.mark.asyncio
-    async def test_item_first_ordering(self):
-        """Test that item_first=True prepends item to query."""
+    @pytest.mark.parametrize(
+        "item_first,expected_prompts",
+        [
+            (
+                False,
+                [
+                    [100, 101, 102, 200, 201],
+                    [100, 101, 102, 300, 301],
+                ],
+            ),
+            (
+                True,
+                [
+                    [200, 201, 100, 101, 102],
+                    [300, 301, 100, 101, 102],
+                ],
+            ),
+        ],
+        ids=["query_first", "item_first"],
+    )
+    async def test_item_ordering(self, item_first, expected_prompts):
+        """Test that item_first flag correctly controls prompt ordering."""
         mock_engine = _create_mock_engine()
         serving = _create_serving(mock_engine)
-
-        # Track what prompts are built
-        built_prompts = []
-
-        async def mock_tokenizer_call(text, **kwargs):
-            result = MagicMock()
-            result.input_ids = [ord(c) for c in text[:5]]  # Simple mock
-            return result
-
-        # We can verify the prompt building by checking the _build_prompts method
         tokenizer = MagicMock()
-        tokenizer.return_value = MagicMock(input_ids=[1, 2, 3])
 
         request = GenerativeScoreRequest(
-            query=[100, 101, 102],  # Pre-tokenized
-            items=[[200, 201], [300, 301]],  # Pre-tokenized
+            query=[100, 101, 102],
+            items=[[200, 201], [300, 301]],
             label_token_ids=[500],
-            item_first=False,
+            item_first=item_first,
         )
 
-        # Build prompts and check ordering
         engine_prompts, _ = await serving._build_prompts(request, tokenizer)
 
-        # With item_first=False: query + item
-        assert engine_prompts[0]["prompt_token_ids"] == [100, 101, 102, 200, 201]
-        assert engine_prompts[1]["prompt_token_ids"] == [100, 101, 102, 300, 301]
-
-        # Now test with item_first=True
-        request.item_first = True
-        engine_prompts, _ = await serving._build_prompts(request, tokenizer)
-
-        # With item_first=True: item + query
-        assert engine_prompts[0]["prompt_token_ids"] == [200, 201, 100, 101, 102]
-        assert engine_prompts[1]["prompt_token_ids"] == [300, 301, 100, 101, 102]
-
-
-# ============================================================================
-# Math Verification Tests
-# ============================================================================
-
-
-class TestMathVerification:
-    """Detailed tests to verify the probability math is correct."""
-
-    def test_softmax_over_subset(self):
-        """Verify: apply_softmax=True gives softmax over subset."""
-        serving = OpenAIServingGenerativeScores.__new__(
-            OpenAIServingGenerativeScores
-        )
-
-        # logits (before log) for full vocab might be [1.0, 2.0, 3.0, ...]
-        # After softmax over full vocab, logprobs become log(softmax(logits))
-        # For our test, let's say:
-        #   - Token A has logprob -0.5 (exp(-0.5) ≈ 0.606 true prob)
-        #   - Token B has logprob -1.5 (exp(-1.5) ≈ 0.223 true prob)
-
-        label_logprobs = {10: -0.5, 20: -1.5}
-
-        # With apply_softmax=True, we do softmax over just [10, 20]
-        # softmax([-0.5, -1.5]) = [exp(-0.5)/(exp(-0.5)+exp(-1.5)),
-        #                          exp(-1.5)/(exp(-0.5)+exp(-1.5))]
-        probs = serving._compute_probabilities(label_logprobs, apply_softmax=True)
-
-        exp_a = math.exp(-0.5)
-        exp_b = math.exp(-1.5)
-        denom = exp_a + exp_b
-
-        expected_a = exp_a / denom
-        expected_b = exp_b / denom
-
-        assert abs(probs[10] - expected_a) < 1e-9
-        assert abs(probs[20] - expected_b) < 1e-9
-        assert abs(sum(probs.values()) - 1.0) < 1e-9
-
-    def test_true_probs_without_softmax(self):
-        """Verify: apply_softmax=False gives exp(logprob) = true model prob."""
-        serving = OpenAIServingGenerativeScores.__new__(
-            OpenAIServingGenerativeScores
-        )
-
-        # These logprobs come from log(softmax(logits)) computed by the model
-        # So exp(logprob) gives the true probability
-        label_logprobs = {10: -0.5, 20: -1.5}
-
-        probs = serving._compute_probabilities(label_logprobs, apply_softmax=False)
-
-        # Just exp of the logprobs
-        expected_a = math.exp(-0.5)
-        expected_b = math.exp(-1.5)
-
-        assert abs(probs[10] - expected_a) < 1e-9
-        assert abs(probs[20] - expected_b) < 1e-9
-
-        # They don't sum to 1 (unless we selected all tokens)
-        assert sum(probs.values()) < 1.0
+        for i, expected in enumerate(expected_prompts):
+            assert engine_prompts[i]["prompt_token_ids"] == expected
 
 
 if __name__ == "__main__":

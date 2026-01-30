@@ -22,6 +22,11 @@ class SamplingMetadata:
     # None means no logprobs, 0 means sampled token logprobs only
     max_num_logprobs: int | None
 
+    # Specific token IDs to compute logprobs for (more efficient than full vocab)
+    # When set, logprobs are computed only for these token IDs using gather
+    # req_index -> list of token IDs to get logprobs for
+    logprob_token_ids: dict[int, list[int]] | None
+
     no_penalties: bool
     prompt_token_ids: torch.Tensor | None
     frequency_penalties: torch.Tensor

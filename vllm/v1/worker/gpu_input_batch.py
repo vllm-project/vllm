@@ -223,6 +223,10 @@ class InputBatch:
 
         self.num_logprobs: dict[str, int] = {}
 
+        # req_id -> list of specific token IDs to compute logprobs for
+        # More efficient than num_logprobs=-1 when only a few tokens are needed
+        self.logprob_token_ids: dict[str, list[int]] = {}
+
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
@@ -383,6 +387,10 @@ class InputBatch:
                     else sampling_params.logprobs
                 )
 
+            # Store specific token IDs to compute logprobs for (more efficient)
+            if sampling_params.logprob_token_ids is not None:
+                self.logprob_token_ids[req_id] = sampling_params.logprob_token_ids
+
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
                 if self.allowed_token_ids_mask_cpu_tensor is None:
@@ -509,6 +517,7 @@ class InputBatch:
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        self.logprob_token_ids.pop(req_id, None)
         self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
@@ -835,6 +844,15 @@ class InputBatch:
             )
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
+        # Build per-request logprob_token_ids mapping: req_index -> token_ids
+        logprob_token_ids_by_index: dict[int, list[int]] | None = None
+        if self.logprob_token_ids:
+            logprob_token_ids_by_index = {}
+            for req_id, token_ids in self.logprob_token_ids.items():
+                if req_id in self.req_id_to_index:
+                    req_index = self.req_id_to_index[req_id]
+                    logprob_token_ids_by_index[req_index] = token_ids
+
         return SamplingMetadata(
             temperature=temperature,
             all_greedy=self.all_greedy,
@@ -843,6 +861,7 @@ class InputBatch:
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
+            logprob_token_ids=logprob_token_ids_by_index,
             prompt_token_ids=prompt_token_ids,
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],

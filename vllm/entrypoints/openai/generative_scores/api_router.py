@@ -111,28 +111,6 @@ async def create_generative_score(
     assert_never(generator)
 
 
-@router.post(
-    "/generative-scores",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@with_cancellation
-@load_aware_call
-async def create_generative_score_unversioned(
-    request: GenerativeScoreRequest,
-    raw_request: Request,
-):
-    """Unversioned alias for the generative-scores endpoint.
-
-    This provides the same functionality as /v1/generative-scores.
-    See create_generative_score for full documentation.
-    """
-    return await create_generative_score(request, raw_request)
-
-
 def register_generative_scores_api_routers(app):
     """Register the generative scores API router with the app."""
     app.include_router(router)

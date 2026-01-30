@@ -190,6 +190,12 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    logprob_token_ids: list[int] | None = None
+    """Specific token IDs to return logprobs for. More efficient than
+    logprobs=-1 when you only need logprobs for a small set of tokens.
+    When set, logprobs for exactly these token IDs will be returned,
+    in addition to the sampled token. This is useful for scoring tasks
+    where you want to compare probabilities of specific label tokens."""
     flat_logprobs: bool = False
     """Whether to return logprobs in flatten format (i.e. FlatLogprob)
     for better performance.
