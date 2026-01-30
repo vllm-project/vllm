@@ -127,6 +127,21 @@ def test_schedule_multimodal_requests():
         assert len(encoder_input) == 1
 
 
+def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
+    """Async scheduling + PP: allow multi-step in-flight scheduling per request"""
+    scheduler = create_scheduler(async_scheduling=True, pipeline_parallel_size=2)
+    (req,) = create_requests(num_requests=1, num_tokens=8)
+    scheduler.add_request(req)
+
+    _ = scheduler.schedule()
+    assert req.num_output_placeholders > 0
+
+    # before any update_from_output, we still expect the request can be
+    # scheduled again (multi-step in-flight).
+    output = scheduler.schedule()
+    assert req.request_id in output.num_scheduled_tokens
+
+
 def test_schedule_partial_requests():
     """Test scheduling behavior with partial requests.
 
@@ -1692,7 +1707,7 @@ def create_requests_with_priority(
                 # Unique dummy hash for each mm item
                 identifier = f"hash{i}_{j}"
             mm_feature = MultiModalFeatureSpec(
-                data=MultiModalKwargsItem.dummy("dummy_m"),
+                data=MultiModalKwargsItem.dummy(),
                 mm_position=position,
                 identifier=identifier,
                 modality="image",
