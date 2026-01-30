@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the FlashMLA sparse backend utilities."""
+"""Unit tests for the sparse MLA backends and utilities."""
 
 import math
 from types import MethodType, SimpleNamespace
@@ -25,6 +25,9 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseBackend,
+)
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
     triton_convert_req_index_to_global_index,
@@ -156,31 +159,42 @@ def _quantize_dequantize_fp8_ds_mla(
     return dequant_kv_c, dequant_k_pe
 
 
-@pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
-@pytest.mark.parametrize("kv_cache_dtype", ["fp8_ds_mla", "auto"])
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
-@pytest.mark.skipif(
-    torch.cuda.get_device_capability() < (9, 0),
-    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+@pytest.mark.parametrize(
+    "backend_cls",
+    [FlashMLASparseBackend, FlashInferMLASparseBackend],
+    ids=["FlashMLA", "FlashInfer"],
 )
+@pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_sparse_backend_decode_correctness(
     default_vllm_config,
     dist_init,
+    backend_cls,
     batch_name,
     kv_cache_dtype,
     tensor_parallel_size,
     workspace_init,
 ):
     if current_platform.is_rocm():
-        pytest.skip("ROCm does not support fp8_ds_mla data type for kv cache.")
+        pytest.skip("ROCm does not support sparse MLA backends.")
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for sparse MLA decode test")
+    if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
+        pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
+
+    if backend_cls == FlashMLASparseBackend:
+        ok, reason = flashmla.is_flashmla_sparse_supported()
+        if not ok:
+            pytest.skip(reason)
+    elif backend_cls == FlashInferMLASparseBackend:
+        if not current_platform.has_device_capability(100):
+            pytest.skip("FlashInferMLASparseBackend requires SM 10.0 or higher")
+
+    batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
+    use_fp8_ds_mla_quantization = kv_cache_dtype == "fp8_ds_mla"
 
     device = torch.device("cuda")
     dtype = torch.bfloat16
-
-    batch_spec = SPARSE_BACKEND_BATCH_SPECS[batch_name]
 
     # Model hyper-parameters (kept intentionally small for the unit test)
     total_num_heads = 128
@@ -268,22 +282,22 @@ def test_sparse_backend_decode_correctness(
         kv_c_full = torch.rand(s_len, kv_lora_rank, dtype=dtype, device=device)
         k_pe_full = torch.rand(s_len, 1, qk_rope_head_dim, dtype=dtype, device=device)
 
-        # SM100 (Blackwell) uses float -> e8m0 -> bf16 scale conversion
-        # which truncates scales to powers of 2. Simulate this in reference.
-        is_sm100 = torch.cuda.get_device_capability()[0] >= 10
-        kv_c_full, k_pe_full = _quantize_dequantize_fp8_ds_mla(
-            kv_c_full,
-            k_pe_full.squeeze(1),
-            block_size=vllm_config.cache_config.block_size,
-            scale=kv_cache_scale,
-            simulate_sm100_e8m0_scales=is_sm100,
-        )
+        if use_fp8_ds_mla_quantization:
+            is_sm100 = torch.cuda.get_device_capability()[0] >= 10
+            kv_c_full, k_pe_squeezed = _quantize_dequantize_fp8_ds_mla(
+                kv_c_full,
+                k_pe_full.squeeze(1),
+                block_size=block_size,
+                scale=kv_cache_scale,
+                simulate_sm100_e8m0_scales=is_sm100,
+            )
+            k_pe_full = k_pe_squeezed.unsqueeze(1)
 
         q_nope, q_pe = q_c.split([qk_nope_head_dim, qk_rope_head_dim], dim=-1)
         ql_nope = torch.einsum("qnh,lnh->qnl", q_nope, W_UK)
         q_mqa = torch.cat([ql_nope, q_pe], dim=-1)
 
-        k_mqa = torch.cat([kv_c_full, k_pe_full], dim=-1)
+        k_mqa = torch.cat([kv_c_full, k_pe_full.squeeze(1)], dim=-1)
         k_mqa = k_mqa.unsqueeze(1).expand(-1, num_heads, -1)
         v_mqa = kv_c_full.unsqueeze(1).expand(-1, num_heads, -1)
 
@@ -334,11 +348,11 @@ def test_sparse_backend_decode_correctness(
         num_blocks=vllm_config.cache_config.num_gpu_blocks,
         common_attn_metadata=common_attn_metadata,
         randomize_blocks=False,
-        kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+        kv_cache_dtype=kv_cache_dtype if use_fp8_ds_mla_quantization else "auto",
         scale=kv_cache_scale,
     )
 
-    builder_cls = FlashMLASparseBackend.get_builder_cls()
+    builder_cls = backend_cls.get_builder_cls()
     builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
     metadata = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata
@@ -362,14 +376,10 @@ def test_sparse_backend_decode_correctness(
         causal_mask, debug_indices, torch.full_like(debug_indices, -1)
     )
 
-    # FlashMLASparseImpl now reads top-k indices from the indexer-provided
+    # Sparse backends read top-k indices from the indexer-provided
     # buffer, so emulate that contract with a simple namespace mock.
     debug_indices = debug_indices.expand(metadata.num_actual_tokens, -1).clone()
     mock_indexer = SimpleNamespace(topk_indices_buffer=debug_indices)
-
-    ok, reason = flashmla.is_flashmla_sparse_supported()
-    if not ok:
-        pytest.skip(reason)
 
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
     kv_b_proj_weight = kv_b_proj_weight.view(
@@ -383,7 +393,7 @@ def test_sparse_backend_decode_correctness(
     ).to(device=device, dtype=dtype)
     mock_kv_b_proj.weight = torch.nn.Parameter(kv_b_proj_weight.T.contiguous())
 
-    impl_cls = FlashMLASparseBackend.get_impl_cls()
+    impl_cls = backend_cls.get_impl_cls()
     with set_current_vllm_config(vllm_config):
         impl = impl_cls(
             num_heads=num_heads,
@@ -430,7 +440,7 @@ def test_sparse_backend_decode_correctness(
 
     # FP8 quantization introduces some error, but should be within reasonable bounds
     # BF16 (auto) should be very accurate, FP8 allows slightly more tolerance
-    if kv_cache_dtype == "fp8_ds_mla":
+    if kv_cache_dtype.startswith("fp8"):
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.05, atol=0.05)
     else:
         torch.testing.assert_close(backend_output, sdpa_reference, rtol=0.01, atol=0.01)
