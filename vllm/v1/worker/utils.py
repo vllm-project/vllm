@@ -39,7 +39,7 @@ class MultiModalBudget:
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
 
         max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
             model_config,
