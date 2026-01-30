@@ -93,6 +93,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 weight_quant_key=weight_quant_key,
                 activation_quant_key=activation_quant_key,
                 out_dtype=torch.get_default_dtype(),
+                module_name=self.__class__.__name__,
             )
         else:
             activation_quant_key = activation_quant_key_mapping[is_static_input_scheme]

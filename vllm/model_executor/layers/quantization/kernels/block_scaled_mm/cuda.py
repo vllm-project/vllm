@@ -81,7 +81,15 @@ class CudaBlockScaledMMKernel(Fp8BlockScaledMMKernel):
         assert self.default_fallback_kernel is not None
         return self.default_fallback_kernel.apply(layer, x, bias)
 
-    def apply_block_scaled_mm(self, A, B, out_dtype, As, Bs, **kwargs):
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        **kwargs,
+    ) -> torch.Tensor:
         assert self.default_fallback_kernel is not None
         return self.default_fallback_kernel.apply_block_scaled_mm(
             A, B, out_dtype, As, Bs, **kwargs

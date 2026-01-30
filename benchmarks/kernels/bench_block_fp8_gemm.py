@@ -12,10 +12,8 @@ from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
     init_fp8_block_scaled_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    FP8_DTYPE,
     GroupShape,
-    QuantKey,
-    ScaleDesc,
+    create_fp8_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
@@ -50,7 +48,7 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
-    # Create random input tensor (bfloat16, will be quantized by W8A8BlockFp8LinearOp)
+    # Create random input tensor (bfloat16, will be quantized by Fp8BlockScaledMMKernel)
     A_ref = (torch.rand(M, K, dtype=torch.bfloat16, device=device) - 0.5) * 2 * fp8_max
 
     # Create quantized weight tensor
@@ -70,19 +68,15 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
     weight_group_shape = GroupShape(block_n, block_k)
     act_quant_group_shape = GroupShape(1, block_k)  # Per-token, per-group quantization
 
-    weight_scale_desc = ScaleDesc(
-        dtype=torch.float32, static=False, group_shape=weight_group_shape
-    )
-    weight_quant_key = QuantKey(FP8_DTYPE, weight_scale_desc)
-    act_scale_desc = ScaleDesc(
-        FP8_DTYPE, static=False, group_shape=act_quant_group_shape
-    )
-    activation_quant_key = QuantKey(FP8_DTYPE, act_scale_desc)
-
     linear_op = init_fp8_block_scaled_linear_kernel(
-        weight_quant_key=weight_quant_key,
-        activation_quant_key=activation_quant_key,
+        weight_quant_key=create_fp8_quant_key(
+            static=True, group_shape=weight_group_shape
+        ),
+        activation_quant_key=create_fp8_quant_key(
+            static=False, group_shape=act_quant_group_shape
+        ),
         out_dtype=torch.get_default_dtype(),
+        module_name="build_w8a8_block_fp8_runner",
     )
 
     def run():

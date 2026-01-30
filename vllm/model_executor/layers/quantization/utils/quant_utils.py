@@ -138,6 +138,19 @@ kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
 kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
 
+kDynamic128x128Scale = ScaleDesc(torch.float32, False, GroupShape(128, 128))
+kFP8Dynamic128x128Sym = QuantKey(FP8_DTYPE, kDynamic128x128Scale, symmetric=True)
+
+
+def create_fp8_quant_key(
+    static: bool,
+    group_shape: GroupShape,
+    symmetric: bool = True,
+    scale_dtype: torch.dtype = torch.float32,
+) -> QuantKey:
+    scale_desc = ScaleDesc(scale_dtype, static, group_shape)
+    return QuantKey(FP8_DTYPE, scale_desc, symmetric=symmetric)
+
 
 # Normalize the group_shape to the full extent for any dims that are -1
 def _normalize_quant_group_shape(x: torch.Tensor, group_shape: GroupShape):

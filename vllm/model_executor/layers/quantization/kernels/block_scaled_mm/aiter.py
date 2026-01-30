@@ -23,9 +23,6 @@ class AiterBlockScaledMMKernel(Fp8BlockScaledMMKernel):
     def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
         return [TritonBlockScaledMMKernel]
 
-    def process_weights_after_loading(self, layer):
-        return super().process_weights_after_loading(layer)
-
     def apply(
         self,
         layer: torch.nn.Module,
@@ -51,7 +48,7 @@ class AiterBlockScaledMMKernel(Fp8BlockScaledMMKernel):
             and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
         )
 
-        q_input, input_scale = self.input_quant(
+        q_input, input_scale = self.input_quant_op(
             input_2d, input_scale, scale_up, use_triton=use_triton
         )
 

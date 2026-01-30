@@ -61,7 +61,7 @@ class DeepGemmBlockScaledMMKernel(Fp8BlockScaledMMKernel):
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
         act_scale_descriptor = config.activation_quant_key.scale
         self.is_deep_gemm_supported = is_deep_gemm_supported()
-        self.input_quant = QuantFP8(
+        self.input_quant_op = QuantFP8(
             static=False,
             group_shape=act_scale_descriptor.group_shape,
             use_ue8m0=is_deep_gemm_e8m0_used(),
@@ -96,7 +96,10 @@ class DeepGemmBlockScaledMMKernel(Fp8BlockScaledMMKernel):
                 ws=weight_scale_invs
                 if weight_scale_invs is not None
                 else params.weight_scale,
-                quant_block_shape=self.weight_group_shape.col,
+                quant_block_shape=(
+                    self.weight_group_shape.row,
+                    self.weight_group_shape.col,
+                ),
                 use_e8m0=is_deep_gemm_e8m0_used(),
             )
             replace_parameter(layer, params.WEIGHT, dg_weight)

@@ -58,7 +58,7 @@ class FlashInferBlockScaledMMKernel(Fp8BlockScaledMMKernel):
     def __init__(self, config: Fp8BlockMMScaledConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
-        self.input_quant = QuantFP8(
+        self.input_quant_op = QuantFP8(
             static=act_scale_descriptor.static,
             group_shape=act_scale_descriptor.group_shape,
             num_token_padding=self.get_output_padding(),

@@ -42,15 +42,16 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
+    init_fp8_block_scaled_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     FP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     QuantKey,
 )
 from vllm.model_executor.model_loader import get_model_loader
@@ -1367,7 +1368,7 @@ class TestFP8Layer(torch.nn.Module):
         weight_quant_key: QuantKey,
         out_dtype: torch.dtype | None = None,
         device: torch.device | None = None,
-        force_kernel: FP8ScaledMMLinearKernel | None = None,
+        force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     ):
         super().__init__()
         per_tensor_weights = weight_quant_key.scale.group_shape.is_per_tensor()
@@ -1409,10 +1410,7 @@ class TestFP8Layer(torch.nn.Module):
 class TestBlockFP8Layer:
     """
     Test helper for blockwise FP8 linear operations. Creates random weights
-    and scales for W8A8BlockFp8LinearOp.
-
-    This is a workaround until W8A8BlockFp8LinearOp implements the kernel
-    abstraction (ScaledMMLinearKernel) for blockwise quantization.
+    and scales for block scaled linear layers.
 
     Args:
         weight_shape: Shape of the weight tensor (out_features, in_features).
@@ -1425,11 +1423,13 @@ class TestBlockFP8Layer:
     def __init__(
         self,
         weight_shape: tuple[int, int],
-        group_shape: GroupShape,
-        cutlass_block_fp8_supported: bool = False,
-        use_aiter_and_is_supported: bool = False,
+        activation_quant_key: QuantKey,
+        weight_quant_key: QuantKey,
+        out_dtype: torch.dtype | None = None,
         transpose_weights: bool = False,
     ):
+        group_shape = weight_quant_key.scale.group_shape
+
         weight_scale_shape = weight_shape[0] // group_shape[1]
         self.weight_scale = torch.rand(
             (weight_scale_shape, weight_scale_shape), dtype=torch.float32
@@ -1439,23 +1439,17 @@ class TestBlockFP8Layer:
         if transpose_weights:
             self.weight = self.weight.t()
 
-        self.linear_op = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(group_shape[1], group_shape[1]),
-            act_quant_group_shape=group_shape,
-            cutlass_block_fp8_supported=cutlass_block_fp8_supported,
-            use_aiter_and_is_supported=use_aiter_and_is_supported,
+        self.linear_op = init_fp8_block_scaled_linear_kernel(
+            weight_quant_key=weight_quant_key,
+            activation_quant_key=activation_quant_key,
+            out_dtype=out_dtype,
+            module_name=self.__class__.__name__,
         )
 
     def __call__(
         self, y: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        return self.linear_op.apply(
-            input=y,
-            weight=self.weight,
-            weight_scale=self.weight_scale,
-            input_scale=self.input_scale,
-            bias=bias,
-        )
+        return self.linear_op.apply(self, y, bias)
 
     def is_quant_fp8_enabled(self) -> bool:
         return self.linear_op.input_quant_op.enabled()
