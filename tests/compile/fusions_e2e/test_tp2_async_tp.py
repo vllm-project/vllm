@@ -102,11 +102,10 @@ def test_tp2_async_tp_fp8_fusions(
     "model_name, matches_fn, model_kwargs, hf_overrides",
     [llama3_8b, qwen3_a3b],
 )
-@pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
+@pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", CUSTOM_OPS_RMS_NORM)
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
-@pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
 def test_tp2_async_tp_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],

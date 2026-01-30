@@ -159,7 +159,6 @@ def test_tp2_ar_rms_fp4_fusions(
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", CUSTOM_OPS_RMS_NORM)
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
-@pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
 def test_tp2_ar_rms_fusions(
     model_name: str,
     matches_fn: Callable[[int], Matches],
