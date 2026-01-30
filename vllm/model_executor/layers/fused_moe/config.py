@@ -1086,6 +1086,11 @@ class FusedMoEConfig:
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
+
+    # This flag is used to disable the inplace optimization
+    # in MoE kernels. If this flag is True then the kernel
+    # should not be using inplace. If the flag is false, the
+    # kernel is free to use inplace or not.
     disable_inplace: bool = True
 
     def __post_init__(self):
