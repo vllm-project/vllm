@@ -9,6 +9,8 @@ backend based on device capabilities and configuration.
 from functools import cache
 from typing import TYPE_CHECKING
 
+import torch
+
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 
@@ -130,7 +132,7 @@ def get_mla_prefill_backend(
 @cache
 def _auto_select_mla_prefill_backend(
     device_capability: "DeviceCapability",
-    dtype,
+    dtype: torch.dtype,
     vllm_config: "VllmConfig",
 ) -> "type[MLAPrefillBackend]":
     """Auto-select the best available MLA prefill backend.
