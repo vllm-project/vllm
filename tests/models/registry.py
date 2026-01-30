@@ -874,6 +874,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-VL-7B",
         trust_remote_code=True,
+        max_model_len=4096,
+        enforce_eager=True,
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
