@@ -820,7 +820,7 @@ class EplbState:
                 eplb_model_state.physical_to_logical_map,
             )
 
-            # Uncommon case: max_num_transfers has been specified in the eplb config
+            # Uncommon case: max_num_transfers has been set in the eplb config
             max_num_transfers = self.parallel_config.eplb_config.max_num_transfers
             if max_num_transfers is not None:
                 max_num_transfers = int(max_num_transfers)
@@ -1247,11 +1247,11 @@ def find_cycles(old_expert_indices: torch.Tensor, new_expert_indices: torch.Tens
         old_expert_indices: Shape (num_physical_experts).
         new_expert_indices: Shape (num_physical_experts).
     """
-    num_experts = len(old_expert_indices)
-    visited = [False] * num_experts
+    num_physical_experts = len(old_expert_indices)
+    visited = [False] * num_physical_experts
     cycles = []
 
-    for current_expert in range(num_experts):
+    for current_expert in range(num_physical_experts):
         if (
             visited[current_expert]
             or old_expert_indices[current_expert] == new_expert_indices[current_expert]

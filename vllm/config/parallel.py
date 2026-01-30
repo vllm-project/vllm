@@ -114,6 +114,10 @@ class EPLBConfig:
                 "Setting max_num_transfers is not supported when using "
                 "redundant experts"
             )
+        if self.max_num_transfers and self.use_async:
+            raise ValueError(
+                "Setting max_num_transfers is not supported when running async"
+            )
         return self
 
 
