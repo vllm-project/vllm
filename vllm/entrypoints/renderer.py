@@ -401,8 +401,8 @@ class CompletionRenderer(BaseRenderer):
                 f"This model's maximum context length is {max_model_len} tokens. "
                 f"However, your request has {max_tokens} 'max_tokens' plus "
                 f"{len(token_ids)} input tokens. Please reduce one or the other.",
-                parameter="input_tokens",
-                value=len(token_ids),
+                parameter="input_tokens, max_tokens",
+                value=(len(token_ids), max_tokens),
             )
 
         tokens_prompt = TokensPrompt(prompt_token_ids=token_ids)
