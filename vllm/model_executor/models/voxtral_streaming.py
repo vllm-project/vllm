@@ -50,7 +50,7 @@ logger = init_logger(__name__)
 _PRE_ALLOCATE_BUFFER_SIZE_IN_S = 30
 
 
-class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
+class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
     def __init__(
         self,
         info: _I,
@@ -211,12 +211,12 @@ class VoxtralRealtimeBuffer:
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    VoxtralStreamingMultiModalProcessor,
+    VoxtralRealtimeMultiModalProcessor,
     info=VoxtralProcessingInfo,
     dummy_inputs=VoxtralDummyInputsBuilder,
 )
 @support_torch_compile
-class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
+class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
