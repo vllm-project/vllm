@@ -10,7 +10,8 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-from vllm.inputs.data import PromptType
+
+from vllm.inputs.data import PromptType, StreamingInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
@@ -53,7 +54,7 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
