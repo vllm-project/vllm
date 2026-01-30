@@ -128,7 +128,7 @@ python = "./.venv"
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*",
     "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
-    "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", 
+    "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*",
     "docs/governance/process.md"]
 ignore-hidden = true
 ignore-files = true
@@ -148,7 +148,7 @@ locale = "en"
 extend-ignore-identifiers-re = ["NVML_*", ".*Unc.*", ".*_thw",
     ".*UE8M0.*", ".*[UE4M3|ue4m3].*", ".*eles.*",
      ".*[Tt]h[rR].*"]
-extend-ignore-words-re = []
+extend-ignore-words-re = ["thw"]
 extend-ignore-re = []
 
 [tool.typos.default.extend-identifiers]
