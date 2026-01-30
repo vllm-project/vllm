@@ -709,9 +709,7 @@ def is_torch_equal(target: str) -> bool:
 
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
-    return (
-        is_torch_equal_or_newer("2.8.0.dev") and torch.distributed.is_xccl_available()
-    )
+    return torch.distributed.is_xccl_available()
 
 
 # create a library to hold the custom op
