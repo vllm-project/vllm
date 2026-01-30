@@ -49,6 +49,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
+    init_fp8_block_scaled_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
@@ -65,7 +68,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     select_cutlass_fp8_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
 )
@@ -78,7 +80,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP8_DTYPE,
     GroupShape,
+    QuantKey,
+    ScaleDesc,
     cutlass_fp4_supported,
     is_layer_skipped,
     kFp8DynamicTokenSym,
@@ -87,7 +92,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     swizzle_blockscale,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
     requantize_with_max_scale,
 )
 from vllm.model_executor.parameter import (
@@ -609,11 +613,24 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         block_n, block_k = self._WEIGHT_BLOCK_SIZE
         self.weight_block_size = list(self._WEIGHT_BLOCK_SIZE)
-        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(block_n, block_k),
-            act_quant_group_shape=GroupShape(1, block_k),
-            cutlass_block_fp8_supported=cutlass_block_fp8_supported(),
-            use_aiter_and_is_supported=False,
+
+        weight_scale_desc = ScaleDesc(
+            dtype=torch.float32,
+            static=False,
+            group_shape=GroupShape(*self.weight_block_size),
+        )
+        weight_quant_key = QuantKey(FP8_DTYPE, weight_scale_desc)
+        act_scale_desc = ScaleDesc(
+            FP8_DTYPE,
+            static=False,
+            group_shape=GroupShape(1, self.weight_block_size[0]),
+        )
+        activation_quant_key = QuantKey(FP8_DTYPE, act_scale_desc)
+
+        self.w8a8_block_fp8_linear = init_fp8_block_scaled_linear_kernel(
+            weight_quant_key=weight_quant_key,
+            activation_quant_key=activation_quant_key,
+            out_dtype=torch.get_default_dtype(),
         )
 
     def create_weights(
@@ -704,11 +721,9 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.w8a8_block_fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=None,
-            bias=bias,
+            layer,
+            x,
+            bias,
         )
 
 

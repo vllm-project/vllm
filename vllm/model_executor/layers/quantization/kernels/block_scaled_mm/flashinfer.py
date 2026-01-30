@@ -99,7 +99,7 @@ class FlashInferBlockScaledMMKernel(Fp8BlockScaledMMKernel):
 
         params = self._get_layer_params(layer)
         weight = params.weight
-        weight_scale = params.weight_scale
+        weight_scale_inv = params.weight_scale_inv
         input_scale = params.input_scale
 
         # View input as 2D matrix for fp8 methods
@@ -108,7 +108,7 @@ class FlashInferBlockScaledMMKernel(Fp8BlockScaledMMKernel):
         output_dtype = x.dtype
 
         output = self.apply_block_scaled_mm(
-            input_2d, weight, output_dtype, input_scale, weight_scale
+            input_2d, weight, output_dtype, input_scale, weight_scale_inv
         )
 
         if bias is not None:

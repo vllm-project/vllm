@@ -42,8 +42,8 @@ def init_fp8_block_scaled_linear_kernel(
     force_kernel: type[Fp8BlockScaledMMKernel] | None = None,
 ) -> Fp8BlockScaledMMKernel:
     config = Fp8BlockMMScaledConfig(
-        activation_quant_key,
-        weight_quant_key,
+        activation_quant_key=activation_quant_key,
+        weight_quant_key=weight_quant_key,
         out_dtype=out_dtype,
     )
 

@@ -8,11 +8,14 @@ os.environ["VLLM_USE_DEEP_GEMM"] = "0"
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
+from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
+    init_fp8_block_scaled_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP8_DTYPE,
     GroupShape,
+    QuantKey,
+    ScaleDesc,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
@@ -64,15 +67,22 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
         * factor_for_scale
     )
 
-    # Create W8A8BlockFp8LinearOp instance
     weight_group_shape = GroupShape(block_n, block_k)
     act_quant_group_shape = GroupShape(1, block_k)  # Per-token, per-group quantization
 
-    linear_op = W8A8BlockFp8LinearOp(
-        weight_group_shape=weight_group_shape,
-        act_quant_group_shape=act_quant_group_shape,
-        cutlass_block_fp8_supported=use_cutlass,
-        use_aiter_and_is_supported=False,
+    weight_scale_desc = ScaleDesc(
+        dtype=torch.float32, static=False, group_shape=weight_group_shape
+    )
+    weight_quant_key = QuantKey(FP8_DTYPE, weight_scale_desc)
+    act_scale_desc = ScaleDesc(
+        FP8_DTYPE, static=False, group_shape=act_quant_group_shape
+    )
+    activation_quant_key = QuantKey(FP8_DTYPE, act_scale_desc)
+
+    linear_op = init_fp8_block_scaled_linear_kernel(
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
+        out_dtype=torch.get_default_dtype(),
     )
 
     def run():

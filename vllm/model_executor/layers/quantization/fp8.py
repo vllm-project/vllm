@@ -48,6 +48,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
+    init_fp8_block_scaled_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
@@ -58,13 +61,10 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     select_cutlass_fp8_gemm_impl,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
-    maybe_post_process_fp8_weight_block,
     process_fp8_input_tensor_strategy_moe,
-    process_fp8_weight_block_strategy,
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
     validate_fp8_block_shape,
@@ -77,7 +77,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    FP8_DTYPE,
     GroupShape,
+    QuantKey,
+    ScaleDesc,
     is_layer_skipped,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -336,11 +339,23 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             assert not self.act_q_static
             assert self.weight_block_size is not None
-            self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-                weight_group_shape=GroupShape(*self.weight_block_size),
-                act_quant_group_shape=GroupShape(1, self.weight_block_size[0]),
-                cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
-                use_aiter_and_is_supported=self.use_aiter_and_is_supported,
+
+            weight_scale_desc = ScaleDesc(
+                dtype=torch.float32,
+                static=False,
+                group_shape=GroupShape(*self.weight_block_size),
+            )
+            weight_quant_key = QuantKey(FP8_DTYPE, weight_scale_desc)
+            act_scale_desc = ScaleDesc(
+                FP8_DTYPE,
+                static=False,
+                group_shape=GroupShape(1, self.weight_block_size[0]),
+            )
+            activation_quant_key = QuantKey(FP8_DTYPE, act_scale_desc)
+            self.w8a8_block_fp8_linear = init_fp8_block_scaled_linear_kernel(
+                weight_quant_key=weight_quant_key,
+                activation_quant_key=activation_quant_key,
+                out_dtype=torch.get_default_dtype(),
             )
         else:
             # Use per-token quantization for better perf if dynamic and cutlass
@@ -478,13 +493,7 @@ class Fp8LinearMethod(LinearMethodBase):
             assert not self.act_q_static
             size_k_first = False
 
-            weight, weight_scale_inv = process_fp8_weight_block_strategy(
-                layer.weight, layer.weight_scale_inv
-            )
-
-            # Update layer with new values
-            replace_parameter(layer, "weight", weight.data)
-            replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
+            self.w8a8_block_fp8_linear.process_weights_after_loading(layer)
 
         # If checkpoint not serialized fp8, quantize the weights.
         else:
@@ -531,9 +540,6 @@ class Fp8LinearMethod(LinearMethodBase):
             del layer.input_scale
             return
 
-        if self.block_quant:
-            maybe_post_process_fp8_weight_block(layer)
-
     def apply(
         self,
         layer: torch.nn.Module,
@@ -546,11 +552,9 @@ class Fp8LinearMethod(LinearMethodBase):
             if self.block_quant:
                 assert self.weight_block_size is not None
                 return self.w8a8_block_fp8_linear.apply(
-                    input=x,
-                    weight=layer.weight,
-                    weight_scale=layer.weight_scale_inv,
-                    input_scale=layer.input_scale,
-                    bias=bias,
+                    layer,
+                    x,
+                    bias,
                 )
             else:
                 # per-tensor/channel: dequant to BF16 and run GEMM
@@ -597,11 +601,9 @@ class Fp8LinearMethod(LinearMethodBase):
             assert self.weight_block_size is not None
 
             return self.w8a8_block_fp8_linear.apply(
-                input=x,
-                weight=layer.weight,
-                weight_scale=layer.weight_scale_inv,
-                input_scale=layer.input_scale,
-                bias=bias,
+                layer,
+                x,
+                bias,
             )
 
         return self.fp8_linear.apply_weights(layer, x, bias)

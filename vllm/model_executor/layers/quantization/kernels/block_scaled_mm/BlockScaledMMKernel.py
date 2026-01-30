@@ -3,8 +3,10 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
+from typing_extensions import Self
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -27,7 +29,25 @@ class Fp8BlockMMScaledConfig(CustomKernelConfig):
     out_dtype: torch.dtype | None
 
 
-class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8Params]):
+@dataclass
+class FP8BlockParams(FP8Params):
+    weight_scale_inv: torch.Tensor
+    weight_scale: torch.Tensor | None
+
+    WEIGHT_SCALE_INV: ClassVar[str] = "weight_scale_inv"
+
+    @classmethod
+    def from_layer(cls, layer: torch.nn.Module) -> Self:
+        return cls(
+            weight=getattr(layer, cls.WEIGHT),
+            weight_scale_inv=getattr(layer, cls.WEIGHT_SCALE_INV),
+            weight_scale=getattr(layer, cls.WEIGHT_SCALE, None),
+            input_scale=getattr(layer, cls.INPUT_SCALE, None),
+            input_scale_ub=getattr(layer, cls.INPUT_SCALE_UB, None),
+        )
+
+
+class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8BlockParams]):
     def __init__(self, config: Fp8BlockMMScaledConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
@@ -47,18 +67,20 @@ class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8Params]):
     def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
         raise NotImplementedError
 
-    def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> FP8Params:
-        return FP8Params.from_layer(layer)
+    def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> FP8BlockParams:
+        return FP8BlockParams.from_layer(layer)
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         params = self._get_layer_params(layer)
+        print("--- process params ---")
+        print(params)
         weight, weight_scale_inv = process_fp8_weight_block_strategy(
             params.weight,
-            params.weight_scale,
+            params.weight_scale_inv,
         )
 
         replace_parameter(layer, params.WEIGHT, weight.data)
-        replace_parameter(layer, params.WEIGHT_SCALE, weight_scale_inv.data)
+        replace_parameter(layer, params.WEIGHT_SCALE_INV, weight_scale_inv.data)
 
     def apply(
         self,
@@ -69,7 +91,7 @@ class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8Params]):
     ) -> torch.Tensor:
         params = self._get_layer_params(layer)
         weight = params.weight
-        weight_scale = params.weight_scale
+        weight_scale_inv = params.weight_scale_inv
         input_scale = params.input_scale
         scale_up = params.input_scale_ub
 
@@ -85,7 +107,7 @@ class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8Params]):
             B=weight,
             out_dtype=output_dtype,
             As=input_scale,
-            Bs=weight_scale,
+            Bs=weight_scale_inv,
         )
 
         if bias is not None:
