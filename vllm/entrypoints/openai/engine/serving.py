@@ -64,13 +64,12 @@ from vllm.entrypoints.openai.translations.protocol import (
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
-    ClassificationRequest,
     ClassificationResponse,
 )
 from vllm.entrypoints.pooling.embed.protocol import (
+    EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
-    EmbeddingRequest,
     EmbeddingResponse,
 )
 from vllm.entrypoints.pooling.pooling.protocol import (
@@ -95,11 +94,14 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import _validate_truncation_size, sanitize_message
+from vllm.entrypoints.utils import (
+    _validate_truncation_size,
+    get_max_tokens,
+    sanitize_message,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import (
-    PromptComponents,
     get_prompt_components,
     is_explicit_encoder_decoder_prompt,
 )
@@ -170,6 +172,7 @@ AnyResponse: TypeAlias = (
     CompletionResponse
     | ChatCompletionResponse
     | EmbeddingResponse
+    | EmbeddingBytesResponse
     | TranscriptionResponse
     | TokenizeResponse
     | PoolingResponse
@@ -183,51 +186,21 @@ RequestT = TypeVar("RequestT", bound=AnyRequest)
 
 
 @dataclass(kw_only=True)
-class RequestProcessingMixin:
-    """
-    Mixin for request processing,
-    handling prompt preparation and engine input.
-    """
-
-    engine_prompts: list[TokensPrompt] | None = field(default_factory=list)
-
-
-@dataclass(kw_only=True)
-class ResponseGenerationMixin:
-    """
-    Mixin for response generation,
-    managing result generators and final batch results.
-    """
-
-    result_generator: (
-        AsyncGenerator[tuple[int, RequestOutput | PoolingRequestOutput], None] | None
-    ) = None
-    final_res_batch: list[RequestOutput | PoolingRequestOutput] = field(
-        default_factory=list
-    )
-
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-
-@dataclass(kw_only=True)
-class ServeContext(RequestProcessingMixin, ResponseGenerationMixin, Generic[RequestT]):
+class ServeContext(Generic[RequestT]):
     request: RequestT
     raw_request: Request | None = None
     model_name: str
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
+    engine_prompts: list[TokensPrompt] | None = None
 
+    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
+        None
+    )
+    final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
 
-@dataclass(kw_only=True)
-class ClassificationServeContext(ServeContext[ClassificationRequest]):
-    pass
-
-
-@dataclass(kw_only=True)
-class EmbeddingServeContext(ServeContext[EmbeddingRequest]):
-    chat_template: str | None = None
-    chat_template_content_format: ChatTemplateContentFormatOption
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class OpenAIServing:
@@ -605,10 +578,7 @@ class OpenAIServing:
         self,
         ctx: ServeContext,
     ) -> AnyResponse | ErrorResponse:
-        generation: AsyncGenerator[AnyResponse | ErrorResponse, None]
-        generation = self._pipeline(ctx)
-
-        async for response in generation:
+        async for response in self._pipeline(ctx):
             return response
 
         return self.create_error_response("No response yielded from pipeline")
@@ -667,9 +637,7 @@ class OpenAIServing:
         ctx: ServeContext,
     ) -> ErrorResponse | None:
         """Schedule the request and get the result generator."""
-        generators: list[
-            AsyncGenerator[RequestOutput | PoolingRequestOutput, None]
-        ] = []
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
         try:
             trace_headers = (
@@ -723,7 +691,7 @@ class OpenAIServing:
                 return self.create_error_response("Engine prompts not available")
 
             num_prompts = len(ctx.engine_prompts)
-            final_res_batch: list[RequestOutput | PoolingRequestOutput | None]
+            final_res_batch: list[PoolingRequestOutput | None]
             final_res_batch = [None] * num_prompts
 
             if ctx.result_generator is None:
@@ -1011,7 +979,7 @@ class OpenAIServing:
 
     def _validate_input(
         self,
-        request: AnyRequest,
+        request: object,
         input_ids: list[int],
         input_text: str,
     ) -> TokensPrompt:
@@ -1322,7 +1290,7 @@ class OpenAIServing:
         priority: int = 0,
         **kwargs,
     ):
-        prompt_text, _, _ = self._get_prompt_components(engine_prompt)
+        prompt_text, _, _ = get_prompt_components(engine_prompt)
 
         orig_priority = priority
         sub_request = 0
@@ -1373,10 +1341,12 @@ class OpenAIServing:
             # yield context
 
             # Create inputs for the next turn.
-            # Render the next prompt token ids.
+            # Render the next prompt token ids and update sampling_params.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
-                prompt_token_ids = context.render_for_completion()
-                engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+                token_ids = context.render_for_completion()
+                engine_prompt = TokensPrompt(prompt_token_ids=token_ids)
+
+                sampling_params.max_tokens = self.max_model_len - len(token_ids)
             elif isinstance(context, ParsableContext):
                 engine_prompts = await self._render_next_turn(
                     context.request,
@@ -1388,18 +1358,18 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
-                prompt_text, _, _ = self._get_prompt_components(engine_prompt)
+                prompt_text, _, _ = get_prompt_components(engine_prompt)
 
-            # Update the sampling params.
-            sampling_params.max_tokens = self.max_model_len - len(
-                engine_prompt["prompt_token_ids"]
-            )
+                sampling_params.max_tokens = get_max_tokens(
+                    self.max_model_len,
+                    context.request,
+                    engine_prompt,
+                    self.default_sampling_params,  # type: ignore
+                )
+
             # OPTIMIZATION
             priority = orig_priority - 1
             sub_request += 1
-
-    def _get_prompt_components(self, prompt: PromptType) -> PromptComponents:
-        return get_prompt_components(prompt)
 
     def _log_inputs(
         self,
@@ -1411,7 +1381,7 @@ class OpenAIServing:
         if self.request_logger is None:
             return
 
-        prompt, prompt_token_ids, prompt_embeds = self._get_prompt_components(inputs)
+        prompt, prompt_token_ids, prompt_embeds = get_prompt_components(inputs)
 
         self.request_logger.log_inputs(
             request_id,
@@ -1525,6 +1495,7 @@ class OpenAIServing:
                 # extract_tool_calls() returns a list of tool calls.
                 function_calls.extend(
                     FunctionCall(
+                        id=tool_call.id,
                         name=tool_call.function.name,
                         arguments=tool_call.function.arguments,
                     )
@@ -1557,7 +1528,7 @@ class OpenAIServing:
                 "Unable to get tokenizer because `skip_tokenizer_init=True`"
             )
 
-        return tokenizer.decode(token_id)
+        return tokenizer.decode([token_id])
 
     def _is_model_supported(self, model_name: str | None) -> bool:
         if not model_name:

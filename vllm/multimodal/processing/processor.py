@@ -17,7 +17,7 @@ from typing import (
 
 import regex as re
 import torch
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import TypeVar, assert_never, deprecated
 
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -40,7 +40,6 @@ from ..parse import (
     DictEmbeddingItems,
     EmbeddingItems,
     MultiModalDataItems,
-    MultiModalDataParser,
 )
 from .context import (
     BaseProcessingInfo,
@@ -990,19 +989,26 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.dummy_inputs = dummy_inputs
         self.cache = cache
 
-        self.data_parser = self._get_data_parser()
+        if hasattr(self, "_get_data_parser"):
+            logger.warning_once(
+                "BaseMultiModalProcessor._get_data_parser is deprecated "
+                "and will be removed in v0.16."
+                "You should override `info.build_data_parser` instead."
+            )
 
-        # Avoid unnecessary recomputation
-        self._supported_mm_limits = self.info.get_supported_mm_limits()
-        self._allowed_mm_limits = self.info.get_allowed_mm_limits()
+            self.data_parser = self._get_data_parser()  # type: ignore
+        else:
+            self.data_parser = self.info.get_data_parser()
 
     @property
+    @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
     def supported_mm_limits(self):
-        return self._supported_mm_limits
+        return self.info.supported_mm_limits
 
     @property
+    @deprecated("Will be removed in v0.17. Use `info.allowed_mm_limits` instead.")
     def allowed_mm_limits(self):
-        return self._allowed_mm_limits
+        return self.info.allowed_mm_limits
 
     def __call__(
         self,
@@ -1013,47 +1019,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         return self.apply(prompt, mm_data, hf_processor_mm_kwargs, mm_uuids=mm_uuids)
-
-    def _get_data_parser(self) -> MultiModalDataParser:
-        """
-        Construct a parser to preprocess multi-modal data items
-        before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
-
-        You can support additional modalities by creating a subclass
-        of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
-        that has additional subparsers.
-        """
-        # Get expected hidden size for embedding validation if mm_embeds enabled
-        # This validates hidden dimensions to prevent vulnerabilities: embeddings
-        # with correct ndim but wrong shape could cause crashes at inference time
-        mm_config = self.info.ctx.model_config.get_multimodal_config()
-        expected_hidden_size = None
-        if mm_config.enable_mm_embeds:
-            expected_hidden_size = self.info.ctx.model_config.get_inputs_embeds_size()
-
-        return MultiModalDataParser(expected_hidden_size=expected_hidden_size)
-
-    def validate_num_items(
-        self,
-        modality: str,
-        num_items: int,
-    ) -> None:
-        supported_limit = self.supported_mm_limits.get(modality, 0)
-        allowed_limit = self.allowed_mm_limits.get(modality, 0)
-
-        if supported_limit is None:
-            supported_limit = allowed_limit
-
-        limit = min(supported_limit, allowed_limit)
-
-        if num_items > limit:
-            msg = f"At most {limit} {modality}(s) may be provided in one prompt."
-
-            if num_items <= supported_limit:
-                msg += " Set `--limit-mm-per-prompt` to increase this limit."
-
-            raise ValueError(msg)
 
     def _to_mm_items(
         self,
@@ -1078,7 +1043,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     )
 
         for modality, items in mm_items.items():
-            self.validate_num_items(modality, len(items))
+            self.info.validate_num_items(modality, len(items))
 
         return mm_items
 
