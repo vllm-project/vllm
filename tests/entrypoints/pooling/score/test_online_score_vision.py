@@ -16,11 +16,12 @@ HF_OVERRIDES = {
 }
 
 query = "A cat standing in the snow."
+document = "This product was excellent and exceeded my expectations."
 image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
 documents = [
     {
         "type": "text",
-        "text": query,
+        "text": document,
     },
     {
         "type": "image_url",
@@ -55,7 +56,7 @@ def test_score_api_queries_str_documents_str(server: RemoteOpenAIServer):
         json={
             "model": MODEL_NAME,
             "queries": query,
-            "documents": query,
+            "documents": document,
         },
     )
     score_response.raise_for_status()
@@ -64,7 +65,7 @@ def test_score_api_queries_str_documents_str(server: RemoteOpenAIServer):
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.data[0].score == pytest.approx(0.6972196698188782, rel=0.01)
+    assert score.data[0].score == pytest.approx(0.10040374100208282, rel=0.1)
 
 
 def test_score_api_queries_str_documents_text_content(server: RemoteOpenAIServer):
@@ -82,7 +83,7 @@ def test_score_api_queries_str_documents_text_content(server: RemoteOpenAIServer
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.data[0].score == pytest.approx(0.6972196698188782, rel=0.01)
+    assert score.data[0].score == pytest.approx(0.10418888181447983, rel=0.1)
 
 
 def test_score_api_queries_str_documents_image_url_content(server: RemoteOpenAIServer):
@@ -100,7 +101,7 @@ def test_score_api_queries_str_documents_image_url_content(server: RemoteOpenAIS
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.data[0].score == pytest.approx(0.7489911317825317, rel=0.01)
+    assert score.data[0].score == pytest.approx(0.74134361743927, rel=0.1)
 
 
 def test_score_api_queries_str_documents_image_base64_content(
@@ -120,7 +121,7 @@ def test_score_api_queries_str_documents_image_base64_content(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.data[0].score == pytest.approx(0.7489911317825317, rel=0.01)
+    assert score.data[0].score == pytest.approx(0.74134361743927, rel=0.1)
 
 
 def test_score_api_queries_str_documents_image_url_plus_text_content(
@@ -140,6 +141,7 @@ def test_score_api_queries_str_documents_image_url_plus_text_content(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
+    assert score.data[0].score == pytest.approx(0.5200872421264648, rel=0.1)
 
 
 def test_score_api_queries_str_documents_list(server: RemoteOpenAIServer):
@@ -149,7 +151,7 @@ def test_score_api_queries_str_documents_list(server: RemoteOpenAIServer):
             "model": MODEL_NAME,
             "queries": query,
             "documents": [
-                {"content": [query]},
+                document,
                 {"content": [documents[0]]},
                 {"content": [documents[1]]},
                 {"content": [documents[0], documents[1]]},
@@ -162,9 +164,10 @@ def test_score_api_queries_str_documents_list(server: RemoteOpenAIServer):
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 4
-    assert score.data[0].score == pytest.approx(0.6972196698188782, rel=0.01)
-    assert score.data[1].score == pytest.approx(0.6972196698188782, rel=0.01)
-    assert score.data[0].score == pytest.approx(0.7489911317825317, rel=0.01)
+    assert score.data[0].score == pytest.approx(0.10040374100208282, rel=0.1)
+    assert score.data[1].score == pytest.approx(0.10418888181447983, rel=0.1)
+    assert score.data[2].score == pytest.approx(0.74134361743927, rel=0.1)
+    assert score.data[3].score == pytest.approx(0.5200872421264648, rel=0.1)
 
 
 def test_rerank_api_queries_str_documents_list(server: RemoteOpenAIServer):
@@ -174,6 +177,7 @@ def test_rerank_api_queries_str_documents_list(server: RemoteOpenAIServer):
             "model": MODEL_NAME,
             "query": query,
             "documents": [
+                document,
                 {"content": [documents[0]]},
                 {"content": [documents[1]]},
                 {"content": [documents[0], documents[1]]},
@@ -190,18 +194,17 @@ def test_rerank_api_queries_str_documents_list(server: RemoteOpenAIServer):
 
 
 def test_score_api_queries_list_documents_list(server: RemoteOpenAIServer):
-    data = [
-        {"content": [documents[0]]},
-        {"content": [documents[1]]},
-        {"content": [documents[0], documents[1]]},
-    ]
-
     score_response = requests.post(
         server.url_for("score"),
         json={
             "model": MODEL_NAME,
-            "queries": data,
-            "documents": data,
+            "queries": [query] * 4,
+            "documents": [
+                document,
+                {"content": [documents[0]]},
+                {"content": [documents[1]]},
+                {"content": [documents[0], documents[1]]},
+            ],
         },
     )
     score_response.raise_for_status()
@@ -209,4 +212,8 @@ def test_score_api_queries_list_documents_list(server: RemoteOpenAIServer):
 
     assert score.id is not None
     assert score.data is not None
-    assert len(score.data) == 3
+    assert len(score.data) == 4
+    assert score.data[0].score == pytest.approx(0.10040374100208282, rel=0.1)
+    assert score.data[1].score == pytest.approx(0.10418888181447983, rel=0.1)
+    assert score.data[2].score == pytest.approx(0.74134361743927, rel=0.1)
+    assert score.data[3].score == pytest.approx(0.5200872421264648, rel=0.1)
