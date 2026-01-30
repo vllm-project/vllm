@@ -77,7 +77,6 @@ from vllm.multimodal.parse import (
     DictEmbeddingItems,
     ModalityDataItems,
     MultiModalDataItems,
-    MultiModalDataParser,
 )
 from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
@@ -227,6 +226,16 @@ class Qwen2_5OmniThinkerProcessingInfo(
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return Qwen2_5OmniThinkerMultiModalDataParser(
+            spatial_merge_size=self.get_hf_config().vision_config.spatial_merge_size,
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.get_target_channels(),
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_target_channels(self) -> int:
         """Return target audio channels for Qwen2.5 Omni models (mono)."""
         return 1
@@ -310,14 +319,6 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
 class Qwen2_5OmniThinkerMultiModalProcessor(
     BaseMultiModalProcessor[Qwen2_5OmniThinkerProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return Qwen2_5OmniThinkerMultiModalDataParser(
-            spatial_merge_size=self.info.get_hf_config().vision_config.spatial_merge_size,
-            target_sr=feature_extractor.sampling_rate,
-            target_channels=self.info.get_target_channels(),
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -1298,7 +1299,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

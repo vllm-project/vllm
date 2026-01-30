@@ -83,7 +83,10 @@ def _assert_model_arch_config(
     assert model_arch_config.is_deepseek_mla == expected["is_deepseek_mla"]
 
     torch_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
-        model_config.hf_config, model_config.model, revision=model_config.revision
+        model_config.hf_config,
+        model_config.model,
+        revision=model_config.revision,
+        config_format="hf",
     )
     assert str(torch_dtype) == expected["dtype"]
 
