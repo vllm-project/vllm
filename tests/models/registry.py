@@ -975,6 +975,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "model_type": "tarsier2",
         },
     ),
+    "VibeVoiceForASRTraining": _HfExamplesInfo(
+        "microsoft/VibeVoice-ASR",
+        trust_remote_code=True,
+        max_model_len=4096,
+    ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
         # disable this temporarily until we support HF format
