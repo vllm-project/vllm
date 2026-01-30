@@ -250,14 +250,6 @@ class InputBatch:
         self.logitsprocs = logitsprocs or LogitsProcessors()
         self.logitsprocs_need_output_token_ids = logitsprocs_need_output_token_ids
 
-        from vllm.logger import init_logger
-
-        logger = init_logger(__name__)
-        logger.info(
-            "[FORCE] InputBatch: logitsprocs_need_output_token_ids=%s",
-            logitsprocs_need_output_token_ids,
-        )
-
         # Store last speculative tokens for sampler.
         self.spec_token_ids: list[list[int]] = [[] for _ in range(max_num_reqs)]
 
@@ -833,20 +825,6 @@ class InputBatch:
             else []
         )
 
-        from vllm.logger import init_logger
-
-        logger = init_logger(__name__)
-        logger.info(
-            "[FORCE] _make_sampling_metadata: needs_output_token_ids=%s "
-            "(no_penalties=%s, bad_words=%s, logitsprocs_need=%s), "
-            "len(output_token_ids)=%d",
-            needs_output_token_ids,
-            self.no_penalties,
-            bool(self.bad_words_token_ids),
-            self.logitsprocs_need_output_token_ids,
-            len(output_token_ids),
-        )
-
         allowed_token_ids_mask: torch.Tensor | None = None
         if not self.no_allowed_token_ids:
             assert self.allowed_token_ids_mask is not None
@@ -961,20 +939,9 @@ class InputBatch:
         from prior steps sampled token ids once they've finished copying to CPU.
         This is called right before they are needed by the logits processors.
         """
-        from vllm.logger import init_logger
-
-        logger = init_logger(__name__)
-
         output_token_ids = self.sampling_metadata.output_token_ids
-        logger.info(
-            "[FORCE] update_async_output_token_ids: "
-            "sampled_token_ids_cpu=%s, len(output_token_ids)=%d",
-            self.sampled_token_ids_cpu is not None,
-            len(output_token_ids) if output_token_ids else 0,
-        )
         if self.sampled_token_ids_cpu is None or not output_token_ids:
             # Output token ids not needed or not async scheduling.
-            logger.info("[FORCE] update_async_output_token_ids: early return")
             return
 
         assert self.prev_req_id_to_index is not None
