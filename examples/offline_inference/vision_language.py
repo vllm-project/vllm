@@ -407,7 +407,8 @@ def run_gemma3n(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=2048,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
-        enforce_eager=True,
+        enforce_eager=False,
+        compilation_config={"compile_mm_encoder": "true"},
     )
 
     prompts = [

@@ -17,8 +17,11 @@ from transformers.models.gemma3n import (
 )
 from transformers.models.siglip import SiglipImageProcessorFast
 
+from vllm.compilation.backends import set_model_tag
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.forward_context import set_forward_context
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -29,6 +32,7 @@ from vllm.model_executor.models.gemma3n_audio_utils import (
     adjust_audio_features_to_expected_length,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -390,6 +394,11 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo])
         }
 
 
+@support_torch_compile(
+    dynamic_arg_dims={"input_ids": 0, "inputs_embeds": 0},
+    mark_unbacked_dims={"input_ids": 0, "inputs_embeds": 0},
+    enable_if=should_torch_compile_mm_vit,
+)
 class Gemma3nMultimodalEmbedder(nn.Module):
     """Embeds token ids or soft tokens for multimodal content into language
     model space."""
@@ -403,7 +412,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
 
         self.multimodal_hidden_size = multimodal_config.hidden_size
         self.eps = multimodal_config.rms_norm_eps
-        self.vocab_offset = multimodal_config.vocab_offset
+        self.vocab_offset = torch.tensor(multimodal_config.vocab_offset)
         self.vocab_size = multimodal_config.vocab_size
         self.text_hidden_size = text_config.hidden_size
 
@@ -505,21 +514,29 @@ class Gemma3nForConditionalGeneration(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
         self.vocab_size = config.text_config.vocab_size
 
-        with self._mark_tower_model(vllm_config, "image"):
+        with (
+            self._mark_tower_model(vllm_config, "image"),
+            set_model_tag("Gemma3nMultimodalEmbedder", is_encoder=True),
+        ):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
             self.embed_vision = Gemma3nMultimodalEmbedder(
-                config.vision_config, config.text_config
+                multimodal_config=config.vision_config, text_config=config.text_config
             )
+            # self.embed_vision.compile(fullgraph=True)
 
-        with self._mark_tower_model(vllm_config, "audio"):
+        with (
+            self._mark_tower_model(vllm_config, "audio"),
+            set_model_tag("Gemma3nMultimodalEmbedder", is_encoder=True),
+        ):
             self.audio_tower = AutoModel.from_config(config=config.audio_config)
             self.embed_audio = Gemma3nMultimodalEmbedder(
-                config.audio_config, config.text_config
+                multimodal_config=config.audio_config, text_config=config.text_config
             )
 
         with self._mark_language_model(vllm_config):
@@ -670,12 +687,13 @@ class Gemma3nForConditionalGeneration(
         # to preserve the order of the modalities.
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
-            if modality == "image":
-                vision_embeddings = self._process_image_input(multimodal_input)
-                multimodal_embeddings.extend(vision_embeddings)
-            if modality == "audio":
-                audio_embeddings = self._process_audio_input(multimodal_input)
-                multimodal_embeddings.extend(audio_embeddings)
+            with set_forward_context(None, self.vllm_config):
+                if modality == "image":
+                    vision_embeddings = self._process_image_input(multimodal_input)
+                    multimodal_embeddings.extend(vision_embeddings)
+                if modality == "audio":
+                    audio_embeddings = self._process_audio_input(multimodal_input)
+                    multimodal_embeddings.extend(audio_embeddings)
         return multimodal_embeddings
 
     def embed_input_ids(
