@@ -44,7 +44,7 @@ requires_pplx = pytest.mark.skipif(
 )
 
 NUM_EXPERTS = [40, 64]
-TOP_KS = [6, 8]
+TOP_KS = [1, 6, 8]
 
 
 def rank_chunk(num, r, w):
@@ -288,6 +288,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  # , [4, 2]])
 @pytest.mark.parametrize("use_internode", [False])
+@pytest.mark.parametrize("apply_router_weight_on_input", [True, False])
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
@@ -306,7 +307,12 @@ def test_cutlass_moe_pplx(
     per_out_ch: bool,
     world_dp_size: tuple[int, int],
     use_internode: bool,
+    apply_router_weight_on_input: bool,
 ):
+    # apply_router_weight_on_input=True only supports topk=1 (Llama4 config)
+    if apply_router_weight_on_input and topk != 1:
+        pytest.skip("apply_router_weight_on_input=True only supports topk=1")
+
     set_random_seed(7)
 
     with set_current_vllm_config(vllm_config):
@@ -370,105 +376,5 @@ def test_cutlass_moe_pplx(
             per_act_token,
             per_out_ch,
             use_internode,
-            False,  # apply_router_weight_on_input
-        )
-
-
-# Test for Llama4's apply_router_weight_on_input=True configuration
-# Related to issue #33011
-@pytest.mark.parametrize("m", [2, 224])
-@pytest.mark.parametrize("n", [3072])
-@pytest.mark.parametrize("k", [1536])
-@pytest.mark.parametrize("e", NUM_EXPERTS)
-@pytest.mark.parametrize("per_act_token", [True, False])
-@pytest.mark.parametrize("per_out_ch", [True, False])
-@pytest.mark.parametrize("world_dp_size", [[2, 1]])
-@pytest.mark.parametrize("use_internode", [False])
-@multi_gpu_test(num_gpus=2)
-@pytest.mark.skipif(
-    (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
-        current_platform.get_device_capability()
-    ),
-    reason="Grouped gemm is not supported on this GPU type.",
-)
-@requires_pplx
-def test_cutlass_moe_pplx_router_weight_on_input(
-    m: int,
-    n: int,
-    k: int,
-    e: int,
-    per_act_token: bool,
-    per_out_ch: bool,
-    world_dp_size: tuple[int, int],
-    use_internode: bool,
-):
-    """
-    Test apply_router_weight_on_input=True case.
-    This is the configuration used by Llama4 models, which requires topk=1.
-    """
-    topk = 1  # apply_router_weight_on_input only supports topk=1
-    set_random_seed(7)
-
-    with set_current_vllm_config(vllm_config):
-        dtype = torch.half
-
-        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10.0
-        w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10.0
-        w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10.0
-
-        n_b_scales = 2 * n if per_out_ch else 1
-        k_b_scales = k if per_out_ch else 1
-
-        w1_q = torch.empty((e, 2 * n, k), device="cuda", dtype=torch.float8_e4m3fn)
-        w2_q = torch.empty((e, k, n), device="cuda", dtype=torch.float8_e4m3fn)
-        w1_scale = torch.empty((e, n_b_scales, 1), device="cuda", dtype=torch.float32)
-        w2_scale = torch.empty((e, k_b_scales, 1), device="cuda", dtype=torch.float32)
-
-        for expert in range(e):
-            w1_q[expert], w1_scale[expert] = ops.scaled_fp8_quant(
-                w1[expert], use_per_token_if_dynamic=per_out_ch
-            )
-            w2_q[expert], w2_scale[expert] = ops.scaled_fp8_quant(
-                w2[expert], use_per_token_if_dynamic=per_out_ch
-            )
-
-        w1_d = torch.empty_like(w1)
-        w2_d = torch.empty_like(w2)
-        for expert in range(e):
-            w1_d[expert] = (w1_q[expert].float() * w1_scale[expert]).half()
-            w2_d[expert] = (w2_q[expert].float() * w2_scale[expert]).half()
-
-        score = torch.randn((m, e), device="cuda", dtype=dtype)
-        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
-
-        world_size, dp_size = world_dp_size
-        a_scale1 = (
-            torch.randn(
-                (m if per_act_token else 1, 1), device="cuda", dtype=torch.float32
-            )
-            / 10.0
-        )
-        if not per_act_token:
-            a_scale1 = a_scale1.repeat(world_size, 1)
-
-        parallel_launch(
-            world_size,
-            _pplx_moe,
-            dp_size,
-            a,
-            w1_q,
-            w2_q,
-            w1_scale,
-            w2_scale,
-            topk_weights,
-            topk_ids,
-            a_scale1,
-            dtype,
-            a,
-            w1_d,
-            w2_d,
-            per_act_token,
-            per_out_ch,
-            use_internode,
-            True,  # apply_router_weight_on_input=True
+            apply_router_weight_on_input,
         )
