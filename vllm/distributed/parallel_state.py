@@ -33,7 +33,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import shared_memory
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -847,13 +847,13 @@ class GroupCoordinator:
                 continue
 
             # send-allgather: send only a slice, then do allgather.
-            default_use_all_gather = (
+            use_all_gather = (
                 all_gather_group is not None and tensor.numel() % all_gather_size == 0
             )
             use_all_gather = (
-                all_gather_tensors.get(key, default_use_all_gather)
+                all_gather_tensors.get(key, use_all_gather)
                 if all_gather_tensors is not None
-                else default_use_all_gather
+                else use_all_gather
             )
             if use_all_gather:
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
@@ -872,7 +872,7 @@ class GroupCoordinator:
         self,
         tensor_dict: dict[str, torch.Tensor | Any],
         dst: int | None = None,
-        all_gather_group: Optional["GroupCoordinator"] = None,
+        all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> list[Any]:
         if self.world_size == 1:
@@ -907,13 +907,13 @@ class GroupCoordinator:
             if tensor.numel() == 0:
                 continue
 
-            default_use_all_gather = (
+            use_all_gather = (
                 all_gather_group is not None and tensor.numel() % all_gather_size == 0
             )
             use_all_gather = (
-                all_gather_tensors.get(key, default_use_all_gather)
+                all_gather_tensors.get(key, use_all_gather)
                 if all_gather_tensors is not None
-                else default_use_all_gather
+                else use_all_gather
             )
             if use_all_gather:
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
@@ -990,14 +990,14 @@ class GroupCoordinator:
                     continue
 
                 # send-allgather: send only a slice, then do allgather.
-                default_use_all_gather = (
+                use_all_gather = (
                     all_gather_group is not None
                     and tensor.numel() % all_gather_size == 0
                 )
                 use_all_gather = (
-                    all_gather_tensors.get(key, default_use_all_gather)
+                    all_gather_tensors.get(key, use_all_gather)
                     if all_gather_tensors is not None
-                    else default_use_all_gather
+                    else use_all_gather
                 )
 
                 if use_all_gather:
@@ -1027,7 +1027,7 @@ class GroupCoordinator:
     def irecv_tensor_dict(
         self,
         src: int | None = None,
-        all_gather_group: Optional["GroupCoordinator"] = None,
+        all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> tuple[
         dict[str, torch.Tensor | Any] | None, list[Any], list[Callable[[], None]]
@@ -1068,14 +1068,14 @@ class GroupCoordinator:
                     tensor_dict[key] = full_tensor
                     continue
 
-                default_use_all_gather = (
+                use_all_gather = (
                     all_gather_group is not None
                     and full_tensor.numel() % all_gather_size == 0
                 )
                 use_all_gather = (
-                    all_gather_tensors.get(key, default_use_all_gather)
+                    all_gather_tensors.get(key, use_all_gather)
                     if all_gather_tensors is not None
-                    else default_use_all_gather
+                    else use_all_gather
                 )
 
                 if use_all_gather:
@@ -1097,9 +1097,7 @@ class GroupCoordinator:
                         key: str = key,
                         slice_tensor: torch.Tensor = slice_tensor,
                         orig_shape: tuple[int, ...] = tuple(orig_shape),
-                        all_gather_group: Optional[
-                            "GroupCoordinator"
-                        ] = all_gather_group,
+                        all_gather_group=all_gather_group,
                     ) -> None:
                         assert all_gather_group is not None
                         tensor_dict[key] = all_gather_group.all_gather(
