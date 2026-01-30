@@ -77,10 +77,11 @@ class OpenAIToolParser(ToolParser):
             if forced_ids:
                 self._forced_sequence = forced_ids
 
-        except Exception:
+        except (AttributeError, TypeError, KeyError) as e:
             logger.warning(
-                "Failed to initialize Harmony tokens. "
-                "tool_choice='required' may not work correctly."
+                "Failed to initialize Harmony tokens: %s. "
+                "tool_choice='required' may not work correctly.",
+                e,
             )
 
     def extract_tool_calls(
