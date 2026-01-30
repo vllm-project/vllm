@@ -1464,9 +1464,9 @@ def cutlass_w4a8_moe_mm(
         b_tensors:
             INT4-packed weight matrix for all experts, packed to INT32
         a_scales:
-            Per-token FP8 activation scales, applied in the epilogue.
+            Per-token FP32 activation scales, applied in the epilogue.
         b_scales:
-            Per-channel FP8 weight scales for each expert, applied in the epilogue.
+            Per-channel FP32 weight scales for each expert, applied in the epilogue.
         b_group_scales:
             FP8 scale values for group-wise INT4 weight blocks.
         b_group_size:
@@ -1479,6 +1479,7 @@ def cutlass_w4a8_moe_mm(
             Strides describing the memory layout of the input tensors.
         maybe_schedule:
             Optional override to choose a specific kernel or epilogue schedule.
+            Available schedules: "Kernel_{128,256}x{16,32,64,128}_{1,2}x1x1_Coop"
 
     Returns:
         out_tensors updated in-place with the dequantized INT4xFP8 grouped GEMM result.
@@ -1501,16 +1502,88 @@ def cutlass_w4a8_moe_mm(
     )
 
 
+def cutlass_w4a16_moe_mm(
+    out_tensors: torch.Tensor,
+    a_tensors: torch.Tensor,
+    b_tensors: torch.Tensor,
+    b_group_scales: torch.Tensor,
+    b_group_size: int,
+    expert_offsets: torch.Tensor,
+    problem_sizes: torch.Tensor,
+    a_strides: torch.Tensor,
+    b_strides: torch.Tensor,
+    c_strides: torch.Tensor,
+    group_scale_strides: torch.Tensor,
+    maybe_schedule: str | None = None,
+):
+    """
+    Executes the CUTLASS-based fused-MoE grouped matrix multiplication for the
+    W4A16 quantization scheme. Uses group-wise quantization (INT4 -> BFLOAT16)
+    and both per-channel + per-token scaling in the epilogue.
+
+    Args:
+        out_tensors:
+            Output buffer for all experts (updated in-place).
+        a_tensors:
+            BF16 activations for all experts.
+        b_tensors:
+            INT4-packed weight matrix for all experts, packed to INT32
+        b_group_scales:
+            BF16 scale values for group-wise INT4 weight blocks.
+        b_group_size:
+            Number of elements grouped under each entry of b_group_scales.
+        expert_offsets:
+            Cumulative token offsets
+        problem_sizes:
+            Per-expert (M, N, K) GEMM sizes used by the grouped GEMM launcher.
+        a/b/c/group_scale_strides:
+            Strides describing the memory layout of the input tensors.
+        maybe_schedule:
+            Optional override to choose a specific kernel or epilogue schedule.
+            Available schedules: "Kernel_{128,256}x{16,32,64,128}_{1,2}x1x1_Coop"
+
+    Returns:
+        out_tensors updated in-place with the dequantized INT4xBF16 grouped GEMM result.
+    """
+    return torch.ops._C.cutlass_w4a16_moe_mm(
+        out_tensors,
+        a_tensors,
+        b_tensors,
+        b_group_scales,
+        b_group_size,
+        expert_offsets,
+        problem_sizes,
+        a_strides,
+        b_strides,
+        c_strides,
+        group_scale_strides,
+        maybe_schedule,
+    )
+
+
 def cutlass_encode_and_reorder_int4b_grouped(
     b_tensors: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.ops._C.cutlass_encode_and_reorder_int4b_grouped(b_tensors)
 
 
+def cutlass_reorder_int4b_grouped(
+    b_tensors: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._C.cutlass_reorder_int4b_grouped(b_tensors)
+
+
 if hasattr(torch.ops._C, "cutlass_encode_and_reorder_int4b_grouped"):
 
     @register_fake("_C::cutlass_encode_and_reorder_int4b_grouped")
     def cutlass_encode_and_reorder_int4b_grouped_fake(b: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(b, memory_format=torch.contiguous_format)
+
+
+if hasattr(torch.ops._C, "cutlass_reorder_int4b_grouped"):
+
+    @register_fake("_C::cutlass_reorder_int4b_grouped")
+    def cutlass_reorder_int4b_grouped_fake(b: torch.Tensor) -> torch.Tensor:
         return torch.empty_like(b, memory_format=torch.contiguous_format)
 
 

@@ -25,7 +25,7 @@
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 #include "w4a8_utils.cuh"
 
-namespace vllm::cutlass_w4a8_moe {
+namespace vllm::cutlass_w4a16_moe {
 
 using namespace cute;
 
@@ -35,10 +35,12 @@ using namespace cute;
 using ProblemShape =
     cutlass::gemm::GroupProblemShape<Shape<int, int, int>>;  // <M,N,K> per
                                                              // group
-using MmaType = cutlass::float_e4m3_t;
+using MmaType = cutlass::bfloat16_t;
 using QuantType = cutlass::int4b_t;
 
-constexpr int TileShapeK = 128 * 8 / sizeof_bits<MmaType>::value;
+constexpr int TileShapeK = 64;  // TODO(siyuan): make this tunable
+// TODO(siyuan): relax the SmemLayoutAtomScale in cutlass and make TileShapeK
+// tunnable
 static int constexpr PackFactor = 8;  // 8 int4 packed into int32
 
 // A matrix configuration
@@ -58,8 +60,7 @@ constexpr int AlignmentB =
               ElementB>::value;  // Memory access granularity/alignment of B
                                  // matrix in units of elements (up to 16 bytes)
 
-// This example manually swaps and transposes, so keep transpose of input
-// layouts
+// TODO(siyuan): Only transpose when batch size is small
 using LayoutA_Transpose =
     typename cutlass::layout::LayoutTranspose<LayoutA>::type;
 using LayoutB_Transpose =
@@ -75,12 +76,17 @@ using StrideB =
 // LayoutAtomQuant places values that will be read by the same thread in
 // contiguous locations in global memory. It specifies the reordering within a
 // single warp's fragment
+using ValueShuffle =
+    Layout<Shape<_2, _4>, Stride<_4, _1>>;  // order [0,2,4,6,1,3,5,7]
+int constexpr NumShuffleAtoms = 1;
+using MmaAtomShape = Layout<Shape<_1, Int<NumShuffleAtoms>>>;
 using LayoutAtomQuant =
-    decltype(cutlass::compute_memory_reordering_atom<MmaType>());
+    decltype(cutlass::compute_memory_reordering_atom<MmaType, MmaAtomShape,
+                                                     ValueShuffle>());
 using LayoutB_Reordered = decltype(cute::tile_to_shape(
     LayoutAtomQuant{}, Layout<Shape<int, int, Int<1>>, StrideB>{}));
 
-using ElementScale = cutlass::float_e4m3_t;
+using ElementScale = cutlass::bfloat16_t;
 using LayoutScale = cutlass::layout::RowMajor;
 
 // C/D matrix configuration
@@ -112,24 +118,20 @@ using ElementSChannel = float;
 
 template <class TileShape_MN, class ClusterShape_MNK, class KernelSchedule,
           class EpilogueSchedule>
-struct W4A8GroupedGemmKernel {
+struct W4A16GroupedGemmKernel {
   using TileShape =
       decltype(cute::append(TileShape_MN{}, cute::Int<TileShapeK>{}));
   using ClusterShape = ClusterShape_MNK;
 
-  // per-channel, per-token scales epilogue
-  using ChTokScalesEpilogue =
-      typename vllm::c3x::ScaledEpilogueArray<ElementAccumulator, ElementD,
-                                              TileShape>;
-  using EVTCompute = typename ChTokScalesEpilogue::EVTCompute;
+  // BF16 activation doesn't need scales. use default epilogue
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
-          ArchTag, OperatorClass, TileShape, ClusterShape,
-          cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
-          ElementSChannel, ElementC,
+          cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
+          ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
+          ElementAccumulator, ElementAccumulator, ElementC,
           typename cutlass::layout::LayoutTranspose<LayoutC>::type*, AlignmentC,
           ElementD, typename cutlass::layout::LayoutTranspose<LayoutD>::type*,
-          AlignmentD, EpilogueSchedule, EVTCompute>::CollectiveOp;
+          AlignmentD, EpilogueSchedule>::CollectiveOp;
 
   // =========================================================== MIXED INPUT
   // WITH SCALES
@@ -139,8 +141,7 @@ struct W4A8GroupedGemmKernel {
   // scale information.
   using CollectiveMainloopShuffled =
       typename cutlass::gemm::collective::CollectiveBuilder<
-          ArchTag, OperatorClass,
-          cute::tuple<ElementB, cutlass::Array<ElementScale, 8>>,
+          ArchTag, OperatorClass, cute::tuple<ElementB, ElementScale>,
           LayoutB_Reordered*, AlignmentB, ElementA, LayoutA_Transpose*,
           AlignmentA, ElementAccumulator, TileShape, ClusterShape,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
@@ -167,8 +168,7 @@ struct W4A8GroupedGemmKernel {
 
   static void grouped_mm(
       torch::Tensor& out_tensors, const torch::Tensor& a_tensors,
-      const torch::Tensor& b_tensors, const torch::Tensor& a_scales,
-      const torch::Tensor& b_scales, const torch::Tensor& b_group_scales,
+      const torch::Tensor& b_tensors, const torch::Tensor& b_group_scales,
       const int64_t b_group_size, const torch::Tensor& expert_offsets,
       const torch::Tensor& problem_sizes_torch, const torch::Tensor& a_strides,
       const torch::Tensor& b_strides, const torch::Tensor& c_strides,
@@ -187,15 +187,15 @@ struct W4A8GroupedGemmKernel {
     torch::Tensor a_ptrs = torch::empty(num_experts, options_int);
     torch::Tensor b_ptrs = torch::empty(num_experts, options_int);
     torch::Tensor out_ptrs = torch::empty(num_experts, options_int);
-    torch::Tensor a_scales_ptrs = torch::empty(num_experts, options_int);
-    torch::Tensor b_scales_ptrs = torch::empty(num_experts, options_int);
     torch::Tensor b_group_scales_ptrs = torch::empty(num_experts, options_int);
 
     // get the correct offsets to pass to gemm
     run_get_group_gemm_starts(expert_offsets, a_ptrs, b_ptrs, out_ptrs,
-                              a_scales_ptrs, b_scales_ptrs, b_group_scales_ptrs,
-                              a_tensors, b_tensors, out_tensors, a_scales,
-                              b_scales, b_group_scales, b_group_size);
+                              std::nullopt, std::nullopt, b_group_scales_ptrs,
+                              a_tensors, b_tensors, out_tensors, std::nullopt,
+                              std::nullopt, b_group_scales, b_group_size);
+
+    cudaDeviceSynchronize();
 
     // construct args
     using Args = typename GemmShuffled::Arguments;
@@ -214,20 +214,22 @@ struct W4A8GroupedGemmKernel {
         static_cast<LayoutB_Reordered*>(b_strides.data_ptr()),
         static_cast<const MmaType**>(a_ptrs.data_ptr()),
         static_cast<StrideA*>(a_strides.data_ptr()),
-        static_cast<const cutlass::Array<ElementScale, 8>**>(
-            b_group_scales_ptrs.data_ptr()),
+        static_cast<const ElementScale**>(b_group_scales_ptrs.data_ptr()),
         static_cast<StrideS*>(group_scale_strides.data_ptr()),
         static_cast<int>(b_group_size)};
 
+    decltype(arguments.epilogue.thread) fusion_args{};
+    // trivial epilogue. TODO(siyuan): expose alpha and beta as arguments
+    fusion_args.alpha = 1.0;
+    fusion_args.beta = 0.0;
+    fusion_args.alpha_ptr = nullptr;
+    fusion_args.beta_ptr = nullptr;
+    fusion_args.alpha_ptr_array = nullptr;
+    fusion_args.beta_ptr_array = nullptr;
+    fusion_args.dAlpha = {cute::_0{}, cute::_0{}, 0};
+    fusion_args.dBeta = {cute::_0{}, cute::_0{}, 0};
     EpilogueArguments epilogue_arguments{
-        // since we are doing SwapAB the channel scales comes first, then token
-        // scales
-        ChTokScalesEpilogue::prepare_args(  // see ScaledEpilogueArray
-            static_cast<const ElementAccumulator**>(
-                b_scales_ptrs.data_ptr()),  // per-channel
-            static_cast<const ElementAccumulator**>(
-                a_scales_ptrs.data_ptr()),  // per-token
-            true, true),
+        fusion_args,
         nullptr,                                       // C
         static_cast<StrideC*>(c_strides.data_ptr()),   // C
         static_cast<ElementD**>(out_ptrs.data_ptr()),  // D
@@ -264,116 +266,114 @@ using CoopEpi = cutlass::epilogue::PtrArrayTmaWarpSpecializedCooperative;
 
 // Kernel_TileShape_ClusterShape_Schedule
 using Kernel_128x16_1x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_128, _16>, Shape<_1, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_128, _16>, Shape<_1, _1, _1>, Coop, CoopEpi>;
 using Kernel_128x16_2x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_128, _16>, Shape<_2, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_128, _16>, Shape<_2, _1, _1>, Coop, CoopEpi>;
 
 using Kernel_256x16_1x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_256, _16>, Shape<_1, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_256, _16>, Shape<_1, _1, _1>, Coop, CoopEpi>;
 using Kernel_256x16_2x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_256, _16>, Shape<_2, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_256, _16>, Shape<_2, _1, _1>, Coop, CoopEpi>;
 
 using Kernel_256x32_1x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_256, _32>, Shape<_1, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_256, _32>, Shape<_1, _1, _1>, Coop, CoopEpi>;
 using Kernel_256x32_2x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_256, _32>, Shape<_2, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_256, _32>, Shape<_2, _1, _1>, Coop, CoopEpi>;
 
 using Kernel_256x64_1x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_256, _64>, Shape<_1, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_256, _64>, Shape<_1, _1, _1>, Coop, CoopEpi>;
 using Kernel_256x64_2x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_256, _64>, Shape<_2, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_256, _64>, Shape<_2, _1, _1>, Coop, CoopEpi>;
 
 using Kernel_256x128_1x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_256, _128>, Shape<_1, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_256, _128>, Shape<_1, _1, _1>, Coop, CoopEpi>;
 using Kernel_256x128_2x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_256, _128>, Shape<_2, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_256, _128>, Shape<_2, _1, _1>, Coop, CoopEpi>;
 
 using Kernel_128x256_2x1x1_Coop =
-    W4A8GroupedGemmKernel<Shape<_128, _256>, Shape<_2, _1, _1>, Coop, CoopEpi>;
+    W4A16GroupedGemmKernel<Shape<_128, _256>, Shape<_2, _1, _1>, Coop, CoopEpi>;
 
 void mm_dispatch(
     torch::Tensor& out_tensors, const torch::Tensor& a_tensors,
-    const torch::Tensor& b_tensors, const torch::Tensor& a_scales,
-    const torch::Tensor& b_scales, const torch::Tensor& b_group_scales,
+    const torch::Tensor& b_tensors, const torch::Tensor& b_group_scales,
     const int64_t b_group_size, const torch::Tensor& expert_offsets,
     const torch::Tensor& problem_sizes, const torch::Tensor& a_strides,
     const torch::Tensor& b_strides, const torch::Tensor& c_strides,
     const torch::Tensor& group_scale_strides, const std::string& schedule) {
   if (schedule == "Kernel_128x16_1x1x1_Coop") {
     Kernel_128x16_1x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else if (schedule == "Kernel_128x16_2x1x1_Coop") {
     Kernel_128x16_2x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else if (schedule == "Kernel_256x16_1x1x1_Coop") {
     Kernel_256x16_1x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else if (schedule == "Kernel_256x16_2x1x1_Coop") {
     Kernel_256x16_2x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else if (schedule == "Kernel_256x32_1x1x1_Coop") {
     Kernel_256x32_1x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else if (schedule == "Kernel_256x32_2x1x1_Coop") {
     Kernel_256x32_2x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else if (schedule == "Kernel_256x64_1x1x1_Coop") {
     Kernel_256x64_1x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else if (schedule == "Kernel_256x64_2x1x1_Coop") {
     Kernel_256x64_2x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else if (schedule == "Kernel_256x128_1x1x1_Coop") {
     Kernel_256x128_1x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else if (schedule == "Kernel_256x128_2x1x1_Coop") {
     Kernel_256x128_2x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else if (schedule == "Kernel_128x256_2x1x1_Coop") {
     Kernel_128x256_2x1x1_Coop::grouped_mm(
-        out_tensors, a_tensors, b_tensors, a_scales, b_scales, b_group_scales,
-        b_group_size, expert_offsets, problem_sizes, a_strides, b_strides,
-        c_strides, group_scale_strides);
+        out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+        expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+        group_scale_strides);
   } else {
     TORCH_CHECK(false,
-                "cutlass_w4a8_moe_mm: unknown schedule string: ", schedule);
+                "cutlass_w4a16_moe_mm: unknown schedule string: ", schedule);
   }
 }
 
 void mm(torch::Tensor& out_tensors, const torch::Tensor& a_tensors,
-        const torch::Tensor& b_tensors, const torch::Tensor& a_scales,
-        const torch::Tensor& b_scales, const torch::Tensor& b_group_scales,
+        const torch::Tensor& b_tensors, const torch::Tensor& b_group_scales,
         const int64_t b_group_size, const torch::Tensor& expert_offsets,
         const torch::Tensor& problem_sizes, const torch::Tensor& a_strides,
         const torch::Tensor& b_strides, const torch::Tensor& c_strides,
         const torch::Tensor& group_scale_strides,
         std::optional<std::string> maybe_schedule) {
+  // TODO(siyuan): add sanity checks for input tensors
   // user has specified a schedule
   if (maybe_schedule) {
-    mm_dispatch(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
-                b_group_scales, b_group_size, expert_offsets, problem_sizes,
-                a_strides, b_strides, c_strides, group_scale_strides,
-                *maybe_schedule);
+    mm_dispatch(out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+                expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+                group_scale_strides, *maybe_schedule);
     return;
   }
 
@@ -398,13 +398,14 @@ void mm(torch::Tensor& out_tensors, const torch::Tensor& a_tensors,
     schedule = "Kernel_128x256_2x1x1_Coop";
   }
 
-  mm_dispatch(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
-              b_group_scales, b_group_size, expert_offsets, problem_sizes,
-              a_strides, b_strides, c_strides, group_scale_strides, schedule);
+  mm_dispatch(out_tensors, a_tensors, b_tensors, b_group_scales, b_group_size,
+              expert_offsets, problem_sizes, a_strides, b_strides, c_strides,
+              group_scale_strides, schedule);
 }
 
-std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(
-    torch::Tensor const& b_tensors) {
+// 16bit LUT is not supported yet. reorder without re-encoding.
+std::tuple<torch::Tensor, torch::Tensor> reorder_int4b(
+    torch::Tensor& b_tensors) {
   TORCH_CHECK(b_tensors.dtype() == torch::kInt32);
   TORCH_CHECK(b_tensors.dim() == 3);  // (experts, n, k)
   TORCH_CHECK(b_tensors.is_contiguous());
@@ -422,17 +423,9 @@ std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(
   // this is the number of elements we need per layout
   constexpr size_t layout_width = sizeof(LayoutB_Reordered) / sizeof(int32_t);
 
-  torch::Tensor b_tensors_packed = torch::empty_like(b_tensors);
   int num_experts = static_cast<int>(b_tensors.size(0));
 
-  auto b_ptr = static_cast<QuantType const*>(b_tensors.const_data_ptr());
-  auto b_packed_ptr = static_cast<QuantType*>(b_tensors_packed.data_ptr());
-
-  // multiply by ull so result does not overflow int32
-  size_t num_int4_elems = 1ull * num_experts * n * k;
-  bool ok = vllm::cutlass_w4a8_utils::unified_encode_int4b(b_ptr, b_packed_ptr,
-                                                           num_int4_elems);
-  TORCH_CHECK(ok, "unified_encode_int4b failed");
+  auto b_ptr = static_cast<QuantType*>(b_tensors.data_ptr());
 
   // construct the layout once; assumes each expert has the same layout
   using LayoutType = LayoutB_Reordered;
@@ -448,8 +441,7 @@ std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(
     // we need to adjust the offset
     int64_t offset =
         1ull * i * n * k * cutlass::sizeof_bits<QuantType>::value / 8;
-    cutlass::reorder_tensor(b_packed_ptr + offset, layout_B,
-                            layout_B_reordered);
+    cutlass::reorder_tensor(b_ptr + offset, layout_B, layout_B_reordered);
   }
 
   // save the packed layout to torch tensor so we can re-use it
@@ -468,13 +460,13 @@ std::tuple<torch::Tensor, torch::Tensor> encode_and_reorder_int4b(
   torch::Tensor packed_layout =
       layout_cpu.to(b_tensors.device(), /*non_blocking=*/false);
 
-  return {b_tensors_packed, packed_layout};
+  return {b_tensors, packed_layout};
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("cutlass_w4a8_moe_mm", &mm);
-  m.impl("cutlass_encode_and_reorder_int4b_grouped", &encode_and_reorder_int4b);
+  m.impl("cutlass_w4a16_moe_mm", &mm);
+  m.impl("cutlass_reorder_int4b_grouped", &reorder_int4b);
 }
 
-}  // namespace vllm::cutlass_w4a8_moe
+}  // namespace vllm::cutlass_w4a16_moe
 /////////////////////////////////////////////////////////////////////////////////////////////////
