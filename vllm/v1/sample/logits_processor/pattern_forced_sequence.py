@@ -20,22 +20,27 @@ from vllm.v1.sample.logits_processor.interface import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-# Hardcoded token IDs for Harmony format (GPT-OSS)
-# <|end|><|start|>assistant<|channel|>
-TRIGGER_PATTERN = [200007, 200006, 173781, 200005]
-# commentary to=
-FORCED_SEQUENCE = [12606, 815, 316, 28]
-
 
 class ForcingState(Enum):
     NORMAL = auto()
     FORCING = auto()
 
 
+# State tuple: (state, forcing_pos, output_ids, trigger_pattern, forced_sequence)
+RequestState = tuple[ForcingState, int, list[int], list[int], list[int]]
+
+
 class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
     """
     Detects trigger pattern and forces a token sequence.
-    Enabled via SamplingParams.extra_args["harmony_tool_required"] = True.
+
+    Enabled via SamplingParams.extra_args["harmony_tool_required"] which can be:
+    - A dict with "trigger_pattern" and "forced_sequence" keys (list of token IDs)
+    - Example:
+        extra_args["harmony_tool_required"] = {
+            "trigger_pattern": [200007, 200006, 173781, 200005],
+            "forced_sequence": [12606, 815, 316, 28],
+        }
     """
 
     def __init__(
@@ -44,8 +49,8 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
         device: torch.device,
         is_pin_memory: bool,
     ):
-        # index -> (state, forcing_pos, output_ids)
-        self.req_states: dict[int, tuple[ForcingState, int, list[int]]] = {}
+        # index -> (state, forcing_pos, output_ids, trigger_pattern, forced_sequence)
+        self.req_states: dict[int, RequestState] = {}
         self.neg_inf = torch.tensor(-float("inf"), dtype=torch.float32, device=device)
 
     def is_argmax_invariant(self) -> bool:
@@ -59,12 +64,31 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
         params: SamplingParams,
         _prompt_tok_ids: list[int] | None,
         output_tok_ids: list[int],
-    ) -> tuple[ForcingState, int, list[int]] | None:
+    ) -> RequestState | None:
         if not params.extra_args:
             return None
-        if not params.extra_args.get("harmony_tool_required"):
+
+        harmony_config = params.extra_args.get("harmony_tool_required")
+        if not harmony_config:
             return None
-        return (ForcingState.NORMAL, 0, output_tok_ids)
+
+        # Parse dict format with trigger_pattern and forced_sequence
+        if not isinstance(harmony_config, dict):
+            return None
+
+        trigger_pattern = harmony_config.get("trigger_pattern")
+        forced_sequence = harmony_config.get("forced_sequence")
+
+        if not trigger_pattern or not forced_sequence:
+            return None
+
+        return (
+            ForcingState.NORMAL,
+            0,
+            output_tok_ids,
+            trigger_pattern,
+            forced_sequence,
+        )
 
     def update_state(self, batch_update: BatchUpdate | None):
         process_dict_updates(self.req_states, batch_update, self._add_request)
@@ -73,26 +97,50 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
         if not self.req_states:
             return logits
 
-        for index, (state, pos, output_ids) in list(self.req_states.items()):
+        for index, (
+            state,
+            pos,
+            output_ids,
+            trigger_pattern,
+            forced_sequence,
+        ) in list(self.req_states.items()):
             real_tokens = [t for t in output_ids if t != -1]
 
             if state == ForcingState.NORMAL and len(real_tokens) >= len(
-                TRIGGER_PATTERN
+                trigger_pattern
             ):
-                tail = real_tokens[-len(TRIGGER_PATTERN) :]
-                if tail == TRIGGER_PATTERN:
-                    self.req_states[index] = (ForcingState.FORCING, 0, output_ids)
+                tail = real_tokens[-len(trigger_pattern) :]
+                if tail == trigger_pattern:
+                    self.req_states[index] = (
+                        ForcingState.FORCING,
+                        0,
+                        output_ids,
+                        trigger_pattern,
+                        forced_sequence,
+                    )
                     state = ForcingState.FORCING
                     pos = 0
 
             if state == ForcingState.FORCING:
-                if pos < len(FORCED_SEQUENCE):
-                    allowed = FORCED_SEQUENCE[pos]
+                if pos < len(forced_sequence):
+                    allowed = forced_sequence[pos]
                     original = logits[index, allowed].clone()
                     logits[index] = self.neg_inf
                     logits[index, allowed] = original
-                    self.req_states[index] = (state, pos + 1, output_ids)
+                    self.req_states[index] = (
+                        state,
+                        pos + 1,
+                        output_ids,
+                        trigger_pattern,
+                        forced_sequence,
+                    )
                 else:
-                    self.req_states[index] = (ForcingState.NORMAL, 0, output_ids)
+                    self.req_states[index] = (
+                        ForcingState.NORMAL,
+                        0,
+                        output_ids,
+                        trigger_pattern,
+                        forced_sequence,
+                    )
 
         return logits
