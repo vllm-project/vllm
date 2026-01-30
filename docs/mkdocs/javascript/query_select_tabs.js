@@ -1,13 +1,6 @@
 // If user directly navigates to a grouped tab
 // sync the tab state by clicking the corresponding label
 window.addEventListener("load", function () {
-  // Only run on installation pages with grouped tabs
-  const currentPath = window.location.pathname;
-  if (!currentPath.endsWith('installation/gpu.html') && 
-    !currentPath.endsWith('installation/cpu.html')) {
-    return;
-  }
-
   // Only run if there's an anchor in the URL
   const anchor = window.location.hash;
   if (!anchor) {
@@ -15,7 +8,7 @@ window.addEventListener("load", function () {
   }
 
   // Only if there's a tabbed-labels div
-  const labelsDiv = document.querySelector("div.tabbed-labels");
+  const labelsDiv = document.querySelector("div.tabbed-set");
   if (!labelsDiv) {
     return;
   }
