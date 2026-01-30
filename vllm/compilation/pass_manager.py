@@ -21,6 +21,7 @@ if rocm_aiter_ops.is_enabled():
         RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
         RocmAiterTritonAddRMSNormPadFusionPass,
+        ROCmAiterTritonRopeReshapeKVCacheFusionPass,
     )
 
 if current_platform.is_cuda_alike():
@@ -133,6 +134,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
                 self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
+
+            if self.pass_config.fuse_rope_kvcache and rocm_aiter_ops.is_enabled():
+                self.passes += [ROCmAiterTritonRopeReshapeKVCacheFusionPass(config)]
 
             if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnFusionPass(config)]

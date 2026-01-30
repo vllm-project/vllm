@@ -502,3 +502,93 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(self, AddAiterRMSNormPadPattern)
+
+
+class RopeReshapeKVCachePattern:
+    """
+    This pattern matches the following unfused sequence:
+      q, k = rotary_embedding(positions, q, k, head_dim, cos_sin_cache, is_neox)
+      kv_cache_dummy = unified_kv_cache_update(k, v, layer_name)
+
+    and replaces it with the fused AITER triton kernel:
+      q_out, k_out, key_cache, value_cache = qk_rope_reshape_and_cache(
+        q, k, v, key_cache, value_cache, slot_mapping, positions,
+        cos, sin, k_scale, v_scale, is_neox, flash_layout
+      )
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_qk_rope_reshape_and_cache_op()
+
+    def __init__(
+        self,
+        head_dim: int,
+        num_heads: int,
+        num_kv_heads: int,
+        is_neox: bool,
+    ) -> None:
+        raise NotImplementedError
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        raise NotImplementedError
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern():
+            raise NotImplementedError
+
+        def replacement():
+            raise NotImplementedError
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
+class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
+    """
+    This pass fuses the rotary embedding and KV cache update operations
+    into a single AITER triton kernel: qk_rope_reshape_and_cache.
+
+    This fusion eliminates the need for separate kernel launches and
+    intermediate memory operations between the RoPE and cache update steps.
+    """
+
+    @enable_fake_mode
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config)
+
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass"
+        )
+
+        # List of tuples of (head_dim, num_heads, num_kv_heads)
+        PATTERNS = [
+            (64, 64, 8),  # gpt-oss 20b, 120b
+            (128, 64, 8),  # llama 3.3 70B
+            (128, 128, 8),  # llama 3.1 405B
+            (128, 32, 8),  # mixtral 8x7b
+            (128, 48, 8),  # mixtral 8x22b
+            # Qwen also supports qk_norm_rope fusion; figure out which one to use
+            # (128, 64, 4),  # qwen 235b-a22b
+            # (128, 32, 4),  # qwen 30b-a3b
+        ]
+
+        # Register patterns for common model configurations
+        for head_dim, num_heads, num_kv_heads in PATTERNS:
+            for is_neox in [True, False]:
+                RopeReshapeKVCachePattern(
+                    head_dim=head_dim,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    is_neox=is_neox,
+                ).register(self.patterns)
+
+        self.dump_patterns(config, self.patterns)
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph) -> None:
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Replaced %s patterns", self.matched_count)
+        graph.print_tabular()
+
+    def uuid(self) -> str:
+        return VllmInductorPass.hash_source(self, RopeReshapeKVCachePattern)
