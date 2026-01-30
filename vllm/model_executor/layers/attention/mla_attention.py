@@ -594,7 +594,7 @@ try:
     is_vllm_fa = True
 except ImportError:
     # For rocm use upstream flash attention
-    if current_platform.is_rocm():
+    if current_platform.is_rocm() and not rocm_aiter_ops.is_enabled():
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
     is_vllm_fa = False
 
