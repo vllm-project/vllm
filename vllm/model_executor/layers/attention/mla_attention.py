@@ -1969,7 +1969,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             and (self.qk_rope_head_dim == 64)
         )
 
-        self.supports_prefill_query_quantization = False
         if use_trtllm_ragged_deepseek_prefill():
             logger.info_once(
                 "Using TRT-LLM ragged DeepSeek prefill for MLA", scope="local"
@@ -1979,13 +1978,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             )
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
-            self.supports_prefill_query_quantization = True
         elif use_flashinfer_prefill():
             logger.info_once("Using FlashInfer prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
             self._pad_v = False
-            self.supports_prefill_query_quantization = True
         elif use_cudnn_prefill():
             logger.info_once("Using CUDNN prefill for MLA", scope="local")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
