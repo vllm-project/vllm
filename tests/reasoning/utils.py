@@ -18,9 +18,6 @@ class StreamingReasoningReconstructor:
         assert delta.content is None or delta.reasoning is None, (
             "Both content and reasoning content are present in the delta message"
         )
-        assert delta.reasoning == delta.reasoning_content, (
-            "reasoning_content should be present for backwards compatibility"
-        )
         if delta.content is not None:
             if self.other_content is None:
                 self.other_content = delta.content

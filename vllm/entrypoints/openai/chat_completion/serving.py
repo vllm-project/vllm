@@ -1186,8 +1186,8 @@ class OpenAIServingChat(OpenAIServing):
                         delta_content_parts = []
                         if delta_message.content:
                             delta_content_parts.append(delta_message.content)
-                        if delta_message.reasoning_content:
-                            reasoning = delta_message.reasoning_content
+                        if delta_message.reasoning:
+                            reasoning = delta_message.reasoning
                             delta_content_parts.append(f"[reasoning: {reasoning}]")
                         if delta_message.tool_calls:
                             tool_args = "".join(
