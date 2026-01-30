@@ -46,7 +46,7 @@ def audio_to_pcm16_base64(audio_path: str) -> str:
     return base64.b64encode(pcm16.tobytes()).decode("utf-8")
 
 
-async def realtime_transcribe(audio_path: str, host: str, port: int):
+async def realtime_transcribe(audio_path: str, host: str, port: int, model: str):
     """
     Connect to the Realtime API and transcribe an audio file.
     """
@@ -60,6 +60,9 @@ async def realtime_transcribe(audio_path: str, host: str, port: int):
         else:
             print(f"Unexpected response: {response}")
             return
+
+        # Validate model
+        await ws.send(json.dumps({"type": "session.update", "model": model}))
 
         # Signal ready to start
         await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
@@ -113,12 +116,18 @@ def main(args):
         audio_path = str(AudioAsset("mary_had_lamb").get_local_path())
         print(f"No audio path provided, using default: {audio_path}")
 
-    asyncio.run(realtime_transcribe(audio_path, args.host, args.port))
+    asyncio.run(realtime_transcribe(audio_path, args.host, args.port, args.model))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Realtime WebSocket Transcription Client"
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="mistralai/Voxtral-Mini-3B-Realtime-2602",
+        help="Model that is served and should be pinged.",
     )
     parser.add_argument(
         "--audio_path",

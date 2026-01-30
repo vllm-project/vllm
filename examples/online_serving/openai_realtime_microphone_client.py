@@ -34,6 +34,7 @@ audio_queue: queue.Queue = queue.Queue()
 transcription_text = ""
 is_running = False
 ws_url = ""
+model = ""
 
 
 async def websocket_handler():
@@ -43,6 +44,9 @@ async def websocket_handler():
     async with websockets.connect(ws_url) as ws:
         # Wait for session.created
         await ws.recv()
+
+        # Validate model
+        await ws.send(json.dumps({"type": "session.update", "model": model}))
 
         # Signal ready
         await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
@@ -160,6 +164,12 @@ if __name__ == "__main__":
         description="Realtime WebSocket Transcription with Gradio"
     )
     parser.add_argument(
+        "--model",
+        type=str,
+        default="mistralai/Voxtral-Mini-3B-Realtime-2602",
+        help="Model that is served and should be pinged.",
+    )
+    parser.add_argument(
         "--host", type=str, default="localhost", help="vLLM server host"
     )
     parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
@@ -169,4 +179,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     ws_url = f"ws://{args.host}:{args.port}/v1/realtime"
+    model = args.model
     demo.launch(share=args.share)
