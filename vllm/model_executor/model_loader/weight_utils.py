@@ -250,6 +250,7 @@ def get_quant_config(
     if (
         hf_quant_config is not None
         and hf_quant_config.get("quant_method") == "compressed-tensors"
+        and "config_groups" in hf_quant_config
     ):
         if hf_text_config is not None:
             n_heads = getattr(hf_text_config, "num_attention_heads", None)
