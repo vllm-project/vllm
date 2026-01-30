@@ -55,9 +55,9 @@ class BatchDescriptor(NamedTuple):
     (like fused_moe_lora) whose grid size depends on num_active_loras
     to be properly captured.
     """
-    is_vit: bool = False
+    is_mm_encoder: bool = False
     """
-    ViT Piecewise CUDA Graph Flag
+    mm_encoder Piecewise CUDA Graph Flag
     """
 
     def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
@@ -71,7 +71,7 @@ class BatchDescriptor(NamedTuple):
             uniform=False,
             has_lora=self.has_lora,
             num_active_loras=self.num_active_loras,
-            is_vit=self.is_vit,
+            is_mm_encoder=self.is_mm_encoder,
         )
 
 
@@ -255,7 +255,7 @@ class ForwardContext:
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
 
-    # ViT Multi-Modal Encoder flags used by backend compiler
+    # mm_encoder Multi-Modal Encoder flags used by backend compiler
     is_first_graph_in_mm_encoder_sequence: bool = True
     is_last_graph_in_mm_encoder_sequence: bool = True
 

@@ -530,12 +530,12 @@ class CompilationConfig:
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
-    vit_cudagraph_capture_sizes: list[int] | None = None
-    """Sizes to capture vit cudagraph.
+    mm_encoder_cudagraph_capture_sizes: list[int] | None = None
+    """Sizes to capture mm_encoder cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
-    max_vit_cudagraph_capture_size: int = field(default=None)
-    """The maximum vit cudagraph capture size.
+    max_mm_encoder_cudagraph_capture_size: int = field(default=None)
+    """The maximum mm_encoder cudagraph capture size.
     """
     cudagraph_copy_inputs: bool = False
     """Whether to copy input tensors for

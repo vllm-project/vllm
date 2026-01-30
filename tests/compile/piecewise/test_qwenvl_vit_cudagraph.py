@@ -22,8 +22,9 @@ def _worker_embed_multimodal(
     This function sets up the necessary forward context for tensor-parallel (TP)
     execution and then calls the model's `embed_multimodal` method.
     Note: For data-parallel (DP) mode, the forward context is typically
-    created and managed within the vision dispatcher, which would override
-    the context set here.
+          created and managed within the
+          vision.py:run_dp_sharded_mrope_vision_model(), which would override the
+          context set here.
     Args:
         worker: The worker instance containing the model runner.
         vllm_config: The vLLM engine configuration.
@@ -103,7 +104,7 @@ def llm(request):
             compilation_config=CompilationConfig(
                 cudagraph_mode="PIECEWISE",
                 compile_mm_encoder=True,
-                vit_cudagraph_capture_sizes=[64, 128, 256],
+                mm_encoder_cudagraph_capture_sizes=[64, 128, 256],
             ),
         )
         print(f"LLM initialized for {model_name} tp={tp_size} mode={mm_mode}")
@@ -154,7 +155,10 @@ class TestQwenVLCUDAGraph:
 
         # Dispatch to get runtime mode and batch descriptor
         cudagraph_runtime_mode, batch_descriptor = dispatcher.dispatch(
-            num_tokens=num_patches, uniform_decode=False, has_lora=False, is_vit=True
+            num_tokens=num_patches,
+            uniform_decode=False,
+            has_lora=False,
+            is_mm_encoder=True,
         )
 
         model_executor = llm.llm_engine.model_executor

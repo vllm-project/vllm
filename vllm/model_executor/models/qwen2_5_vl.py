@@ -653,9 +653,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self._persistent_hidden_states_buffer: torch.Tensor | None = None
         self._persistent_rotary_pos_emb_cos_buffer: torch.Tensor | None = None
         self._persistent_rotary_pos_emb_sin_buffer: torch.Tensor | None = None
-        if vllm_config.compilation_config.vit_cudagraph_capture_sizes:
+        if vllm_config.compilation_config.mm_encoder_cudagraph_capture_sizes:
             max_compile_size = (
-                vllm_config.compilation_config.vit_cudagraph_capture_sizes[-1]
+                vllm_config.compilation_config.mm_encoder_cudagraph_capture_sizes[-1]
             )
             self._persistent_hidden_states_buffer = torch.empty(
                 (max_compile_size, self.patch_embed.proj.input_size),
@@ -1292,7 +1292,7 @@ class Qwen2_5_VLForConditionalGeneration(
             with set_current_vllm_config(self.vllm_config):
                 if (
                     self.use_data_parallel
-                    and not self.vllm_config.is_in_compile_or_vit_cuda_graph_capture
+                    and not self.vllm_config.in_mm_encoder_tracing
                 ):
                     return run_dp_sharded_mrope_vision_model(
                         self.visual,
@@ -1356,7 +1356,7 @@ class Qwen2_5_VLForConditionalGeneration(
             with set_current_vllm_config(self.vllm_config):
                 if (
                     self.use_data_parallel
-                    and not self.vllm_config.is_in_compile_or_vit_cuda_graph_capture
+                    and not self.vllm_config.in_mm_encoder_tracing
                 ):
                     return run_dp_sharded_mrope_vision_model(
                         self.visual,

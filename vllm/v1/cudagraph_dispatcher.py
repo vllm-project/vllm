@@ -70,7 +70,7 @@ class CudagraphDispatcher:
         """Pre-compute the mapping from batch size to padded graph size."""
         max_capture_size = self.compilation_config.max_cudagraph_capture_size
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
-        self._bs_to_padded_graph_size = self._get_padded_size_map(
+        self._bs_to_padded_graph_size: list[int] = self._get_padded_size_map(
             capture_sizes, max_capture_size
         )
 
@@ -112,12 +112,12 @@ class CudagraphDispatcher:
             # No specialization: only capture graphs with LoRA active
             return [lora_config.max_loras + 1]
 
-    def _compute_bs_to_padded_vit_graph_size(self) -> None:
-        """pre-compute the mapping from batch size to ViT padded graph size."""
-        max_capture_size = self.compilation_config.max_vit_cudagraph_capture_size
-        capture_sizes = self.compilation_config.vit_cudagraph_capture_sizes
+    def _compute_bs_to_padded_mm_encoder_graph_size(self) -> None:
+        """pre-compute the mapping from batch size to mm_encoder padded graph size."""
+        max_capture_size = self.compilation_config.max_mm_encoder_cudagraph_capture_size
+        capture_sizes = self.compilation_config.mm_encoder_cudagraph_capture_sizes
 
-        self._bs_to_padded_vit_graph_size = self._get_padded_size_map(
+        self._bs_to_padded_mm_encoder_graph_size: list[int] = self._get_padded_size_map(
             capture_sizes, max_capture_size
         )
 
@@ -146,12 +146,12 @@ class CudagraphDispatcher:
         uniform_decode: bool,
         has_lora: bool,
         num_active_loras: int = 0,
-        is_vit: bool = False,
+        is_mm_encoder: bool = False,
     ) -> BatchDescriptor:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
         uniform_decode_query_len = self.uniform_decode_query_len
-        if is_vit:
-            num_tokens_padded = self._bs_to_padded_vit_graph_size[num_tokens]
+        if is_mm_encoder:
+            num_tokens_padded = self._bs_to_padded_mm_encoder_graph_size[num_tokens]
         else:
             num_tokens_padded = self._bs_to_padded_graph_size[num_tokens]
 
@@ -168,7 +168,7 @@ class CudagraphDispatcher:
             uniform=uniform_decode,
             has_lora=has_lora,
             num_active_loras=num_active_loras,
-            is_vit=is_vit
+            is_mm_encoder=is_mm_encoder,
         )
 
     def add_cudagraph_key(
@@ -192,7 +192,7 @@ class CudagraphDispatcher:
             return
 
         self._compute_bs_to_padded_graph_size()
-        self._compute_bs_to_padded_vit_graph_size()
+        self._compute_bs_to_padded_mm_encoder_graph_size()
 
         # Get LoRA cases to capture
         lora_cases = self._get_lora_cases()
@@ -213,12 +213,12 @@ class CudagraphDispatcher:
                         bs, False, num_active_loras > 0, num_active_loras
                     ).relax_for_mixed_batch_cudagraphs(),
                 )
-            # ViT CUDAGraph Entry
-            for patch_len in self.compilation_config.vit_cudagraph_capture_sizes:
+            # mm_encoder CUDAGraph Entry
+            for patch_len in self.compilation_config.mm_encoder_cudagraph_capture_sizes:
                 self.add_cudagraph_key(
-                    cudagraph_mode.mixed_mode(),
+                    CUDAGraphMode.PIECEWISE,
                     self._create_padded_batch_descriptor(
-                        patch_len, False, False, is_vit=True
+                        patch_len, False, False, is_mm_encoder=True
                     ).relax_for_mixed_batch_cudagraphs(),
                 )
 
@@ -256,7 +256,7 @@ class CudagraphDispatcher:
         has_lora: bool = False,
         disable_full: bool = False,
         num_active_loras: int = 0,
-        is_vit: bool = False,
+        is_mm_encoder: bool = False,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         """
         Given conditions(e.g.,batch descriptor and if using piecewise only),
@@ -278,15 +278,18 @@ class CudagraphDispatcher:
             not self.keys_initialized
             or self.cudagraph_mode == CUDAGraphMode.NONE
             or (
-                not is_vit
+                not is_mm_encoder
                 and num_tokens > self.compilation_config.max_cudagraph_capture_size
             )
             or (
-                is_vit
-                and num_tokens > self.compilation_config.max_vit_cudagraph_capture_size
+                is_mm_encoder
+                and num_tokens
+                > self.compilation_config.max_mm_encoder_cudagraph_capture_size
             )
         ):
-            return CUDAGraphMode.NONE, BatchDescriptor(num_tokens, is_vit=is_vit)
+            return CUDAGraphMode.NONE, BatchDescriptor(
+                num_tokens, is_mm_encoder=is_mm_encoder
+            )
 
         effective_num_active_loras = num_active_loras
         if has_lora and num_active_loras > 0:
@@ -305,7 +308,7 @@ class CudagraphDispatcher:
                 effective_num_active_loras = self.vllm_config.lora_config.max_loras + 1
 
         batch_desc = self._create_padded_batch_descriptor(
-            num_tokens, uniform_decode, has_lora, effective_num_active_loras, is_vit
+            num_tokens, uniform_decode, has_lora, effective_num_active_loras, is_mm_encoder
         )
         relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 
@@ -324,10 +327,12 @@ class CudagraphDispatcher:
             return CUDAGraphMode.PIECEWISE, relaxed_batch_desc
 
         # finally, just return no cudagraphs and a trivial batch descriptor
-        return CUDAGraphMode.NONE, BatchDescriptor(num_tokens, is_vit=is_vit)
+        return CUDAGraphMode.NONE, BatchDescriptor(
+            num_tokens, is_mm_encoder=is_mm_encoder
+        )
 
     def get_capture_descs(
-        self, is_vit: bool = False
+        self, is_mm_encoder: bool = False
     ) -> list[tuple[CUDAGraphMode, list[BatchDescriptor]]]:
         """
         Returns capture descriptors for cudagraph capturing.
@@ -346,7 +351,7 @@ class CudagraphDispatcher:
             descs = list(self.cudagraph_keys[mode])
             if descs:
                 # Sort by num_tokens descending (largest first)
-                filter_descs = [d for d in descs if d.is_vit == is_vit]
+                filter_descs = [d for d in descs if d.is_mm_encoder == is_mm_encoder]
                 if filter_descs:
                     filter_descs.sort(key=lambda d: d.num_tokens, reverse=True)
                     result.append((mode, filter_descs))

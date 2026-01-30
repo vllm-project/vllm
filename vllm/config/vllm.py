@@ -257,10 +257,10 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -02 is used by defult. See  OptimizationLevel for full
     description."""
-    is_in_compile_or_vit_cuda_graph_capture: bool = False
-    """Flag for ViT compilation or ViT CUDA graph capture.
+    in_mm_encoder_tracing: bool = False
+    """Flag for mm_encoder compilation or mm_encoder CUDA graph capture.
     
-    If true, ViT in DP mode will execute the ViT model directly instead of
+    If true, mm_encoder in DP mode will execute the mm_encoder model directly instead of
     `run_dp_sharded_mrope_vision_model` to ensure correct memory profiling
     and compilation for each rank.
     """
@@ -827,7 +827,7 @@ class VllmConfig:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
             self._set_cudagraph_sizes()
-            self._set_vit_cudagraph_sizes()
+            self._set_mm_encoder_cudagraph_sizes()
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -1347,12 +1347,12 @@ class VllmConfig:
             computed_compile_ranges_split_points
         )
 
-    def _set_vit_cudagraph_sizes(self):
-        """Sets the CUDA graph capture sizes for the Vision Transformer (ViT).
+    def _set_mm_encoder_cudagraph_sizes(self):
+        """Sets the CUDA graph capture sizes for the multimodal encoder (MM Encoder).
 
         This method determines the batch sizes (in terms of number of patches)
-        for which ViT CUDA graphs will be captured. CUDA graphs improve
-        performance by reducing kernel launch overhead for the vision encoder.
+        for which MM Encoder CUDA graphs will be captured. CUDA graphs improve
+        performance by reducing kernel launch overhead for the multimodal encoder.
 
         The logic is as follows:
         1.  The feature is only enabled if all of the following conditions are met:
@@ -1361,22 +1361,22 @@ class VllmConfig:
             - CUDA graph mode is enabled (`cudagraph_mode` is not NONE).
             - Multimodal encoder compilation is enabled (`compile_mm_encoder` is True).
             If these conditions are not met, the list of capture sizes will be empty,
-            effectively disabling ViT CUDA graphs.
+            effectively disabling mm_encoder CUDA graphs.
 
-        2.  If the user has explicitly provided `vit_cudagraph_capture_sizes` in the
-            compilation config, those sizes are used. The list is de-duplicated
-            and sorted in ascending order.
+        2.  If the user has explicitly provided `mm_encoder_cudagraph_capture_sizes`
+            in the compilation config, those sizes are used. The list is
+            de-duplicated and sorted in ascending order.
 
         3.  If no sizes are provided by the user, a default list of sizes is
             generated. The maximum size for this list is determined automatically
             by `compute_encoder_budget` (capped at 8192), or by the user-provided
-            `max_vit_cudagraph_capture_size`. The default sizes are:
+            `max_mm_encoder_cudagraph_capture_size`. The default sizes are:
             [512, 1024, 1536] + list(range(2048, 4096, 128)) + list(
             range(4096, max_size + 1, 256))
 
         4.  The final list of sizes is stored in
-            `self.compilation_config.vit_cudagraph_capture_sizes`. The
-            `max_vit_cudagraph_capture_size` is also updated to be consistent
+            `self.compilation_config.mm_encoder_cudagraph_capture_sizes`. The
+            `max_mm_encoder_cudagraph_capture_size` is also updated to be consistent
             with the largest value in this final list.
 
         At runtime:
@@ -1391,11 +1391,11 @@ class VllmConfig:
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and self.compilation_config.compile_mm_encoder
         ):
-            # determine the initial max_vit_cudagraph_capture_size
-            max_vit_cudagraph_capture_size = (
-                self.compilation_config.max_vit_cudagraph_capture_size
+            # determine the initial max_mm_encoder_cudagraph_capture_size
+            max_mm_encoder_cudagraph_capture_size = (
+                self.compilation_config.max_mm_encoder_cudagraph_capture_size
             )
-            if max_vit_cudagraph_capture_size is None:
+            if max_mm_encoder_cudagraph_capture_size is None:
                 from vllm.multimodal import MULTIMODAL_REGISTRY
                 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 
@@ -1404,65 +1404,83 @@ class VllmConfig:
                     scheduler_config=self.scheduler_config,
                     mm_registry=MULTIMODAL_REGISTRY,
                 )
-                max_vit_cudagraph_capture_size = min(encoder_compute_budget, 8192)
+                max_mm_encoder_cudagraph_capture_size = min(
+                    encoder_compute_budget, 8192
+                )
 
-            # determine the vit_cudagraph_capture_sizes
-            if self.compilation_config.vit_cudagraph_capture_sizes is not None:
+            # determine the mm_encoder_cudagraph_capture_sizes
+            if self.compilation_config.mm_encoder_cudagraph_capture_sizes is not None:
                 # de-duplicate the sizes provided by the config
                 dedup_sizes = list(
-                    set(self.compilation_config.vit_cudagraph_capture_sizes)
+                    set(self.compilation_config.mm_encoder_cudagraph_capture_sizes)
                 )
-                vit_cudagraph_capture_sizes = dedup_sizes
+                mm_encoder_cudagraph_capture_sizes = dedup_sizes
                 # sort to make sure the sizes are in ascending order
-                vit_cudagraph_capture_sizes.sort()
+                mm_encoder_cudagraph_capture_sizes.sort()
             else:
-                vit_cudagraph_capture_sizes = [
-                    i for i in [512, 1024, 1536] if i <= max_vit_cudagraph_capture_size
+                mm_encoder_cudagraph_capture_sizes = [
+                    i
+                    for i in [512, 1024, 1536]
+                    if i <= max_mm_encoder_cudagraph_capture_size
                 ]
-                if max_vit_cudagraph_capture_size >= 2048:
+                if max_mm_encoder_cudagraph_capture_size >= 2048:
                     # Step size 128 for larger batch sizes
-                    vit_cudagraph_capture_sizes += list(
-                        range(2048, min(max_vit_cudagraph_capture_size + 1, 4096), 128)
+                    mm_encoder_cudagraph_capture_sizes += list(
+                        range(
+                            2048,
+                            min(max_mm_encoder_cudagraph_capture_size + 1, 4096),
+                            128,
+                        )
                     )
-                if max_vit_cudagraph_capture_size >= 4096:
+                if max_mm_encoder_cudagraph_capture_size >= 4096:
                     # Step size 256 for largest batch sizes
-                    vit_cudagraph_capture_sizes += list(
-                        range(4096, max_vit_cudagraph_capture_size + 1, 256)
+                    mm_encoder_cudagraph_capture_sizes += list(
+                        range(4096, max_mm_encoder_cudagraph_capture_size + 1, 256)
                     )
 
-            # user-specific compilation_config.max_vit_cudagraph_capture_size get
+            # user-specific compilation_config.max_mm_encoder_cudagraph_capture_size get
             # truncated to valid_max_size when they are inconsistent.
             valid_max_size = (
-                vit_cudagraph_capture_sizes[-1] if vit_cudagraph_capture_sizes else 0
+                mm_encoder_cudagraph_capture_sizes[-1]
+                if mm_encoder_cudagraph_capture_sizes
+                else 0
             )
             if (
-                self.compilation_config.max_vit_cudagraph_capture_size is not None
-                and self.compilation_config.max_vit_cudagraph_capture_size
+                self.compilation_config.max_mm_encoder_cudagraph_capture_size
+                is not None
+                and self.compilation_config.max_mm_encoder_cudagraph_capture_size
                 != valid_max_size
             ):
                 # raise error only when both two flags are user-specified
                 # and they are inconsistent with each other
-                if self.compilation_config.vit_cudagraph_capture_sizes is not None:
+                if (
+                    self.compilation_config.mm_encoder_cudagraph_capture_sizes
+                    is not None
+                ):
                     raise ValueError(
-                        "customized max_vit_cudagraph_capture_size"
-                        f"(={self.compilation_config.max_vit_cudagraph_capture_size}) "
-                        "should be consistent with the max value of "
-                        f"vit_cudagraph_capture_sizes(={valid_max_size})"
+                        "customized max_mm_encoder_cudagraph_capture_size(="
+                        f"{
+                            self.compilation_config.max_mm_encoder_cudagraph_capture_size
+                        }"
+                        ") should be consistent with the max value of "
+                        f"mm_encoder_cudagraph_capture_sizes(={valid_max_size})"
                     )
 
                 logger.warning(
-                    "Truncating max_vit_cudagraph_capture_size to %d",
+                    "Truncating max_mm_encoder_cudagraph_capture_size to %d",
                     valid_max_size,
                 )
-            # always set the final max_vit_cudagraph_capture_size
-            self.compilation_config.max_vit_cudagraph_capture_size = valid_max_size
-            self.compilation_config.vit_cudagraph_capture_sizes = (
-                vit_cudagraph_capture_sizes
+            # always set the final max_mm_encoder_cudagraph_capture_size
+            self.compilation_config.max_mm_encoder_cudagraph_capture_size = (
+                valid_max_size
+            )
+            self.compilation_config.mm_encoder_cudagraph_capture_sizes = (
+                mm_encoder_cudagraph_capture_sizes
             )
         else:
             # no cudagraph in use
-            self.compilation_config.max_vit_cudagraph_capture_size = 0
-            self.compilation_config.vit_cudagraph_capture_sizes = []
+            self.compilation_config.max_mm_encoder_cudagraph_capture_size = 0
+            self.compilation_config.mm_encoder_cudagraph_capture_sizes = []
 
     def try_verify_and_update_config(self):
         if self.model_config is None:

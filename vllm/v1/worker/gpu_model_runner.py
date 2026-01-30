@@ -553,14 +553,14 @@ class GPUModelRunner(
             self.cudagraph_batch_sizes = sorted(
                 self.compilation_config.cudagraph_capture_sizes
             )
-        # self.vit_cudagraph_batch_sizes sorts in ascending order.
-        self.vit_cudagraph_batch_sizes: list[int] | None = None
+        # self.mm_encoder_cudagraph_batch_sizes sorts in ascending order.
+        self.mm_encoder_cudagraph_batch_sizes: list[int] | None = None
         if (
-            self.compilation_config.vit_cudagraph_capture_sizes
+            self.compilation_config.mm_encoder_cudagraph_capture_sizes
             and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
-            self.vit_cudagraph_batch_sizes = sorted(
-                self.compilation_config.vit_cudagraph_capture_sizes
+            self.mm_encoder_cudagraph_batch_sizes = sorted(
+                self.compilation_config.mm_encoder_cudagraph_capture_sizes
             )
 
         # Cache the device properties.
@@ -2441,11 +2441,11 @@ class GPUModelRunner(
                     original_num_imgs = -1
                     padded_num_tokens = -1
 
-                    # Default values for non-ViT cudagraph case
+                    # Default values for non-mm_encoder cudagraph case
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
                     batch_descriptor = None
                     if (
-                        self.vit_cudagraph_batch_sizes
+                        self.mm_encoder_cudagraph_batch_sizes
                         and "pixel_values" in mm_kwargs_group
                     ):
                         pixel_values = cast(
@@ -2460,7 +2460,7 @@ class GPUModelRunner(
                                 uniform_decode=False,
                                 has_lora=False,
                                 disable_full=False,
-                                is_vit=True,
+                                is_mm_encoder=True,
                             )
                         )
                         padded_num_tokens = batch_descriptor.num_tokens
@@ -4682,10 +4682,10 @@ class GPUModelRunner(
         w_patches = patches // merge_size
         return h_patches, w_patches
 
-    def _get_dummy_vit_input(
+    def _get_dummy_mm_encoder_input(
         self, num_image_tokens: int, img_feature_dim: int
     ) -> BatchedTensorInputs:
-        """Dummy data for profiling and precompiling ViT."""
+        """Dummy data for profiling and precompiling mm_encoder."""
 
         # The first dimension of pixel_values corresponds
         # to the total number of patches.
@@ -5236,7 +5236,7 @@ class GPUModelRunner(
         self,
         compilation_cases: list[int],
     ) -> None:
-        self.vllm_config.is_in_compile_or_vit_cuda_graph_capture = True
+        self.vllm_config.in_mm_encoder_tracing = True
         tmp_dummy_mm_inputs = self._get_mm_dummy_batch(
             "video",
             1,
@@ -5249,17 +5249,19 @@ class GPUModelRunner(
             compilation_cases = tqdm(
                 compilation_cases,
                 disable=not self.load_config.use_tqdm_on_load,
-                desc="Capturing Vit CUDA graphs (PIECEWISE)",
+                desc="Capturing mm_encoder CUDA graphs (PIECEWISE)",
             )
-        # Lazy initialization of the persistent buffer
+
         for capture_size in compilation_cases:
-            dummy_mm_inputs = self._get_dummy_vit_input(capture_size, img_feature_dim)
+            dummy_mm_inputs = self._get_dummy_mm_encoder_input(
+                capture_size, img_feature_dim
+            )
             cudagraph_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
                 num_tokens=capture_size,
                 uniform_decode=False,
                 has_lora=False,
                 disable_full=False,
-                is_vit=True,
+                is_mm_encoder=True,
             )
             with (
                 set_forward_context(
@@ -5271,10 +5273,10 @@ class GPUModelRunner(
                 ),
             ):
                 self.model.embed_multimodal(**dummy_mm_inputs)
-        self.vllm_config.is_in_compile_or_vit_cuda_graph_capture = False
+        self.vllm_config.in_mm_encoder_tracing = False
 
     def profile_run(self) -> None:
-        self.vllm_config.is_in_compile_or_vit_cuda_graph_capture = True
+        self.vllm_config.in_mm_encoder_tracing = True
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
             mm_config = self.model_config.multimodal_config
@@ -5339,7 +5341,7 @@ class GPUModelRunner(
         del hidden_states, output
         self.encoder_cache.clear()
         gc.collect()
-        self.vllm_config.is_in_compile_or_vit_cuda_graph_capture = False
+        self.vllm_config.in_mm_encoder_tracing = False
 
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
@@ -5491,10 +5493,10 @@ class GPUModelRunner(
             cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
             and self.supports_mm_inputs
         ):
-            vit_capture_sizes = self.vit_cudagraph_batch_sizes
-            if vit_capture_sizes:
-                compilation_cases_vit = list(reversed(vit_capture_sizes))
-                self._dummy_mm_encoder_run(compilation_cases_vit)
+            mm_encoder_capture_sizes = self.mm_encoder_cudagraph_batch_sizes
+            if mm_encoder_capture_sizes:
+                compilation_cases_mm_encoder = list(reversed(mm_encoder_capture_sizes))
+                self._dummy_mm_encoder_run(compilation_cases_mm_encoder)
 
         self.maybe_remove_all_loras(self.lora_config)
 

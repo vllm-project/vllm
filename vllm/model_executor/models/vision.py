@@ -494,14 +494,17 @@ def run_dp_sharded_mrope_vision_model(
     cudagraph_runtime_mode = CUDAGraphMode.NONE
     batch_descriptor = None
 
-    if vllm_config and vllm_config.compilation_config.vit_cudagraph_capture_sizes:
+    if (
+        vllm_config
+        and vllm_config.compilation_config.mm_encoder_cudagraph_capture_sizes
+    ):
         current_input_len = pixel_values_local.shape[0]
         cudagraph_runtime_mode, batch_descriptor = dispatcher.dispatch(
             num_tokens=current_input_len,
             uniform_decode=False,
             has_lora=False,
             disable_full=False,
-            is_vit=True,
+            is_mm_encoder=True,
         )
         target_input_len = batch_descriptor.num_tokens
 

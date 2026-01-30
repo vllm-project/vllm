@@ -72,7 +72,7 @@ vLLM now supports Piecewise CUDA Graph integration for the Vision Transformer (V
 
 #### Enabling ViT CUDA Graphs
 
-**Important**: This feature is **not enabled by default**. The Piecewise CUDA Graph implementation relies on `torch.compile` to trace the computation graph and separate the attention operators. Therefore, users must explicitly enable ViT compilation via the `--compilation-config` argument to activate this feature.
+**Important**: This feature is **not enabled by default**. The Piecewise CUDA Graph implementation relies on `torch.compile` to trace the computation graph and separate the attention operators. Therefore, users must explicitly enable mm_encoder compilation via the `--compilation-config` argument to activate this feature.
 
 To enable ViT CUDA graph compilation, use:
 
@@ -82,26 +82,26 @@ vllm serve <model> --compilation-config '{"compile_mm_encoder": true}'
 
 #### Configuring Capture Sizes
 
-You can specify custom patch sizes for CUDA graph capture using `vit_cudagraph_capture_sizes`. For models like `Qwen2.5-VL` and `Qwen3-VL`, the capture sizes should be multiples of the square of `merge_size`:
+You can specify custom patch sizes for CUDA graph capture using `mm_encoder_cudagraph_capture_sizes`. For models like `Qwen2.5-VL` and `Qwen3-VL`, the capture sizes should be multiples of the square of `merge_size`:
 
 ```bash
-vllm serve <model> --compilation-config '{"compile_mm_encoder": true, "vit_cudagraph_capture_sizes": [512, 1024]}'
+vllm serve <model> --compilation-config '{"compile_mm_encoder": true, "mm_encoder_cudagraph_capture_sizes": [512, 1024]}'
 ```
 
-Alternatively, you can specify `max_vit_cudagraph_capture_size` to generate a default list of capture sizes up to the given value:
+Alternatively, you can specify `max_mm_encoder_cudagraph_capture_size` to generate a default list of capture sizes up to the given value:
 
 ```bash
-vllm serve <model> --compilation-config '{"compile_mm_encoder": true, "max_vit_cudagraph_capture_size": 2048}'
+vllm serve <model> --compilation-config '{"compile_mm_encoder": true, "max_mm_encoder_cudagraph_capture_size": 2048}'
 ```
 
 #### Default Behavior
 
-Once enabled, if `vit_cudagraph_capture_sizes` is not specified, vLLM will use a default set of sizes for capture. Since `compile_mm_encoder` is `False` by default, this feature remains inactive unless configured.
+Once enabled, if `mm_encoder_cudagraph_capture_sizes` is not specified, vLLM will use a default set of sizes for capture. Since `compile_mm_encoder` is `False` by default, this feature remains inactive unless configured.
 
 If you only want to enable `torch.compile` for ViT without using the CUDA Graph feature, you can explicitly set the capture sizes to empty:
 
 ```bash
-vllm serve <model> --compilation-config '{"compile_mm_encoder": true, "vit_cudagraph_capture_sizes": []}'
+vllm serve <model> --compilation-config '{"compile_mm_encoder": true, "mm_encoder_cudagraph_capture_sizes": []}'
 ```
 
 #### Limitations & Notes
