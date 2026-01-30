@@ -116,6 +116,7 @@ from vllm.entrypoints.openai.responses.utils import (
     extract_tool_types,
     should_continue_final_message,
 )
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
@@ -435,8 +436,11 @@ class OpenAIServingResponses(OpenAIServing):
                 if maybe_error is not None:
                     return maybe_error
 
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"]
+                default_max_tokens = get_max_tokens(
+                    self.max_model_len,
+                    request,
+                    engine_prompt,
+                    self.default_sampling_params,
                 )
 
                 sampling_params = request.to_sampling_params(
@@ -689,7 +693,7 @@ class OpenAIServingResponses(OpenAIServing):
             except ValueError as e:
                 return self.create_error_response(e)
 
-        # NOTE: Implementation of stauts is still WIP, but for now
+        # NOTE: Implementation of status is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
@@ -832,10 +836,11 @@ class OpenAIServingResponses(OpenAIServing):
         for i, (token_id, _logprob) in enumerate(logprobs.items()):
             if i >= top_logprobs:
                 break
-            text = (
-                _logprob.decoded_token
-                if _logprob.decoded_token is not None
-                else tokenizer.decode([token_id])
+            text = self._get_decoded_token(
+                logprob=_logprob,
+                token_id=token_id,
+                tokenizer=tokenizer,
+                return_as_token_id=self.return_tokens_as_token_ids,
             )
             out.append(
                 LogprobTopLogprob(
@@ -861,10 +866,11 @@ class OpenAIServingResponses(OpenAIServing):
         for i, token_id in enumerate(token_ids):
             logprob = logprobs[i]
             token_logprob = logprob[token_id]
-            text = (
-                token_logprob.decoded_token
-                if token_logprob.decoded_token is not None
-                else tokenizer.decode([token_id])
+            text = self._get_decoded_token(
+                logprob=token_logprob,
+                token_id=token_id,
+                tokenizer=tokenizer,
+                return_as_token_id=self.return_tokens_as_token_ids,
             )
             out.append(
                 Logprob(

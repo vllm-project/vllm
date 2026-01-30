@@ -68,6 +68,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import TokensPrompt
+from vllm.inputs.parse import get_prompt_components
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -374,20 +375,18 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, _, _ = self._get_prompt_components(engine_prompt)
+                prompt_text, _, _ = get_prompt_components(engine_prompt)
+
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
                 sub_request_id = (
                     request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
                 )
 
-                if self.default_sampling_params is None:
-                    self.default_sampling_params = {}
-
                 max_tokens = get_max_tokens(
                     max_model_len=self.max_model_len,
                     request=request,
-                    input_length=len(engine_prompt["prompt_token_ids"]),
+                    prompt=engine_prompt,
                     default_sampling_params=self.default_sampling_params,
                 )
 
@@ -983,6 +982,7 @@ class OpenAIServingChat(OpenAIServing):
                                     index=i,
                                 )
                                 function_name_returned[i] = True
+                                history_tool_call_cnt += 1
 
                             delta_message = DeltaMessage(
                                 tool_calls=[
@@ -1583,7 +1583,7 @@ class OpenAIServingChat(OpenAIServing):
                             generated_id = make_tool_call_id(
                                 id_type=self.tool_call_id_type,
                                 func_name=tc.name,
-                                idx=history_tool_call_cnt + idx,
+                                idx=history_tool_call_cnt,
                             )
                             tool_call_class_items.append(
                                 tool_call_class(id=generated_id, function=tc)
@@ -1618,7 +1618,7 @@ class OpenAIServingChat(OpenAIServing):
                             generated_id = make_tool_call_id(
                                 id_type=self.tool_call_id_type,
                                 func_name=tool_call.name,
-                                idx=history_tool_call_cnt + idx,
+                                idx=history_tool_call_cnt,
                             )
                             tool_call_class_items.append(
                                 tool_call_class(id=generated_id, function=tool_call)
@@ -1666,7 +1666,7 @@ class OpenAIServingChat(OpenAIServing):
                                 generated_id = make_tool_call_id(
                                     id_type=self.tool_call_id_type,
                                     func_name=tc.name,
-                                    idx=history_tool_call_cnt + idx,
+                                    idx=history_tool_call_cnt,
                                 )
                                 tool_call_items.append(
                                     tool_call_class(id=generated_id, function=tc)
