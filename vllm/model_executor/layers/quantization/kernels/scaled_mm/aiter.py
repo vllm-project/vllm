@@ -122,13 +122,18 @@ class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
-            return False, "AITER bpreshuffle is ROCm-only"
+            return False, "requires ROCm."
         if not rocm_aiter_ops.is_linear_fp8_enabled():
-            return False, "AiterBpreshuffle is disabled. Check VLLM_ROCM_USE_AITER."
+            return (
+                False,
+                "requires setting `VLLM_ROCM_USE_AITER=1` "
+                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+            )
         try:
             import aiter  # noqa: F401
         except Exception:
-            return False, "aiter library not found."
+            return False, "requires aiter library to be installed."
         return True, None
 
     @classmethod
@@ -138,13 +143,16 @@ class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             and c.weight_quant_key.scale.group_shape.is_per_channel()
         )
         if not is_ptpc:
-            return False, "This kernel only handles Per-Token/Per-Channel (PTPC)"
+            return (
+                False,
+                "requires per token activation scales and per channel weight scales.",
+            )
 
         if not (c.N % 16 == 0 and c.K % 16 == 0):
             return (
                 False,
                 f"requires N and K dimensions to be divisible by 16, recived "
-                f"N={c.N} and k={c.K}",
+                f"N={c.N} and k={c.K}.",
             )
         return True, None
 
@@ -183,7 +191,10 @@ class AiterCKPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             and c.weight_quant_key.scale.group_shape.is_per_channel()
         )
         if not is_ptpc:
-            return False, "This kernel only handles Per-Token/Per-Channel (PTPC)"
+            return (
+                False,
+                "requires per token activation scales and per channel weight scales.",
+            )
         return True, None
 
     def apply_scaled_mm(
