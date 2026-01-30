@@ -1348,6 +1348,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "sig(name): associates a test with a vLLM SIG for ownership/triage (informational)",
     )
+    # Register execution_tag for Buildkite Test Engine
+    config.addinivalue_line(
+        "markers",
+        "execution_tag(key, value): adds execution tag for Buildkite Test Engine",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -1358,6 +1363,9 @@ def pytest_collection_modifyitems(config, items):
             # Only add if not already tagged explicitly
             if item.get_closest_marker("sig") is None:
                 item.add_marker(pytest.mark.sig(sig_value))
+
+            # Add execution_tag for Buildkite Test Engine (primary signal)
+            item.add_marker(pytest.mark.execution_tag("sig", sig_value))
 
     # Handle --optional flag
     if config.getoption("--optional"):
