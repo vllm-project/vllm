@@ -87,19 +87,9 @@ class CustomQwen2Decoder(nn.Module):
                     # New version: has new pattern and no old pattern
                     # Old version: has old pattern
                     self._is_new_version = has_new_pattern and not has_old_pattern
-
-                    # Debug output (can be removed in production)
-                    import sys
-                    print(f"[DeepEncoder2] Transformers version detection:", file=sys.stderr)
-                    print(f"  - Has new pattern (create_causal_mask): {has_new_pattern}", file=sys.stderr)
-                    print(f"  - Has old pattern (self._update_causal_mask): {has_old_pattern}", file=sys.stderr)
-                    print(f"  - Detected as: {'NEW' if self._is_new_version else 'OLD'} version", file=sys.stderr)
-                except Exception as e:
+                except Exception:
                     # If we can't get source, assume old version (safer default)
                     self._is_new_version = False
-                    import sys
-                    print(f"[DeepEncoder2] Version detection failed: {e}", file=sys.stderr)
-                    print(f"  - Defaulting to OLD version", file=sys.stderr)
 
             def forward(
                 self,
