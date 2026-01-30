@@ -6,7 +6,6 @@ Used for GPT-OSS models to enforce tool_choice='required'.
 """
 
 from enum import Enum, auto
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -16,9 +15,6 @@ from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     LogitsProcessor,
 )
-
-if TYPE_CHECKING:
-    from vllm.config import VllmConfig
 
 
 class ForcingState(Enum):
@@ -45,24 +41,29 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        _: object,
         device: torch.device,
-        is_pin_memory: bool,
+        is_pin_memory: bool,  # noqa: ARG002
     ):
+        del is_pin_memory  # unused
         # index -> (state, forcing_pos, output_ids, trigger_pattern, forced_sequence)
         self.req_states: dict[int, RequestState] = {}
-        self.neg_inf = torch.tensor(-float("inf"), dtype=torch.float32, device=device)
+        self.neg_inf_tensor = torch.tensor(
+            -float("inf"), dtype=torch.float32, device=device
+        )
 
     def is_argmax_invariant(self) -> bool:
+        """By forcing specific tokens, this processor changes the outcome
+        of the argmax operation in greedy sampling."""
         return False
 
     def needs_output_token_ids(self) -> bool:
         return True
 
-    def _add_request(
-        self,
+    @staticmethod
+    def add_request(
         params: SamplingParams,
-        _prompt_tok_ids: list[int] | None,
+        _: list[int] | None,  # prompt_tok_ids (unused)
         output_tok_ids: list[int],
     ) -> RequestState | None:
         if not params.extra_args:
@@ -91,7 +92,7 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
         )
 
     def update_state(self, batch_update: BatchUpdate | None):
-        process_dict_updates(self.req_states, batch_update, self._add_request)
+        process_dict_updates(self.req_states, batch_update, self.add_request)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if not self.req_states:
@@ -125,7 +126,7 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
                 if pos < len(forced_sequence):
                     allowed = forced_sequence[pos]
                     original = logits[index, allowed].clone()
-                    logits[index] = self.neg_inf
+                    logits[index] = self.neg_inf_tensor
                     logits[index, allowed] = original
                     self.req_states[index] = (
                         state,

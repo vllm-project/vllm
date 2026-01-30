@@ -166,7 +166,4 @@ class LogitsProcessors:
 
     def any_needs_output_token_ids(self) -> bool:
         """Check if any logits processor needs output token IDs."""
-        return any(
-            lp.needs_output_token_ids()
-            for lp in chain(self.argmax_invariant, self.non_argmax_invariant)
-        )
+        return any(lp.needs_output_token_ids() for lp in self.all)
