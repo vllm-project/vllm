@@ -27,7 +27,8 @@ def main(client):
         messages,
         add_generation_prompt=True,
         enable_thinking=False,
-    )
+        return_dict=True,
+    ).input_ids
     payload = {
         "model": MODEL_NAME,
         "token_ids": token_ids,
