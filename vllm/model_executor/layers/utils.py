@@ -16,6 +16,20 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+MOE_LAYER_ROUTER_GATE_SUFFIXES = {
+    "gate",
+    "router",
+    "router_gate",
+    "shared_expert_gate",
+    "expert_gate",
+}
+
+
+def is_layer_moe_router_gate(prefix: str) -> bool:
+    if not prefix:
+        return False
+    return prefix.rsplit(".", 1)[-1] in MOE_LAYER_ROUTER_GATE_SUFFIXES
+
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
     # Shuffle weight along the last dimension so that
