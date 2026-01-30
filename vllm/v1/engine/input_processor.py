@@ -31,6 +31,7 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import RendererLike
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
+from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
@@ -588,6 +589,10 @@ class InputProcessor:
                 sampling_params.update_from_tokenizer(self.tokenizer)
         else:
             pooling_params = params.clone()
+            # Verify pooling params to set default values (e.g., use_activation=True)
+            # This ensures consistent behavior between AsyncLLM and LLM
+            task: PoolingTask = pooling_params.task or "embed"
+            pooling_params.verify(task, self.model_config)
 
         # Multimodal related.
         mm_features: list[MultiModalFeatureSpec] | None = None
