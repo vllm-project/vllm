@@ -251,7 +251,7 @@ class LMCacheMPRequestTracker:
 @dataclass
 class LMCacheMPRequestMetadata:
     request_id: str
-    direction: Literal["STORE", "RETRIEVE", "SKIP"]
+    direction: Literal["STORE", "RETRIEVE"]
     op: LoadStoreOp
 
     @staticmethod
