@@ -176,9 +176,6 @@ def test_sparse_backend_decode_correctness(
     tensor_parallel_size,
     workspace_init,
 ):
-    if current_platform.is_rocm():
-        pytest.skip("ROCm does not support sparse MLA backends.")
-
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
 
