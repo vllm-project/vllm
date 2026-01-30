@@ -88,7 +88,8 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
 
 // RMS norm + quant kernel
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false, int32_t group_size = 0>
+          bool is_scale_transposed = false, bool has_tma_aligned_scales = false,
+          int32_t group_size = 0>
 __global__ void rms_norm_per_block_quant_kernel(
     scalar_out_t* __restrict__ out,  // [..., hidden_size]
     float* __restrict__ scales,      // [num_tokens, hidden_size / group_size]
@@ -107,8 +108,9 @@ __global__ void rms_norm_per_block_quant_kernel(
   // Compute Scale
   // Always able to vectorize due to constraints on hidden_size and group_size
   vllm::vectorized::compute_dynamic_per_token_scales<
-      scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size>(
-      nullptr, scales, input, weight, rms, scale_ub, hidden_size, residual);
+      scalar_t, scalar_out_t, has_residual, is_scale_transposed,
+      has_tma_aligned_scales, group_size>(nullptr, scales, input, weight, rms,
+                                          scale_ub, hidden_size, residual);
 
   // RMS Norm + Quant
   // Always able to vectorize due to constraints on hidden_size
@@ -118,7 +120,7 @@ __global__ void rms_norm_per_block_quant_kernel(
   // overhead.
   vllm::vectorized::norm_and_quant<
       scalar_t, scalar_out_t, std::is_same_v<scalar_out_t, int8_t>,
-      has_residual, is_scale_transposed, group_size>(
+      has_residual, is_scale_transposed, has_tma_aligned_scales, group_size>(
       out, input, weight, rms, scales, hidden_size, residual);
 }
 
@@ -196,7 +198,8 @@ void rms_norm_per_block_quant_dispatch(
     int32_t group_size,
     double const var_epsilon,  // Variance epsilon used in norm calculation
     std::optional<at::Tensor> const& scale_ub,
-    std::optional<at::Tensor>& residual, bool is_scale_transposed) {
+    std::optional<at::Tensor>& residual, bool is_scale_transposed,
+    bool has_tma_aligned_scales) {
   int32_t hidden_size = input.size(-1);
   auto num_tokens = input.numel() / hidden_size;
 
@@ -212,20 +215,27 @@ void rms_norm_per_block_quant_dispatch(
         VLLM_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
           VLLM_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
             VLLM_DISPATCH_BOOL(is_scale_transposed, transpose_scale, [&] {
-              VLLM_DISPATCH_QUANT_TYPES(
-                  out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
-                    vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t,
-                                                          has_residual,
-                                                          transpose_scale, gs>
-                        <<<grid, block, 0, stream>>>(
-                            out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                            input.data_ptr<scalar_in_t>(),
-                            weight.data_ptr<scalar_in_t>(),
-                            scale_ub.has_value() ? scale_ub->data_ptr<float>()
-                                                 : nullptr,
-                            var_epsilon, hidden_size,
-                            has_residual ? residual->data_ptr<scalar_in_t>()
-                                         : nullptr);
+              VLLM_DISPATCH_BOOL(
+                  has_tma_aligned_scales, tma_aligned_scales, [&] {
+                    VLLM_DISPATCH_QUANT_TYPES(
+                        out.scalar_type(), "rms_norm_per_block_quant_kernel",
+                        [&] {
+                          vllm::rms_norm_per_block_quant_kernel<
+                              scalar_in_t, scalar_t, has_residual,
+                              transpose_scale, tma_aligned_scales, gs>
+                              <<<grid, block, 0, stream>>>(
+                                  out.data_ptr<scalar_t>(),
+                                  scales.data_ptr<float>(),
+                                  input.data_ptr<scalar_in_t>(),
+                                  weight.data_ptr<scalar_in_t>(),
+                                  scale_ub.has_value()
+                                      ? scale_ub->data_ptr<float>()
+                                      : nullptr,
+                                  var_epsilon, hidden_size,
+                                  has_residual
+                                      ? residual->data_ptr<scalar_in_t>()
+                                      : nullptr);
+                        });
                   });
             });
           });
@@ -238,7 +248,8 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor& scales, double const var_epsilon,
                               std::optional<torch::Tensor> scale_ub,
                               std::optional<torch::Tensor> residual,
-                              int64_t group_size, bool is_scale_transposed) {
+                              int64_t group_size, bool is_scale_transposed,
+                              bool has_tma_aligned_scales) {
   static c10::ScalarType kFp8Type = is_fp8_ocp()
                                         ? c10::ScalarType::Float8_e4m3fn
                                         : c10::ScalarType::Float8_e4m3fnuz;
@@ -257,7 +268,7 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
   TORCH_CHECK(group_size == 128 || group_size == 64,
               "Unsupported group size: ", group_size);
 
-  rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,
-                                    var_epsilon, scale_ub, residual,
-                                    is_scale_transposed);
+  rms_norm_per_block_quant_dispatch(
+      out, input, weight, scales, group_size, var_epsilon, scale_ub, residual,
+      is_scale_transposed, has_tma_aligned_scales);
 }

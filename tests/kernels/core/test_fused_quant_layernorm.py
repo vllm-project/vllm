@@ -115,7 +115,7 @@ def ops_dynamic_per_token_or_block_quant(
         residual = residual.clone()
     if group_size is not None:
         out, scales = ops.rms_norm_per_block_quant(
-            x, weight, EPS, quant_dtype, group_size, scale_ub, residual, True
+            x, weight, EPS, quant_dtype, group_size, scale_ub, residual, True, False
         )
         scales = scales.contiguous()
     else:

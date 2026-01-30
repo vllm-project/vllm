@@ -450,6 +450,7 @@ def rms_norm_per_block_quant(
     scale_ub: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
+    has_tma_aligned_scales: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
     output = torch.empty_like(input, dtype=quant_dtype)
@@ -476,6 +477,7 @@ def rms_norm_per_block_quant(
         residual,
         group_size[1],
         is_scale_transposed,
+        has_tma_aligned_scales,
     )
     return output, scales
 
