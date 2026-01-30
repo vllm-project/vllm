@@ -2480,7 +2480,7 @@ class CompressedTensorsW4A16CutlassMoEMethod(CompressedTensorsMoEMethod):
     def __init__(
         self,
         weight_quant: QuantizationArgs,
-        input_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
         moe: FusedMoEConfig,
         layer_name: str | None = None,
     ):
@@ -2492,6 +2492,17 @@ class CompressedTensorsW4A16CutlassMoEMethod(CompressedTensorsMoEMethod):
         self.num_bits = self.weight_quant.num_bits
         self.packed_factor = 32 // self.num_bits  # use int32 to pack int4
 
+        assert self.input_quant is None, (
+            f"W4A16 Cutlass MoE doesn't need input quantization, got {self.input_quant}"
+        )
+        assert self.weight_quant.strategy == "group", (
+            "W4A16 Cutlass MoE only supports group quantization,"
+            f"got {self.weight_quant.strategy}"
+        )
+        assert self.weight_quant.num_bits == 4, (
+            "W4A16 Cutlass MoE only supports 4 bit quantization,"
+            f"got {self.weight_quant.num_bits}"
+        )
         assert self.weight_quant.symmetric, (
             "Only symmetric quantization is supported for W4A16 MoE"
         )
@@ -2517,13 +2528,19 @@ class CompressedTensorsW4A16CutlassMoEMethod(CompressedTensorsMoEMethod):
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
+        assert self.moe.is_act_and_mul, (
+            "W4A16 Cutlass MoE only supports is_act_and_mul=True,"
+            f"got {self.moe.is_act_and_mul}"
+        )
 
         # requirement for CUTLASS reorder_tensor
         assert hidden_size % 256 == 0, f"{hidden_size=} must be divisible by 256"
         assert intermediate_size_per_partition % 256 == 0, (
             f"{intermediate_size_per_partition=} must be divisible by 256"
         )
-        assert(params_dtype == torch.bfloat16), f"params_dtype must be bfloat16 for W4A16 Cutlass MoE, got {params_dtype}"
+        assert params_dtype == torch.bfloat16, (
+            f"params_dtype must be bfloat16 for W4A16 Cutlass MoE, got {params_dtype}"
+        )
         # storage type, pack 8xint4 into int32
         params_dtype = torch.int32
 

@@ -60,8 +60,8 @@ def test_cutlass_w4a16_moe(
     )
 
     # quantize and dequantize weights
-    w13_ref, w13_cutlass, w13_scales_cutlass = [], [], []
-    w2_ref, w2_cutlass, w2_scales_cutlass = [], [], []
+    w13_ref_list, w13_cutlass_list, w13_scales_cutlass_list = [], [], []
+    w2_ref_list, w2_cutlass_list, w2_scales_cutlass_list = [], [], []
     for i in range(expert_num):
         w13_ref_, w13_cutlass_, w13_scales_cutlass_, _ = cutlass_quantize(
             torch.bfloat16,
@@ -71,9 +71,9 @@ def test_cutlass_w4a16_moe(
             group_size,
             zero_points=False,
         )
-        w13_ref.append(w13_ref_)
-        w13_cutlass.append(w13_cutlass_.view(torch.int32))
-        w13_scales_cutlass.append(w13_scales_cutlass_)
+        w13_ref_list.append(w13_ref_)
+        w13_cutlass_list.append(w13_cutlass_.view(torch.int32))
+        w13_scales_cutlass_list.append(w13_scales_cutlass_)
         w2_ref_, w2_cutlass_, w2_scales_cutlass_, _ = cutlass_quantize(
             torch.bfloat16,
             w2_bf16[i].T,
@@ -82,15 +82,15 @@ def test_cutlass_w4a16_moe(
             group_size,
             zero_points=False,
         )
-        w2_ref.append(w2_ref_)
-        w2_cutlass.append(w2_cutlass_.view(torch.int32))
-        w2_scales_cutlass.append(w2_scales_cutlass_)
-    w13_ref = torch.stack(w13_ref)
-    w13_cutlass = torch.stack(w13_cutlass)
-    w13_scales_cutlass = torch.stack(w13_scales_cutlass)
-    w2_ref = torch.stack(w2_ref)
-    w2_cutlass = torch.stack(w2_cutlass)
-    w2_scales_cutlass = torch.stack(w2_scales_cutlass)
+        w2_ref_list.append(w2_ref_)
+        w2_cutlass_list.append(w2_cutlass_.view(torch.int32))
+        w2_scales_cutlass_list.append(w2_scales_cutlass_)
+    w13_ref: torch.Tensor = torch.stack(w13_ref_list)
+    w13_cutlass: torch.Tensor = torch.stack(w13_cutlass_list)
+    w13_scales_cutlass: torch.Tensor = torch.stack(w13_scales_cutlass_list)
+    w2_ref: torch.Tensor = torch.stack(w2_ref_list)
+    w2_cutlass: torch.Tensor = torch.stack(w2_cutlass_list)
+    w2_scales_cutlass: torch.Tensor = torch.stack(w2_scales_cutlass_list)
 
     # routing
     routing_logits = (

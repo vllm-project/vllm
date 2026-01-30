@@ -1346,13 +1346,6 @@ class CutlassExpertsW4A16Bf16(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
     @staticmethod
-    def _supports_no_act_and_mul() -> bool:
-        raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
-            "This method should not be called."
-        )
-
-    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,

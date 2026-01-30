@@ -35,7 +35,7 @@ def test_cutlass_w4a16_moe_mm(
     A = torch.randn(M_full, K, device=device, dtype=dtype)
     B = torch.randn(bs, K, N, device=device, dtype=dtype)
 
-    B_ref, B_int4, B_scales = [], [], []
+    B_ref_list, B_int4_list, B_scales_list = [], [], []
     for i in range(bs):
         B_ref_, B_int4_, B_scales_, _ = cutlass_quantize(
             torch.bfloat16,
@@ -45,12 +45,12 @@ def test_cutlass_w4a16_moe_mm(
             group_size,
             zero_points=False,
         )
-        B_ref.append(B_ref_)
-        B_int4.append(B_int4_.view(torch.int32))
-        B_scales.append(B_scales_)
-    B_ref = torch.stack(B_ref)
-    B_int4 = torch.stack(B_int4)
-    B_scales = torch.stack(B_scales)
+        B_ref_list.append(B_ref_)
+        B_int4_list.append(B_int4_.view(torch.int32))
+        B_scales_list.append(B_scales_)
+    B_ref = torch.stack(B_ref_list)
+    B_int4 = torch.stack(B_int4_list)
+    B_scales = torch.stack(B_scales_list)
 
     out_tensors = torch.empty(M_full, N, device=device, dtype=dtype)
 
