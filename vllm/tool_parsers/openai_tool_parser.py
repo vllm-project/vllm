@@ -163,6 +163,7 @@ class OpenAIToolParser(ToolParser):
                     "trigger_pattern": self._trigger_pattern,
                     "forced_sequence": self._forced_sequence,
                 }
+                # Disable structured_outputs; enforcement is via LogitsProcessor
                 request.structured_outputs = None
             else:
                 logger.warning(

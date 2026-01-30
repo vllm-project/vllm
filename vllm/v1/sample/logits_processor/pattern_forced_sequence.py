@@ -6,6 +6,7 @@ Used for GPT-OSS models to enforce tool_choice='required'.
 """
 
 from enum import Enum, auto
+from typing import NamedTuple
 
 import torch
 
@@ -22,8 +23,14 @@ class ForcingState(Enum):
     FORCING = auto()
 
 
-# State tuple: (state, forcing_pos, output_ids, trigger_pattern, forced_sequence)
-RequestState = tuple[ForcingState, int, list[int], list[int], list[int]]
+class RequestState(NamedTuple):
+    """Per-request state for pattern-triggered forced sequence."""
+
+    state: ForcingState
+    forcing_pos: int
+    output_ids: list[int]
+    trigger_pattern: list[int]
+    forced_sequence: list[int]
 
 
 class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
@@ -39,14 +46,8 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
         }
     """
 
-    def __init__(
-        self,
-        _: object,
-        device: torch.device,
-        is_pin_memory: bool,  # noqa: ARG002
-    ):
-        del is_pin_memory  # unused
-        # index -> (state, forcing_pos, output_ids, trigger_pattern, forced_sequence)
+    def __init__(self, _, device: torch.device, is_pin_memory: bool):
+        del is_pin_memory  # unused, interface requirement
         self.req_states: dict[int, RequestState] = {}
         self.neg_inf_tensor = torch.tensor(
             -float("inf"), dtype=torch.float32, device=device
@@ -63,7 +64,7 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
     @staticmethod
     def add_request(
         params: SamplingParams,
-        _: list[int] | None,  # prompt_tok_ids (unused)
+        _: list[int] | None,
         output_tok_ids: list[int],
     ) -> RequestState | None:
         if not params.extra_args:
@@ -83,12 +84,12 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
         if not trigger_pattern or not forced_sequence:
             return None
 
-        return (
-            ForcingState.NORMAL,
-            0,
-            output_tok_ids,
-            trigger_pattern,
-            forced_sequence,
+        return RequestState(
+            state=ForcingState.NORMAL,
+            forcing_pos=0,
+            output_ids=output_tok_ids,
+            trigger_pattern=trigger_pattern,
+            forced_sequence=forced_sequence,
         )
 
     def update_state(self, batch_update: BatchUpdate | None):
@@ -98,13 +99,13 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
         if not self.req_states:
             return logits
 
-        for index, (
-            state,
-            pos,
-            output_ids,
-            trigger_pattern,
-            forced_sequence,
-        ) in list(self.req_states.items()):
+        for index, req_state in list(self.req_states.items()):
+            state = req_state.state
+            pos = req_state.forcing_pos
+            output_ids = req_state.output_ids
+            trigger_pattern = req_state.trigger_pattern
+            forced_sequence = req_state.forced_sequence
+
             real_tokens = [t for t in output_ids if t != -1]
 
             if state == ForcingState.NORMAL and len(real_tokens) >= len(
@@ -112,12 +113,9 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
             ):
                 tail = real_tokens[-len(trigger_pattern) :]
                 if tail == trigger_pattern:
-                    self.req_states[index] = (
-                        ForcingState.FORCING,
-                        0,
-                        output_ids,
-                        trigger_pattern,
-                        forced_sequence,
+                    self.req_states[index] = req_state._replace(
+                        state=ForcingState.FORCING,
+                        forcing_pos=0,
                     )
                     state = ForcingState.FORCING
                     pos = 0
@@ -128,20 +126,13 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
                     original = logits[index, allowed].clone()
                     logits[index] = self.neg_inf_tensor
                     logits[index, allowed] = original
-                    self.req_states[index] = (
-                        state,
-                        pos + 1,
-                        output_ids,
-                        trigger_pattern,
-                        forced_sequence,
+                    self.req_states[index] = req_state._replace(
+                        forcing_pos=pos + 1,
                     )
                 else:
-                    self.req_states[index] = (
-                        ForcingState.NORMAL,
-                        0,
-                        output_ids,
-                        trigger_pattern,
-                        forced_sequence,
+                    self.req_states[index] = req_state._replace(
+                        state=ForcingState.NORMAL,
+                        forcing_pos=0,
                     )
 
         return logits

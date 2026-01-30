@@ -95,9 +95,7 @@ class LogitsProcessor(ABC):
         """True if this logits processor needs access to output token IDs.
 
         Override and return True if the processor needs to read the actual
-        generated token IDs (not just their count). This ensures the async
-        scheduling system populates output_token_ids with real values instead
-        of -1 placeholders.
+        generated token IDs (not just their count).
         """
         return False
 
