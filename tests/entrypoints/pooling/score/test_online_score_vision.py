@@ -5,7 +5,7 @@ import pytest
 import requests
 
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
-from vllm.entrypoints.pooling.score.protocol import ScoreResponse
+from vllm.entrypoints.pooling.score.protocol import RerankResponse, ScoreResponse
 from vllm.multimodal.utils import encode_image_url, fetch_image
 
 MODEL_NAME = "Qwen/Qwen3-VL-Reranker-2B"
@@ -120,3 +120,88 @@ def test_score_api_queries_str_documents_image_base64_content(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
+
+
+def test_score_api_queries_str_documents_image_url_plus_text_content(
+    server: RemoteOpenAIServer,
+):
+    score_response = requests.post(
+        server.url_for("score"),
+        json={
+            "model": MODEL_NAME,
+            "queries": query,
+            "documents": {"content": [documents[0], documents[1]]},
+        },
+    )
+    score_response.raise_for_status()
+    score = ScoreResponse.model_validate(score_response.json())
+
+    assert score.id is not None
+    assert score.data is not None
+    assert len(score.data) == 1
+
+
+def test_score_api_queries_str_documents_list(server: RemoteOpenAIServer):
+    score_response = requests.post(
+        server.url_for("score"),
+        json={
+            "model": MODEL_NAME,
+            "queries": query,
+            "documents": [
+                {"content": [documents[0]]},
+                {"content": [documents[1]]},
+                {"content": [documents[0], documents[1]]},
+            ],
+        },
+    )
+    score_response.raise_for_status()
+    score = ScoreResponse.model_validate(score_response.json())
+
+    assert score.id is not None
+    assert score.data is not None
+    assert len(score.data) == 3
+
+
+def test_rerank_api_queries_str_documents_list(server: RemoteOpenAIServer):
+    rerank_response = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": [
+                {"content": [documents[0]]},
+                {"content": [documents[1]]},
+                {"content": [documents[0], documents[1]]},
+            ],
+        },
+    )
+    rerank_response.raise_for_status()
+    rerank = RerankResponse.model_validate(rerank_response.json())
+
+    assert rerank.id is not None
+    assert rerank.model is not None
+    assert rerank.usage is not None
+    assert len(rerank.results) == 3
+
+
+def test_score_api_queries_list_documents_list(server: RemoteOpenAIServer):
+    data = [
+        {"content": [documents[0]]},
+        {"content": [documents[1]]},
+        {"content": [documents[0], documents[1]]},
+    ]
+
+    score_response = requests.post(
+        server.url_for("score"),
+        json={
+            "model": MODEL_NAME,
+            "queries": data,
+            "documents": data,
+        },
+    )
+    score_response.raise_for_status()
+    score = ScoreResponse.model_validate(score_response.json())
+
+    assert score.id is not None
+    assert score.data is not None
+    assert len(score.data) == 3

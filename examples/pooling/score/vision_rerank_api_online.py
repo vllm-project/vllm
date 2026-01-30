@@ -89,6 +89,28 @@ def main(args):
     response = requests.post(rerank_url, json=prompt)
     pprint.pprint(response.json())
 
+    print("Query: string & Document: text + image url")
+    prompt = {
+        "model": model,
+        "query": query,
+        "documents": {"content": [documents[0], documents[1]]},
+    }
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: list")
+    prompt = {
+        "model": model,
+        "query": query,
+        "documents": [
+            {"content": [documents[0]]},
+            {"content": [documents[1]]},
+            {"content": [documents[0], documents[1]]},
+        ],
+    }
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
+
 
 if __name__ == "__main__":
     args = parse_args()
