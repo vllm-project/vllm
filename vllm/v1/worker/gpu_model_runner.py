@@ -1004,15 +1004,14 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    # For async spec decode, we don't add placeholders here.
-                    # The actual accepted tokens will be added in
-                    # update_async_output_token_ids when we know the real count.
-                    # For non-async, we wait for the acceptance count and add
-                    # the correct number of placeholders.
-                    if self.use_async_spec_decode:
-                        num_accepted = req_state.prev_num_draft_len
-                        num_rejected = 0
-                    else:
+                    # Async spec decode: assume all draft tokens accepted.
+                    # Actual accepted tokens will be added in
+                    # update_async_output_token_ids.
+                    num_accepted = req_state.prev_num_draft_len
+                    num_rejected = 0
+
+                    if not self.use_async_spec_decode:
+                        # Non-async: wait for acceptance count, add placeholders.
                         assert self.input_batch.prev_req_id_to_index is not None
                         prev_req_index = self.input_batch.prev_req_id_to_index[req_id]
                         num_accepted = valid_sampled_token_count[prev_req_index] - 1
