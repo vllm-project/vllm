@@ -27,7 +27,8 @@ steps:
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: V1 Others (CPU)
-  depends_on: ~
+  depends_on:
+    - image-build-cpu
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -114,7 +115,8 @@ steps:
   - pytest -v -s utils_
 
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU)
-  depends_on: ~
+  depends_on: 
+  - image-build-cpu
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/

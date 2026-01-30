@@ -143,9 +143,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)
             )
         else:
-            assert isinstance(
-                m_fused_moe_fn.fused_experts, (MarlinExperts, TritonExperts)
-            )
+            assert isinstance(m_fused_moe_fn.fused_experts, TritonExperts)
 
         def fwd_decorator(layer, func):
             def wrapper(*args, **kwargs):

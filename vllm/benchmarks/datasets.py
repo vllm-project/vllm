@@ -134,8 +134,7 @@ class BenchmarkDataset(ABC):
                 content.append(mm_content)
             else:
                 raise TypeError(
-                    "Could not process multimodal content of type: "
-                    + f"{type(mm_content)}"
+                    f"Could not process multimodal content of type: {type(mm_content)}"
                 )
         return [{"role": "user", "content": content}]
 

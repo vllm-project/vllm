@@ -168,7 +168,7 @@ class MultiModalRegistry:
         )
 
         if profiler_limits is None:
-            profiler_limits = processor.allowed_mm_limits
+            profiler_limits = processor.info.allowed_mm_limits
 
         mm_counts = {
             modality: 1 for modality, limit in profiler_limits.items() if limit > 0
@@ -200,7 +200,6 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         *,
-        cache: BaseMultiModalProcessorCache | None = None,
         observability_config: ObservabilityConfig | None = None,
     ) -> Mapping[str, int]:
         """
@@ -210,10 +209,8 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return {}
 
-        processor = self.create_processor(
-            model_config, observability_config, cache=cache
-        )
-        return processor.allowed_mm_limits
+        info = self._create_processing_info(model_config, observability_config)
+        return info.allowed_mm_limits
 
     def register_processor(
         self,
@@ -324,7 +321,7 @@ class MultiModalRegistry:
                 model_config, observability_config, cache=cache
             )
         if mm_counts is None:
-            mm_counts = processor.allowed_mm_limits
+            mm_counts = processor.info.allowed_mm_limits
 
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=seq_len,

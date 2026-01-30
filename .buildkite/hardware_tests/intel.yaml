@@ -16,6 +16,7 @@ steps:
     - bash .buildkite/scripts/hardware_ci/run-hpu-test.sh
 
   - label: "Intel GPU Test"
+    depends_on: []
     soft_fail: true
     device: intel_gpu
     no_plugin: true

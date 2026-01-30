@@ -822,6 +822,12 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_video_processor(self, **kwargs: object) -> Glm4vVideoProcessor:
         return self.get_hf_processor(**kwargs).video_processor
 
+    def get_data_parser(self):
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def _get_vision_info(
         self,
         *,
@@ -1222,9 +1228,6 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
 
 
 class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(video_needs_metadata=True)
-
     def _call_hf_processor(
         self,
         prompt: str,

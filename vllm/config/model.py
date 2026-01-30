@@ -565,6 +565,7 @@ class ModelConfig:
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
+            config_format=self.config_format,
         )
 
         self.original_max_model_len = self.max_model_len
@@ -890,10 +891,7 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
-                "bitblas",
-                "gptq_marlin_24",
                 "gptq_marlin",
-                "gptq_bitblas",
                 "awq_marlin",
                 "ipex",
                 "inc",
@@ -1847,9 +1845,10 @@ def _get_and_verify_dtype(
     *,
     is_pooling_model: bool,
     revision: str | None = None,
+    config_format: ConfigFormat = "hf",
 ) -> torch.dtype:
     config_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
-        config, model_id, revision=revision
+        config, model_id, revision=revision, config_format=config_format
     )
     model_type = config.model_type
 

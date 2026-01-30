@@ -406,8 +406,8 @@ class OpenAISpeechToText(OpenAIServing):
 
         if request.response_format not in ["text", "json", "verbose_json"]:
             return self.create_error_response(
-                ("Currently only support response_format")
-                + ("`text`, `json` or `verbose_json`")
+                "Currently only support response_format: "
+                "`text`, `json` or `verbose_json`"
             )
 
         if (

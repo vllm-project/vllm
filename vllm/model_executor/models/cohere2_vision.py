@@ -262,10 +262,8 @@ class Cohere2VisionMultiModalProcessor(
             hf_processor = self.info.get_hf_processor(**mm_kwargs)
 
             # Fallback calculation if HF processor didn't provide num_patches
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", ImageProcessorItems)
+            parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
+                "image", ImageProcessorItems
             )
 
             num_patches = [

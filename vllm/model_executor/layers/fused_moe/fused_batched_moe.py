@@ -933,6 +933,7 @@ class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         SUPPORTED_W_A_FP8 = [
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
         ]

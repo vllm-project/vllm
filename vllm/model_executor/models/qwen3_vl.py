@@ -81,7 +81,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
     VideoItem,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -624,6 +624,13 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_video_processor(self, **kwargs: object) -> Qwen3VLVideoProcessor:
         return self.get_hf_processor(**kwargs).video_processor
 
+    def get_data_parser(self):
+        return Qwen2VLMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def _get_vision_info(
         self,
         *,
@@ -901,12 +908,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return Qwen2VLMultiModalDataParser(
-            self.info.get_hf_config().vision_config.spatial_merge_size,
-            video_needs_metadata=True,
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
