@@ -691,9 +691,10 @@ def test_mixtral_moe(
                 vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
         else:
             # Transformers v5
-            hf_moe.experts.config._experts_implementation = "eager"
             vllm_moe.experts.w13_weight.data[:] = hf_moe.experts.gate_up_proj.data
             vllm_moe.experts.w2_weight.data[:] = hf_moe.experts.down_proj.data
+            # TODO: remove this line after https://github.com/huggingface/transformers/pull/43622
+            hf_moe.experts.config._experts_implementation = "eager"
 
         # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
         hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
