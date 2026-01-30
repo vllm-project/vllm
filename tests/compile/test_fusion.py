@@ -144,6 +144,7 @@ class TestModel(torch.nn.Module):
                     weight_shape=(hidden_size, hidden_size),
                     weight_quant_key=kFP8Dynamic128x128Sym,
                     activation_quant_key=self.activation_quant_key,
+                    transpose_weights=use_aiter_fusion,
                 )
                 for _ in range(3)
             ]
