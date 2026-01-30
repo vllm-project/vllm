@@ -280,8 +280,8 @@ class Worker(WorkerBase):
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
-    def reload_weights(self) -> None:
-        self.model_runner.reload_weights()
+    def reload_weights(self, *args, **kwargs) -> None:
+        self.model_runner.reload_weights(*args, **kwargs)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
