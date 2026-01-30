@@ -30,7 +30,8 @@ steps:
   parallelism: 2
 
 - label: Basic Models Tests (Other)
-  amd_mirror: true
+  mirror:
+    amd: amd_mi325_1
   timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/
