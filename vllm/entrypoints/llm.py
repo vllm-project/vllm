@@ -1,21 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import itertools
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
+import torch
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar
 
 from vllm.beam_search import (
-    BeamSearchInstance,
     BeamSearchOutput,
     BeamSearchSequence,
-    create_sort_beams_key_function,
+    _beam_search_has_unfinished_sequences,
+    _check_early_stop_heuristic,
+    _flatten_beam_dim,
+    _get_running_beams_for_next_iteration,
+    _get_token_prompts,
+    _get_top_k_continuations,
+    _unflatten_beam_dim,
+    _update_finished_beams,
 )
 from vllm.config import (
     AttentionConfig,
@@ -573,15 +579,21 @@ class LLM:
         self,
         lora_request: list[LoRARequest] | LoRARequest | None,
         prompts: list[TokensPrompt | TextPrompt],
-    ) -> list[LoRARequest | None]:
+        beam_width: int,
+    ) -> list[LoRARequest] | None:
         """Get the optional lora request corresponding to each prompt."""
-        if isinstance(lora_request, Sequence) and len(lora_request) != len(prompts):
-            raise ValueError(
-                "Lora request list should be the same length as the prompts"
-            )
+        if lora_request is None:
+            return None
 
-        if lora_request is None or isinstance(lora_request, LoRARequest):
-            return [lora_request] * len(prompts)
+        if isinstance(lora_request, Sequence):
+            if len(lora_request) != len(prompts):
+                raise ValueError(
+                    "Lora request list should be the same length as the prompts"
+                )
+            return [lr for lr in lora_request for _ in range(beam_width)]
+
+        if isinstance(lora_request, LoRARequest):
+            return [lora_request] * beam_width * len(prompts)
 
         raise TypeError(f"Invalid lora_request type {type(lora_request)}")
 
@@ -602,173 +614,283 @@ class LLM:
             params: The beam search parameters.
             lora_request: LoRA request to use for generation, if any.
             use_tqdm: Whether to use tqdm to display the progress bar.
-            concurrency_limit: The maximum number of concurrent requests.
-                If None, the number of concurrent requests is unlimited.
+            concurrency_limit: Not used
         """
-        # TODO: how does beam search work together with length penalty,
-        # frequency, penalty, and stopping criteria, etc.?
-        beam_width = params.beam_width
-        max_tokens = params.max_tokens
+        tokenizer = self.get_tokenizer()
+
+        # 1. init beam_search values
         temperature = params.temperature
         ignore_eos = params.ignore_eos
+        early_stopping = params.early_stopping
         length_penalty = params.length_penalty
-
-        lora_requests = self._get_beam_search_lora_requests(lora_request, prompts)
-
-        tokenizer = self.get_tokenizer()
-        sort_beams_key = create_sort_beams_key_function(
-            tokenizer.eos_token_id,
-            length_penalty,
+        max_tokens = params.max_tokens
+        num_beams = params.beam_width
+        num_return_sequences = (
+            params.num_return_sequences
+            if params.num_return_sequences is not None
+            else num_beams
+        )
+        max_logprobs_size = self.model_config.max_logprobs
+        pad_token_id = (
+            params.pad_token_id
+            if params.pad_token_id is not None
+            else tokenizer.pad_token_id
+        )
+        eos_token_id = (
+            params.eos_token_id
+            if params.eos_token_id is not None
+            else tokenizer.eos_token_id
+        )
+        device = "cpu"  # use tensor on cpu
+        batch_size = len(prompts)
+        beam_lora_requests = self._get_beam_search_lora_requests(
+            lora_request, prompts, num_beams
         )
 
-        if use_tqdm and concurrency_limit is not None:
+        # At each beam search step, we want to keep top K
+        # [K = (number of EOS tokens + 1) * `num_beams`] candidates # with the
+        # highest log-probabilities, or sample K continuations without replacement.
+        # We gather the top K (as opposed to `num_beams`, or any number lower than K)
+        # so that we have at least `num_beams` sequences non-finished to continue
+        # the live beam search, in case the top `num_beams` all select an EOS token.
+        n_eos_tokens = len(eos_token_id) if isinstance(eos_token_id, list) else 1
+        beams_to_keep = max(2, 1 + n_eos_tokens) * num_beams
+        top_num_beam_mask = torch.cat(
+            (
+                torch.ones((num_beams), dtype=torch.bool),
+                torch.zeros((beams_to_keep - num_beams), dtype=torch.bool),
+            ),
+            dim=0,
+        ).to(device)
+
+        # 2. encode prompts
+        token_prompts: list[TokensPrompt] = [
+            TokensPrompt(prompt_token_ids=tokenizer.encode(prompt["prompt"]))
+            if "prompt_token_ids" not in prompt
+            else cast(TokensPrompt, prompt)  # Needed for mypy
+            for prompt in prompts
+        ]
+        prompt_max_len = max(len(seq["prompt_token_ids"]) for seq in token_prompts)
+        max_length = prompt_max_len + max_tokens
+        input_ids = torch.full(
+            (batch_size, prompt_max_len), pad_token_id, dtype=torch.long, device=device
+        )
+        for i, token_prompt in enumerate(token_prompts):
+            token_ids = token_prompt["prompt_token_ids"]
+            token_tensor = torch.tensor(
+                token_ids, dtype=torch.long, device=input_ids.device
+            )
+            input_ids[i, prompt_max_len - len(token_ids) : prompt_max_len] = (
+                token_tensor
+            )
+
+        input_ids = input_ids.repeat_interleave(
+            num_beams, dim=0
+        )  # [batch*num_beams, prompt_len]
+        cur_len = input_ids.shape[1]
+        decoder_prompt_len = cur_len
+
+        # 3. init running tensors and static-shaped placeholders
+        output_fill_value = (
+            pad_token_id
+            or (
+                eos_token_id[0]
+                if isinstance(eos_token_id, (list, tuple))
+                else eos_token_id
+            )
+            if eos_token_id is not None
+            else -1
+        )
+        running_sequences = torch.full(
+            (batch_size, num_beams, max_length),
+            fill_value=output_fill_value,
+            dtype=torch.long,
+            device=device,
+        )
+        running_sequences[:, :, :cur_len] = _unflatten_beam_dim(
+            input_ids, batch_size, num_beams
+        )
+        sequences = running_sequences.detach().clone()
+
+        # per batch, beam-item score, logprobs
+        # initialise score of first beam with 0 and the rest with -1e9. This
+        # makes sure that only tokens of the first beam are considered to avoid
+        # sampling the exact same tokens across all beams.
+        running_beam_scores = torch.zeros(
+            (batch_size, num_beams), dtype=torch.float, device=device
+        )
+        running_beam_scores[:, 1:] = -1e9
+        beam_scores = torch.full(
+            (batch_size, num_beams), fill_value=-1e9, dtype=torch.float, device=device
+        )
+
+        # per batch, beam-item state bit indicating if sentence has finished.
+        is_sent_finished = torch.zeros(
+            (batch_size, num_beams), dtype=torch.bool, device=device
+        )
+
+        # per batch state bit indicating if there is a possibility to improve
+        # the best finished sentence.
+        is_early_stop_heuristic_unsatisfied = torch.ones(
+            (batch_size, 1), dtype=torch.bool, device=device
+        )
+
+        # per batch, beam-item state bit indicating if there are valid continuations.
+        next_token_hits_stopping_criteria = torch.zeros(
+            (batch_size, num_beams), dtype=torch.bool, device=device
+        )
+
+        # per batch selected beam indices
+        running_beam_indices = torch.full(
+            (batch_size, num_beams, max_length - cur_len),
+            fill_value=-1,
+            dtype=torch.int32,
+            device=device,
+        )
+        beam_indices = running_beam_indices.detach().clone()
+
+        # 4. run the generation loop
+        token_iter = range(cur_len, max_length)
+        if not early_stopping and use_tqdm:
+            token_iter = tqdm(
+                token_iter, desc="Beam search", unit="token", unit_scale=False
+            )
             logger.warning(
-                "Progress bar is not supported when using concurrency_limit. "
-                "Disabling progress bar."
+                "The progress bar shows the upper bound on token steps and "
+                "may finish early due to stopping conditions. It does not "
+                "reflect instance-level progress."
             )
-            use_tqdm = False
+        for _ in token_iter:
+            # a. Forward current tokens, obtain the logits
+            is_first_step = cur_len == decoder_prompt_len
 
-        if concurrency_limit is None:
-            concurrency_limit = len(prompts)
-
-        def create_tokens_prompt_from_beam(beam: BeamSearchSequence) -> TokensPrompt:
-            token_prompt_kwargs: TokensPrompt = {"prompt_token_ids": beam.tokens}
-            if beam.multi_modal_data is not None:
-                token_prompt_kwargs["multi_modal_data"] = beam.multi_modal_data
-
-            if beam.mm_processor_kwargs is not None:
-                token_prompt_kwargs["mm_processor_kwargs"] = beam.mm_processor_kwargs
-            return TokensPrompt(**token_prompt_kwargs)
-
-        # generate 2 * beam_width candidates at each step
-        # following the huggingface transformers implementation
-        # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
-        beam_search_params = SamplingParams(
-            logprobs=2 * beam_width,
-            max_tokens=1,
-            temperature=temperature,
-            skip_clone=True,  # Internal beam search, safe to skip clone
-        )
-        instances: list[BeamSearchInstance] = []
-
-        for lora_req, prompt in zip(lora_requests, prompts):
-            # Add multimodal processor kwargs & data
-            mm_kwargs = {}
-            if "multi_modal_data" in prompt:
-                mm_kwargs["multi_modal_data"] = prompt["multi_modal_data"]
-            if "mm_processor_kwargs" in prompt:
-                mm_kwargs["mm_processor_kwargs"] = prompt["mm_processor_kwargs"]
-
-            if "prompt_token_ids" in prompt:
-                prompt = cast(TokensPrompt, prompt)  # Needed for mypy
-                prompt_tokens = prompt["prompt_token_ids"]
-            else:
-                prompt_tokens = tokenizer.encode(prompt["prompt"])
-
-            instances.append(
-                BeamSearchInstance(
-                    prompt_tokens,
-                    lora_request=lora_req,
-                    logprobs=None,
-                    **mm_kwargs,
+            # for the first step, all sequences are the same, so only use one
+            # to generate
+            flat_running_sequences = (
+                running_sequences[:, 0, :cur_len]
+                if is_first_step
+                else _flatten_beam_dim(running_sequences[:, :, :cur_len])
+            )
+            model_inputs = _get_token_prompts(flat_running_sequences, pad_token_id)
+            model_outputs = self.generate(
+                prompts=model_inputs,
+                sampling_params=SamplingParams(
+                    logprobs=max_logprobs_size, max_tokens=1, temperature=temperature
                 ),
+                use_tqdm=False,
+                lora_request=lora_request if is_first_step else beam_lora_requests,
             )
 
-        for prompt_start in range(0, len(prompts), concurrency_limit):
-            instances_batch = instances[prompt_start : prompt_start + concurrency_limit]
+            # b. Compute log probs. Not needed
 
-            token_iter = range(max_tokens)
-            if use_tqdm:
-                token_iter = tqdm(
-                    token_iter, desc="Beam search", unit="token", unit_scale=False
+            # c. Retrieve top-K continuations, i.e. select the next token
+            # (greedy or sampling) and then keep the best continuations among
+            # all beams based on the accumulated scores.
+            topk_log_probs, topk_running_sequences, topk_running_beam_indices = (
+                _get_top_k_continuations(
+                    model_outputs,
+                    running_sequences=running_sequences,
+                    running_beam_indices=running_beam_indices,
+                    running_beam_scores=running_beam_scores,
+                    cur_len=cur_len,
+                    decoder_prompt_len=decoder_prompt_len,
+                    beams_to_keep=beams_to_keep,
+                    num_beams=num_beams,
+                    batch_size=batch_size,
+                    logprobs_size=max_logprobs_size,
+                    is_first_step=is_first_step,
                 )
-                logger.warning(
-                    "The progress bar shows the upper bound on token steps and "
-                    "may finish early due to stopping conditions. It does not "
-                    "reflect instance-level progress."
-                )
-            for _ in token_iter:
-                all_beams: list[BeamSearchSequence] = list(
-                    sum((instance.beams for instance in instances_batch), [])
-                )
-                pos = [0] + list(
-                    itertools.accumulate(
-                        len(instance.beams) for instance in instances_batch
-                    )
-                )
-                instance_start_and_end: list[tuple[int, int]] = list(
-                    zip(pos[:-1], pos[1:])
-                )
+            )
 
-                if len(all_beams) == 0:
-                    break
-
-                # create corresponding batch entries for prompt & optional lora
-                prompts_batch, lora_req_batch = zip(
-                    *[
-                        (create_tokens_prompt_from_beam(beam), beam.lora_request)
-                        for beam in all_beams
-                    ]
+            # d. Check which running sequences have finished
+            if not ignore_eos:
+                next_token_hits_stopping_criteria = (
+                    topk_running_sequences[:, :, cur_len] == eos_token_id
                 )
 
-                # only runs for one step
-                # we don't need to use tqdm here
-                output = self.generate(
-                    prompts_batch,
-                    sampling_params=beam_search_params,
-                    use_tqdm=False,
-                    lora_request=lora_req_batch,
+            # e. Get the non-finished running `num_beams` sequences for the
+            # next generation step
+            running_sequences, running_beam_scores, running_beam_indices = (
+                _get_running_beams_for_next_iteration(
+                    topk_log_probs=topk_log_probs,
+                    topk_running_sequences=topk_running_sequences,
+                    topk_running_beam_indices=topk_running_beam_indices,
+                    next_token_hits_stopping_criteria=next_token_hits_stopping_criteria,
+                    num_beams=num_beams,
                 )
+            )
 
-                for (start, end), instance in zip(
-                    instance_start_and_end, instances_batch
-                ):
-                    instance_new_beams = []
-                    for i in range(start, end):
-                        current_beam = all_beams[i]
-                        result = output[i]
+            # f. Update the completed beams if a new high score in a finished
+            # sequence is found
+            sequences, beam_scores, beam_indices, is_sent_finished = (
+                _update_finished_beams(
+                    sequences=sequences,
+                    topk_running_sequences=topk_running_sequences,
+                    beam_scores=beam_scores,
+                    topk_log_probs=topk_log_probs,
+                    beam_indices=beam_indices,
+                    topk_running_beam_indices=topk_running_beam_indices,
+                    is_early_stop_heuristic_unsatisfied=is_early_stop_heuristic_unsatisfied,
+                    is_sent_finished=is_sent_finished,
+                    next_token_hits_stopping_criteria=next_token_hits_stopping_criteria,
+                    top_num_beam_mask=top_num_beam_mask,
+                    num_beams=num_beams,
+                    cur_len=cur_len,
+                    decoder_prompt_len=decoder_prompt_len,
+                    length_penalty=length_penalty,
+                    early_stopping=early_stopping,
+                )
+            )
 
-                        if result.outputs[0].logprobs is not None:
-                            # if `result.outputs[0].logprobs` is None, it means
-                            # the sequence is completed because of the
-                            # max-model-len or abortion. we don't need to add
-                            # it to the new beams.
-                            logprobs = result.outputs[0].logprobs[0]
-                            for token_id, logprob_obj in logprobs.items():
-                                new_beam = BeamSearchSequence(
-                                    tokens=current_beam.tokens + [token_id],
-                                    logprobs=current_beam.logprobs + [logprobs],
-                                    lora_request=current_beam.lora_request,
-                                    cum_logprob=current_beam.cum_logprob
-                                    + logprob_obj.logprob,
-                                    multi_modal_data=current_beam.multi_modal_data,
-                                    mm_processor_kwargs=current_beam.mm_processor_kwargs,
-                                )
+            # g. Prepare remaining data for the next iteration, including computing
+            # the stopping condition for beam search as a whole (as opposed to
+            # individual beams, i.e. `stopping_criteria`)
+            cur_len = cur_len + 1
+            is_early_stop_heuristic_unsatisfied = _check_early_stop_heuristic(
+                is_early_stop_heuristic_unsatisfied=is_early_stop_heuristic_unsatisfied,
+                running_beam_scores=running_beam_scores,
+                beam_scores=beam_scores,
+                is_sent_finished=is_sent_finished,
+                cur_len=cur_len,
+                max_length=max_length,
+                decoder_prompt_len=decoder_prompt_len,
+                early_stopping=early_stopping,
+                length_penalty=length_penalty,
+            )
 
-                                if (
-                                    token_id == tokenizer.eos_token_id
-                                    and not ignore_eos
-                                ):
-                                    instance.completed.append(new_beam)
-                                else:
-                                    instance_new_beams.append(new_beam)
-                    sorted_beams = sorted(
-                        instance_new_beams, key=sort_beams_key, reverse=True
-                    )
-                    instance.beams = sorted_beams[:beam_width]
+            if not _beam_search_has_unfinished_sequences(
+                is_early_stop_heuristic_unsatisfied,
+                is_sent_finished,
+                next_token_hits_stopping_criteria,
+                early_stopping,
+            ):
+                break
+
+        # 5. prepare outputs
+        sequences = _flatten_beam_dim(sequences[:, :num_return_sequences, :])
+        beam_scores = _flatten_beam_dim(beam_scores[:, :num_return_sequences])
 
         outputs = []
-        for instance in instances:
-            instance.completed.extend(instance.beams)
-            sorted_completed = sorted(
-                instance.completed, key=sort_beams_key, reverse=True
-            )
-            best_beams = sorted_completed[:beam_width]
+        seq_token_lists = [seq.tolist() for seq in sequences]
+        decoded_texts = [
+            tokenizer.decode(seq, skip_special_tokens=True) for seq in seq_token_lists
+        ]
 
-            for beam in best_beams:
-                beam.text = tokenizer.decode(beam.tokens)
-            outputs.append(BeamSearchOutput(sequences=best_beams))
-
+        for i in range(batch_size):
+            batch_outputs = []
+            for j in range(num_return_sequences):
+                idx = i * num_return_sequences + j
+                seq_tokens = seq_token_lists[idx]
+                score = beam_scores[idx].item() if idx < len(beam_scores) else 0.0
+                batch_outputs.append(
+                    BeamSearchSequence(
+                        text=decoded_texts[idx],
+                        logprobs=[],
+                        tokens=seq_tokens,
+                        cum_logprob=score,
+                    )
+                )
+            outputs.append(BeamSearchOutput(sequences=batch_outputs))
         return outputs
 
     def preprocess_chat(
