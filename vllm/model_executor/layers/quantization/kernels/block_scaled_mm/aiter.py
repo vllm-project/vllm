@@ -35,7 +35,7 @@ class AiterBlockScaledMMKernel(Fp8BlockScaledMMKernel):
     ) -> torch.Tensor:
         params = self._get_layer_params(layer)
         weight = params.weight
-        weight_scale = params.weight_scale
+        weight_scale_inv = params.weight_scale_inv
         input_scale = params.input_scale
         scale_up = params.input_scale_ub
 
@@ -60,7 +60,7 @@ class AiterBlockScaledMMKernel(Fp8BlockScaledMMKernel):
             B=weight,
             out_dtype=output_dtype,
             As=input_scale,
-            Bs=weight_scale,
+            Bs=weight_scale_inv,
         )
 
         if bias is not None:

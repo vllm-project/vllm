@@ -72,8 +72,6 @@ class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8BlockPara
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         params = self._get_layer_params(layer)
-        print("--- process params ---")
-        print(params)
         weight, weight_scale_inv = process_fp8_weight_block_strategy(
             params.weight,
             params.weight_scale_inv,
