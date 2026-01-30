@@ -1,6 +1,74 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
+
 from vllm.triton_utils import tl, triton
+
+
+def eagle_prepare_inputs_padded_pytorch(
+    cu_num_draft_tokens: torch.Tensor,  # [num_reqs]
+    valid_sampled_tokens_count: torch.Tensor,  # [num_reqs]
+    query_start_loc_gpu: torch.Tensor,  # [num_reqs + 1]
+    token_indices_to_sample: torch.Tensor,  # [num_reqs] (output)
+    num_rejected_tokens_gpu: torch.Tensor,  # [num_reqs] (output)
+    num_reqs: int,
+):
+    """PyTorch implementation of eagle_prepare_inputs_padded_kernel."""
+    for req_idx in range(num_reqs):
+        cu_draft_curr = cu_num_draft_tokens[req_idx].item()
+        
+        if req_idx == 0:
+            num_draft_tokens = cu_draft_curr
+        else:
+            cu_draft_prev = cu_num_draft_tokens[req_idx - 1].item()
+            num_draft_tokens = cu_draft_curr - cu_draft_prev
+        
+        valid_count = valid_sampled_tokens_count[req_idx].item()
+        num_rejected = num_draft_tokens + 1 - valid_count
+        if num_draft_tokens <= 0:
+            num_rejected = 0
+        
+        q_last_tok_idx = query_start_loc_gpu[req_idx + 1].item() - 1
+        index_to_sample = q_last_tok_idx - num_rejected
+        
+        token_indices_to_sample[req_idx] = index_to_sample
+        num_rejected_tokens_gpu[req_idx] = num_rejected
+
+
+def eagle_prepare_next_token_padded_pytorch(
+    sampled_token_ids: torch.Tensor,  # [num_reqs, num_sampled_tokens_per_req]
+    discard_request_mask: torch.Tensor,  # [num_reqs]
+    backup_next_token_ids: torch.Tensor,  # [num_reqs]
+    next_token_ids: torch.Tensor,  # [num_reqs] (output)
+    valid_sampled_tokens_count: torch.Tensor,  # [num_reqs] (output)
+    vocab_size: int,
+    num_sampled_tokens_per_req: int,
+    num_reqs: int,
+):
+    """PyTorch implementation of eagle_prepare_next_token_padded_kernel."""
+    for req_idx in range(num_reqs):
+        is_discarded = discard_request_mask[req_idx].item()
+        
+        if is_discarded:
+            next_token_ids[req_idx] = backup_next_token_ids[req_idx]
+            valid_sampled_tokens_count[req_idx] = 0
+        else:
+            token_ids = sampled_token_ids[req_idx, :num_sampled_tokens_per_req]
+            
+            # Valid tokens are in [0, vocab_size) and not -1
+            is_valid = (token_ids != -1) & (token_ids < vocab_size)
+            valid_count = is_valid.sum().item()
+            
+            if valid_count > 0:
+                # Find the last valid index
+                valid_indices = torch.where(is_valid)[0]
+                last_valid_index = valid_indices[-1].item()
+                last_valid_token = token_ids[last_valid_index].item()
+                next_token_ids[req_idx] = last_valid_token
+            else:
+                next_token_ids[req_idx] = backup_next_token_ids[req_idx]
+            
+            valid_sampled_tokens_count[req_idx] = valid_count
 
 
 @triton.jit

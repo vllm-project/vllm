@@ -17,6 +17,14 @@ from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID, SpecDecodeBaseProposer
 
 logger = init_logger(__name__)
 
+# Check if Triton is actually available for kernel execution
+try:
+    import importlib.util
+    HAS_TRITON = (importlib.util.find_spec("triton.language") is not None
+                  and hasattr(triton, 'jit') and callable(triton.jit))
+except (ImportError, AttributeError):
+    HAS_TRITON = False
+
 
 class DraftModelProposer(SpecDecodeBaseProposer):
     def __init__(
@@ -102,29 +110,51 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         is_rejected_tok = torch.empty(
             (num_tokens,), device=self.input_ids.device, dtype=torch.bool
         )
-        merge_toks_kernel[grid](
-            target_toks_ptr=target_token_ids,
-            next_toks_ptr=next_token_ids,
-            query_start_locs_ptr=start_locs,
-            query_end_locs_ptr=end_locs,
-            out_ptr_merged_toks=self.input_ids,
-            out_ptr_is_rejected_tok=is_rejected_tok,
-            target_toks_size=target_token_ids.shape[0],
-            # passing a negative rejected_tok_fill value will raise an error
-            # when the value is used to index into embeddings.
-            # Therefore, we pass a valid integer, e.g. 0.
-            rejected_tok_fill=0,
-        )
-        merge_toks_kernel[grid](
-            target_toks_ptr=target_positions,
-            next_toks_ptr=target_positions[end_locs] + 1,
-            query_start_locs_ptr=start_locs,
-            query_end_locs_ptr=end_locs,
-            out_ptr_merged_toks=self.positions,
-            out_ptr_is_rejected_tok=is_rejected_tok,
-            target_toks_size=target_positions.shape[0],
-            rejected_tok_fill=0,
-        )
+        if HAS_TRITON and self.device.type == 'cuda':
+            merge_toks_kernel[grid](
+                target_toks_ptr=target_token_ids,
+                next_toks_ptr=next_token_ids,
+                query_start_locs_ptr=start_locs,
+                query_end_locs_ptr=end_locs,
+                out_ptr_merged_toks=self.input_ids,
+                out_ptr_is_rejected_tok=is_rejected_tok,
+                target_toks_size=target_token_ids.shape[0],
+                # passing a negative rejected_tok_fill value will raise an error
+                # when the value is used to index into embeddings.
+                # Therefore, we pass a valid integer, e.g. 0.
+                rejected_tok_fill=0,
+            )
+            merge_toks_kernel[grid](
+                target_toks_ptr=target_positions,
+                next_toks_ptr=target_positions[end_locs] + 1,
+                query_start_locs_ptr=start_locs,
+                query_end_locs_ptr=end_locs,
+                out_ptr_merged_toks=self.positions,
+                out_ptr_is_rejected_tok=is_rejected_tok,
+                target_toks_size=target_positions.shape[0],
+                rejected_tok_fill=0,
+            )
+        else:
+            _merge_toks_pytorch(
+                target_toks=target_token_ids,
+                next_toks=next_token_ids,
+                query_start_locs=start_locs,
+                query_end_locs=end_locs,
+                out_merged_toks=self.input_ids,
+                out_is_rejected_tok=is_rejected_tok,
+                target_toks_size=target_token_ids.shape[0],
+                rejected_tok_fill=0,
+            )
+            _merge_toks_pytorch(
+                target_toks=target_positions,
+                next_toks=target_positions[end_locs] + 1,
+                query_start_locs=start_locs,
+                query_end_locs=end_locs,
+                out_merged_toks=self.positions,
+                out_is_rejected_tok=is_rejected_tok,
+                target_toks_size=target_positions.shape[0],
+                rejected_tok_fill=0,
+            )
 
         # recompute slot mapping
         new_slot_mapping = compute_new_slot_mapping(
@@ -229,6 +259,42 @@ def compute_new_slot_mapping(
     # Mask out rejected tokens to prevent saves to the KV cache.
     new_slot_mapping.masked_fill_(is_rejected_token_mask, PADDING_SLOT_ID)
     return new_slot_mapping
+
+
+def _merge_toks_pytorch(
+    target_toks: torch.Tensor,
+    next_toks: torch.Tensor,
+    query_start_locs: torch.Tensor,
+    query_end_locs: torch.Tensor,
+    out_merged_toks: torch.Tensor,
+    out_is_rejected_tok: torch.Tensor,
+    target_toks_size: int,
+    rejected_tok_fill: int,
+):
+    """PyTorch implementation of merge_toks_kernel."""
+    batch_size = query_start_locs.shape[0]
+    
+    for pid in range(batch_size):
+        start_loc = query_start_locs[pid].item()
+        is_last_program = pid == batch_size - 1
+        if is_last_program:
+            next_start_loc = target_toks_size
+        else:
+            next_start_loc = query_start_locs[pid + 1].item()
+        
+        end_loc = query_end_locs[pid].item()
+        new_val = next_toks[pid].item() if next_toks.dim() == 1 else next_toks[pid]
+        
+        for i in range(start_loc, next_start_loc + 1):
+            if i <= end_loc:  # copy existing tokens
+                out_merged_toks[pid + i] = target_toks[i]
+                out_is_rejected_tok[pid + i] = False
+            elif i == end_loc + 1:  # copy bonus token
+                out_merged_toks[pid + i] = new_val
+                out_is_rejected_tok[pid + i] = False
+            else:  # fill rejected tokens
+                out_merged_toks[pid + i] = rejected_tok_fill
+                out_is_rejected_tok[pid + i] = True
 
 
 @triton.jit

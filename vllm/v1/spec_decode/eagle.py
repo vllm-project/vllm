@@ -27,6 +27,14 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_pin_memory_available
+
+# Check if Triton is actually available for kernel execution
+try:
+    import importlib.util
+    HAS_TRITON = (importlib.util.find_spec("triton.language") is not None
+                  and hasattr(triton, 'jit') and callable(triton.jit))
+except (ImportError, AttributeError):
+    HAS_TRITON = False
 from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
@@ -44,7 +52,9 @@ from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
     eagle_prepare_inputs_padded_kernel,
+    eagle_prepare_inputs_padded_pytorch,
     eagle_prepare_next_token_padded_kernel,
+    eagle_prepare_next_token_padded_pytorch,
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
@@ -721,20 +731,32 @@ class SpecDecodeBaseProposer:
         # Kernel grid: one program per request (row)
         grid = (batch_size,)
 
-        # Find the next power of 2 for block sizes
-        BLOCK_SIZE_TOKENS = triton.next_power_of_2(num_tokens)
-        eagle_prepare_next_token_padded_kernel[grid](
-            sampled_token_ids,
-            discard_request_mask,
-            backup_tokens_gpu,
-            next_token_ids,
-            valid_sampled_tokens_count,
-            gpu_input_batch.vocab_size,
-            num_tokens,
-            batch_size,
-            sampled_token_ids.stride(0),
-            BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
-        )
+        if HAS_TRITON and device.type == 'cuda':
+            # Find the next power of 2 for block sizes
+            BLOCK_SIZE_TOKENS = triton.next_power_of_2(num_tokens)
+            eagle_prepare_next_token_padded_kernel[grid](
+                sampled_token_ids,
+                discard_request_mask,
+                backup_tokens_gpu,
+                next_token_ids,
+                valid_sampled_tokens_count,
+                gpu_input_batch.vocab_size,
+                num_tokens,
+                batch_size,
+                sampled_token_ids.stride(0),
+                BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
+            )
+        else:
+            eagle_prepare_next_token_padded_pytorch(
+                sampled_token_ids,
+                discard_request_mask,
+                backup_tokens_gpu,
+                next_token_ids,
+                valid_sampled_tokens_count,
+                gpu_input_batch.vocab_size,
+                num_tokens,
+                batch_size,
+            )
 
         return next_token_ids, valid_sampled_tokens_count
 
@@ -763,14 +785,24 @@ class SpecDecodeBaseProposer:
         )
 
         grid = (num_reqs,)
-        eagle_prepare_inputs_padded_kernel[grid](
-            spec_decode_metadata.cu_num_draft_tokens,
-            valid_sampled_tokens_count,
-            common_attn_metadata.query_start_loc,
-            token_indices_to_sample,
-            num_rejected_tokens_gpu,
-            num_reqs,
-        )
+        if HAS_TRITON and device.type == 'cuda':
+            eagle_prepare_inputs_padded_kernel[grid](
+                spec_decode_metadata.cu_num_draft_tokens,
+                valid_sampled_tokens_count,
+                common_attn_metadata.query_start_loc,
+                token_indices_to_sample,
+                num_rejected_tokens_gpu,
+                num_reqs,
+            )
+        else:
+            eagle_prepare_inputs_padded_pytorch(
+                spec_decode_metadata.cu_num_draft_tokens,
+                valid_sampled_tokens_count,
+                common_attn_metadata.query_start_loc,
+                token_indices_to_sample,
+                num_rejected_tokens_gpu,
+                num_reqs,
+            )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
