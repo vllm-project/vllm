@@ -1,0 +1,37 @@
+[package]
+name = "vllm-api-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+
+# Tokenizer
+tokenizers = "0.21"
+
+# Streaming
+tokio-stream = "0.1"
+async-stream = "0.3"
+
+# CLI & Utilities
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+
+[build-dependencies]
+tonic-build = "0.12"
