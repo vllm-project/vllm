@@ -24,6 +24,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -70,6 +71,11 @@ class LMCacheKVEvents(KVConnectorKVEvents):
 
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        extra_config = self._kv_transfer_config.kv_connector_extra_config
+        return bool(str(extra_config.get("enable_cross_layers_blocks", "False")))
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -117,6 +123,26 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         if hasattr(self._lmcache_engine, "register_kv_caches"):
             self._lmcache_engine.register_kv_caches(kv_caches)
+        else:
+            logger.warning(
+                "LMCache engine does not support register_kv_caches, "
+                "please check and use the latest version"
+            )
+
+    def register_cross_layers_kv_cache(
+        self,
+        cross_layers_kv_cache: torch.Tensor,
+        cross_layers_attn_backend: "AttentionBackend",
+    ):
+        """
+        Initialize with the KV caches. Useful for pre-registering the
+        KV Caches in the KVConnector (e.g. for NIXL).
+
+        Args:
+            cross_layers_kv_cache: kv cache of all layers
+        """
+        if hasattr(self._lmcache_engine, "register_cross_layers_kv_cache"):
+            self._lmcache_engine.register_cross_layers_kv_cache(cross_layers_kv_cache)
         else:
             logger.warning(
                 "LMCache engine does not support register_kv_caches, "
