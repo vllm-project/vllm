@@ -11,12 +11,12 @@ from typing import Annotated, Any
 import msgspec
 from pydantic.dataclasses import dataclass
 
+from vllm.config.model import LogprobsMode
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.serial_utils import PydanticMsgspecMixin
-from vllm.config.model import LogprobsMode
 
 logger = init_logger(__name__)
 
