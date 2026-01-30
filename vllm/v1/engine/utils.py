@@ -78,14 +78,6 @@ class EngineHandshakeMetadata:
     parallel_config: dict[str, int | str | list[int]]
 
 
-def _shutdown_engine_procs(
-    procs: list[BaseProcess], death_writers: list[Connection]
-) -> None:
-    for w in death_writers:
-        w.close()
-    shutdown(procs)
-
-
 class CoreEngineProcManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -118,14 +110,14 @@ class CoreEngineProcManager:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
         self.processes: list[BaseProcess] = []
-        self.death_writers: list[Connection] = []
+        self.shutdown_writers: list[Connection] = []
         local_dp_ranks = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
 
-            death_reader, death_writer = context.Pipe(duplex=False)
-            self.death_writers.append(death_writer)
+            shutdown_reader, shutdown_writer = context.Pipe(duplex=False)
+            self.shutdown_writers.append(shutdown_writer)
 
             # Start EngineCore in background process.
             local_dp_ranks.append(local_index)
@@ -137,13 +129,13 @@ class CoreEngineProcManager:
                     | {
                         "dp_rank": global_index,
                         "local_dp_rank": local_index,
-                        "death_pipe": death_reader,
+                        "shutdown_pipe": shutdown_reader,
                     },
                 )
             )
 
         self._finalizer = weakref.finalize(
-            self, _shutdown_engine_procs, self.processes, self.death_writers
+            self, shutdown, self.processes, self.shutdown_writers
         )
 
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
@@ -175,8 +167,8 @@ class CoreEngineProcManager:
 
     def signal_drain(self):
         """Signal all engine cores to start draining."""
-        logger.debug("Sending DRAIN to %d engine(s)", len(self.death_writers))
-        for i, w in enumerate(self.death_writers):
+        logger.debug("Sending DRAIN to %d engine(s)", len(self.shutdown_writers))
+        for i, w in enumerate(self.shutdown_writers):
             try:
                 w.send("DRAIN")
             except (BrokenPipeError, OSError) as e:

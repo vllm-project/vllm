@@ -686,15 +686,15 @@ class EngineCore:
         return req, request.current_wave
 
 
-class ParentDeathMonitor:
-    """Monitors parent process via death pipe, signals when parent exits.
+class ParentShutdownMonitor:
+    """Monitors parent process via shutdown pipe, signals when parent exits.
 
     Also handles drain messages from parent before pipe close.
     """
 
-    def __init__(self, death_pipe, input_queue: queue.Queue):
-        self.parent_died = threading.Event()
-        self._death_pipe = death_pipe
+    def __init__(self, shutdown_pipe, input_queue: queue.Queue):
+        self.parent_died = False
+        self._shutdown_pipe = shutdown_pipe
         self._input_queue = input_queue
         self._thread: threading.Thread | None = None
 
@@ -705,19 +705,18 @@ class ParentDeathMonitor:
     def _monitor(self):
         try:
             while True:
-                msg = self._death_pipe.recv()
+                msg = self._shutdown_pipe.recv()
                 if msg == "DRAIN":
                     logger.info("Received DRAIN from parent")
-                    # put drain request in input queue
                     self._input_queue.put_nowait((EngineCoreRequestType.DRAIN, None))
                 else:
                     logger.warning("Unknown message from parent: %s", msg)
         except EOFError:
             logger.info("Parent exited, terminating EngineCore")
-            self.parent_died.set()
+            self.parent_died = True
             self._input_queue.put_nowait(None)
         finally:
-            self._death_pipe.close()
+            self._shutdown_pipe.close()
 
 
 class EngineCoreProc(EngineCore):
@@ -972,7 +971,7 @@ class EngineCoreProc(EngineCore):
         *args,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
-        death_pipe=None,
+        shutdown_pipe=None,
         **kwargs,
     ):
         """Launch EngineCore busy loop in background process."""
@@ -981,7 +980,7 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
-        death_monitor: ParentDeathMonitor | None = None
+        shutdown_monitor: ParentShutdownMonitor | None = None
         engine_core: EngineCoreProc | None = None
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
@@ -1030,12 +1029,13 @@ class EngineCoreProc(EngineCore):
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
             assert engine_core is not None
-            if death_pipe:
-                death_monitor = ParentDeathMonitor(death_pipe, engine_core.input_queue)
-                death_monitor.start()
+            if shutdown_pipe:
+                shutdown_monitor = ParentShutdownMonitor(
+                    shutdown_pipe, engine_core.input_queue
+                )
+                shutdown_monitor.start()
 
-            parent_died = death_monitor.parent_died if death_monitor else None
-            engine_core.run_busy_loop(parent_died)
+            engine_core.run_busy_loop()
 
         except SystemExit:
             # raised by SHUTDOWN request; normal shutdown path
@@ -1050,17 +1050,16 @@ class EngineCoreProc(EngineCore):
         finally:
             if engine_core is not None:
                 engine_core.shutdown()
-                if death_monitor is None or not death_monitor.parent_died.is_set():
+                if shutdown_monitor is None or not shutdown_monitor.parent_died:
                     engine_core._send_ready_to_exit()
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
-    def run_busy_loop(self, parent_died: threading.Event | None = None):
+    def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        # Loop until SHUTDOWN received or parent dies
-        while parent_died is None or not parent_died.is_set():
+        while True:
             # 1) Poll the input queue until there is work to do.
             if not self._process_input_queue():
                 break
@@ -1159,9 +1158,6 @@ class EngineCoreProc(EngineCore):
             )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
-        elif request_type == EngineCoreRequestType.SHUTDOWN:
-            logger.debug("Received SHUTDOWN request from parent.")
-            raise SystemExit()
         elif request_type == EngineCoreRequestType.DRAIN:
             logger.info("Received DRAIN, draining requests...")
             self._drain_requested = True
@@ -1279,11 +1275,7 @@ class EngineCoreProc(EngineCore):
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
-                    elif request_type in (
-                        EngineCoreRequestType.SHUTDOWN,
-                        EngineCoreRequestType.DRAIN,
-                    ):
-                        # these have no payload
+                    elif request_type == EngineCoreRequestType.DRAIN:
                         request = None
                     else:
                         request = generic_decoder.decode(data_frames)
@@ -1489,11 +1481,10 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
-    def run_busy_loop(self, parent_died: threading.Event | None = None):
+    def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
-        # Loop until SHUTDOWN received or parent dies
-        while parent_died is None or not parent_died.is_set():
+        while True:
             # 1) Poll the input queue until there is work to do.
             if not self._process_input_queue():
                 break

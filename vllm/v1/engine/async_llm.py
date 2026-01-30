@@ -806,16 +806,6 @@ class AsyncLLM(EngineClient):
         async with self._pause_cond:
             return self._paused
 
-    async def _has_pending_kv_transfers(self) -> bool:
-        """Check if there are pending async KV transfers in the engine."""
-        return await self.engine_core.has_pending_kv_transfers_async()
-
-    async def wait_for_kv_transfers_complete(self, poll_interval: float = 0.1) -> None:
-        """Wait until all pending KV transfers complete."""
-        while await self._has_pending_kv_transfers():
-            logger.info_once("Waiting for pending KV transfers to complete")
-            await asyncio.sleep(poll_interval)
-
     async def drain(self, timeout: float) -> bool:
         """Drain in-flight requests before shutdown.
 
@@ -828,24 +818,7 @@ class AsyncLLM(EngineClient):
         Returns:
             True if drain completed successfully, False if timed out or failed.
         """
-        start_time = time.monotonic()
-        try:
-            success = await self.engine_core.drain_async(timeout)
-            elapsed = time.monotonic() - start_time
-            if success:
-                logger.info("Drain: complete in %.1fs", elapsed)
-            else:
-                remaining = self.get_num_unfinished_requests()
-                logger.warning(
-                    "Drain: timed out after %.1fs, "
-                    "%d requests remaining, proceeding with shutdown",
-                    elapsed,
-                    remaining,
-                )
-            return success
-        except Exception as e:
-            logger.warning("Drain: failed: %s", e)
-            return False
+        return await self.engine_core.drain_async(timeout)
 
     def get_num_unfinished_requests(self) -> int:
         """Return the number of in-flight requests."""

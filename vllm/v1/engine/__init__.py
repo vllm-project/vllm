@@ -216,10 +216,8 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
-    # explicit shutdown from parent
-    SHUTDOWN = b"\x05"
     # drain requests first, then exit
-    DRAIN = b"\x06"
+    DRAIN = b"\x05"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
