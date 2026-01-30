@@ -644,22 +644,26 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-            kv_head_counts = [
-                spec.num_kv_heads for spec in kv_cache_spec.kv_cache_specs.values()
-            ]
-        else:
-            kv_head_counts = [kv_cache_spec.num_kv_heads]
-
-        has_trtllm_support = all(
-            can_use_trtllm_attention(
-                num_qo_heads=vllm_config.model_config.get_num_attention_heads(
-                    vllm_config.parallel_config
-                ),
-                num_kv_heads=num_kv_heads,
-            )
-            for num_kv_heads in kv_head_counts
+        kv_specs = (
+            kv_cache_spec.kv_cache_specs.values()
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+            else [kv_cache_spec]
         )
+        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
+        has_trtllm_support: bool = len(kv_specs) > 0
+        for spec in kv_specs:
+            if not isinstance(spec, AttentionSpec):
+                has_trtllm_support = False
+                break
+            if not can_use_trtllm_attention(
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=spec.num_kv_heads,
+            ):
+                has_trtllm_support = False
+                break
+
         if has_trtllm_support:
             return AttentionCGSupport.UNIFORM_BATCH
         else:
