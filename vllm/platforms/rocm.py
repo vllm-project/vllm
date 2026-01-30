@@ -313,7 +313,23 @@ class RocmPlatform(Platform):
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
-            # Priority 3: Check for AITER enabled without specific flags
+            # Priority 3: Check for ROCM_ATTN (prefill-decode split)
+            from vllm.config import get_current_vllm_config_or_none
+
+            vllm_config = get_current_vllm_config_or_none()
+            if (
+                vllm_config is not None
+                and vllm_config.attention_config.use_prefill_decode_attention
+            ):
+                logger.warning_once(
+                    "use_prefill_decode_attention is deprecated and will be removed in "
+                    "future releases. "
+                    "Use --attention_config.backend to select the desired backend"
+                )
+                logger.info("Using Rocm Attention backend.")
+                return AttentionBackendEnum.ROCM_ATTN.get_path()
+
+            # Priority 4: Check for AITER enabled without specific flags
             # This defaults to AITER FA only if MHA is not explicitly disabled
             if (
                 envs.VLLM_ROCM_USE_AITER
