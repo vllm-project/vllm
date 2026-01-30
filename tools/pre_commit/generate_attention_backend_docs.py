@@ -394,23 +394,15 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
     backend_metadata = {
         "TRTLLM_RAGGED": {
             "description": "TensorRT-LLM ragged attention",
-            "enable": "`-ac.mla_prefill_backend=TRTLLM_RAGGED`",
-            "disable": "`-ac.mla_prefill_backend=FLASH_ATTN`",
         },
         "FLASHINFER": {
             "description": "FlashInfer CUTLASS backend",
-            "enable": "`-ac.mla_prefill_backend=FLASHINFER`",
-            "disable": "`-ac.mla_prefill_backend=FLASH_ATTN`",
         },
         "CUDNN": {
             "description": "cuDNN-based attention",
-            "enable": "`-ac.mla_prefill_backend=CUDNN`",
-            "disable": "`-ac.mla_prefill_backend=FLASH_ATTN`",
         },
         "FLASH_ATTN": {
             "description": "FlashAttention varlen (FA2/FA3)",
-            "enable": "Default fallback",
-            "disable": "Use other backends",
         },
     }
 
@@ -443,8 +435,6 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
                 "marker": marker,
                 "description": metadata.get("description", ""),
                 "compute_capability": backend_info.get("compute_capability", "Any"),
-                "enable": metadata.get("enable", ""),
-                "disable": metadata.get("disable", ""),
                 "notes": notes,
             }
         )
@@ -1078,21 +1068,21 @@ def generate_mla_section(
         "",
         "### Prefill Backends",
         "",
-        "The prefill backend is selected at runtime based on hardware and",
-        "configuration.",
+        "To explicitly select a prefill backend, use",
+        "`-ac.mla_prefill_backend=<BACKEND>` (e.g., `FLASH_ATTN`, `FLASHINFER`).",
+        "Otherwise, the prefill backend is selected automatically at runtime based on",
+        "hardware and configuration.",
         "",
-        "| Backend | Description | Compute Cap. | Enable | Disable | Notes |",
-        "|---------|-------------|--------------|--------|---------|-------|",
+        "| Backend | Description | Compute Cap. | Notes |",
+        "|---------|-------------|--------------|-------|",
     ]
 
     for backend in prefill_backends:
-        row = "| `{}`{} | {} | {} | {} | {} | {} |".format(
+        row = "| `{}`{} | {} | {} | {} |".format(
             backend["name"],
             backend.get("marker", ""),
             backend["description"],
             backend["compute_capability"],
-            backend["enable"],
-            backend["disable"],
             backend.get("notes", ""),
         )
         lines.append(row)
@@ -1104,6 +1094,9 @@ def generate_mla_section(
             "> On other GPUs, FlashAttention is used as the default.",
             "",
             "### Decode Backends",
+            "",
+            "MLA decode backends are selected using the standard",
+            "`-ac.backend=<BACKEND>` argument (e.g., `FLASHMLA`, `TRITON_MLA`).",
             "",
         ]
     )
