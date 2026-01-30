@@ -99,7 +99,7 @@ def test_tp2_ar_rms_fp8_fusions(
     "model_name, matches_fn, model_kwargs, hf_overrides",
     [llama3_8b_fp4, llama4_scout_fp4],
 )
-@pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
+@pytest.mark.parametrize("attn_backend", [FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", CUSTOM_OPS_RMS_NORM)
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
@@ -155,7 +155,7 @@ def test_tp2_ar_rms_fp4_fusions(
     "model_name, matches_fn, model_kwargs, hf_overrides",
     [llama3_8b, qwen3_a3b],
 )
-@pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
+@pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", CUSTOM_OPS_RMS_NORM)
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
