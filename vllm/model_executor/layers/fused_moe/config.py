@@ -889,10 +889,6 @@ class FusedMoEParallelConfig:
         return self.dp_size > 1 and self.use_ep
 
     @property
-    def is_sequence_parallel(self):
-        return self.sp_size > 1
-
-    @property
     def use_pplx_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "pplx"
 
