@@ -224,6 +224,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                     continue
                 grps_without_attn_quant[k] = v
             config["config_groups"] = grps_without_attn_quant
+        else:
+            config["config_groups"] = {}
 
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
