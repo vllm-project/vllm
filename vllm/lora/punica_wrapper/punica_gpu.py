@@ -12,10 +12,8 @@ from typing import final
 import torch
 
 from vllm.lora.layers import LoRAMapping
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_align_block_size,
-)
-from vllm.triton_utils import HAS_TRITON
+from vllm.triton_utils import HAS_TRITON, triton
+from vllm.utils.math_utils import round_up
 
 if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (
@@ -25,6 +23,7 @@ if HAS_TRITON:
         lora_shrink,
     )
 
+from vllm import _custom_ops as ops
 
 from .punica_base import PunicaWrapperBase
 
@@ -314,42 +313,48 @@ class PunicaWrapperGPU(PunicaWrapperBase):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Aligns tokens and experts into block-sized chunks for LoRA-based
-        mixture-of-experts (MoE) execution using combined virtual experts.
-
-        The approach combines (lora_id, expert_id) into a single "virtual expert"
-        index: virtual_expert = lora_id * num_experts + expert_id
-
-        For tokens without LoRA (token_lora_mapping == -1), we set
-        topk_ids_lora to -1 to indicate they should be skipped.
+        mixture-of-experts (MoE) execution.
         """
+        num_virtual_experts = num_experts * max_loras
+        max_num_tokens_padded = topk_ids.numel() + num_virtual_experts * (
+            block_size - 1
+        )
+        if pad_sorted_ids:
+            max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+        sorted_ids = torch.empty(
+            (max_num_tokens_padded,),
+            dtype=torch.int32,
+            device=topk_ids.device,
+        )
+        max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+        # Expert ids must be set default to -1 to prevent a blank block
+        expert_ids = torch.empty(
+            (max_num_m_blocks,),
+            dtype=torch.int32,
+            device=topk_ids.device,
+        )
+        num_tokens_post_pad = torch.empty(
+            (1,), dtype=torch.int32, device=topk_ids.device
+        )
 
         (token_lora_mapping, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(
             num_tokens
         )
 
-        # Number of virtual experts = num_experts * max_loras
-        num_expert_lora = num_experts * max_loras
-        token_lora_expanded = token_lora_mapping.unsqueeze(1)
-
-        # Create mask for valid LoRA tokens
-        has_lora = torch.zeros_like(token_lora_expanded, dtype=torch.bool)
-        for lora_id in lora_ids:
-            has_lora |= (token_lora_expanded == lora_id) & (token_lora_expanded >= 0)
-        topk_ids_lora = token_lora_expanded * num_experts + topk_ids
-        topk_ids_lora = topk_ids_lora.masked_fill(~has_lora, num_expert_lora)
-
-        # Call standard moe_align_block_size with num_expert_lora + 1 virtual
-        # experts (the extra slot absorbs non-LoRA tokens harmlessly).
-        sorted_ids, expert_ids, num_tokens_post_pad = moe_align_block_size(
-            topk_ids_lora,
+        ops.moe_lora_align_block_size(
+            topk_ids,
+            lora_ids,
+            adapter_enabled,
+            token_lora_mapping,
+            num_virtual_experts,
+            max_loras,
             block_size,
-            num_expert_lora,
-            expert_map=None,
-            pad_sorted_ids=pad_sorted_ids,
+            sorted_ids,
+            expert_ids,
+            num_tokens_post_pad,
+            expert_map,
         )
 
-        # If no tokens have active LoRA adapters, zero out num_tokens_post_pad
-        # so the downstream kernel exits immediately.
         return sorted_ids, expert_ids, num_tokens_post_pad
 
     def add_lora_fused_moe(
