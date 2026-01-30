@@ -118,6 +118,8 @@ class QuarkW8A8Fp8(QuarkScheme):
         if self.is_static_input_scheme:
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
 
+        self.fp8_linear.process_weights_after_loading(layer)
+
     def create_weights(
         self,
         layer: torch.nn.Module,

@@ -174,6 +174,8 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
             # Activations not quantized for marlin.
             del layer.input_scale_ub
 
+        self.fp8_linear.process_weights_after_loading(layer)
+
     def apply(
         self,
         layer: torch.nn.Module,

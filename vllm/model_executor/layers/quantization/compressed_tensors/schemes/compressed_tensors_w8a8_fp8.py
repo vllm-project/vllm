@@ -192,7 +192,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         if self.strategy == QuantizationStrategy.BLOCK:
             maybe_post_process_fp8_weight_block(layer)
 
-        self.fp8_linear.process_weights_after_loading(layer)
+        if self.fp8_linear is not None:
+            self.fp8_linear.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
