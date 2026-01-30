@@ -1384,7 +1384,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.chunked_prefill_workspace_size,
                     self.model_config.get_head_size(),
                 ),
-                dtype=self.model_config.dtype,
+                dtype=self.q_data_type,
                 device=device,
             )
 
@@ -1771,6 +1771,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
                 output_dtype=self.model_config.dtype,
+                q_data_type=self.q_data_type,
             )
 
             if self._use_cudnn_prefill:
@@ -2243,7 +2244,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             q.shape[1],
             v.shape[2],
             device=q.device,
-            dtype=q.dtype,
+            dtype=prefill.output_dtype,
         )
         prefill.workspace_buffer.fill_(0)
 
@@ -2316,6 +2317,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
+
+        if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
+            q = q.to(attn_metadata.prefill.q_data_type)
+
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             if attn_metadata.prefill.q_data_type != current_platform.fp8_dtype():
@@ -2353,6 +2358,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
             if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
                 kv_nope = kv_nope.to(attn_metadata.prefill.q_data_type)
+                k_pe = k_pe.to(attn_metadata.prefill.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
@@ -2530,6 +2536,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size != -1
 
+        # Convert q to FP8 if FP8 prefill attention is enabled
+        if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
+            q = q.to(attn_metadata.prefill.q_data_type)
+
         has_context = attn_metadata.prefill.chunked_context is not None
 
         # Allocate k and v together in layout: [k_nope | k_pe | v]
@@ -2564,6 +2574,10 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         # Create views for k and v
         k = kv[..., : self.qk_nope_head_dim + self.qk_rope_head_dim]
         v = kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :]
+
+        if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
+            k = k.to(attn_metadata.prefill.q_data_type)
+            v = v.to(attn_metadata.prefill.q_data_type)
 
         output_prefill = self._run_prefill_new_tokens(
             prefill=attn_metadata.prefill,
