@@ -21,7 +21,7 @@ def test_find_cycles_single_swap():
     new = torch.tensor([0, 3, 2, 1, 4])
     cycles = find_cycles(old, new)
     assert len(cycles) == 1
-    assert set(cycles[0]) == {1, 3}
+    assert cycles[0] == [1, 3]
 
 
 def test_find_cycles_multiple_swaps():
@@ -30,9 +30,8 @@ def test_find_cycles_multiple_swaps():
     new = torch.tensor([1, 0, 3, 2, 4])
     cycles = find_cycles(old, new)
     assert len(cycles) == 2
-    cycle_sets = [set(c) for c in cycles]
-    assert {0, 1} in cycle_sets
-    assert {2, 3} in cycle_sets
+    assert cycles[0] == [0, 1]
+    assert cycles[1] == [2, 3]
 
 
 def test_find_cycles_three_cycle():
@@ -41,7 +40,7 @@ def test_find_cycles_three_cycle():
     # Cycle 0->3->2->0
     cycles = find_cycles(old, new)
     assert len(cycles) == 1
-    assert set(cycles[0]) == {0, 2, 3}
+    assert cycles[0] == [0, 3, 2]
 
 
 def test_find_cycles_four_cycle():
@@ -50,7 +49,7 @@ def test_find_cycles_four_cycle():
     # Cycle 0->1->2->3->0
     cycles = find_cycles(old, new)
     assert len(cycles) == 1
-    assert set(cycles[0]) == {0, 1, 2, 3}
+    assert cycles[0] == [0, 1, 2, 3]
 
 
 def test_find_cycles_mixed():
@@ -60,9 +59,8 @@ def test_find_cycles_mixed():
     # Cycle 2: 2->3->4->2
     cycles = find_cycles(old, new)
     assert len(cycles) == 2
-    cycle_sets = [set(c) for c in cycles]
-    assert {0, 1} in cycle_sets
-    assert {2, 3, 4} in cycle_sets
+    assert cycles[0] == [0, 1]
+    assert cycles[1] == [2, 3, 4]
 
 
 def test_apply_transfer_cap_under_limit():
