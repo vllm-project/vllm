@@ -40,11 +40,11 @@ class SimpleScoreCalculator(AbstractScoreCalculator):
         """
         Calculates the final score by combining the partial score with the dynamic wait time.
         """
-        computation_time: float = 1.0  # Placeholder
+        normalized_cost: float = 1.0  # Placeholder
 
         # EWSJF MODIFICATION: Get arrival_time directly from the Request object.
         wait_time: float = current_time - request.arrival_time
-        base_score: float = wait_time / computation_time
+        base_score: float = wait_time / normalized_cost
         # print(f'length: {len(request.prompt_token_ids)}, partial_score: {partial_score}, base_score: {base_score}')
 
         return base_score * partial_score
