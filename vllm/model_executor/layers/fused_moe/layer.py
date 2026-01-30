@@ -639,6 +639,7 @@ class FusedMoE(CustomOp):
         # NOTE(rob): WIP refactor. For quant methods that own the MK
         # we create the MK during process_weights_after_loading.
         if self.quant_method.supports_internal_mk or self.quant_method.is_monolithic:
+            self.init_runner()
             return None
 
         self.ensure_moe_quant_config_init()
