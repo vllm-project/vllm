@@ -24,24 +24,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             pass_hidden_states_to_model=False,
             runner=runner,
         )
-        self._raise_if_multimodal()
-        self._raise_if_mrope()
-        self._raise_if_padded_drafter_batch_disabled()
         self._raise_if_vocab_size_mismatch()
         self._raise_if_draft_tp_mismatch()
-
-    def _raise_if_multimodal(self):
-        if self.supports_mm_inputs:
-            raise NotImplementedError(
-                "Speculative Decoding with draft models "
-                "does not support multimodal models yet"
-            )
-
-    def _raise_if_mrope(self):
-        if self.draft_model_config.uses_mrope:
-            raise NotImplementedError(
-                "Speculative Decoding with draft models does not support M-RoPE yet"
-            )
 
     def _raise_if_vocab_size_mismatch(self):
         self.vllm_config.speculative_config.verify_equal_vocab_size_if_draft_model()

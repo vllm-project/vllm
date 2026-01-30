@@ -44,6 +44,7 @@ from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
     compute_new_slot_mapping,
     copy_and_expand_eagle_inputs_kernel,
+    create_vllm_config_for_draft_model,
     eagle_prepare_inputs_padded_kernel,
     eagle_prepare_next_token_padded_kernel,
     extend_all_queries_by_N,
@@ -84,6 +85,7 @@ class SpecDecodeBaseProposer:
         self.inputs_embeds_size = self.draft_model_config.get_inputs_embeds_size()
 
         # Unifying eagle, draft model, and parallel drafting support
+        self.is_draft_model = not self.pass_hidden_states_to_model
         self.parallel_drafting: bool = self.speculative_config.parallel_drafting
         self.extra_slots_per_request = (
             1 if not self.parallel_drafting else self.num_speculative_tokens
@@ -91,9 +93,7 @@ class SpecDecodeBaseProposer:
         self.net_num_new_slots_per_request = self.extra_slots_per_request - (
             1 if self.pass_hidden_states_to_model else 0
         )
-
-        if self.net_num_new_slots_per_request > 0:
-            self._raise_if_padded_drafter_batch_disabled()
+        self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
 
         self.parallel_drafting_token_id: int = 0
         self.parallel_drafting_hidden_state_tensor: torch.Tensor | None = None
@@ -174,9 +174,14 @@ class SpecDecodeBaseProposer:
             max_num_slots_for_arange, device=device, dtype=torch.int32
         )
 
+        if self.needs_extra_input_slots:
+            self._raise_if_padded_drafter_batch_disabled()
+            self._raise_if_multimodal()
+            self._raise_if_mrope()
+
         self.is_rejected_token_mask: torch.Tensor | None = None
         self.is_masked_token_mask: torch.Tensor | None = None
-        if self.net_num_new_slots_per_request > 0:
+        if self.needs_extra_input_slots:
             # For draft models and parallel drafting, we need to keep track of
             # which tokens are rejected to update the slot mapping with padding slots.
             self.is_rejected_token_mask = torch.zeros(
@@ -270,6 +275,20 @@ class SpecDecodeBaseProposer:
                 "disable_padded_drafter_batch in the speculative_config."
             )
 
+    def _raise_if_multimodal(self):
+        if self.supports_mm_inputs:
+            raise NotImplementedError(
+                "Speculative Decoding with draft models or parallel drafting "
+                "does not support multimodal models yet"
+            )
+
+    def _raise_if_mrope(self):
+        if self.draft_model_config.uses_mrope:
+            raise NotImplementedError(
+                "Speculative Decoding with draft models or parallel drafting "
+                "does not support M-RoPE yet"
+            )
+
     def _init_parallel_drafting_params(self):
         # For parallel drafting, we need the token ID to use for masked slots
         # And for EAGLE + parallel drafting, we need the hidden state tensor to use
@@ -281,15 +300,10 @@ class SpecDecodeBaseProposer:
         elif hasattr(model_hf_config, "ptd_token_id"):
             self.parallel_drafting_token_id = model_hf_config.ptd_token_id
         else:
-            pard_token = 201020
-            self.parallel_drafting_token_id = pard_token
-            logger.info(
-                "Using default token ID of %d for parallel drafting", pard_token
+            raise ValueError(
+                "For parallel drafting, the draft model config must have "
+                "`pard_token` or `ptd_token_id` specified in its config.json."
             )
-            # raise ValueError(
-            #     "For parallel drafting, the draft model config must have "
-            #     "`pard_token` specified in its HuggingFace config."
-            # )
 
         if self.pass_hidden_states_to_model:
             self.parallel_drafting_hidden_state_tensor = torch.empty(
@@ -1269,15 +1283,22 @@ class SpecDecodeBaseProposer:
 
         from vllm.compilation.backends import set_model_tag
 
-        temp_vllm_config = self.vllm_config.replace(
-            quant_config=None,
-            model_config=draft_model_config,
-            parallel_config=self.speculative_config.draft_parallel_config.replace(
-                rank=self.vllm_config.parallel_config.rank
-            ),
-        )
-        with set_model_tag("drafter"):
-            self.model = get_model(vllm_config=temp_vllm_config, prefix="drafter")
+        if self.is_draft_model:
+            # Draft models may be quantized or on different parallelism,
+            # so we load them with a modified vllm config
+            temp_vllm_config = create_vllm_config_for_draft_model(self.vllm_config)
+            with set_model_tag("draft_model"):
+                self.model = get_model(
+                    vllm_config=temp_vllm_config,
+                    prefix="draft_model",
+                )
+        else:
+            # EAGLE models read the base model's vllm config to determine
+            # total number of layers, hidden size, etc.
+            with set_model_tag("eagle_head"):
+                self.model = get_model(
+                    vllm_config=self.vllm_config, model_config=draft_model_config
+                )
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
