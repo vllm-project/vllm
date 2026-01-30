@@ -603,34 +603,18 @@ class MPClient(EngineCoreClient):
                 self._finalizer()
 
     def shutdown(self):
-        # send explicit SHUTDOWN to engines before closing resources
-        self._send_shutdown_to_engines()
-        # Terminate background resources.
         self._finalizer()
-
-    def _send_shutdown_to_engines(self):
-        """Send SHUTDOWN message to all engine cores via ZMQ."""
-        if self.resources.engine_dead:
-            return
-        try:
-            for engine_id in self.core_engines:
-                self.input_socket.send_multipart(
-                    [engine_id, EngineCoreRequestType.SHUTDOWN.value],
-                    flags=zmq.NOBLOCK,
-                )
-        except Exception:
-            logger.debug_once("Failed to send SHUTDOWN, engines may be gone")
 
     def _send_drain_to_engines(self):
         """Send DRAIN message to all engine cores."""
         if self.resources.engine_dead:
             return
-        # prefer death pipe for drain signaling if engine_manager available
+        # prefer shutdown pipe for drain signaling if engine_manager available
         if self.resources.engine_manager is not None and hasattr(
             self.resources.engine_manager, "signal_drain"
         ):
             logger.info(
-                "Sending DRAIN to %d engine(s) via death pipe",
+                "Sending DRAIN to %d engine(s) via shutdown pipe",
                 len(self.core_engines),
             )
             self.resources.engine_manager.signal_drain()
@@ -657,12 +641,18 @@ class MPClient(EngineCoreClient):
         while not ready_to_exit.is_set():
             elapsed = time.monotonic() - start_time
             if elapsed >= timeout:
+                logger.warning(
+                    "Drain: timed out after %.1fs, proceeding with shutdown",
+                    elapsed,
+                )
                 return False
             if self.resources.engine_dead:
                 logger.warning("Drain: engine died during drain")
                 return False
             await asyncio.sleep(0.1)
 
+        elapsed = time.monotonic() - start_time
+        logger.info("Drain: complete in %.1fs", elapsed)
         return True
 
     def _format_exception(self, e: Exception) -> Exception:
