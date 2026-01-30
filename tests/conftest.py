@@ -1355,17 +1355,24 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+def pytest_itemcollected(item):
+    """Add execution_tag markers during collection for Buildkite Test Engine."""
+    # The buildkite-test-collector scans for execution_tag during item collection,
+    # so we must add markers here (not in pytest_collection_modifyitems)
+    sig_value = item.config.getoption("--sig")
+    if sig_value:
+        # Add execution_tag for Buildkite Test Engine
+        item.add_marker(pytest.mark.execution_tag("sig", sig_value))
+
+
 def pytest_collection_modifyitems(config, items):
     # Handle --sig CLI option: auto-tag all tests with SIG ownership
     sig_value = config.getoption("--sig")
     if sig_value:
         for item in items:
-            # Only add if not already tagged explicitly
+            # Only add sig marker if not already tagged explicitly
             if item.get_closest_marker("sig") is None:
                 item.add_marker(pytest.mark.sig(sig_value))
-
-            # Add execution_tag for Buildkite Test Engine (primary signal)
-            item.add_marker(pytest.mark.execution_tag("sig", sig_value))
 
     # Handle --optional flag
     if config.getoption("--optional"):
