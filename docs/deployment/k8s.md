@@ -398,8 +398,7 @@ When vLLM receives a `SIGTERM` signal (sent by Kubernetes during pod termination
 1. The server stops accepting new requests (returns `503 Service Unavailable`)
 2. The frontend process sends a drain notification to the engine
 3. In-flight requests continue processing until completion or timeout
-4. If using async KV transfer connectors, pending transfers complete before shutdown
-5. The `/live` and `/metrics` endpoints remain accessible during drain
+4. The `/live` and `/metrics` endpoints remain accessible during drain
 
 ### Configuration
 
