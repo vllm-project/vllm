@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
-from typing import Optional
 
 import pytest
 import torch
@@ -12,11 +10,10 @@ from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
-# These have unsupported head_dim for FA. We do not
-# have a clean way to fall back, so we fail with
-# a clear msg when it happens.
-# https://github.com/vllm-project/vllm/issues/14524
-REQUIRES_V0 = ["microsoft/phi-2", "stabilityai/stablelm-3b-4e1t"]
+# Models that require embedding scaling for prompt_embeds test
+EMBED_SCALING_MODELS = {
+    "openbmb/MiniCPM4.1-8B",
+}
 
 # This list contains the model that are using AITER kernel.
 # Skip model that are not using AITER tests.
@@ -39,7 +36,11 @@ AITER_MODEL_LIST = [
     [
         pytest.param(
             "bigscience/bloom-560m",  # bloom - testing alibi slopes
-            marks=[pytest.mark.core_model],
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.slow_test,
+                pytest.mark.cpu_model,
+            ],
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
@@ -50,7 +51,15 @@ AITER_MODEL_LIST = [
         pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
         pytest.param(
             "google/gemma-1.1-2b-it",  # gemma
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.cpu_model,
+                pytest.mark.slow_test,
+            ],
+        ),
+        pytest.param(
+            "google/gemma-2-2b-it",  # test hybrid attention
+            marks=[pytest.mark.cpu_model],
         ),
         pytest.param(
             "zai-org/chatglm3-6b",  # chatglm (text-only)
@@ -60,10 +69,8 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "openbmb/MiniCPM3-4B",
-            # fused_moe not supported on CPU
-            marks=[pytest.mark.core_model,
-                   large_gpu_mark(min_gb=32)],
+            "openbmb/MiniCPM4.1-8B",  # minicpm
+            marks=[pytest.mark.core_model, large_gpu_mark(min_gb=48)],
         ),
         pytest.param(
             "facebook/opt-125m",  # opt
@@ -71,14 +78,18 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "microsoft/phi-2",  # phi
-            marks=[pytest.mark.core_model],
+            marks=[pytest.mark.core_model, pytest.mark.slow_test],
         ),
         pytest.param(
             "Qwen/Qwen-7B-Chat",  # qwen (text-only)
         ),
         pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.cpu_model,
+                pytest.mark.slow_test,
+            ],
         ),
         pytest.param(
             "Qwen/Qwen3-8B",  # qwen (text-only)
@@ -87,28 +98,31 @@ AITER_MODEL_LIST = [
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
             "TitanML/tiny-mixtral",  # mixtral
-            marks=[pytest.mark.core_model],
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
-        pytest.param(
-            "allenai/OLMoE-1B-7B-0924-Instruct",
-            marks=[pytest.mark.cpu_model],
-        ),
-        pytest.param("swiss-ai/Apertus-8B"),  # apertus
-    ])
+        pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
+    ],
+)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False])
-def test_models(hf_runner, vllm_runner, example_prompts, model: str,
-                max_tokens: int, num_logprobs: int, use_rocm_aiter: bool,
-                monkeypatch) -> None:
-
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
+)
+@pytest.mark.parametrize("use_prompt_embeds", [True, False])
+def test_models(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    max_tokens: int,
+    num_logprobs: int,
+    use_rocm_aiter: bool,
+    use_prompt_embeds: bool,
+    monkeypatch,
+) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
-
-    if model in REQUIRES_V0:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
 
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -119,38 +133,47 @@ def test_models(hf_runner, vllm_runner, example_prompts, model: str,
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
-    use_prompt_embeds = os.getenv("VLLM_USE_V1") == "0"
-
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs)
+            example_prompts, max_tokens, num_logprobs
+        )
 
-        prompt_embeds: Optional[list[torch.Tensor]] = ([] if use_prompt_embeds
-                                                       else None)
+        prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
 
-        prompt_token_ids = []
         for prompt in example_prompts:
-            token_ids = hf_model.tokenizer(prompt,
-                                           return_tensors="pt").input_ids.to(
-                                               hf_model.model.device)
-            prompt_token_ids.append(token_ids)
+            token_ids = hf_model.tokenizer(prompt, return_tensors="pt").input_ids.to(
+                hf_model.model.device
+            )
             if prompt_embeds is not None:
-                prompt_embeds.append(hf_model.model.get_input_embeddings()(
-                    token_ids).squeeze(0))
+                embed = hf_model.model.get_input_embeddings()(token_ids)
+
+                # MiniCPM models apply scale_emb to embeddings internally.
+                # vLLM expects pre-scaled embeddings when using inputs_embeds.
+                if model in EMBED_SCALING_MODELS:
+                    config = hf_model.model.config
+                    embed = embed * config.scale_emb
+
+                prompt_embeds.append(embed.squeeze(0))
 
     with vllm_runner(
-            model,
-            tokenizer_name=model_info.tokenizer or model,
-            tokenizer_mode=model_info.tokenizer_mode,
-            trust_remote_code=model_info.trust_remote_code,
-            max_num_seqs=2,
-            enable_prompt_embeds=use_prompt_embeds,
+        model,
+        tokenizer_name=model_info.tokenizer or model,
+        tokenizer_mode=model_info.tokenizer_mode,
+        trust_remote_code=model_info.trust_remote_code,
+        # Remove the effects of batch variance on ROCm since batch invariance
+        # is not yet supported.
+        # See: https://github.com/vllm-project/vllm/issues/27433
+        max_num_seqs=1 if current_platform.is_rocm() else 2,
+        enable_prompt_embeds=use_prompt_embeds,
+        compilation_config={"cudagraph_capture_sizes": [1, 2]},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+            example_prompts, max_tokens, num_logprobs
+        )
         if prompt_embeds is not None:
             vllm_outputs_from_embeds = vllm_model.generate_greedy_logprobs(
-                prompt_embeds, max_tokens, num_logprobs)
+                prompt_embeds, max_tokens, num_logprobs
+            )
 
     check_logprobs_close(
         outputs_0_lst=hf_outputs,

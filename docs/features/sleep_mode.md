@@ -11,7 +11,10 @@ Key benefits:
 - **Fine-grained control**: Optionally wake up only model weights or KV cache to avoid OOM during weight updates.
 
 !!! note
-    This feature is only supported on CUDA platform.
+    This feature is now supported on CUDA and ROCm platform.
+
+!!! note
+    For more information, see this [Blog Post](https://blog.vllm.ai/2025/10/26/sleep-mode.html).
 
 ## Sleep levels
 
@@ -31,11 +34,27 @@ llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
 #### Python API
 
 ```python
+# Sleep level 1
 # Put the engine to sleep (level=1: offload weights to CPU RAM, discard KV cache)
 llm.sleep(level=1)
 
 # Wake up the engine (restore weights)
 llm.wake_up()
+```
+
+```python
+# Sleep level 2
+# Put the engine to sleep (level=2: discard both weights and KV cache)
+llm.sleep(level=2)
+
+# Reallocate weights memory only
+llm.wake_up(tags=["weights"])
+
+# Load weights in-place
+llm.collective_rpc("reload_weights")
+
+# Reallocate KV cache
+llm.wake_up(tags=["kv_cache"])
 ```
 
 #### RLHF weight updates
@@ -64,17 +83,40 @@ To enable sleep mode in a vLLM server you need to initialize it with the flag `V
 When using the flag `VLLM_SERVER_DEV_MODE=1` you enable development endpoints, and these endpoints should not be exposed to users.
 
 ```bash
-VLLM_SERVER_DEV_MODE=1 python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen3-0.6B \
+VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
   --enable-sleep-mode \
   --port 8000
+```
+
+Below is an example of how to sleep and wake up a model in level 1.
+
+```bash
+curl -X POST 'http://localhost:8000/sleep?level=1'
+curl -X POST 'http://localhost:8000/wake_up'
+```
+
+And this is an example of how to sleep and wake up a model in level 2.
+
+```bash
+curl -X POST 'http://localhost:8000/sleep?level=2'
+# Reallocate weights memory only
+curl -X POST 'http://localhost:8000/wake_up?tags=weights'
+# Load weights in-place
+curl -X POST 'http://localhost:8000/collective_rpc' -H 'Content-Type: application/json' -d '{"method":"reload_weights"}'
+# Reallocate KV cache
+curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 ```
 
 #### HTTP endpoints
 
 - `POST /sleep?level=1` — Put the model to sleep (`level=1`).
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
+- `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.
 
 !!! note
     These endpoints are only available when passing `VLLM_SERVER_DEV_MODE=1`.
+
+## Limitation
+
+On ROCm, the virtual memory allocation on ROCm is done through chunked memory allocation. You can control the chunk size through `VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE` (in MB). The default value is set at 256MB. The larger the chunk size the faster the performance. However, setting it too large will cause OOM. So if you encounter OOM when using sleep mode. Try reducing the chunk size. It is recommended to define the chunk size as a power of 2.

@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 import requests
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
@@ -14,7 +14,7 @@ MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.fixture(scope="module")
-def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
+def server():
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -24,12 +24,6 @@ def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
         "--enforce-eager",
         "--max-num-seqs",
         "128",
-        # lora config
-        "--enable-lora",
-        "--lora-modules",
-        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
-        "--max-lora-rank",
-        "64",
         "--enable-tokenizer-info-endpoint",
     ]
 
@@ -38,10 +32,8 @@ def server(zephyr_lora_added_tokens_files: str):  # noqa: F811
 
 
 @pytest.fixture(scope="module")
-def tokenizer_name(model_name: str,
-                   zephyr_lora_added_tokens_files: str):  # noqa: F811
-    return zephyr_lora_added_tokens_files if (
-        model_name == "zephyr-lora2") else model_name
+def tokenizer_name(model_name: str):
+    return model_name
 
 
 @pytest_asyncio.fixture
@@ -53,7 +45,7 @@ async def client(server):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_tokenize_completions(
@@ -61,19 +53,20 @@ async def test_tokenize_completions(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
-                              tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     for add_special in [False, True]:
         prompt = "vllm1 This is a test prompt."
         tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
 
-        response = requests.post(server.url_for("tokenize"),
-                                 json={
-                                     "add_special_tokens": add_special,
-                                     "model": model_name,
-                                     "prompt": prompt
-                                 })
+        response = requests.post(
+            server.url_for("tokenize"),
+            json={
+                "add_special_tokens": add_special,
+                "model": model_name,
+                "prompt": prompt,
+            },
+        )
         response.raise_for_status()
 
         result = response.json()
@@ -86,7 +79,7 @@ async def test_tokenize_completions(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_tokenize_chat(
@@ -94,48 +87,39 @@ async def test_tokenize_chat(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
-                              tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     for add_generation in [False, True]:
         for add_special in [False, True]:
-            conversation = [{
-                "role": "user",
-                "content": "Hi there!"
-            }, {
-                "role": "assistant",
-                "content": "Nice to meet you!"
-            }, {
-                "role": "user",
-                "content": "Can I ask a question? vllm1"
-            }]
+            conversation = [
+                {"role": "user", "content": "Hi there!"},
+                {"role": "assistant", "content": "Nice to meet you!"},
+                {"role": "user", "content": "Can I ask a question? vllm1"},
+            ]
             for continue_final in [False, True]:
                 if add_generation and continue_final:
                     continue
                 if continue_final:
-                    conversation.append({
-                        "role": "assistant",
-                        "content": "Sure,"
-                    })
+                    conversation.append({"role": "assistant", "content": "Sure,"})
 
                 prompt = tokenizer.apply_chat_template(
                     add_generation_prompt=add_generation,
                     continue_final_message=continue_final,
                     conversation=conversation,
-                    tokenize=False)
-                tokens = tokenizer.encode(prompt,
-                                          add_special_tokens=add_special)
+                    tokenize=False,
+                )
+                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
 
-                response = requests.post(server.url_for("tokenize"),
-                                         json={
-                                             "add_generation_prompt":
-                                             add_generation,
-                                             "continue_final_message":
-                                             continue_final,
-                                             "add_special_tokens": add_special,
-                                             "messages": conversation,
-                                             "model": model_name
-                                         })
+                response = requests.post(
+                    server.url_for("tokenize"),
+                    json={
+                        "add_generation_prompt": add_generation,
+                        "continue_final_message": continue_final,
+                        "add_special_tokens": add_special,
+                        "messages": conversation,
+                        "model": model_name,
+                    },
+                )
                 response.raise_for_status()
 
                 result = response.json()
@@ -148,7 +132,7 @@ async def test_tokenize_chat(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_tokenize_chat_with_tools(
@@ -156,41 +140,35 @@ async def test_tokenize_chat_with_tools(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
-                              tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     for add_generation in [False, True]:
         for add_special in [False, True]:
-            conversation = [{
-                "role":
-                "user",
-                "content":
-                "What's the weather like in Paris today?",
-            }]
+            conversation = [
+                {
+                    "role": "user",
+                    "content": "What's the weather like in Paris today?",
+                }
+            ]
 
-            tools = [{
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "location": {
-                                "type": "string"
-                            }
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"location": {"type": "string"}},
                         },
                     },
-                },
-            }]
+                }
+            ]
 
             for continue_final in [False, True]:
                 if add_generation and continue_final:
                     continue
                 if continue_final:
-                    conversation.append({
-                        "role": "assistant",
-                        "content": "Sure,"
-                    })
+                    conversation.append({"role": "assistant", "content": "Sure,"})
 
                 prompt = tokenizer.apply_chat_template(
                     add_generation_prompt=add_generation,
@@ -199,8 +177,7 @@ async def test_tokenize_chat_with_tools(
                     tools=tools,
                     tokenize=False,
                 )
-                tokens = tokenizer.encode(prompt,
-                                          add_special_tokens=add_special)
+                tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
 
                 response = requests.post(
                     server.url_for("tokenize"),
@@ -225,7 +202,7 @@ async def test_tokenize_chat_with_tools(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name, tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_tokenize_with_return_token_strs(
@@ -233,17 +210,12 @@ async def test_tokenize_with_return_token_strs(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
-                              tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     prompt = "This is a token_strs test prompt! vllm1"
     response = requests.post(
         server.url_for("tokenize"),
-        json={
-            "prompt": prompt,
-            "model": model_name,
-            "return_token_strs": True
-        },
+        json={"prompt": prompt, "model": model_name, "return_token_strs": True},
     )
     response.raise_for_status()
 
@@ -260,7 +232,7 @@ async def test_tokenize_with_return_token_strs(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_detokenize(
@@ -268,17 +240,14 @@ async def test_detokenize(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
-                              tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     prompt = "This is a test prompt. vllm1"
     tokens = tokenizer.encode(prompt, add_special_tokens=False)
 
-    response = requests.post(server.url_for("detokenize"),
-                             json={
-                                 "model": model_name,
-                                 "tokens": tokens
-                             })
+    response = requests.post(
+        server.url_for("detokenize"), json={"model": model_name, "tokens": tokens}
+    )
     response.raise_for_status()
 
     assert response.json() == {"prompt": prompt}
@@ -287,7 +256,7 @@ async def test_detokenize(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name,tokenizer_name",
-    [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
+    [(MODEL_NAME, MODEL_NAME)],
     indirect=["tokenizer_name"],
 )
 async def test_tokenizer_info_basic(
@@ -327,14 +296,15 @@ async def test_tokenizer_info_schema(server: RemoteOpenAIServer):
     }
     for field, expected_type in field_types.items():
         if field in result and result[field] is not None:
-            assert isinstance(
-                result[field],
-                expected_type), (f"{field} should be {expected_type.__name__}")
+            assert isinstance(result[field], expected_type), (
+                f"{field} should be {expected_type.__name__}"
+            )
 
 
 @pytest.mark.asyncio
 async def test_tokenizer_info_added_tokens_structure(
-    server: RemoteOpenAIServer, ):
+    server: RemoteOpenAIServer,
+):
     """Test added_tokens_decoder structure if present."""
     response = requests.get(server.url_for("tokenizer_info"))
     response.raise_for_status()
@@ -345,25 +315,23 @@ async def test_tokenizer_info_added_tokens_structure(
             assert isinstance(token_id, str), "Token IDs should be strings"
             assert isinstance(token_info, dict), "Token info should be a dict"
             assert "content" in token_info, "Token info should have content"
-            assert "special" in token_info, (
-                "Token info should have special flag")
-            assert isinstance(token_info["special"],
-                              bool), ("Special flag should be boolean")
+            assert "special" in token_info, "Token info should have special flag"
+            assert isinstance(token_info["special"], bool), (
+                "Special flag should be boolean"
+            )
 
 
 @pytest.mark.asyncio
 async def test_tokenizer_info_consistency_with_tokenize(
-    server: RemoteOpenAIServer, ):
+    server: RemoteOpenAIServer,
+):
     """Test that tokenizer info is consistent with tokenization endpoint."""
     info_response = requests.get(server.url_for("tokenizer_info"))
     info_response.raise_for_status()
     info = info_response.json()
     tokenize_response = requests.post(
         server.url_for("tokenize"),
-        json={
-            "model": MODEL_NAME,
-            "prompt": "Hello world!"
-        },
+        json={"model": MODEL_NAME, "prompt": "Hello world!"},
     )
     tokenize_response.raise_for_status()
     tokenize_result = tokenize_response.json()
@@ -371,7 +339,8 @@ async def test_tokenizer_info_consistency_with_tokenize(
     tokenize_max_len = tokenize_result.get("max_model_len")
     if info_max_len and tokenize_max_len:
         assert info_max_len >= tokenize_max_len, (
-            "Info max length should be >= tokenize max length")
+            "Info max length should be >= tokenize max length"
+        )
 
 
 @pytest.mark.asyncio
@@ -382,6 +351,5 @@ async def test_tokenizer_info_chat_template(server: RemoteOpenAIServer):
     result = response.json()
     chat_template = result.get("chat_template")
     if chat_template:
-        assert isinstance(chat_template,
-                          str), ("Chat template should be a string")
+        assert isinstance(chat_template, str), "Chat template should be a string"
         assert chat_template.strip(), "Chat template should not be empty"

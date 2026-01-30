@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Generic, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
 
 import torch
 from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
 
 if TYPE_CHECKING:
-    from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalInputs,
-                                        MultiModalUUIDDict)
+    from vllm.multimodal.inputs import (
+        MultiModalDataDict,
+        MultiModalInputs,
+        MultiModalUUIDDict,
+    )
+else:
+    MultiModalDataDict = object
+    MultiModalInputs = object
+    MultiModalUUIDDict = object
 
 
 class TextPrompt(TypedDict):
@@ -17,13 +24,13 @@ class TextPrompt(TypedDict):
     prompt: str
     """The input text to be tokenized before passing to the model."""
 
-    multi_modal_data: NotRequired["MultiModalDataDict"]
+    multi_modal_data: NotRequired[MultiModalDataDict | None]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
 
-    mm_processor_kwargs: NotRequired[dict[str, Any]]
+    mm_processor_kwargs: NotRequired[dict[str, Any] | None]
     """
     Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
@@ -31,7 +38,7 @@ class TextPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
-    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
+    multi_modal_uuids: NotRequired[MultiModalUUIDDict]
     """
     Optional user-specified UUIDs for multimodal items, mapped by modality.
     Lists must match the number of items per modality and may contain `None`.
@@ -52,16 +59,19 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: list[int]
     """A list of token IDs to pass to the model."""
 
+    prompt: NotRequired[str]
+    """The prompt text corresponding to the token IDs, if available."""
+
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
-    multi_modal_data: NotRequired["MultiModalDataDict"]
+    multi_modal_data: NotRequired[MultiModalDataDict | None]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
 
-    mm_processor_kwargs: NotRequired[dict[str, Any]]
+    mm_processor_kwargs: NotRequired[dict[str, Any] | None]
     """
     Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
@@ -69,7 +79,7 @@ class TokensPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
-    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
+    multi_modal_uuids: NotRequired[MultiModalUUIDDict]
     """
     Optional user-specified UUIDs for multimodal items, mapped by modality.
     Lists must match the number of items per modality and may contain `None`.
@@ -105,7 +115,7 @@ class DataPrompt(TypedDict):
     """The input data format"""
 
 
-SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
+SingletonPrompt: TypeAlias = str | TextPrompt | TokensPrompt | EmbedsPrompt
 """
 Set of possible schemas for a single prompt:
 
@@ -131,23 +141,27 @@ more than one prompt, i.e.
 
 
 def is_tokens_prompt(prompt: SingletonPrompt) -> TypeIs[TokensPrompt]:
-    return (isinstance(prompt, dict) and "prompt_token_ids" in prompt
-            and "prompt_embeds" not in prompt)
+    return (
+        isinstance(prompt, dict)
+        and "prompt_token_ids" in prompt
+        and "prompt_embeds" not in prompt
+    )
 
 
 def is_embeds_prompt(prompt: SingletonPrompt) -> TypeIs[EmbedsPrompt]:
-    return (isinstance(prompt, dict) and "prompt_token_ids" not in prompt
-            and "prompt_embeds" in prompt)
+    return (
+        isinstance(prompt, dict)
+        and "prompt_token_ids" not in prompt
+        and "prompt_embeds" in prompt
+    )
 
 
-_T1_co = TypeVar("_T1_co",
-                 bound=SingletonPrompt,
-                 default=SingletonPrompt,
-                 covariant=True)
-_T2_co = TypeVar("_T2_co",
-                 bound=SingletonPrompt,
-                 default=SingletonPrompt,
-                 covariant=True)
+_T1_co = TypeVar(
+    "_T1_co", bound=SingletonPrompt, default=SingletonPrompt, covariant=True
+)
+_T2_co = TypeVar(
+    "_T2_co", bound=SingletonPrompt, default=SingletonPrompt, covariant=True
+)
 
 
 # TODO: Make fields ReadOnly once mypy supports it
@@ -175,12 +189,12 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
 
     encoder_prompt: _T1_co
 
-    decoder_prompt: Optional[_T2_co]
+    decoder_prompt: _T2_co | None
 
     mm_processor_kwargs: NotRequired[dict[str, Any]]
 
 
-PromptType = Union[SingletonPrompt, ExplicitEncoderDecoderPrompt]
+PromptType: TypeAlias = SingletonPrompt | ExplicitEncoderDecoderPrompt
 """
 Set of possible schemas for an LLM input, including
 both decoder-only and encoder/decoder input types:
@@ -202,11 +216,6 @@ class TokenInputs(TypedDict):
     prompt_token_ids: list[int]
     """The token IDs of the prompt."""
 
-    prompt: NotRequired[str]
-    """
-    The original prompt text corresponding to the token IDs, if available.
-    """
-
     cache_salt: NotRequired[str]
     """
     Optional cache salt to be used for prefix caching.
@@ -215,15 +224,12 @@ class TokenInputs(TypedDict):
 
 def token_inputs(
     prompt_token_ids: list[int],
-    prompt: Optional[str] = None,
-    cache_salt: Optional[str] = None,
+    cache_salt: str | None = None,
 ) -> TokenInputs:
     """Construct [`TokenInputs`][vllm.inputs.data.TokenInputs] from optional
     values."""
     inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
 
-    if prompt is not None:
-        inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
 
@@ -247,7 +253,7 @@ class EmbedsInputs(TypedDict):
 
 def embeds_inputs(
     prompt_embeds: torch.Tensor,
-    cache_salt: Optional[str] = None,
+    cache_salt: str | None = None,
 ) -> EmbedsInputs:
     """Construct [`EmbedsInputs`][vllm.inputs.data.EmbedsInputs] from optional
     values."""
@@ -259,7 +265,7 @@ def embeds_inputs(
     return inputs
 
 
-DecoderOnlyInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
+DecoderOnlyInputs: TypeAlias = TokenInputs | EmbedsInputs | MultiModalInputs
 """
 The inputs in [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] before they are
 passed to the model executor.
@@ -275,20 +281,20 @@ class EncoderDecoderInputs(TypedDict):
     This specifies the required data for encoder-decoder models.
     """
 
-    encoder: Union[TokenInputs, "MultiModalInputs"]
+    encoder: TokenInputs | MultiModalInputs
     """The inputs for the encoder portion."""
 
-    decoder: Union[TokenInputs, "MultiModalInputs"]
+    decoder: TokenInputs | MultiModalInputs
     """The inputs for the decoder portion."""
 
 
-SingletonInputs = Union[TokenInputs, EmbedsInputs, "MultiModalInputs"]
+SingletonInputs: TypeAlias = TokenInputs | EmbedsInputs | MultiModalInputs
 """
-A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be 
-passed to [`vllm.sequence.Sequence`][].
+A processed [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt] which can be
+passed to [`Sequence`][collections.abc.Sequence].
 """
 
-ProcessorInputs = Union[DecoderOnlyInputs, EncoderDecoderInputs]
+ProcessorInputs: TypeAlias = DecoderOnlyInputs | EncoderDecoderInputs
 """
 The outputs from [`vllm.inputs.preprocess.InputPreprocessor`][].
 """
@@ -299,8 +305,8 @@ _T2 = TypeVar("_T2", bound=SingletonPrompt, default=SingletonPrompt)
 
 def build_explicit_enc_dec_prompt(
     encoder_prompt: _T1,
-    decoder_prompt: Optional[_T2],
-    mm_processor_kwargs: Optional[dict[str, Any]] = None,
+    decoder_prompt: _T2 | None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> ExplicitEncoderDecoderPrompt[_T1, _T2]:
     if mm_processor_kwargs is None:
         mm_processor_kwargs = {}
@@ -313,16 +319,15 @@ def build_explicit_enc_dec_prompt(
 
 def zip_enc_dec_prompts(
     enc_prompts: Iterable[_T1],
-    dec_prompts: Iterable[Optional[_T2]],
-    mm_processor_kwargs: Optional[Union[Iterable[dict[str, Any]],
-                                        dict[str, Any]]] = None,
+    dec_prompts: Iterable[_T2 | None],
+    mm_processor_kwargs: Iterable[dict[str, Any]] | dict[str, Any] | None = None,
 ) -> list[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
     """
     Zip encoder and decoder prompts together into a list of
     [`ExplicitEncoderDecoderPrompt`][vllm.inputs.data.ExplicitEncoderDecoderPrompt]
     instances.
 
-    ``mm_processor_kwargs`` may also be provided; if a dict is passed, the same
+    `mm_processor_kwargs` may also be provided; if a dict is passed, the same
     dictionary will be used for every encoder/decoder prompt. If an iterable is
     provided, it will be zipped with the encoder/decoder prompts.
     """
@@ -334,20 +339,21 @@ def zip_enc_dec_prompts(
                 encoder_prompt,
                 decoder_prompt,
                 cast(dict[str, Any], mm_processor_kwargs),
-            ) for (encoder_prompt,
-                   decoder_prompt) in zip(enc_prompts, dec_prompts)
+            )
+            for (encoder_prompt, decoder_prompt) in zip(enc_prompts, dec_prompts)
         ]
     return [
-        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt,
-                                      mm_proc_kwargs)
-        for (encoder_prompt, decoder_prompt, mm_proc_kwargs
-             ) in zip(enc_prompts, dec_prompts, mm_processor_kwargs)
+        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt, mm_proc_kwargs)
+        for (encoder_prompt, decoder_prompt, mm_proc_kwargs) in zip(
+            enc_prompts, dec_prompts, mm_processor_kwargs
+        )
     ]
 
 
 def to_enc_dec_tuple_list(
     enc_dec_prompts: Iterable[ExplicitEncoderDecoderPrompt[_T1, _T2]],
-) -> list[tuple[_T1, Optional[_T2]]]:
-    return [(enc_dec_prompt["encoder_prompt"],
-             enc_dec_prompt["decoder_prompt"])
-            for enc_dec_prompt in enc_dec_prompts]
+) -> list[tuple[_T1, _T2 | None]]:
+    return [
+        (enc_dec_prompt["encoder_prompt"], enc_dec_prompt["decoder_prompt"])
+        for enc_dec_prompt in enc_dec_prompts
+    ]

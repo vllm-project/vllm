@@ -62,17 +62,17 @@ If a single node lacks sufficient GPUs to hold the model, deploy vLLM across mul
 
 ### What is Ray?
 
-Ray is a distributed computing framework for scaling Python programs. Multi-node vLLM deployments require Ray as the runtime engine.
+Ray is a distributed computing framework for scaling Python programs. Multi-node vLLM deployments can use Ray as the runtime engine.
 
 vLLM uses Ray to manage the distributed execution of tasks across multiple nodes and control where execution happens.
 
-Ray also offers high-level APIs for large-scale [offline batch inference](https://docs.ray.io/en/latest/data/working-with-llms.html) and [online serving](https://docs.ray.io/en/latest/serve/llm/serving-llms.html) that can leverage vLLM as the engine. These APIs add production-grade fault tolerance, scaling, and distributed observability to vLLM workloads.
+Ray also offers high-level APIs for large-scale [offline batch inference](https://docs.ray.io/en/latest/data/working-with-llms.html) and [online serving](https://docs.ray.io/en/latest/serve/llm) that can leverage vLLM as the engine. These APIs add production-grade fault tolerance, scaling, and distributed observability to vLLM workloads.
 
 For details, see the [Ray documentation](https://docs.ray.io/en/latest/index.html).
 
 ### Ray cluster setup with containers
 
-The helper script <gh-file:examples/online_serving/run_cluster.sh> starts containers across nodes and initializes Ray. By default, the script runs Docker without administrative privileges, which prevents access to the GPU performance counters when profiling or tracing. To enable admin privileges, add the `--cap-add=CAP_SYS_ADMIN` flag to the Docker command.
+The helper script [examples/online_serving/run_cluster.sh](../../examples/online_serving/run_cluster.sh) starts containers across nodes and initializes Ray. By default, the script runs Docker without administrative privileges, which prevents access to the GPU performance counters when profiling or tracing. To enable admin privileges, add the `--cap-add=CAP_SYS_ADMIN` flag to the Docker command.
 
 Choose one node as the head node and run:
 
@@ -104,7 +104,7 @@ Note that `VLLM_HOST_IP` is unique for each worker. Keep the shells running thes
 From any node, enter a container and run `ray status` and `ray list nodes` to verify that Ray finds the expected number of nodes and GPUs.
 
 !!! tip
-    Alternatively, set up the Ray cluster using KubeRay. For more information, see [KubeRay vLLM documentation](https://docs.ray.io/en/latest/cluster/kubernetes/examples/vllm-rayservice.html).
+    Alternatively, set up the Ray cluster using KubeRay. For more information, see [KubeRay vLLM documentation](https://docs.ray.io/en/latest/cluster/kubernetes/examples/rayserve-llm-example.html).
 
 ### Running vLLM on a Ray cluster
 
@@ -118,21 +118,45 @@ The common practice is to set the tensor parallel size to the number of GPUs in 
 ```bash
 vllm serve /path/to/the/model/in/the/container \
     --tensor-parallel-size 8 \
-    --pipeline-parallel-size 2
+    --pipeline-parallel-size 2 \
+    --distributed-executor-backend ray
 ```
 
 Alternatively, you can set `tensor_parallel_size` to the total number of GPUs in the cluster:
 
 ```bash
 vllm serve /path/to/the/model/in/the/container \
-     --tensor-parallel-size 16
+     --tensor-parallel-size 16 \
+     --distributed-executor-backend ray
+```
+
+### Running vLLM with MultiProcessing
+
+Besides Ray, Multi-node vLLM deployments can also use `multiprocessing` as the runtime engine. Here's an example to deploy model across 2 nodes (8 GPUs per node) with `tp_size=8` and `pp_size=2`.
+
+Choose one node as the head node and run:
+
+```bash
+vllm serve /path/to/the/model/in/the/container \
+  --tensor-parallel-size 8 --pipeline-parallel-size 2 \
+  --nnodes 2 --node-rank 0 \
+  --master-addr <HEAD_NODE_IP>
+```
+
+On the other worker node, run:
+
+```bash
+vllm serve /path/to/the/model/in/the/container \
+  --tensor-parallel-size 8 --pipeline-parallel-size 2 \
+  --nnodes 2 --node-rank 1 \
+  --master-addr <HEAD_NODE_IP> --headless
 ```
 
 ## Optimizing network communication for tensor parallelism
 
-Efficient tensor parallelism requires fast inter-node communication, preferably through high-speed network adapters such as InfiniBand.
+Efficient tensor parallelism requires fast internode communication, preferably through high-speed network adapters such as InfiniBand.
 To set up the cluster to use InfiniBand, append additional arguments like `--privileged -e NCCL_IB_HCA=mlx5` to the
-<gh-file:examples/online_serving/run_cluster.sh> helper script.
+[examples/online_serving/run_cluster.sh](../../examples/online_serving/run_cluster.sh) helper script.
 Contact your system administrator for more information about the required flags.
 
 ## Enabling GPUDirect RDMA

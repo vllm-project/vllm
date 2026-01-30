@@ -3,7 +3,6 @@
 
 import operator
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -26,16 +25,15 @@ class FixFunctionalizationPass(VllmInductorPass):
     To add new nodes to defunctionalize, add to the if-elif chain in __call__.
     """
 
-    def __call__(self, graph: torch.fx.Graph):
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: torch.fx.Graph) -> None:
         # XPU does not support auto-functionalization yet.
         # Will enable this when switch to vllm-xpu-kernels.
         if current_platform.is_xpu():
-            logger.debug("XPU platform does not support fix functionalization"
-                         "pass currently.")
+            logger.debug(
+                "XPU platform does not support fix functionalizationpass currently."
+            )
             return
-
-        self.begin()
-        self.dump_graph(graph, "before_fix_functionalization")
 
         self.nodes_to_remove: list[torch.fx.Node] = []
         count = 0
@@ -47,84 +45,141 @@ class FixFunctionalizationPass(VllmInductorPass):
             at_target = node.args[0]
 
             if at_target == torch.ops._C.rotary_embedding.default:
-                query = kwargs['query']
-                mm_node = query.args[0].args[0]
+                query = kwargs["query"]
+                key = kwargs["key"]
+                getitem_nodes = self.getitem_users(node)
 
-                # rotary_embedding is a special case: the two mutating inputs
-                # are query and key, which are slices of mm_node.
-                # While functionalized, results at[1] and at[2] are scattered
-                # back into mm_node. After de-functionalization, we can just
-                # use mm_node directly.
-                for idx, user in self.getitem_users(node).items():
-                    for user_of_getitem in user.users:
-                        if is_func(user_of_getitem,
-                                   torch.ops.aten.slice_scatter.default):
-                            user_of_getitem.replace_all_uses_with(mm_node)
-                            self._remove(user_of_getitem)
-                    self._remove(user)
+                if (
+                    is_func(query, operator.getitem)
+                    and is_func(key, operator.getitem)
+                    and query.args[0] == key.args[0]
+                    and is_func(query.args[0], torch.ops.aten.split_with_sizes.default)
+                    and all(
+                        is_func(user, torch.ops.aten.slice_scatter.default)
+                        for getitem_node in getitem_nodes.values()
+                        for user in getitem_node.users
+                    )
+                ):
+                    # Pattern where query and key are slices of an mm_node.
+                    # While functionalized, results at [1] and [2] are scattered
+                    # back into mm_node. So after de-functionalization, we can
+                    # just use mm_node directly.
 
-                self.insert_defunctionalized(graph, node)
-                self._remove(node)
+                    mm_node = query.args[0].args[0]
+                    for user in getitem_nodes.values():
+                        for user_of_getitem in user.users:
+                            if is_func(
+                                user_of_getitem, torch.ops.aten.slice_scatter.default
+                            ):
+                                user_of_getitem.replace_all_uses_with(mm_node)
+                                self._remove(user_of_getitem)
+                        self._remove(user)
+
+                    self.insert_defunctionalized(graph, node)
+                    self._remove(node)
+
+                else:
+                    # Directly replace the auto_functionalize(rotary_embedding)
+                    # with the inplace rotary_embedding. In theory, we shouldn't
+                    # do this blindly, but in practice in vLLM it's ok. The best
+                    # solution is to use auto_functionalization_v2 and then use
+                    # inductor's builtin defunctionalization (reinplacing) pass.
+                    mutated_args = {1: "query", 2: "key"}
+                    self.defunctionalize(graph, node, mutated_args)
 
             # rms_norm replacements avoid the most copies for LLaMa.
             elif at_target == torch.ops._C.fused_add_rms_norm.default:
-                mutated_args = {1: 'input', 2: 'residual'}
+                mutated_args = {1: "input", 2: "residual"}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target == torch.ops._C.fused_add_rms_norm_static_fp8_quant.default:  # noqa: E501
-                mutated_args = {1: 'result', 2: 'residual'}
+                mutated_args = {1: "result", 2: "residual"}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target == torch.ops._C.rms_norm_dynamic_per_token_quant.default:  # noqa: E501
-                mutated_args = {1: 'result', 2: 'scale', 3: 'residual'}
+                mutated_args = {1: "result", 2: "scale", 3: "residual"}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target in [
-                    torch.ops._C.rms_norm.default,
-                    torch.ops._C.rms_norm_static_fp8_quant.default,
+                torch.ops._C.rms_norm.default,
+                torch.ops._C.rms_norm_static_fp8_quant.default,
             ]:
-                mutated_args = {1: 'result'}
+                mutated_args = {1: "result"}
+                self.defunctionalize(graph, node, mutated_args)
+            elif (
+                hasattr(torch.ops.vllm, "flashinfer_trtllm_fused_allreduce_norm")
+                and at_target
+                == torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
+            ):
+                mutated_args = {
+                    1: "allreduce_in",
+                    2: "residual",
+                    3: "norm_out",
+                    4: "quant_out",
+                    5: "scale_out",
+                }
                 self.defunctionalize(graph, node, mutated_args)
             # For some reason we need to specify the args for both
             # silu_and_mul and silu_and_mul_quant. The kwargs
             # pathway gets the wrong answer.
             elif at_target == torch.ops._C.silu_and_mul.default:
-                mutated_args = {1: 'result'}
-                self.defunctionalize(graph,
-                                     node,
-                                     mutated_args,
-                                     args=('result', 'input'))
+                mutated_args = {1: "result"}
+                self.defunctionalize(
+                    graph, node, mutated_args, args=("result", "input")
+                )
             elif at_target == torch.ops._C.silu_and_mul_quant.default:
-                mutated_args = {1: 'result'}
-                self.defunctionalize(graph,
-                                     node,
-                                     mutated_args,
-                                     args=('result', 'input', 'scale'))
-            elif hasattr(
-                    torch.ops._C, "silu_and_mul_nvfp4_quant"
-            ) and at_target == torch.ops._C.silu_and_mul_nvfp4_quant.default:
-                mutated_args = {1: 'result', 2: 'result_block_scale'}
-                self.defunctionalize(graph,
-                                     node,
-                                     mutated_args,
-                                     args=('result', 'result_block_scale',
-                                           'input', 'input_global_scale'))
+                mutated_args = {1: "result"}
+                self.defunctionalize(
+                    graph, node, mutated_args, args=("result", "input", "scale")
+                )
+            elif (
+                hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant")
+                and at_target == torch.ops._C.silu_and_mul_nvfp4_quant.default
+            ):
+                mutated_args = {1: "result", 2: "result_block_scale"}
+                self.defunctionalize(
+                    graph,
+                    node,
+                    mutated_args,
+                    args=(
+                        "result",
+                        "result_block_scale",
+                        "input",
+                        "input_global_scale",
+                    ),
+                )
+            # Defunctionalize fused_qk_norm_rope to remove higher-order wrapper.
+            elif at_target == torch.ops._C.fused_qk_norm_rope.default:
+                mutated_args = {1: "qkv"}
+                args = (
+                    "qkv",
+                    "num_heads_q",
+                    "num_heads_k",
+                    "num_heads_v",
+                    "head_dim",
+                    "eps",
+                    "q_weight",
+                    "k_weight",
+                    "cos_sin_cache",
+                    "is_neox",
+                    "position_ids",
+                )
+                self.defunctionalize(graph, node, mutated_args=mutated_args, args=args)
             else:
                 continue  # skip the count
 
             count += 1
 
-        self.dump_graph(graph, "before_fix_functionalization_cleanup")
+        self.dump_graph(graph, "before_cleanup")
 
         # Remove the nodes all at once
         count_removed = len(self.nodes_to_remove)
         for node in self.nodes_to_remove:
             graph.erase_node(node)
 
-        logger.debug("De-functionalized %s nodes, removed %s nodes", count,
-                     count_removed)
-        self.dump_graph(graph, "after_fix_functionalization")
-        self.end_and_log()
+        logger.debug(
+            "De-functionalized %s nodes, removed %s nodes", count, count_removed
+        )
+        self.nodes_to_remove.clear()
 
-    def _remove(self, node_or_nodes: Union[torch.fx.Node,
-                                           Iterable[torch.fx.Node]]):
+    def _remove(self, node_or_nodes: torch.fx.Node | Iterable[torch.fx.Node]) -> None:
         """
         Stage a node (or nodes) for removal at the end of the pass.
         """
@@ -133,12 +188,13 @@ class FixFunctionalizationPass(VllmInductorPass):
         else:
             self.nodes_to_remove.extend(node_or_nodes)
 
-    def defunctionalize(self,
-                        graph: torch.fx.Graph,
-                        node: torch.fx.Node,
-                        mutated_args: dict[int, Union[torch.fx.Node, str]],
-                        args: Optional[tuple[Union[torch.fx.Node, str],
-                                             ...]] = None):
+    def defunctionalize(
+        self,
+        graph: torch.fx.Graph,
+        node: torch.fx.Node,
+        mutated_args: dict[int, torch.fx.Node | str],
+        args: tuple[torch.fx.Node | str, ...] | None = None,
+    ) -> None:
         """
         De-functionalize a node by replacing it with a call to the original.
         It also replaces the getitem users with the mutated arguments.
@@ -148,10 +204,9 @@ class FixFunctionalizationPass(VllmInductorPass):
         self.insert_defunctionalized(graph, node, args=args)
         self._remove(node)
 
-    def replace_users_with_mutated_args(self, node: torch.fx.Node,
-                                        mutated_args: dict[int,
-                                                           Union[torch.fx.Node,
-                                                                 str]]):
+    def replace_users_with_mutated_args(
+        self, node: torch.fx.Node, mutated_args: dict[int, torch.fx.Node | str]
+    ) -> None:
         """
         Replace all getitem users of the auto-functionalized node with the
         mutated arguments.
@@ -177,11 +232,12 @@ class FixFunctionalizationPass(VllmInductorPass):
                 users[idx] = user
         return users
 
-    def insert_defunctionalized(self,
-                                graph: torch.fx.Graph,
-                                node: torch.fx.Node,
-                                args: Optional[tuple[Union[torch.fx.Node, str],
-                                                     ...]] = None):
+    def insert_defunctionalized(
+        self,
+        graph: torch.fx.Graph,
+        node: torch.fx.Node,
+        args: tuple[torch.fx.Node | str, ...] | None = None,
+    ) -> None:
         """
         Insert a new defunctionalized node into the graph before node.
         If one of the kwargs is 'out', provide args directly,
@@ -193,8 +249,9 @@ class FixFunctionalizationPass(VllmInductorPass):
         :param args: If we cannot use kwargs, specify args directly.
         If an arg is a string, `node.kwargs[arg]` is used.
         """  # noqa: E501
-        assert is_func(node, auto_functionalized), \
+        assert is_func(node, auto_functionalized), (
             f"node must be auto-functionalized, is {node} instead"
+        )
 
         # Create a new call to the original function
         with graph.inserting_before(node):
@@ -203,6 +260,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                 graph.call_function(function, kwargs=node.kwargs)
             else:
                 # Args passed as strings refer to items in node.kwargs
-                args = tuple(node.kwargs[arg] if isinstance(arg, str) else arg
-                             for arg in args)
+                args = tuple(
+                    node.kwargs[arg] if isinstance(arg, str) else arg for arg in args
+                )
                 graph.call_function(function, args=args)

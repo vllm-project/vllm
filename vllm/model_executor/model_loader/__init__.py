@@ -1,25 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Literal, Optional
+from typing import Literal
 
 from torch import nn
 
-from vllm.config import LoadConfig, ModelConfig, VllmConfig
+from vllm.config import ModelConfig, VllmConfig
+from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.model_executor.model_loader.bitsandbytes_loader import (
-    BitsAndBytesModelLoader)
+from vllm.model_executor.model_loader.bitsandbytes_loader import BitsAndBytesModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
 from vllm.model_executor.model_loader.gguf_loader import GGUFModelLoader
 from vllm.model_executor.model_loader.runai_streamer_loader import (
-    RunaiModelStreamerLoader)
-from vllm.model_executor.model_loader.sharded_state_loader import (
-    ShardedStateLoader)
+    RunaiModelStreamerLoader,
+)
+from vllm.model_executor.model_loader.sharded_state_loader import ShardedStateLoader
 from vllm.model_executor.model_loader.tensorizer_loader import TensorizerLoader
 from vllm.model_executor.model_loader.utils import (
-    get_architecture_class_name, get_model_architecture, get_model_cls)
+    get_architecture_class_name,
+    get_model_architecture,
+    get_model_cls,
+)
 
 logger = init_logger(__name__)
 
@@ -27,6 +30,7 @@ logger = init_logger(__name__)
 # if a new load format is added here
 LoadFormats = Literal[
     "auto",
+    "hf",
     "bitsandbytes",
     "dummy",
     "fastsafetensors",
@@ -42,6 +46,7 @@ LoadFormats = Literal[
 ]
 _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "auto": DefaultModelLoader,
+    "hf": DefaultModelLoader,
     "bitsandbytes": BitsAndBytesModelLoader,
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
@@ -67,8 +72,11 @@ def register_model_loader(load_format: str):
         load_format (str): The model loader format name.
 
     Examples:
-        >>> from vllm.config import LoadConfig
-        >>> from vllm.model_executor.model_loader import get_model_loader, register_model_loader
+        >>> from vllm.config.load import LoadConfig
+        >>> from vllm.model_executor.model_loader import (
+        ...     get_model_loader,
+        ...     register_model_loader,
+        ... )
         >>> from vllm.model_executor.model_loader.base_loader import BaseModelLoader
         >>>
         >>> @register_model_loader("my_loader")
@@ -88,14 +96,20 @@ def register_model_loader(load_format: str):
         if load_format in _LOAD_FORMAT_TO_MODEL_LOADER:
             logger.warning(
                 "Load format `%s` is already registered, and will be "
-                "overwritten by the new loader class `%s`.", load_format,
-                model_loader_cls)
+                "overwritten by the new loader class `%s`.",
+                load_format,
+                model_loader_cls,
+            )
         if not issubclass(model_loader_cls, BaseModelLoader):
-            raise ValueError("The model loader must be a subclass of "
-                             "`BaseModelLoader`.")
+            raise ValueError(
+                "The model loader must be a subclass of `BaseModelLoader`."
+            )
         _LOAD_FORMAT_TO_MODEL_LOADER[load_format] = model_loader_cls
-        logger.info("Registered model loader `%s` with load format `%s`",
-                    model_loader_cls, load_format)
+        logger.info(
+            "Registered model loader `%s` with load format `%s`",
+            model_loader_cls,
+            load_format,
+        )
         return model_loader_cls
 
     return _wrapper
@@ -109,14 +123,18 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
     return _LOAD_FORMAT_TO_MODEL_LOADER[load_format](load_config)
 
 
-def get_model(*,
-              vllm_config: VllmConfig,
-              model_config: Optional[ModelConfig] = None) -> nn.Module:
+def get_model(
+    *,
+    vllm_config: VllmConfig,
+    model_config: ModelConfig | None = None,
+    prefix: str = "",
+) -> nn.Module:
     loader = get_model_loader(vllm_config.load_config)
     if model_config is None:
         model_config = vllm_config.model_config
-    return loader.load_model(vllm_config=vllm_config,
-                             model_config=model_config)
+    return loader.load_model(
+        vllm_config=vllm_config, model_config=model_config, prefix=prefix
+    )
 
 
 __all__ = [

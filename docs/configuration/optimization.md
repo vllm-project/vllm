@@ -7,7 +7,7 @@ This guide covers optimization strategies and performance tuning for vLLM V1.
 
 ## Preemption
 
-Due to the auto-regressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
+Due to the autoregressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
 In such cases, vLLM can preempt requests to free up KV cache space for other requests. Preempted requests are recomputed when sufficient KV cache space becomes
 available again. When this occurs, you may see the following warning:
 
@@ -27,15 +27,11 @@ You can monitor the number of preemption requests through Prometheus metrics exp
 
 In vLLM V1, the default preemption mode is `RECOMPUTE` rather than `SWAP`, as recomputation has lower overhead in the V1 architecture.
 
-[](){ #chunked-prefill }
-
 ## Chunked Prefill
 
 Chunked prefill allows vLLM to process large prefills in smaller chunks and batch them together with decode requests. This feature helps improve both throughput and latency by better balancing compute-bound (prefill) and memory-bound (decode) operations.
 
-In vLLM V1, **chunked prefill is always enabled by default**. This is different from vLLM V0, where it was conditionally enabled based on model characteristics.
-
-With chunked prefill enabled, the scheduling policy prioritizes decode requests. It batches all pending decode requests before scheduling any prefill operations. When there are available tokens in the `max_num_batched_tokens` budget, it schedules pending prefills. If a pending prefill request cannot fit into `max_num_batched_tokens`, it automatically chunks it.
+In V1, **chunked prefill is enabled by default whenever possible**. With chunked prefill enabled, the scheduling policy prioritizes decode requests. It batches all pending decode requests before scheduling any prefill operations. When there are available tokens in the `max_num_batched_tokens` budget, it schedules pending prefills. If a pending prefill request cannot fit into `max_num_batched_tokens`, it automatically chunks it.
 
 This policy has two benefits:
 
@@ -50,6 +46,10 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 - Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch.
 - For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
+
+!!! warning
+    When chunked prefill is disabled, `max_num_batched_tokens` must be greater than `max_model_len`.  
+    In that case, if `max_num_batched_tokens < max_model_len`, vLLM may crash at server start‑up.
 
 ```python
 from vllm import LLM
@@ -100,7 +100,7 @@ from vllm import LLM
 llm = LLM(
     model="meta-llama/Llama-3.3-70B-Instruct,
     tensor_parallel_size=4,
-    pipeline_parallel_size=2
+    pipeline_parallel_size=2,
 )
 ```
 
@@ -139,9 +139,9 @@ there is relatively little gain from TP. On the other hand, TP incurs significan
 overhead because of all-reduce being performed after every layer.
 
 Given this, it may be advantageous to instead shard the batched input data using TP, essentially
-performing batch-level DP. This has been shown to improve the throughput by around 10% for
+performing batch-level DP. This has been shown to improve the throughput and TTFT by around 10% for
 `tensor_parallel_size=8`. For vision encoders that use hardware-unoptimized Conv3D operations,
-batch-level DP can provide another 40% increase to throughput compared to regular TP.
+batch-level DP can provide another 40% improvement compared to regular TP.
 
 Nevertheless, since the weights of the multi-modal encoder are replicated across each TP rank,
 there will be a minor increase in memory consumption and may cause OOM if you can barely fit the model already.
@@ -172,14 +172,16 @@ Batch-level DP needs to be implemented on a per-model basis,
 and enabled by setting `supports_encoder_tp_data = True` in the model class.
 Regardless, you need to set `mm_encoder_tp_mode="data"` in engine arguments to use this feature.
 
-Known supported models:
+Known supported models (with corresponding benchmarks):
 
-- GLM-4.5V GLM-4.1V (<gh-pr:23168>)
-- Kimi-VL (<gh-pr:23817>)
-- Llama4 (<gh-pr:18368>)
-- MiniCPM-V-2.5 or above (<gh-pr:23327>, <gh-pr:23948>)
-- Qwen2.5-VL (<gh-pr:22742>)
-- Step3 (<gh-pr:22697>)
+- dots_ocr (<https://github.com/vllm-project/vllm/pull/25466>)
+- GLM-4.1V or above (<https://github.com/vllm-project/vllm/pull/23168>)
+- InternVL (<https://github.com/vllm-project/vllm/pull/23909>)
+- Kimi-VL (<https://github.com/vllm-project/vllm/pull/23817>)
+- Llama4 (<https://github.com/vllm-project/vllm/pull/18368>)
+- MiniCPM-V-2.5 or above (<https://github.com/vllm-project/vllm/pull/23327>, <https://github.com/vllm-project/vllm/pull/23948>)
+- Qwen2-VL or above (<https://github.com/vllm-project/vllm/pull/22742>, <https://github.com/vllm-project/vllm/pull/24955>, <https://github.com/vllm-project/vllm/pull/25445>)
+- Step3 (<https://github.com/vllm-project/vllm/pull/22697>)
 
 ## Input Processing
 
@@ -230,6 +232,20 @@ Multi-modal IPC caching is automatically enabled when
 there is a one-to-one correspondence between API (`P0`) and engine core (`P1`) processes,
 to avoid repeatedly transferring the same multi-modal inputs between them.
 
+#### Key-Replicated Cache
+
+By default, IPC caching uses a **key-replicated cache**, where cache keys exist
+in both the API (`P0`) and engine core (`P1`) processes, but the actual cache
+data resides only in `P1`.
+
+#### Shared Memory Cache
+
+When multiple worker processes are involved (e.g., when TP > 1), a
+**shared-memory cache** is more efficient. This can be enabled by setting
+`mm_processor_cache_type="shm"`. In this mode, cache keys are stored
+on `P0`, while the cache data itself lives in shared memory accessible by all
+processes.
+
 ### Configuration
 
 You can adjust the size of the cache by setting the value of `mm_processor_cache_gb` (default 4 GiB).
@@ -241,23 +257,42 @@ Examples:
 
 ```python
 # Use a larger cache
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_processor_cache_gb=8)
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    mm_processor_cache_gb=8,
+)
+
+# Use a shared-memory based IPC cache
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    tensor_parallel_size=2,
+    mm_processor_cache_type="shm",
+    mm_processor_cache_gb=8,
+)
 
 # Disable the cache
-llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          mm_processor_cache_gb=0)
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-3B-Instruct",
+    mm_processor_cache_gb=0,
+)
 ```
 
 ### Cache Placement
 
 Based on the configuration, the content of the multi-modal caches on `P0` and `P1` are as follows:
 
-| Processor Caching | IPC Caching | `P0` Cache | `P1` Cache | Max. Memory |
-|-------------------|-------------|------------|------------|-------------|
-| ✅ | ✅ | K | K + V | `mm_processor_cache_gb * data_parallel_size` |
-| ✅ | ❌ | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
-| ❌ | ❌ | N/A | N/A | `0` |
+| mm_processor_cache_type | Cache Type | `P0` Cache | `P1` Engine Cache | `P1` Worker Cache | Max. Memory |
+|-------------------|-------------|------------|------------|-------------|-------------|
+| lru | Processor Caching | K + V | N/A | N/A | `mm_processor_cache_gb * data_parallel_size` |
+| lru | Key-Replicated Caching | K | K + V | N/A | `mm_processor_cache_gb * api_server_count` |
+| shm | Shared Memory Caching | K | N/A | V | `mm_processor_cache_gb * api_server_count` |
+| N/A | Disabled | N/A | N/A | N/A | `0` |
 
-K: Stores the hashes of multi-modal items  
+K: Stores the hashes of multi-modal items
 V: Stores the processed tensor data of multi-modal items
+
+## Attention Backend Selection
+
+vLLM supports multiple attention backends optimized for different hardware and use cases. The backend is automatically selected based on your GPU architecture, model type, and configuration, but you can also manually specify one for optimal performance.
+
+For detailed information on available backends, their feature support, and how to configure them, see the [Attention Backend Feature Support](../design/attention_backends.md) documentation.

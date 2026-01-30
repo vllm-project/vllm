@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import random
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import pytest
 
 from vllm import LLM
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
+else:
+    VllmRunner = object
 
 MODEL = "facebook/opt-125m"
 DTYPE = "half"
@@ -21,12 +21,10 @@ DTYPE = "half"
 def _vllm_model(
     apc: bool,
     vllm_runner: type[VllmRunner],
-    monkeypatch: pytest.MonkeyPatch,
     *,
     skip_tokenizer_init: bool = False,
 ):
     """Set up VllmRunner instance."""
-    monkeypatch.setenv("VLLM_USE_V1", "1")
     return vllm_runner(
         MODEL,
         dtype=DTYPE,
@@ -43,17 +41,18 @@ def _vllm_model(
     # env var adjustment via monkeypatch
     scope="function",
     # Prefix caching
-    params=[False, True])
-def vllm_model(vllm_runner, request, monkeypatch):
+    params=[False, True],
+)
+def vllm_model(vllm_runner, request):
     """VllmRunner test fixture parameterized by APC True/False."""
-    with _vllm_model(request.param, vllm_runner, monkeypatch) as vllm_model:
+    with _vllm_model(request.param, vllm_runner) as vllm_model:
         yield vllm_model
 
 
 @pytest.fixture(scope="function")
-def vllm_model_apc(vllm_runner, monkeypatch):
+def vllm_model_apc(vllm_runner):
     """VllmRunner test fixture with APC."""
-    with _vllm_model(True, vllm_runner, monkeypatch) as vllm_model:
+    with _vllm_model(True, vllm_runner) as vllm_model:
         yield vllm_model
 
 
@@ -62,21 +61,21 @@ def vllm_model_apc(vllm_runner, monkeypatch):
     # env var adjustment via monkeypatch
     scope="function",
     # Prefix caching
-    params=[False, True])
-def vllm_model_skip_tokenizer_init(vllm_runner, request, monkeypatch):
+    params=[False, True],
+)
+def vllm_model_skip_tokenizer_init(vllm_runner, request):
     """VllmRunner test fixture with APC."""
     with _vllm_model(
-            request.param,
-            vllm_runner,
-            monkeypatch,
-            skip_tokenizer_init=True,
+        request.param,
+        vllm_runner,
+        skip_tokenizer_init=True,
     ) as vllm_model:
         yield vllm_model
 
 
 def _get_test_sampling_params(
     prompt_list: list[str],
-    seed: Optional[int] = 42,
+    seed: int | None = 42,
     structured_outputs: bool = False,
 ) -> tuple[list[SamplingParams], list[int]]:
     """Generate random sampling params for a batch."""
@@ -97,9 +96,11 @@ def _get_test_sampling_params(
             top_p=0.95,
             n=n,
             seed=seed,
-            guided_decoding=GuidedDecodingParams(
-                regex="[0-9]+") if structured_outputs else None,
-        ) for n in n_list
+            structured_outputs=StructuredOutputsParams(regex="[0-9]+")
+            if structured_outputs
+            else None,
+        )
+        for n in n_list
     ], n_list
 
 
@@ -132,26 +133,23 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
     for out, n in zip(outputs, n_list):
         completion_counts: dict[str, int] = {}
         # Assert correct number of completions
-        assert len(out.outputs) == n, (
-            f"{len(out.outputs)} completions; {n} expected.")
+        assert len(out.outputs) == n, f"{len(out.outputs)} completions; {n} expected."
         for idx in range(n):
             comp = out.outputs[idx]
             # Assert correct completion indices
-            assert comp.index == idx, (f"Index {comp.index}; expected {idx}.")
+            assert comp.index == idx, f"Index {comp.index}; expected {idx}."
             text = comp.text
             completion_counts[text] = completion_counts.get(text, 0) + 1
         # Assert unique completions
         if len(completion_counts) != n:
-            repeats = {
-                txt: num
-                for (txt, num) in completion_counts.items() if num > 1
-            }
+            repeats = {txt: num for (txt, num) in completion_counts.items() if num > 1}
             raise AssertionError(
                 f"{len(completion_counts)} unique completions; expected"
-                f" {n}. Repeats: {repeats}")
+                f" {n}. Repeats: {repeats}"
+            )
 
 
-def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
+def test_engine_metrics(vllm_runner, example_prompts):
     max_tokens = 100
     # Use spec decoding to test num_accepted_tokens_per_pos
     speculative_config = {
@@ -160,15 +158,14 @@ def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
         "prompt_lookup_min": 3,
         "num_speculative_tokens": 5,
     }
-    monkeypatch.setenv("VLLM_USE_V1", "1")
+
     with vllm_runner(
-            MODEL,
-            speculative_config=speculative_config,
-            disable_log_stats=False,
+        MODEL,
+        speculative_config=speculative_config,
+        disable_log_stats=False,
     ) as vllm_model:
         llm: LLM = vllm_model.llm
-        sampling_params = SamplingParams(temperature=0.0,
-                                         max_tokens=max_tokens)
+        sampling_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
         outputs = llm.generate(example_prompts, sampling_params)
 
         n_prompts = len(example_prompts)
@@ -192,15 +189,14 @@ def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
         num_requests_running = find_metric("vllm:num_requests_running")
         assert len(num_requests_running) == 1
         assert isinstance(num_requests_running[0], Gauge)
-        assert num_requests_running[0].value == .0
+        assert num_requests_running[0].value == 0.0
 
         generation_tokens = find_metric("vllm:generation_tokens")
         assert len(generation_tokens) == 1
         assert isinstance(generation_tokens[0], Counter)
         assert generation_tokens[0].value == total_tokens
 
-        request_generation_tokens = find_metric(
-            "vllm:request_generation_tokens")
+        request_generation_tokens = find_metric("vllm:request_generation_tokens")
         assert len(request_generation_tokens) == 1
         assert isinstance(request_generation_tokens[0], Histogram)
         assert "+Inf" in request_generation_tokens[0].buckets
@@ -209,16 +205,15 @@ def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
         assert request_generation_tokens[0].sum == total_tokens
 
         num_accepted_tokens_per_pos = find_metric(
-            "vllm:spec_decode_num_accepted_tokens_per_pos")
+            "vllm:spec_decode_num_accepted_tokens_per_pos"
+        )
         assert len(num_accepted_tokens_per_pos) == 1
         assert isinstance(num_accepted_tokens_per_pos[0], Vector)
         assert len(num_accepted_tokens_per_pos[0].values) == 5
 
 
 @pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])
-def test_skip_tokenizer_initialization(model: str,
-                                       monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
+def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization
     # of tokenizer and detokenizer. The generated output is expected to contain
     # token ids.
@@ -229,11 +224,12 @@ def test_skip_tokenizer_initialization(model: str,
     )
     sampling_params = SamplingParams(prompt_logprobs=True, detokenize=True)
 
-    with pytest.raises(ValueError, match="cannot pass text prompts when"):
+    with pytest.raises(ValueError, match="`skip_tokenizer_init=True`"):
         llm.generate("abc", sampling_params)
 
-    outputs = llm.generate({"prompt_token_ids": [1, 2, 3]},
-                           sampling_params=sampling_params)
+    outputs = llm.generate(
+        {"prompt_token_ids": [1, 2, 3]}, sampling_params=sampling_params
+    )
     assert len(outputs) > 0
     completions = outputs[0].outputs
     assert len(completions) > 0

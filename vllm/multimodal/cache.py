@@ -1,27 +1,40 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import operator
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
+from multiprocessing.synchronize import Lock as LockType
+from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
 
 import torch
-from typing_extensions import TypeAlias, override
+from typing_extensions import override
 
+import vllm.envs as envs
+from vllm.distributed.device_communicators.shm_object_storage import (
+    MsgpackSerde,
+    SingleWriterShmObjectStorage,
+    SingleWriterShmRingBuffer,
+)
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, LRUCache
-from vllm.utils.jsontree import (json_count_leaves, json_map_leaves,
-                                 json_reduce_leaves)
+from vllm.utils.cache import CacheInfo, LRUCache
+from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
+from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
+from vllm.utils.mem_utils import format_gib
 
-from .inputs import (MultiModalFeatureSpec, MultiModalFieldElem,
-                     MultiModalKwargs, MultiModalKwargsItem,
-                     MultiModalKwargsItems, NestedTensors)
+from .inputs import (
+    MultiModalBatchedField,
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    NestedTensors,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
-    from .processing import ResolvedPromptUpdate
-    from .registry import MultiModalRegistry
+    from .processing.processor import ResolvedPromptUpdate
 
 logger = init_logger(__name__)
 
@@ -71,41 +84,30 @@ class MultiModalProcessorCacheItemMetadata:
         self.prompt_updates = prompt_updates
 
 
-MultiModalCacheValue = Union[
-    MultiModalProcessorCacheItem,
-    MultiModalProcessorCacheItemMetadata,
-    MultiModalKwargsItems,
-    MultiModalKwargsItem,
-    MultiModalKwargs,
-    Mapping[str, NestedTensors],
-]
+MultiModalCacheValue: TypeAlias = (
+    MultiModalProcessorCacheItem
+    | MultiModalProcessorCacheItemMetadata
+    | MultiModalKwargsItems
+    | MultiModalKwargsItem
+    | Mapping[str, NestedTensors]
+)
 
 _V = TypeVar("_V", bound=MultiModalCacheValue)
 
 
 class MultiModalCache:
-
     @classmethod
-    def get_leaf_size(
-        cls,
-        leaf: object,
-        *,
-        debug: bool = False,
-    ) -> int:
+    def get_leaf_size(cls, leaf: object) -> int:
         if isinstance(leaf, MultiModalProcessorCacheItem):
             return cls.get_leaf_size(leaf.item)
         if isinstance(leaf, MultiModalProcessorCacheItemMetadata):
             return leaf.item_size
 
         # These are not subclasses of dict
-        if isinstance(leaf, MultiModalKwargsItems):
-            return cls.get_item_size(leaf.data)  # type: ignore
-        if isinstance(leaf, MultiModalKwargsItem):
-            return cls.get_item_size(leaf.data)  # type: ignore
-        if isinstance(leaf, MultiModalKwargs):
-            return cls.get_item_size(leaf.data)  # type: ignore
-
-        if isinstance(leaf, MultiModalFieldElem):
+        if isinstance(
+            leaf,
+            (MultiModalKwargsItems, MultiModalKwargsItem, MultiModalFieldElem),
+        ):
             return cls.get_item_size(leaf.data)  # type: ignore
 
         # sys.getsizeof doesn't work for tensors
@@ -122,17 +124,15 @@ class MultiModalCache:
         debug: bool = False,
     ) -> int:
         size = json_reduce_leaves(
-            lambda a, b: a + b,
-            json_map_leaves(lambda x: cls.get_leaf_size(x, debug=debug),
-                            value),
+            operator.add, json_map_leaves(cls.get_leaf_size, value)
         )
 
         if debug:
             leaf_count = json_count_leaves(value)
             logger.debug(
-                "Calculated size of %s to be %.2f GiB (%d leaves)",
+                "Calculated size of %s to be %s GiB (%d leaves)",
                 type(value),
-                size / GiB_bytes,
+                format_gib(size),
                 leaf_count,
             )
 
@@ -249,17 +249,19 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         raise NotImplementedError
 
 
-MultiModalProcessorCacheInItem: TypeAlias = \
-    Optional[tuple[MultiModalKwargsItem, Sequence["ResolvedPromptUpdate"]]]
+MultiModalProcessorCacheInItem: TypeAlias = (
+    tuple[MultiModalKwargsItem, Sequence["ResolvedPromptUpdate"]] | None
+)
 
 
-MultiModalProcessorCacheOutItem: TypeAlias = \
-    tuple[Optional[MultiModalKwargsItem], Sequence["ResolvedPromptUpdate"]]
+MultiModalProcessorCacheOutItem: TypeAlias = tuple[
+    MultiModalKwargsItem | None, Sequence["ResolvedPromptUpdate"]
+]
 
 
 class BaseMultiModalProcessorCache(
-        BaseMultiModalCache[MultiModalProcessorCacheInItem,
-                            MultiModalProcessorCacheOutItem]):
+    BaseMultiModalCache[MultiModalProcessorCacheInItem, MultiModalProcessorCacheOutItem]
+):
     """The required interface for caches on P0."""
 
     @abstractmethod
@@ -292,6 +294,33 @@ class BaseMultiModalProcessorCache(
             For each item, `True` if the item is cached, otherwise `False`.
         """
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
+
+    def close(self) -> None:
+        """Close the underlying cache, if needed."""
+        pass
+
+    @abstractmethod
+    def touch_sender_cache_item(self, mm_hash: str) -> None:
+        """
+        Update the cache eviction order for a multi-modal item.
+
+        This is used to touch the item in the cache without changing
+        its value.
+
+        Args:
+            mm_hash: The hash of the multi-modal item.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def make_stats(self, *, delta: bool = False) -> CacheInfo:
+        """
+        Get (and reset) the multi-modal cache stats.
+
+        Returns:
+            The current multi-modal caching stats.
+        """
+        raise NotImplementedError
 
 
 class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
@@ -335,8 +364,16 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         return mm_item
 
     @override
+    def touch_sender_cache_item(self, mm_hash: str) -> None:
+        self._cache.touch(mm_hash)
+
+    @override
     def clear_cache(self) -> None:
         self._cache.clear()
+
+    @override
+    def make_stats(self, *, delta: bool = False) -> CacheInfo:
+        return self._cache.stat(delta=delta)
 
 
 class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
@@ -385,70 +422,193 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         return mm_item
 
     @override
+    def touch_sender_cache_item(self, mm_hash: str) -> None:
+        self._cache.touch(mm_hash)
+
+    @override
     def clear_cache(self) -> None:
         self._cache.clear()
 
-
-def _enable_processor_cache(
-    model_config: "ModelConfig",
-    mm_registry: "MultiModalRegistry",
-) -> bool:
-    if not mm_registry.supports_multimodal_inputs(model_config):
-        return False
-
-    mm_config = model_config.get_multimodal_config()
-    return mm_config.mm_processor_cache_gb > 0
+    @override
+    def make_stats(self, *, delta: bool = False) -> CacheInfo:
+        return self._cache.stat(delta=delta)
 
 
-def _enable_ipc_cache(vllm_config: "VllmConfig") -> bool:
-    parallel_config = vllm_config.parallel_config
-    supports_ipc_cache = (parallel_config.data_parallel_size == 1
-                          or parallel_config.data_parallel_external_lb)
+class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
+    """
+    The cache which is used on P0 when IPC caching is enabled.
 
-    return supports_ipc_cache
+    How to update each item:
 
+    - If the item is already in the cache, clear the input to avoid
+      unnecessary IPC.
 
-def processor_cache_from_config(
-    vllm_config: "VllmConfig",
-    mm_registry: "MultiModalRegistry",
-) -> Optional[BaseMultiModalProcessorCache]:
-    """Return a `BaseMultiModalProcessorCache`, if enabled."""
-    model_config = vllm_config.model_config
+    - If the item is not in the cache, store the data in shared memory.
+    """
 
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
+    def __init__(self, vllm_config: "VllmConfig") -> None:
+        super().__init__()
 
-    if not _enable_ipc_cache(vllm_config):
-        return MultiModalProcessorOnlyCache(model_config)
+        self.world_size = vllm_config.parallel_config.world_size
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
-    return MultiModalProcessorSenderCache(model_config)
+        ring_buffer = SingleWriterShmRingBuffer(
+            data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
+            name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            create=True,  # sender is the writer
+        )
+        self._shm_cache = SingleWriterShmObjectStorage(
+            max_object_size=mm_config.mm_shm_cache_max_object_size_mb * MiB_bytes,
+            n_readers=self.world_size,
+            ring_buffer=ring_buffer,
+            serde_class=MsgpackSerde,
+        )
+        # cache prompt_updates for P0 only
+        self._p0_cache: dict[str, Sequence[ResolvedPromptUpdate]] = {}
 
+        self._hits = 0
+        self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
 
-def processor_only_cache_from_config(
-    model_config: "ModelConfig",
-    mm_registry: "MultiModalRegistry",
-):
-    """Return a `MultiModalProcessorOnlyCache`, if enabled."""
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
+    def _stat(self, *, delta: bool = False) -> CacheInfo:
+        info = CacheInfo(hits=self._hits, total=self._total)
 
-    return MultiModalProcessorOnlyCache(model_config)
+        if delta:
+            info_delta = info - self._last_info
+            self._last_info = info
+            info = info_delta
+
+        return info
+
+    @override
+    def is_cached_item(self, mm_hash: str) -> bool:
+        return self._shm_cache.is_cached(mm_hash)
+
+    @override
+    def get_and_update_item(
+        self,
+        mm_item: MultiModalProcessorCacheInItem,
+        mm_hash: str,
+    ) -> MultiModalProcessorCacheOutItem:
+        if self._shm_cache.is_cached(mm_hash):
+            self._hits += 1
+            self._total += 1
+
+            address, monotonic_id = self._shm_cache.get_cached(mm_hash)
+            prompt_updates = self._p0_cache[mm_hash]
+            return self.address_as_item(address, monotonic_id), prompt_updates
+
+        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+        item, prompt_updates = mm_item
+
+        self._total += 1
+
+        try:
+            address, monotonic_id = self._shm_cache.put(mm_hash, item)
+            # Try to remove dangling items if p0 cache is too large.
+            if len(self._p0_cache) >= 2 * len(self._shm_cache.key_index):
+                self.remove_dangling_items()
+
+            self._p0_cache[mm_hash] = prompt_updates
+            return self.address_as_item(address, monotonic_id), prompt_updates
+        except (ValueError, MemoryError) as e:
+            # put may fail if the object is too large or
+            # the cache is full.
+            # In this case we log the error and keep the original mm_input.
+            logger.debug("Failed to cache mm_input with hash %s: %s", mm_hash, e)
+            return mm_item
+
+    @override
+    def touch_sender_cache_item(self, mm_hash: str) -> None:
+        """Touch the item in shared memory cache to prevent eviction.
+        Increments writer_flag on sender side."""
+        self._shm_cache.touch(mm_hash)
+
+    @override
+    def clear_cache(self) -> None:
+        self._shm_cache.clear()
+        self._p0_cache.clear()
+
+        self._hits = 0
+        self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
+
+    @override
+    def make_stats(self, *, delta: bool = False) -> CacheInfo:
+        return self._stat(delta=delta)
+
+    @override
+    def close(self) -> None:
+        self._shm_cache.close()
+
+    def remove_dangling_items(self) -> None:
+        """Remove items that are no longer in the shared memory cache."""
+        cached_hashes = self._shm_cache.key_index.keys()
+        dangling_hashes = set(self._p0_cache.keys()) - cached_hashes
+        for mm_hash in dangling_hashes:
+            del self._p0_cache[mm_hash]
+
+    def address_as_item(
+        self,
+        address: int,
+        monotonic_id: int,
+    ) -> MultiModalKwargsItem:
+        addr_elem = MultiModalFieldElem(
+            data=address,
+            field=MultiModalBatchedField(),
+        )
+        id_elem = MultiModalFieldElem(
+            data=monotonic_id,
+            field=MultiModalBatchedField(),
+        )
+
+        return MultiModalKwargsItem({"address": addr_elem, "monotonic_id": id_elem})
 
 
 class BaseMultiModalReceiverCache(
-        BaseMultiModalCache[Optional[MultiModalKwargsItem],
-                            MultiModalKwargsItem]):
+    BaseMultiModalCache[MultiModalKwargsItem | None, MultiModalKwargsItem]
+):
     """The required interface for caches on P1."""
 
     def get_and_update_features(
         self,
         mm_features: list["MultiModalFeatureSpec"],
     ) -> list["MultiModalFeatureSpec"]:
-        """Update multimodal features with cached encoder outputs."""
+        """
+        Update multimodal features with cached encoder outputs.
+        Touch all identifier at first before update to avoid
+        item in updated list evict during update.
+
+        Uses mm_hash for cache key to share across LoRAs (falls back to
+        identifier for backward compatibility).
+        """
         for feature in mm_features:
-            feature.data = self.get_and_update_item(feature.data,
-                                                    feature.identifier)
+            cache_key = feature.mm_hash or feature.identifier
+            self.touch_receiver_cache_item(cache_key, feature.data)
+
+        for feature in mm_features:
+            cache_key = feature.mm_hash or feature.identifier
+            feature.data = self.get_and_update_item(feature.data, cache_key)
         return mm_features
+
+    @abstractmethod
+    def touch_receiver_cache_item(
+        self,
+        mm_hash: str,
+        mm_item: MultiModalKwargsItem | None = None,
+    ) -> None:
+        """
+        Update the cache eviction order for a multi-modal item.
+
+        This is used to touch the item in the cache without changing
+        its value.
+
+        Args:
+            mm_hash: The hash of the multi-modal item.
+            mm_item: The multi-modal item itself. This is optional and
+                may not be needed by some cache implementations.
+        """
+        raise NotImplementedError
 
 
 class MultiModalReceiverCache(BaseMultiModalReceiverCache):
@@ -475,7 +635,7 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
     @override
     def get_and_update_item(
         self,
-        mm_item: Optional[MultiModalKwargsItem],
+        mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
         if (cached_item := self._cache.get(mm_hash)) is not None:
@@ -487,21 +647,79 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         return mm_item
 
     @override
+    def touch_receiver_cache_item(
+        self,
+        mm_hash: str,
+        mm_item: MultiModalKwargsItem | None = None,
+    ) -> None:
+        self._cache.touch(mm_hash)
+
+    @override
     def clear_cache(self) -> None:
         self._cache.clear()
 
 
-def receiver_cache_from_config(
-    vllm_config: "VllmConfig",
-    mm_registry: "MultiModalRegistry",
-) -> Optional[BaseMultiModalReceiverCache]:
-    """Return a `BaseMultiModalReceiverCache`, if enabled."""
-    model_config = vllm_config.model_config
+class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
+    """
+    The cache which is used on P1 Worker Process when IPC caching is enabled.
 
-    if not _enable_processor_cache(model_config, mm_registry):
-        return None
+    How to update each item:
 
-    if not _enable_ipc_cache(vllm_config):
-        return None
+    - If the item has an address, replace the input with the cached item.
+    - If not, return the input.
+    """
 
-    return MultiModalReceiverCache(model_config)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        shared_worker_lock: LockType,
+    ) -> None:
+        super().__init__()
+
+        self.world_size = vllm_config.parallel_config.world_size
+        mm_config = vllm_config.model_config.get_multimodal_config()
+
+        ring_buffer = SingleWriterShmRingBuffer(
+            data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
+            name=envs.VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
+            create=False,  # Server is a reader
+        )
+        self._shm_cache = SingleWriterShmObjectStorage(
+            max_object_size=mm_config.mm_shm_cache_max_object_size_mb * MiB_bytes,
+            n_readers=self.world_size,
+            ring_buffer=ring_buffer,
+            serde_class=MsgpackSerde,
+            reader_lock=shared_worker_lock,
+        )
+
+    @override
+    def get_and_update_item(
+        self,
+        mm_item: MultiModalKwargsItem | None,
+        mm_hash: str,
+    ) -> MultiModalKwargsItem:
+        assert mm_item is not None, f"Expected an address item for {mm_hash=}"
+        if "address" in mm_item:
+            address = cast(int, mm_item["address"].data)
+            monotonic_id = cast(int, mm_item["monotonic_id"].data)
+            return self._shm_cache.get(address, monotonic_id)
+
+        return mm_item
+
+    @override
+    def touch_receiver_cache_item(
+        self,
+        mm_hash: str,
+        mm_item: MultiModalKwargsItem | None = None,
+    ) -> None:
+        """Touch the item in shared memory cache to prevent eviction.
+        Increments reader_count on receiver side."""
+        assert mm_item is not None
+        if "address" in mm_item:
+            address = cast(int, mm_item["address"].data)
+            monotonic_id = cast(int, mm_item["monotonic_id"].data)
+            self._shm_cache.touch(mm_hash, address=address, monotonic_id=monotonic_id)
+
+    @override
+    def clear_cache(self) -> None:
+        self._shm_cache.clear()

@@ -21,11 +21,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional, Union
 
 from transformers import PretrainedConfig
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import (
-    Qwen2_5OmniTextConfig)
+    Qwen2_5OmniTextConfig,
+)
 
 
 class DashengConfig(PretrainedConfig):
@@ -35,15 +35,15 @@ class DashengConfig(PretrainedConfig):
         self,
         embed_dim: int = 768,
         outputdim: int = 527,
-        patch_size: Union[int, tuple[int, int]] = 16,
-        patch_stride: Union[int, tuple[int, int]] = 16,
+        patch_size: int | tuple[int, int] = 16,
+        patch_stride: int | tuple[int, int] = 16,
         input_channels: int = 1,
         target_length: int = 1012,
         depth: int = 12,
         num_heads: int = 12,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = True,
-        init_values: Optional[float] = None,
+        init_values: float | None = None,
         drop_rate: float = 0.0,
         attn_drop_rate: float = 0.0,
         f_min: float = 0.0,
@@ -85,17 +85,19 @@ class MiDashengLMConfig(PretrainedConfig):
 
     def __init__(
         self,
-        audio_encoder_config: Optional[dict] = None,
+        audio_encoder_config: dict | None = None,
         subsample_factor: int = 5,
-        text_config: Optional[dict] = None,
-        audio_token_id: Optional[int] = None,
+        text_config: dict | None = None,
+        audio_token_id: int | None = None,
         **kwargs,
     ):
-        self.audio_encoder_config = DashengConfig(
-            **(audio_encoder_config or {}))
+        self.audio_encoder_config = DashengConfig(**(audio_encoder_config or {}))
         self.subsample_factor = subsample_factor
-        self.text_config = (Qwen2_5OmniTextConfig(
-            **text_config) if text_config else Qwen2_5OmniTextConfig())
-        self.text_config.rope_scaling = None  # uses_mrope is false
+        self.text_config = (
+            Qwen2_5OmniTextConfig(**text_config)
+            if text_config
+            else Qwen2_5OmniTextConfig()
+        )
+        self.text_config.rope_parameters = None  # uses_mrope is false
         self.audio_token_id = audio_token_id
         super().__init__(**kwargs)

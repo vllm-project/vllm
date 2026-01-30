@@ -2,51 +2,51 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # copied from : https://github.com/huggingface/transformers
 import ast
-import sys
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from itertools import chain
-from typing import Any, Literal, Optional, TypedDict, Union
+from itertools import accumulate
+from typing import Annotated, Literal
 
 import numpy as np
-import PIL
-from einops import rearrange
-from PIL import Image
-
-if sys.version_info >= (3, 11):
-    import typing
-    Unpack = typing.Unpack
-else:
-    import typing_extensions
-    Unpack = typing_extensions.Unpack
-
 import torch
 import torch.nn as nn
+from einops import rearrange
 from timm.layers import LayerNorm, LayerNorm2d
 from timm.models.regnet import RegStage
 from transformers import BatchFeature, CLIPVisionConfig, SiglipVisionConfig
-from transformers.modeling_utils import no_init_weights
 
 from vllm.config import VllmConfig
-from vllm.inputs import InputProcessingContext
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItems)
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    InputProcessingContext,
+    PromptReplacement,
+    PromptUpdate,
+)
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .siglip import SiglipVisionModel
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    flatten_bn,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 from .vision import get_vision_encoder_info
 
 EOT = "<|endofturn|>"
@@ -57,8 +57,8 @@ VIDEO_TOKEN: str = "<|_unuse_missing_100270|>"
 # Based on combine_frames_into_images in
 # https://huggingface.co/naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B/blob/main/processing_hyperclovax.py
 def get_num_combined_frames(
-        num_frames: int,
-        max_grid_shape: tuple[int, int] = (3, 3),
+    num_frames: int,
+    max_grid_shape: tuple[int, int] = (3, 3),
 ) -> int:
     max_num_grids = max_grid_shape[0] * max_grid_shape[1]
 
@@ -69,42 +69,58 @@ def get_num_combined_frames(
     return num_canvases + (leftover_frames > 0)
 
 
-class HCXVisionMultimodalPixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values_images: list[torch.Tensor]
+class HCXVisionImagePixelInputs(TensorSchema):
     """
-    Shape: `[(num_grids, num_channels, height, width), ...]` if anyres
-    
-    Note that `height` or `width` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
+    Dimensions:
+        - n: Number of images
+        - g: Number of grids
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
     """
-    image_sizes_images: list[tuple[Union[int, float]]]
-    """
-    Shape: `[(height, width), ...]`
-    """
-    vision_query_lengths_images: list[Union[int, float]]
-    pixel_values_videos: list[tuple[Union[int, float]]]
-    """
-    Shape: `[(num_grids, num_channels, height, width), ...]` if anyres
-    """
-    vision_query_lengths_videos: list[Union[int, float]]
+
+    type: Literal["pixel_values"] = "pixel_values"
+    pixel_values_images: Annotated[
+        list[torch.Tensor], TensorShape("n", "g", 3, "h", "w", dynamic_dims={"g"})
+    ]
+    image_sizes_images: Annotated[torch.Tensor, TensorShape("n", 2)]
 
 
-HCXVisionMultimodalInputs = Union[HCXVisionMultimodalPixelInputs]
+HCXVisionImageInputs = HCXVisionImagePixelInputs
+
+
+class HCXVisionVideoPixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - n: Number of videos
+        - f: Number of frames
+        - g: Number of grids
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
+    """
+
+    type: Literal["pixel_values_videos"] = "pixel_values_videos"
+    pixel_values_videos: Annotated[
+        list[list[torch.Tensor]],
+        TensorShape("n", "f", "g", 3, "h", "w", dynamic_dims={"f", "g"}),
+    ]
+
+
+HCXVisionVideoInputs = HCXVisionVideoPixelInputs
 
 
 class HCXVisionProcessingInfo(BaseProcessingInfo):
-
     def get_vision_encoder_info(self):
         return get_vision_encoder_info(self.get_hf_config())
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
     def get_num_image_tokens(
         self,
         *,
-        vision_query_length: Union[int, list[int]],
+        vision_query_length: int | list[int],
     ) -> int:
         if isinstance(vision_query_length, int):
             return vision_query_length
@@ -114,7 +130,7 @@ class HCXVisionProcessingInfo(BaseProcessingInfo):
     def get_num_video_tokens(
         self,
         *,
-        vision_query_length: Union[int, list[int]],
+        vision_query_length: int | list[int],
     ) -> int:
         if isinstance(vision_query_length, int):
             return vision_query_length
@@ -135,48 +151,49 @@ class HCXVisionProcessingInfo(BaseProcessingInfo):
         )
 
 
-class HCXVisionDummyInputsBuilder(
-        BaseDummyInputsBuilder[HCXVisionProcessingInfo]):
-
+class HCXVisionDummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionProcessingInfo]):
     def get_dummy_text(
         self,
         mm_counts: Mapping[str, int],
     ) -> str:
         dummy_text = IMAGE_TOKEN * mm_counts.get(
-            "image", 0) + VIDEO_TOKEN * mm_counts.get("video", 0)
+            "image", 0
+        ) + VIDEO_TOKEN * mm_counts.get("video", 0)
         return dummy_text
 
     def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        target_width, target_height = \
-            self.info.get_image_size_with_most_features()
+        target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = 32
+
+        image_overrides = mm_options.get("image") if mm_options else None
+        video_overrides = mm_options.get("video") if mm_options else None
+
         return {
-            "image":
-            self._get_dummy_images(
+            "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=num_images,
+                overrides=image_overrides,
             ),
-            "video":
-            self._get_dummy_videos(
+            "video": self._get_dummy_videos(
                 width=target_width - 1,
                 height=target_height - 1,
                 num_frames=target_num_frames,
                 num_videos=num_videos,
-            )
+                overrides=video_overrides,
+            ),
         }
 
 
-class HCXVisionMultiModalProcessor(
-        BaseMultiModalProcessor[HCXVisionProcessingInfo]):
-
+class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingInfo]):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -184,27 +201,9 @@ class HCXVisionMultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-
-        def replace_multimodal_token(
-            token_ids: torch.Tensor,
-            target_token: int,
-            repeats: list[int],
-        ):
-            output = list[int]()
-            _repeats_idx = 0
-            for token_id in token_ids:
-                if token_id == target_token:
-                    output += [token_id.item()] * repeats[_repeats_idx]
-                    _repeats_idx += 1
-                else:
-                    output += [token_id.item()]
-
-            return torch.tensor(output, device=token_ids.device)
-
         for video_idx, video_arr in enumerate(mm_data.get("videos", [])):
-            if video_arr.dtype == np.uint8:
-                continue
-            mm_data["videos"][video_idx] = video_arr.astype(np.uint8)
+            if video_arr.dtype != np.uint8:
+                mm_data["videos"][video_idx] = video_arr.astype(np.uint8)
 
         processed_outputs = self.info.ctx.call_hf_processor(
             hf_processor=self.info.get_hf_processor(**mm_kwargs),
@@ -216,20 +215,16 @@ class HCXVisionMultiModalProcessor(
         )  # text-only
 
         if len(mm_data) > 0:
+            images = mm_data.get("images")
+            videos = mm_data.get("videos")
+
             # batchify input as a single item
-            images = mm_data.get("images", None)
-            batched_images = None if images is None else [images]
-
-            # list of video in single conversation
-            videos = mm_data.get("videos", None)
-            batched_videos = None if videos is None else [videos]
-
             _processed_outputs = self.info.ctx.call_hf_processor(
                 hf_processor=self.info.get_hf_processor(**mm_kwargs),
                 data=dict(
                     text=None,
-                    images=batched_images,
-                    videos=batched_videos,
+                    images=None if images is None else [images],
+                    videos=None if videos is None else [videos],
                 ),
             )  # mm-only
 
@@ -239,50 +234,47 @@ class HCXVisionMultiModalProcessor(
                     _processed_outputs[k] = v[0]
 
             if images:
-                tokenizer = self.info.get_tokenizer()
-                image_token_id = tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
-                processed_outputs["input_ids"] = torch.stack([
-                    replace_multimodal_token(
-                        token_ids=_input_ids,
-                        target_token=image_token_id,
-                        repeats=_processed_outputs[
-                            "vision_query_lengths_images"],
-                    ) for _input_ids in processed_outputs["input_ids"]
-                ],
-                                                             dim=0)
+                _processed_outputs["image_sizes_images"] = torch.tensor(
+                    _processed_outputs["image_sizes_images"]
+                )
+                _processed_outputs["vision_query_lengths_images"] = torch.tensor(
+                    _processed_outputs["vision_query_lengths_images"]
+                )
 
             if videos:
-                _num_per_videos = [
-                    get_num_combined_frames(len(video)) for video in videos
+                _idx_per_video = [
+                    0,
+                    *accumulate(
+                        get_num_combined_frames(len(video)) for video in videos
+                    ),
                 ]
                 _processed_outputs["pixel_values_videos"] = [
-                    _processed_outputs["pixel_values_videos"]
-                    [sum(_num_per_videos[:_i]):sum(_num_per_videos[:_i + 1])]
-                    for _i in range(len(videos))
+                    _processed_outputs["pixel_values_videos"][
+                        _idx_per_video[i] : _idx_per_video[i + 1]
+                    ]
+                    for i in range(len(videos))
                 ]
                 _processed_outputs["vision_query_lengths_videos"] = [
-                    _processed_outputs["vision_query_lengths_videos"]
-                    [sum(_num_per_videos[:_i]):sum(_num_per_videos[:_i + 1])]
-                    for _i in range(len(videos))
+                    torch.tensor(
+                        _processed_outputs["vision_query_lengths_videos"][
+                            _idx_per_video[i] : _idx_per_video[i + 1]
+                        ]
+                    )
+                    for i in range(len(videos))
                 ]
-
-                tokenizer = self.info.get_tokenizer()
-                video_token_id = tokenizer.convert_tokens_to_ids(VIDEO_TOKEN)
-                processed_outputs["input_ids"] = torch.stack([
-                    replace_multimodal_token(
-                        token_ids=_input_ids,
-                        target_token=video_token_id,
-                        repeats=[
-                            sum(lens) for lens in
-                            _processed_outputs["vision_query_lengths_videos"]
-                        ],
-                    ) for _input_ids in processed_outputs["input_ids"]
-                ],
-                                                             dim=0)
 
             processed_outputs.update(_processed_outputs)
 
         return processed_outputs
+
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> bool:
+        return False
 
     def _get_prompt_updates(
         self,
@@ -304,13 +296,11 @@ class HCXVisionMultiModalProcessor(
             out_item = out_mm_kwargs[modality][item_idx]
 
             if modality == "image":
-                lens = out_item["vision_query_lengths_images"].data
-                num_tokens = self.info.get_num_image_tokens(
-                    vision_query_length=lens)
+                lens = out_item["vision_query_lengths_images"].data.tolist()
+                num_tokens = self.info.get_num_image_tokens(vision_query_length=lens)
             elif modality == "video":
-                lens = out_item["vision_query_lengths_videos"].data
-                num_tokens = self.info.get_num_video_tokens(
-                    vision_query_length=lens)
+                lens = out_item["vision_query_lengths_videos"].data.tolist()
+                num_tokens = self.info.get_num_video_tokens(vision_query_length=lens)
             else:
                 raise NotImplementedError(modality)
 
@@ -327,7 +317,8 @@ class HCXVisionMultiModalProcessor(
                     modality=modality,
                     out_mm_kwargs=out_mm_kwargs,
                 ),
-            ) for modality in ("image", "video")
+            )
+            for modality in ("image", "video")
         ]
 
     def _get_mm_fields_config(
@@ -336,31 +327,17 @@ class HCXVisionMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
-            # image
             pixel_values_images=MultiModalFieldConfig.batched("image"),
             image_sizes_images=MultiModalFieldConfig.batched("image"),
             vision_query_lengths_images=MultiModalFieldConfig.batched("image"),
-            num_queries_vis_abstractors_images=MultiModalFieldConfig.batched(
-                "image"),
-            num_queries_vis_abstractors_slow_images=MultiModalFieldConfig.
-            batched("image"),
-            first_last_frames_slows_images=MultiModalFieldConfig.batched(
-                "image"),
-            # video
             pixel_values_videos=MultiModalFieldConfig.batched("video"),
-            image_sizes_videos=MultiModalFieldConfig.batched("video"),
             vision_query_lengths_videos=MultiModalFieldConfig.batched("video"),
-            num_queries_vis_abstractors_videos=MultiModalFieldConfig.batched(
-                "video"),
-            num_queries_vis_abstractors_slow_videos=MultiModalFieldConfig.
-            batched("video"),
-            first_last_frames_slows_videos=MultiModalFieldConfig.batched(
-                "video"),
         )
 
 
 def _build_hcxvision_hf_info(
-    ctx: InputProcessingContext, ) -> HCXVisionProcessingInfo:
+    ctx: InputProcessingContext,
+) -> HCXVisionProcessingInfo:
     return HCXVisionProcessingInfo(ctx)
 
 
@@ -368,7 +345,7 @@ def _build_hcxvision_hf_processor(
     info: HCXVisionProcessingInfo,
     dummy_inputs: BaseDummyInputsBuilder[HCXVisionProcessingInfo],
     *,
-    cache: Optional[BaseMultiModalProcessorCache] = None,
+    cache: BaseMultiModalProcessorCache | None = None,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, HCXVisionProcessingInfo):
         return HCXVisionMultiModalProcessor(
@@ -382,12 +359,12 @@ def _build_hcxvision_hf_processor(
 
 def init_vision_tower_for_hcxvision(
     vision_config,
-    quant_config: Optional[QuantizationConfig],
+    quant_config: QuantizationConfig | None,
     *,
-    use_nth_layer: Optional[int] = None,
-    require_post_norm: Optional[bool] = None,
+    use_nth_layer: int | None = None,
+    require_post_norm: bool | None = None,
     prefix: str = "",
-) -> Union[CLIPVisionModel, SiglipVisionModel]:
+) -> CLIPVisionModel | SiglipVisionModel:
     num_hidden_layers = vision_config.num_hidden_layers
     if not isinstance(use_nth_layer, int):
         pass
@@ -418,7 +395,6 @@ def init_vision_tower_for_hcxvision(
 
 
 class HCXVisionMlp(nn.Module):
-
     def __init__(
         self,
         mm_projector_type,
@@ -440,8 +416,9 @@ class HCXVisionMlp(nn.Module):
             self.act = act_layer()
             self.fc2 = nn.Linear(2 * hidden_features, out_features)
         else:
-            raise NotImplementedError("{} is not implemented".format(
-                self.mm_projector_type))
+            raise NotImplementedError(
+                "{} is not implemented".format(self.mm_projector_type)
+            )
 
     def forward(self, x):
         x = self.fc1(x)
@@ -453,7 +430,7 @@ class HCXVisionMlp(nn.Module):
 class HCXVisionCAbstractor(nn.Module):
     """
     This module is based on C-Abstractor, whose license is under apache-2.0.
-    You can check the original code at 
+    You can check the original code at
     https://github.com/khanrc/honeybee/blob/main/honeybee/projectors/projectors.py
     and we made necessary modifications.
     """
@@ -475,7 +452,8 @@ class HCXVisionCAbstractor(nn.Module):
         # Positional embedding
         if pos_emb:
             self.pos_emb = torch.nn.Parameter(
-                torch.zeros(1, num_input_tokens, encoder_hidden_size))
+                torch.zeros(1, num_input_tokens, encoder_hidden_size)
+            )
             self.pos_emb.data.normal_(mean=0.0, std=0.02)
         else:
             self.pos_emb = None
@@ -486,15 +464,16 @@ class HCXVisionCAbstractor(nn.Module):
         else:
             self.prenorm = None
 
-        self.build_net(num_queries, encoder_hidden_size, hidden_size,
-                       output_hidden_size)
+        self.build_net(
+            num_queries, encoder_hidden_size, hidden_size, output_hidden_size
+        )
         self.dtype = next(self.parameters()).dtype
 
     def forward(
         self,
         x: torch.Tensor,
-        num_queries_vis_abstractors: Optional[list[list[int]]] = None,
-        num_grids: Optional[list[int]] = None,
+        num_queries_vis_abstractors: list[list[int]] | None = None,
+        num_grids: list[int] | None = None,
     ) -> torch.Tensor:
         if self.prenorm is not None:
             x = self.prenorm(x)
@@ -513,8 +492,8 @@ class HCXVisionCAbstractor(nn.Module):
     def _forward(
         self,
         x: torch.Tensor,
-        num_queries_vis_abstractors: Optional[list[list[int]]] = None,
-        num_grids: Optional[list[int]] = None,
+        num_queries_vis_abstractors: list[list[int]] | None = None,
+        num_grids: list[int] | None = None,
     ) -> torch.Tensor:
         # x: [B, L, dim]
         B, L, dim = x.shape
@@ -524,7 +503,8 @@ class HCXVisionCAbstractor(nn.Module):
         if num_queries_vis_abstractors is not None:
             assert num_grids is not None
             return self._forward_adaptive_num_query(
-                x, num_queries_vis_abstractors, num_grids)
+                x, num_queries_vis_abstractors, num_grids
+            )
 
         x = self.net(x)
         x = rearrange(x, "b d h w -> b (h w) d")
@@ -534,8 +514,8 @@ class HCXVisionCAbstractor(nn.Module):
     def _forward_adaptive_num_query(
         self,
         x: torch.Tensor,
-        num_queries_vis_abstractors: Optional[list[list[int]]] = None,
-        num_grids: Optional[list[int]] = None,
+        num_queries_vis_abstractors: list[list[int]] | None = None,
+        num_grids: list[int] | None = None,
     ) -> list[torch.Tensor]:
         # self.net is consisted by 3 layers (s1, sampler, s2)
         assert len(self.net) == 3
@@ -545,7 +525,7 @@ class HCXVisionCAbstractor(nn.Module):
         for i, num_queries in enumerate(num_queries_vis_abstractors):
             hw = int(num_queries**0.5)
             sampler = nn.AdaptiveAvgPool2d((hw, hw))
-            out = sampler(x[num_grids[i]:num_grids[i + 1], :])
+            out = sampler(x[num_grids[i] : num_grids[i + 1], :])
             out = self.net[2](out)  # s2
 
             out = rearrange(out, "b d h w -> b (h w) d")
@@ -563,8 +543,9 @@ class HCXVisionCAbstractor(nn.Module):
         depth: int = 3,
         mlp_depth: int = 2,
     ):
-        assert (n_queries**0.5).is_integer(
-        ), f"n_queries must be square number. n_queries: {n_queries}"
+        assert (n_queries**0.5).is_integer(), (
+            f"n_queries must be square number. n_queries: {n_queries}"
+        )
         hw = int(n_queries**0.5)
 
         # RegBlock = ResBlock + SE
@@ -589,8 +570,7 @@ class HCXVisionCAbstractor(nn.Module):
         )
 
         self.net = nn.Sequential(s1, sampler, s2)
-        self.readout = self.build_mlp(mlp_depth, hidden_size,
-                                      output_hidden_size)
+        self.readout = self.build_mlp(mlp_depth, hidden_size, output_hidden_size)
 
     def build_mlp(
         self,
@@ -608,21 +588,15 @@ class HCXVisionCAbstractor(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(
     _build_hcxvision_hf_processor,
     info=_build_hcxvision_hf_info,
-    dummy_inputs=HCXVisionDummyInputsBuilder)
+    dummy_inputs=HCXVisionDummyInputsBuilder,
+)
 class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"]
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        **kwargs: Optional[Any],
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
         # init configs
@@ -643,31 +617,32 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         ## possible_resolution should be matched with preprocessor_config.json
         config.possible_resolutions = self._init_possible_resolutions(
-            config, vision_config)
+            config, vision_config
+        )
 
-        # init models & parameters
-        with no_init_weights():  # weight will be loaded in from_pretrained
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_model = init_vision_tower_for_hcxvision(
                 vision_config,
-                quant_config,
+                quant_config=quant_config,
                 use_nth_layer=getattr(config, "use_nth_layer", -1),
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_model"),
             )
-        self.mm_projector = self._init_mm_projector(config, text_config,
-                                                    vision_config)
+            self.mm_projector = self._init_mm_projector(
+                config, text_config, vision_config
+            )
 
-        self.lm_head_vocab_size = getattr(text_config, "padded_vocab_size",
-                                          text_config.vocab_size)
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+            if config.anyres:
+                self.image_newline = nn.Parameter(
+                    torch.empty(text_config.hidden_size, dtype=self.dtype)
+                )
 
-        if config.anyres:
-            self.image_newline = nn.Parameter(
-                torch.empty(text_config.hidden_size, dtype=self.dtype))
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.config = config
         self.vision_config = vision_config
@@ -677,7 +652,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # self.reduction = self._init_reduction_type(use_sum_loss)
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return IMAGE_TOKEN
         if modality.startswith("video"):
@@ -685,188 +660,162 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         raise ValueError("Only image or video modality is supported")
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(
+    def _parse_and_validate_image_input(
         self,
-        **kwargs: Unpack[HCXVisionMultimodalInputs],
-    ) -> Optional[MultiModalEmbeddings]:
+        **kwargs: object,
+    ) -> HCXVisionImageInputs | None:
+        pixel_values_images = kwargs.pop("pixel_values_images", None)
 
-        multimodal_embeddings = list()
-        if kwargs.get("pixel_values_images") is not None:
-            for _pixel_values_images, _image_sizes_images in zip(
-                    kwargs["pixel_values_images"],
-                    kwargs["image_sizes_images"]):
-                _pixel_values_images = _pixel_values_images.unsqueeze(dim=0)
-                _image_sizes_images = _image_sizes_images.unsqueeze(dim=0)
-                _len_pixel_values_images = [
-                    len(pixel_value) for pixel_value in _pixel_values_images
-                ]
-                if isinstance(_image_sizes_images, torch.Tensor):
-                    _image_sizes_images = _image_sizes_images.detach().cpu(
-                    ).tolist()
-                _multimodal_embeddings_images = self.forward_images(
-                    pixel_values_images=_pixel_values_images,
-                    image_sizes_images=_image_sizes_images,
-                    len_pixel_values_images=_len_pixel_values_images,
-                )
-                _multimodal_embeddings_images = torch.cat(
-                    _multimodal_embeddings_images, dim=0)
-                multimodal_embeddings.append(_multimodal_embeddings_images)
+        if pixel_values_images is None:
+            return None
 
-        if kwargs.get("pixel_values_videos") is not None:
-            for _pixel_values_videos, _vision_query_lengths_videos in zip(
-                    kwargs["pixel_values_videos"],
-                    kwargs["vision_query_lengths_videos"]):
-                _len_pixel_values_videos = [
-                    len(_vision_query_lengths)
-                    for _vision_query_lengths in _vision_query_lengths_videos
-                ]
-                _c, _w, _h = _pixel_values_videos.shape[-3:]
-                _pixel_values_videos = _pixel_values_videos.reshape(
-                    sum(_len_pixel_values_videos), -1, _c, _w,
-                    _h).unsqueeze(dim=0)
-                _multimodal_embeddings_videos = self.forward_videos(
-                    pixel_values_videos=_pixel_values_videos,
-                    len_pixel_values_videos=_len_pixel_values_videos,
-                )
-                _multimodal_embeddings_videos = torch.cat(
-                    _multimodal_embeddings_videos, dim=0)
-                multimodal_embeddings.append(_multimodal_embeddings_videos)
+        image_sizes_images = kwargs.pop("image_sizes_images")
+
+        return HCXVisionImagePixelInputs(
+            pixel_values_images=pixel_values_images,
+            image_sizes_images=image_sizes_images,
+        )
+
+    def _parse_and_validate_video_input(
+        self,
+        **kwargs: object,
+    ) -> HCXVisionVideoInputs | None:
+        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+
+        if pixel_values_videos is None:
+            return None
+
+        return HCXVisionVideoPixelInputs(
+            pixel_values_videos=pixel_values_videos,
+        )
+
+    def _process_image_input(
+        self,
+        image_input: HCXVisionImageInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        return self.forward_images(
+            pixel_values_images=image_input["pixel_values_images"],
+            image_sizes_images=image_input["image_sizes_images"],
+        )
+
+    def _process_video_input(
+        self,
+        video_input: HCXVisionVideoInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        return self.forward_videos(
+            pixel_values_videos=video_input["pixel_values_videos"],
+        )
+
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        modalities = {}
+
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if input_key == "pixel_values_images" and "images" not in modalities:
+                modalities["images"] = self._parse_and_validate_image_input(**kwargs)
+            if input_key == "pixel_values_videos" and "videos" not in modalities:
+                modalities["videos"] = self._parse_and_validate_video_input(**kwargs)
+
+        return modalities
+
+    def embed_multimodal(
+        self,
+        **kwargs: object,
+    ) -> MultiModalEmbeddings:
+        modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not modalities:
+            return []
+
+        # The result multimodal_embeddings is tuple of tensors, with each
+        # tensor correspoending to a multimodal data item (image or video).
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+
+        # NOTE: It is important to iterate over the keys in this dictionary
+        # to preserve the order of the modalities.
+        for modality in modalities:
+            if modality == "images":
+                image_input = modalities["images"]
+                image_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
+            if modality == "videos":
+                video_input = modalities["videos"]
+                video_embeddings = self._process_video_input(video_input)
+                multimodal_embeddings += tuple(video_embeddings)
+
         return multimodal_embeddings
-
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if (kwargs.get("pixel_values_images") is not None
-                or kwargs.get("pixel_values_videos")
-                is not None):  # v0 compatibility
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-        if multimodal_embeddings is not None:
-            multimodal_embeddings = torch.cat(multimodal_embeddings, dim=0)
-            _mask_image = input_ids == self.config.image_token_id
-            _mask_video = input_ids == self.config.video_token_id
-            assert _mask_image.sum() + _mask_video.sum() == len(
-                multimodal_embeddings)
-
-            if multimodal_embeddings.dtype != inputs_embeds.dtype:
-                multimodal_embeddings = multimodal_embeddings.to(
-                    dtype=inputs_embeds.dtype)
-            if multimodal_embeddings.device != inputs_embeds.device:
-                multimodal_embeddings = multimodal_embeddings.to(
-                    device=inputs_embeds.device)
-
-            if _mask_image.sum() > 0:
-                inputs_embeds[
-                    _mask_image] = multimodal_embeddings[:sum(_mask_image)]
-            if _mask_video.sum() > 0:
-                inputs_embeds[_mask_video] = multimodal_embeddings[
-                    -sum(_mask_video):]
-        return inputs_embeds
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            inputs_embeds = self.get_input_embeddings(input_ids=input_ids,
-                                                      **kwargs)
-            input_ids = None
-        hidden_states = self.language_model.model(input_ids,
-                                                  positions,
-                                                  intermediate_tensors,
-                                                  inputs_embeds=inputs_embeds)
+        hidden_states = self.language_model.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
+        )
         return hidden_states
 
     def forward_images(
         self,
-        pixel_values_images: list[list[torch.FloatTensor]],
-        image_sizes_images: list[list[tuple[int, int]]],
-        len_pixel_values_images: list[int],
-    ) -> list[list[torch.Tensor]]:
-        if sum(len_pixel_values_images) == 0:
-            return None
-
-        concat_pixel_values_images = torch.cat(list(
-            chain(*pixel_values_images)),
-                                               dim=0)
+        pixel_values_images: list[torch.Tensor],
+        image_sizes_images: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        pixel_values_image_flat = flatten_bn(pixel_values_images, concat=True)
 
         visual_token_idx = 0 if "siglip" in self.vision_config.model_type else 1
-        image_forward_outs = self.vision_model(
-            concat_pixel_values_images)[:, visual_token_idx:]
+        image_forward_outs = self.vision_model(pixel_values_image_flat)[
+            :, visual_token_idx:
+        ]
 
-        image_forward_outs = image_forward_outs.to(
-            dtype=self.mm_projector.dtype)
+        image_forward_outs = image_forward_outs.to(dtype=self.mm_projector.dtype)
         image_forward_outs = self.mm_projector(image_forward_outs)  # b (h w) d
 
-        split_sizes = [
-            pixel_value.shape[0] for pixel_value in chain(*pixel_values_images)
-        ]
-        image_forward_outs = torch.split(image_forward_outs,
-                                         split_sizes,
-                                         dim=0)
+        split_sizes = [len(item) for item in pixel_values_images]
+        image_forward_outs = torch.split(image_forward_outs, split_sizes, dim=0)
 
         # newline for anyres postprocessing
         image_features = anyres_postprocessing(
             image_forward_outs=image_forward_outs,
-            image_sizes=[
-                image_size for image_sizes in image_sizes_images
-                for image_size in image_sizes
-            ],
-            num_queries_vis_abstractor=self.config.
-            num_queries_vis_abstractor_image,
+            image_sizes=image_sizes_images.tolist(),
+            num_queries_vis_abstractor=self.config.num_queries_vis_abstractor_image,
             unpad=self.config.unpad,
             patch_size=self.vision_config.patch_size,
             grid_size=self.vision_config.image_size,
             image_newline=self.image_newline,
             possible_resolutions=self.config.possible_resolutions,
         )
-        return image_features
+
+        return tuple(image_features)
 
     def forward_videos(
         self,
-        pixel_values_videos: list[list[torch.FloatTensor]],
-        len_pixel_values_videos: list[int],
-    ) -> list[torch.Tensor]:
-
-        len_video_grids = sum(len_pixel_values_videos)
-        if len_video_grids == 0:
-            return None
-
-        # Run Vision Model
-        concat_pixel_values_videos = torch.cat(list(
-            chain(*pixel_values_videos)),
-                                               dim=0)
+        pixel_values_videos: list[list[torch.Tensor]],
+    ) -> tuple[torch.Tensor, ...]:
+        pixel_values_videos_flat = flatten_bn(
+            [frame for frames in pixel_values_videos for frame in frames],
+            concat=True,
+        )
 
         visual_token_idx = 0 if "siglip" in self.vision_config.model_type else 1
-        video_forward_outs = self.vision_model(
-            concat_pixel_values_videos)[:, visual_token_idx:]
+        video_forward_outs = self.vision_model(pixel_values_videos_flat)[
+            :, visual_token_idx:
+        ]
 
-        video_forward_outs = video_forward_outs.to(
-            dtype=self.mm_projector.dtype)
+        video_forward_outs = video_forward_outs.to(dtype=self.mm_projector.dtype)
 
         # Run MM-Projector
         # len(num_grids) == len(num_queries_vis_abstractors) + 1
         grid_idx = 0
-        num_grids = [
-            grid_idx
-        ]  # e.g. [0, 9, 18, 19, 27, 28, 36, 37, 45, 46, 54, 55, 56]
-        num_queries_vis_abstractors = [
-        ]  # e.g. [81, 81, 81, 9, 81, 9, 81, 9, 81, 9, 81, 9]
+        # e.g. [0, 9, 18, 19, 27, 28, 36, 37, 45, 46, 54, 55, 56]
+        num_grids = [grid_idx]
+        # e.g. [81, 81, 81, 9, 81, 9, 81, 9, 81, 9, 81, 9]
+        num_queries_vis_abstractors = []
         len_total_frames = video_forward_outs.shape[0]
 
         if self.config.first_last_frames_slow:
@@ -874,22 +823,26 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             assert len_total_frames != 0
             if len_total_frames <= 2:
                 num_queries_vis_abstractors.append(
-                    self.config.num_queries_vis_abstractor_video_slow)
+                    self.config.num_queries_vis_abstractor_video_slow
+                )
                 grid_idx += len_total_frames
                 num_grids.append(grid_idx)
             else:
                 num_queries_vis_abstractors.append(
-                    self.config.num_queries_vis_abstractor_video_slow)
+                    self.config.num_queries_vis_abstractor_video_slow
+                )
                 grid_idx += 1
                 num_grids.append(grid_idx)
 
                 num_queries_vis_abstractors.append(
-                    self.config.num_queries_vis_abstractor_video_fast)
+                    self.config.num_queries_vis_abstractor_video_fast
+                )
                 grid_idx += len_total_frames - 2
                 num_grids.append(grid_idx)
 
                 num_queries_vis_abstractors.append(
-                    self.config.num_queries_vis_abstractor_video_slow)
+                    self.config.num_queries_vis_abstractor_video_slow
+                )
                 grid_idx += 1
                 num_grids.append(grid_idx)
         else:
@@ -898,17 +851,19 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 for pixel_values_frame in pixel_values_frames:
                     if len(pixel_values_frame) > 0:
                         num_queries_vis_abstractors.append(
-                            self.config.num_queries_vis_abstractor_video_slow)
+                            self.config.num_queries_vis_abstractor_video_slow
+                        )
                         grid_idx += 1
                         num_grids.append(grid_idx)
                         num_queries_vis_abstractors.append(
-                            self.config.num_queries_vis_abstractor_video_fast)
+                            self.config.num_queries_vis_abstractor_video_fast
+                        )
                         grid_idx = grid_idx + len(pixel_values_frame) - 1
                         num_grids.append(grid_idx)
 
-        video_forward_outs = self.mm_projector(video_forward_outs,
-                                               num_queries_vis_abstractors,
-                                               num_grids)
+        video_forward_outs = self.mm_projector(
+            video_forward_outs, num_queries_vis_abstractors, num_grids
+        )
 
         video_features = []  # what we want to return
         target_features = []
@@ -930,14 +885,19 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 target_group_size = 0
 
             elif video_group_size < target_group_size:
-                raise RuntimeError(
-                    f"{video_group_size=} < {target_group_size=}")
+                raise RuntimeError(f"{video_group_size=} < {target_group_size=}")
 
-        assert len(target_features
-                   ) == 0, f"target_features is not empty!! {target_features}"
+        assert len(target_features) == 0, (
+            f"target_features is not empty!! {target_features}"
+        )
         assert len(video_groups) == len(video_features)
 
-        return video_features
+        feats_per_video = [len(video) for video in pixel_values_videos]
+        idxs_per_video = [0, *accumulate(feats_per_video)]
+        return tuple(
+            torch.cat(video_features[idxs_per_video[i] : idxs_per_video[i + 1]])
+            for i in range(len(feats_per_video))
+        )
 
     def _prepare_multimodal_kwargs(self, **kwargs: object):
         output = defaultdict(list)
@@ -946,7 +906,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 continue  # if empty batch of empty sample
 
             new_k, is_video = k, False
-            if (not k.endswith("_images") and not k.endswith("_videos")):
+            if not k.endswith("_images") and not k.endswith("_videos"):
                 pass
             else:
                 new_k, is_video = k.split("_")[:-1], k.split("_")[-1]
@@ -973,10 +933,8 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        return self.language_model.compute_logits(hidden_states,
-                                                  sampling_metadata)
+    ) -> torch.Tensor | None:
+        return self.language_model.compute_logits(hidden_states)
 
     def load_weights(
         self,
@@ -1001,10 +959,10 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                         if i * j <= config.max_num_grids:
                             possible_resolutions.append([i, j])
 
-                possible_resolutions = [[
-                    ys * vision_config.image_size,
-                    xs * vision_config.image_size
-                ] for ys, xs in possible_resolutions]
+                possible_resolutions = [
+                    [ys * vision_config.image_size, xs * vision_config.image_size]
+                    for ys, xs in possible_resolutions
+                ]
             return possible_resolutions
         else:
             return config.possible_resolutions
@@ -1017,14 +975,13 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ):
         input_hidden_size = vision_config.hidden_size
         if config.mm_projector_type == "linear":
-            mm_projector = nn.Linear(input_hidden_size,
-                                     text_config.hidden_size)
+            mm_projector = nn.Linear(input_hidden_size, text_config.hidden_size)
             mm_projector.dtype = next(mm_projector.parameters()).dtype
         elif config.mm_projector_type == "cabstractor":
             mm_projector = HCXVisionCAbstractor(
                 num_queries=config.num_queries_vis_abstractor_image,
-                num_input_tokens=(vision_config.image_size //
-                                  vision_config.patch_size)**2,
+                num_input_tokens=(vision_config.image_size // vision_config.patch_size)
+                ** 2,
                 encoder_hidden_size=input_hidden_size,
                 hidden_size=input_hidden_size,
                 output_hidden_size=text_config.hidden_size,
@@ -1041,8 +998,7 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return mm_projector
 
 
-def unpad_image(tensor: torch.Tensor,
-                original_size: tuple[int, int]) -> torch.Tensor:
+def unpad_image(tensor: torch.Tensor, original_size: tuple[int, int]) -> torch.Tensor:
     original_width, original_height = original_size
     current_height, current_width = tensor.shape[1:]
 
@@ -1053,18 +1009,17 @@ def unpad_image(tensor: torch.Tensor,
         scale_factor = current_width / original_width
         new_height = int(original_height * scale_factor)
         padding = (current_height - new_height) // 2
-        unpadded_tensor = tensor[:, padding:current_height - padding, :]
+        unpadded_tensor = tensor[:, padding : current_height - padding, :]
     else:
         scale_factor = current_height / original_height
         new_width = int(original_width * scale_factor)
         padding = (current_width - new_width) // 2
-        unpadded_tensor = tensor[:, :, padding:current_width - padding]
+        unpadded_tensor = tensor[:, :, padding : current_width - padding]
 
     return unpadded_tensor
 
 
-def select_best_resolution(original_size: tuple,
-                           possible_resolutions: list) -> tuple:
+def select_best_resolution(original_size: tuple, possible_resolutions: list) -> tuple:
     original_height, original_width = original_size
     best_fit = None
     max_effective_resolution = 0
@@ -1072,15 +1027,19 @@ def select_best_resolution(original_size: tuple,
 
     for height, width in possible_resolutions:
         scale = min(width / original_width, height / original_height)
-        downscaled_width, downscaled_height = int(original_width * scale), int(
-            original_height * scale)
-        effective_resolution = min(downscaled_width * downscaled_height,
-                                   original_width * original_height)
+        downscaled_width, downscaled_height = (
+            int(original_width * scale),
+            int(original_height * scale),
+        )
+        effective_resolution = min(
+            downscaled_width * downscaled_height, original_width * original_height
+        )
         wasted_resolution = (width * height) - effective_resolution
 
         if effective_resolution > max_effective_resolution or (
-                effective_resolution == max_effective_resolution
-                and wasted_resolution < min_wasted_resolution):
+            effective_resolution == max_effective_resolution
+            and wasted_resolution < min_wasted_resolution
+        ):
             max_effective_resolution = effective_resolution
             min_wasted_resolution = wasted_resolution
             best_fit = (height, width)
@@ -1090,15 +1049,19 @@ def select_best_resolution(original_size: tuple,
 
 def get_anyres_image_grid_shape(
     image_size: tuple[int, int],
-    grid_pinpoints: Union[str, list[tuple[int, int]]],
+    grid_pinpoints: str | list[tuple[int, int]],
     patch_size: int,
 ) -> tuple[int, int]:
-    possible_resolutions = grid_pinpoints if isinstance(
-        grid_pinpoints, list) else ast.literal_eval(grid_pinpoints)
+    possible_resolutions = (
+        grid_pinpoints
+        if isinstance(grid_pinpoints, list)
+        else ast.literal_eval(grid_pinpoints)
+    )
 
     original_width, original_height = image_size
-    height, width = select_best_resolution((original_height, original_width),
-                                           possible_resolutions)
+    height, width = select_best_resolution(
+        (original_height, original_width), possible_resolutions
+    )
     return width // patch_size, height // patch_size
 
 
@@ -1116,12 +1079,15 @@ def reshape_and_unpad_image_features(
     image_feature = image_feature[1:]
 
     assert height * width == base_image_feature.shape[0], (
-        f"{height=} * {width=} != {base_image_feature.shape[0]=}")
+        f"{height=} * {width=} != {base_image_feature.shape[0]=}"
+    )
 
     num_patch_width, num_patch_height = get_anyres_image_grid_shape(
-        image_size, possible_resolutions, grid_size)
-    image_feature = image_feature.view(num_patch_height, num_patch_width,
-                                       height, width, -1)
+        image_size, possible_resolutions, grid_size
+    )
+    image_feature = image_feature.view(
+        num_patch_height, num_patch_width, height, width, -1
+    )
 
     if unpad:
         image_feature = image_feature.permute(4, 0, 2, 1, 3).contiguous()
@@ -1130,8 +1096,9 @@ def reshape_and_unpad_image_features(
         image_feature = torch.cat(
             (
                 image_feature,
-                image_newline[:, None, None].expand(
-                    *image_feature.shape[:-1], 1).to(image_feature.device),
+                image_newline[:, None, None]
+                .expand(*image_feature.shape[:-1], 1)
+                .to(image_feature.device),
             ),
             dim=-1,
         )
@@ -1145,20 +1112,21 @@ def reshape_and_unpad_image_features(
 
 
 def anyres_postprocessing(
-    image_forward_outs: list[torch.FloatTensor],
+    image_forward_outs: list[torch.Tensor],
     image_sizes: list[list[int]],
     possible_resolutions: list[tuple[int, int]],
     patch_size: int,
     grid_size: int,
-    image_newline: torch.FloatTensor,
+    image_newline: torch.Tensor,
     num_queries_vis_abstractor: int = -1,
     unpad: bool = False,
-) -> list[torch.FloatTensor]:
+) -> list[torch.Tensor]:
     height = width = grid_size // patch_size
 
     if num_queries_vis_abstractor > 0:
-        assert (num_queries_vis_abstractor**0.5
-                ).is_integer(), "n_queries must be square number"
+        assert (num_queries_vis_abstractor**0.5).is_integer(), (
+            "n_queries must be square number"
+        )
         height = width = int(num_queries_vis_abstractor**0.5)
 
     # post-processing (unpad, add newline)
@@ -1178,29 +1146,8 @@ def anyres_postprocessing(
         else:
             image_feature = image_feature[0]
             image_feature = torch.cat(
-                (image_feature, image_newline[None].to(image_feature.device)),
-                dim=0)
+                (image_feature, image_newline[None].to(image_feature.device)), dim=0
+            )
         new_image_features.append(image_feature)
-    image_features = new_image_features
-    return image_features
 
-
-def resize_image(
-    image: Union[np.ndarray, PIL.Image.Image],
-    max_side: int = 378,
-) -> np.ndarray:
-    image_arr = image
-    if isinstance(image, np.ndarray):
-        image = Image.fromarray(image)
-
-    width, height = image.size
-    cur_max_size = max(width, height)
-    if cur_max_size <= max_side:
-        return image_arr
-
-    scale = max_side / cur_max_size
-    width = int(width * scale)
-    height = int(height * scale)
-    image = image.resize((width, height), Image.LANCZOS)
-    image_arr = np.array(image)
-    return image_arr
+    return new_image_features

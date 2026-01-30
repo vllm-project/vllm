@@ -5,29 +5,36 @@ import contextlib
 import multiprocessing
 import time
 import weakref
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
-from typing import (TYPE_CHECKING, Any, Callable, Generic, Optional, TypeVar,
-                    Union, overload)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Generic,
+    Optional,
+    TypeVar,
+    Union,
+    overload,
+)
 
 import torch
 from torch.autograd.profiler import record_function
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
-                                  usage_message)
-from vllm.utils import (get_open_port, get_open_zmq_ipc_path, get_tcp_uri,
-                        kill_process_tree)
+from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
+from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.system_utils import kill_process_tree
+from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     import numpy as np
 
     from vllm.v1.engine.coordinator import DPCoordinator
-    from vllm.v1.engine.utils import (CoreEngineActorManager,
-                                      CoreEngineProcManager)
+    from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
 
 logger = init_logger(__name__)
 
@@ -35,7 +42,6 @@ T = TypeVar("T")
 
 
 class ConstantList(Generic[T], Sequence):
-
     def __init__(self, x: list[T]) -> None:
         self._x = x
 
@@ -57,33 +63,25 @@ class ConstantList(Generic[T], Sequence):
     def clear(self):
         raise TypeError("Cannot clear a constant list")
 
-    def index(self,
-              item: T,
-              start: int = 0,
-              stop: Optional[int] = None) -> int:
-        return self._x.index(item, start,
-                             stop if stop is not None else len(self._x))
+    def index(self, item: T, start: int = 0, stop: int | None = None) -> int:
+        return self._x.index(item, start, stop if stop is not None else len(self._x))
 
     @overload
-    def __getitem__(self, item: int) -> T:
-        ...
+    def __getitem__(self, item: int) -> T: ...
 
     @overload
-    def __getitem__(self, s: slice, /) -> list[T]:
-        ...
+    def __getitem__(self, s: slice, /) -> list[T]: ...
 
-    def __getitem__(self, item: Union[int, slice]) -> Union[T, list[T]]:
+    def __getitem__(self, item: int | slice) -> T | list[T]:
         return self._x[item]
 
     @overload
-    def __setitem__(self, item: int, value: T):
-        ...
+    def __setitem__(self, item: int, value: T): ...
 
     @overload
-    def __setitem__(self, s: slice, value: T, /):
-        ...
+    def __setitem__(self, s: slice, value: T, /): ...
 
-    def __setitem__(self, item: Union[int, slice], value: Union[T, list[T]]):
+    def __setitem__(self, item: int | slice, value: T | list[T]):
         raise TypeError("Cannot set item in a constant list")
 
     def __delitem__(self, item):
@@ -101,23 +99,23 @@ class ConstantList(Generic[T], Sequence):
     def __repr__(self):
         return f"ConstantList({self._x})"
 
+    def copy(self) -> list[T]:
+        return self._x.copy()
+
 
 class CpuGpuBuffer:
     """Buffer to easily copy tensors between CPU and GPU."""
 
     def __init__(
         self,
-        *size: Union[int, torch.SymInt],
+        *size: int | torch.SymInt,
         dtype: torch.dtype,
         device: torch.device,
         pin_memory: bool,
         with_numpy: bool = True,
     ) -> None:
-        self.cpu = torch.zeros(*size,
-                               dtype=dtype,
-                               device="cpu",
-                               pin_memory=pin_memory)
-        self.gpu = self.cpu.to(device)
+        self.cpu = torch.zeros(*size, dtype=dtype, device="cpu", pin_memory=pin_memory)
+        self.gpu = torch.zeros_like(self.cpu, device=device)
         self.np: np.ndarray
         # To keep type hints simple (avoiding generics and subclasses), we
         # only conditionally create the numpy array attribute. This can cause
@@ -126,15 +124,16 @@ class CpuGpuBuffer:
             if dtype == torch.bfloat16:
                 raise ValueError(
                     "Bfloat16 torch tensors cannot be directly cast to a "
-                    "numpy array, so call CpuGpuBuffer with with_numpy=False")
+                    "numpy array, so call CpuGpuBuffer with with_numpy=False"
+                )
             self.np = self.cpu.numpy()
 
-    def copy_to_gpu(self, n: Optional[int] = None) -> torch.Tensor:
+    def copy_to_gpu(self, n: int | None = None) -> torch.Tensor:
         if n is None:
             return self.gpu.copy_(self.cpu, non_blocking=True)
         return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
 
-    def copy_to_cpu(self, n: Optional[int] = None) -> torch.Tensor:
+    def copy_to_cpu(self, n: int | None = None) -> torch.Tensor:
         """NOTE: Because this method is non-blocking, explicit synchronization
         is needed to ensure the data is copied to CPU."""
         if n is None:
@@ -142,9 +141,7 @@ class CpuGpuBuffer:
         return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
 
 
-def get_engine_client_zmq_addr(local_only: bool,
-                               host: str,
-                               port: int = 0) -> str:
+def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> str:
     """Assign a new ZMQ socket address.
 
     If local_only is True, participants are colocated and so a unique IPC
@@ -153,8 +150,11 @@ def get_engine_client_zmq_addr(local_only: bool,
     Otherwise, the provided host and port will be used to construct a TCP
     address (port == 0 means assign an available port)."""
 
-    return get_open_zmq_ipc_path() if local_only else (get_tcp_uri(
-        host, port or get_open_port()))
+    return (
+        get_open_zmq_ipc_path()
+        if local_only
+        else (get_tcp_uri(host, port or get_open_port()))
+    )
 
 
 class APIServerProcessManager:
@@ -173,7 +173,7 @@ class APIServerProcessManager:
         num_servers: int,
         input_addresses: list[str],
         output_addresses: list[str],
-        stats_update_address: Optional[str] = None,
+        stats_update_address: str | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -195,21 +195,23 @@ class APIServerProcessManager:
         spawn_context = multiprocessing.get_context("spawn")
         self.processes: list[BaseProcess] = []
 
-        for i, in_addr, out_addr in zip(range(num_servers), input_addresses,
-                                        output_addresses):
+        for i, in_addr, out_addr in zip(
+            range(num_servers), input_addresses, output_addresses
+        ):
             client_config = {
                 "input_address": in_addr,
                 "output_address": out_addr,
                 "client_count": num_servers,
-                "client_index": i
+                "client_index": i,
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
 
-            proc = spawn_context.Process(target=target_server_fn,
-                                         name=f"ApiServer_{i}",
-                                         args=(listen_address, sock, args,
-                                               client_config))
+            proc = spawn_context.Process(
+                target=target_server_fn,
+                name=f"ApiServer_{i}",
+                args=(listen_address, sock, args, client_config),
+            )
             self.processes.append(proc)
             proc.start()
 
@@ -224,10 +226,11 @@ class APIServerProcessManager:
 
 
 def wait_for_completion_or_failure(
-        api_server_manager: APIServerProcessManager,
-        engine_manager: Optional[Union["CoreEngineProcManager",
-                                       "CoreEngineActorManager"]] = None,
-        coordinator: Optional["DPCoordinator"] = None) -> None:
+    api_server_manager: APIServerProcessManager,
+    engine_manager: Union["CoreEngineProcManager", "CoreEngineActorManager"]
+    | None = None,
+    coordinator: Optional["DPCoordinator"] = None,
+) -> None:
     """Wait for all processes to complete or detect if any fail.
 
     Raises an exception if any process exits with a non-zero status.
@@ -240,16 +243,14 @@ def wait_for_completion_or_failure(
         coordinator: The coordinator for data parallel.
     """
 
-    from vllm.v1.engine.utils import (CoreEngineActorManager,
-                                      CoreEngineProcManager)
+    from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
 
     try:
         logger.info("Waiting for API servers to complete ...")
         # Create a mapping of sentinels to their corresponding processes
         # for efficient lookup
         sentinel_to_proc: dict[Any, BaseProcess] = {
-            proc.sentinel: proc
-            for proc in api_server_manager.processes
+            proc.sentinel: proc for proc in api_server_manager.processes
         }
 
         if coordinator:
@@ -265,8 +266,7 @@ def wait_for_completion_or_failure(
         # Check if any process terminates
         while sentinel_to_proc or actor_run_refs:
             # Wait for any process to terminate
-            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc,
-                                                         timeout=5)
+            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc, timeout=5)
 
             # Process any terminated processes
             for sentinel in ready_sentinels:
@@ -276,17 +276,18 @@ def wait_for_completion_or_failure(
                 if proc.exitcode != 0:
                     raise RuntimeError(
                         f"Process {proc.name} (PID: {proc.pid}) "
-                        f"died with exit code {proc.exitcode}")
+                        f"died with exit code {proc.exitcode}"
+                    )
 
             if actor_run_refs:
                 import ray
+
                 _, actor_run_refs = ray.wait(actor_run_refs, timeout=5)
 
     except KeyboardInterrupt:
         logger.info("Received KeyboardInterrupt, shutting down API servers...")
     except Exception as e:
-        logger.exception("Exception occurred while running API servers: %s",
-                         str(e))
+        logger.exception("Exception occurred while running API servers: %s", str(e))
         raise
     finally:
         logger.info("Terminating remaining processes ...")
@@ -319,8 +320,9 @@ def shutdown(procs: list[BaseProcess]):
             kill_process_tree(pid)
 
 
-def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
-               length: int) -> torch.Tensor:
+def copy_slice(
+    from_tensor: torch.Tensor, to_tensor: torch.Tensor, length: int
+) -> torch.Tensor:
     """
     Copy the first length elements of a tensor into another tensor in a
     non-blocking manner.
@@ -333,8 +335,8 @@ def copy_slice(from_tensor: torch.Tensor, to_tensor: torch.Tensor,
 
 
 def report_usage_stats(
-        vllm_config,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT) -> None:
+    vllm_config, usage_context: UsageContext = UsageContext.ENGINE_CONTEXT
+) -> None:
     """Report usage statistics if enabled."""
 
     if not is_usage_stats_enabled():
@@ -342,40 +344,123 @@ def report_usage_stats(
 
     from vllm.model_executor.model_loader import get_architecture_class_name
 
+    parallel_config = vllm_config.parallel_config
+
+    # Prepare KV connector string if applicable
+    kv_connector = None
+    if vllm_config.kv_transfer_config is not None:
+        kv_connector = vllm_config.kv_transfer_config.kv_connector
+
     usage_message.report_usage(
         get_architecture_class_name(vllm_config.model_config),
         usage_context,
         extra_kvs={
             # Common configuration
-            "dtype":
-            str(vllm_config.model_config.dtype),
-            "tensor_parallel_size":
-            vllm_config.parallel_config.tensor_parallel_size,
-            "block_size":
-            vllm_config.cache_config.block_size,
-            "gpu_memory_utilization":
-            vllm_config.cache_config.gpu_memory_utilization,
-
+            "dtype": str(vllm_config.model_config.dtype),
+            "block_size": vllm_config.cache_config.block_size,
+            "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
+            "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
             # Quantization
-            "quantization":
-            vllm_config.model_config.quantization,
-            "kv_cache_dtype":
-            str(vllm_config.cache_config.cache_dtype),
-
+            "quantization": vllm_config.model_config.quantization,
+            "kv_cache_dtype": str(vllm_config.cache_config.cache_dtype),
             # Feature flags
-            "enable_lora":
-            bool(vllm_config.lora_config),
-            "enable_prefix_caching":
-            vllm_config.cache_config.enable_prefix_caching,
-            "enforce_eager":
-            vllm_config.model_config.enforce_eager,
-            "disable_custom_all_reduce":
-            vllm_config.parallel_config.disable_custom_all_reduce,
-        })
+            "enable_lora": bool(vllm_config.lora_config),
+            "enable_prefix_caching": vllm_config.cache_config.enable_prefix_caching,
+            "enforce_eager": vllm_config.model_config.enforce_eager,
+            "disable_custom_all_reduce": parallel_config.disable_custom_all_reduce,
+            # Distributed parallelism settings
+            "tensor_parallel_size": parallel_config.tensor_parallel_size,
+            "data_parallel_size": parallel_config.data_parallel_size,
+            "pipeline_parallel_size": parallel_config.pipeline_parallel_size,
+            "enable_expert_parallel": parallel_config.enable_expert_parallel,
+            # All2All backend for MoE expert parallel
+            "all2all_backend": parallel_config.all2all_backend,
+            # KV connector used
+            "kv_connector": kv_connector,
+        },
+    )
+
+
+_PROFILER_FUNC = None
 
 
 def record_function_or_nullcontext(name: str) -> AbstractContextManager:
+    global _PROFILER_FUNC
+
+    # fast path assume it is set
+    if _PROFILER_FUNC is not None:
+        return _PROFILER_FUNC(name)
+
+    func = contextlib.nullcontext
     if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
-        return record_function(name)
-    else:
-        return contextlib.nullcontext()
+        func = record_function
+    elif envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
+        import nvtx
+
+        func = nvtx.annotate
+
+    _PROFILER_FUNC = func
+    return func(name)
+
+
+def tensor_data(tensor: torch.Tensor) -> memoryview:
+    """Get the raw data of a tensor as a uint8 memoryview, useful for
+    serializing and hashing.
+
+    Args:
+        tensor: The input tensor.
+
+    Returns:
+        A memoryview of the tensor data as uint8.
+    """
+    return tensor.flatten().contiguous().view(torch.uint8).numpy().data
+
+
+@dataclass
+class IterationDetails:
+    num_ctx_requests: int
+    num_ctx_tokens: int
+    num_generation_requests: int
+    num_generation_tokens: int
+
+    def __repr__(self) -> str:
+        return f"IterationDetails(num_ctx_requests={self.num_ctx_requests},\
+                 num_ctx_tokens={self.num_ctx_tokens}, \
+                 num_generation_requests={self.num_generation_requests}, \
+                 num_generation_tokens={self.num_generation_tokens})"
+
+
+def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDetails:
+    """
+    Compute the number of context/generation requests and tokens
+    for the current iteration's scheduler output. A requests is regarded
+    as a context request if its output tokens are still 0, an extended chunk
+    of chunked prefill falls into this category.
+
+    Args:
+        scheduler_output: The scheduler output for the current iteration.
+
+    Returns:
+        An IterationDetails object containing the number of
+        context/generation requests and tokens.
+    """
+    num_context_requests = 0
+    num_context_tokens = 0
+    num_generation_requests = 0
+    num_generation_tokens = 0
+    new_req_ids = {new_req.req_id for new_req in scheduler_output.scheduled_new_reqs}
+    for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+        if scheduler_output.scheduled_cached_reqs.is_context_phase(req_id) or (
+            req_id in new_req_ids
+        ):
+            num_context_requests += 1
+            num_context_tokens += num_tokens
+        else:
+            num_generation_requests += 1
+            num_generation_tokens += num_tokens
+    return IterationDetails(
+        num_context_requests,
+        num_context_tokens,
+        num_generation_requests,
+        num_generation_tokens,
+    )

@@ -2,23 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import UserDict
 from dataclasses import dataclass
-from typing import Optional
 
 import msgspec
 import numpy as np
 import pytest
 import torch
 
-from vllm.multimodal.inputs import (MultiModalBatchedField,
-                                    MultiModalFieldElem, MultiModalFlatField,
-                                    MultiModalKwargsItem,
-                                    MultiModalKwargsItems,
-                                    MultiModalSharedField, NestedTensors)
+from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
+    MultiModalFieldElem,
+    MultiModalFlatField,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    MultiModalSharedField,
+    NestedTensors,
+)
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+
+pytestmark = pytest.mark.cpu_test
 
 
 class UnrecognizedType(UserDict):
-
     def __init__(self, an_int: int):
         super().__init__()
         self.an_int = an_int
@@ -45,10 +49,7 @@ def test_encode_decode(monkeypatch: pytest.MonkeyPatch):
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
         obj = MyType(
-            tensor1=torch.randint(low=0,
-                                  high=100,
-                                  size=(1024, ),
-                                  dtype=torch.int32),
+            tensor1=torch.randint(low=0, high=100, size=(1024,), dtype=torch.int32),
             a_string="hello",
             list_of_tensors=[
                 torch.rand((1, 10), dtype=torch.float32),
@@ -56,8 +57,9 @@ def test_encode_decode(monkeypatch: pytest.MonkeyPatch):
                 torch.tensor(1984),  # test scalar too
                 # Make sure to test bf16 which numpy doesn't support.
                 torch.rand((3, 5, 1000), dtype=torch.bfloat16),
-                torch.tensor([float("-inf"), float("inf")] * 1024,
-                             dtype=torch.bfloat16),
+                torch.tensor(
+                    [float("-inf"), float("inf")] * 1024, dtype=torch.bfloat16
+                ),
             ],
             numpy_array=np.arange(512),
             unrecognized=UnrecognizedType(33),
@@ -97,30 +99,36 @@ def test_encode_decode(monkeypatch: pytest.MonkeyPatch):
 
 
 class MyRequest(msgspec.Struct):
-    mm: Optional[list[MultiModalKwargsItems]]
+    mm: list[MultiModalKwargsItems] | None
 
 
 def test_multimodal_kwargs():
-    e1 = MultiModalFieldElem("audio", "a0",
-                             torch.zeros(1000, dtype=torch.bfloat16),
-                             MultiModalBatchedField())
+    e1 = MultiModalFieldElem(
+        torch.zeros(1000, dtype=torch.bfloat16),
+        MultiModalBatchedField(),
+    )
     e2 = MultiModalFieldElem(
-        "video",
-        "v0",
         [torch.zeros(1000, dtype=torch.int8) for _ in range(4)],
         MultiModalFlatField(
-            [[slice(1, 2, 3), slice(4, 5, 6)], [slice(None, 2)]], 0),
+            slices=[[slice(1, 2, 3), slice(4, 5, 6)], [slice(None, 2)]],
+            dim=0,
+        ),
     )
-    e3 = MultiModalFieldElem("image", "i0", torch.zeros(1000,
-                                                        dtype=torch.int32),
-                             MultiModalSharedField(4))
+    e3 = MultiModalFieldElem(
+        torch.zeros(1000, dtype=torch.int32),
+        MultiModalSharedField(batch_size=4),
+    )
     e4 = MultiModalFieldElem(
-        "image", "i1", torch.zeros(1000, dtype=torch.int32),
-        MultiModalFlatField([slice(1, 2, 3), slice(4, 5, 6)], 2))
-    audio = MultiModalKwargsItem.from_elems([e1])
-    video = MultiModalKwargsItem.from_elems([e2])
-    image = MultiModalKwargsItem.from_elems([e3, e4])
-    mm = MultiModalKwargsItems.from_seq([audio, video, image])
+        torch.zeros(1000, dtype=torch.int32),
+        MultiModalFlatField(slices=[slice(1, 2, 3), slice(4, 5, 6)], dim=2),
+    )
+    mm = MultiModalKwargsItems(
+        {
+            "audio": [MultiModalKwargsItem({"a0": e1})],
+            "video": [MultiModalKwargsItem({"v0": e2})],
+            "image": [MultiModalKwargsItem({"i0": e3, "i1": e4})],
+        }
+    )
 
     # pack mm kwargs into a mock request so that it can be decoded properly
     req = MyRequest([mm])
@@ -134,8 +142,8 @@ def test_multimodal_kwargs():
 
     total_len = sum(memoryview(x).cast("B").nbytes for x in encoded)
 
-    # expected total encoding length, should be 14306, +-20 for minor changes
-    assert 14275 <= total_len <= 14325
+    # expected total encoding length, should be 14319, +-20 for minor changes
+    assert 14300 <= total_len <= 14340
     decoded = decoder.decode(encoded).mm[0]
     assert isinstance(decoded, MultiModalKwargsItems)
 
@@ -162,16 +170,14 @@ def assert_equal(obj1: MyType, obj2: MyType):
     assert torch.equal(obj1.tensor1, obj2.tensor1)
     assert obj1.a_string == obj2.a_string
     assert all(
-        torch.equal(a, b)
-        for a, b in zip(obj1.list_of_tensors, obj2.list_of_tensors))
+        torch.equal(a, b) for a, b in zip(obj1.list_of_tensors, obj2.list_of_tensors)
+    )
     assert np.array_equal(obj1.numpy_array, obj2.numpy_array)
     assert obj1.unrecognized.an_int == obj2.unrecognized.an_int
     assert torch.equal(obj1.small_f_contig_tensor, obj2.small_f_contig_tensor)
     assert torch.equal(obj1.large_f_contig_tensor, obj2.large_f_contig_tensor)
-    assert torch.equal(obj1.small_non_contig_tensor,
-                       obj2.small_non_contig_tensor)
-    assert torch.equal(obj1.large_non_contig_tensor,
-                       obj2.large_non_contig_tensor)
+    assert torch.equal(obj1.small_non_contig_tensor, obj2.small_non_contig_tensor)
+    assert torch.equal(obj1.large_non_contig_tensor, obj2.large_non_contig_tensor)
     assert torch.equal(obj1.empty_tensor, obj2.empty_tensor)
 
 
@@ -208,8 +214,9 @@ def test_tensor_serialization():
     decoded = decoder.decode(encoded)
 
     # Verify the decoded tensor matches the original
-    assert torch.allclose(
-        tensor, decoded), "Decoded tensor does not match the original tensor."
+    assert torch.allclose(tensor, decoded), (
+        "Decoded tensor does not match the original tensor."
+    )
 
 
 def test_numpy_array_serialization():
@@ -227,13 +234,12 @@ def test_numpy_array_serialization():
     decoded = decoder.decode(encoded)
 
     # Verify the decoded array matches the original
-    assert np.allclose(
-        array,
-        decoded), "Decoded numpy array does not match the original array."
+    assert np.allclose(array, decoded), (
+        "Decoded numpy array does not match the original array."
+    )
 
 
 class CustomClass:
-
     def __init__(self, value):
         self.value = value
 
@@ -242,7 +248,8 @@ class CustomClass:
 
 
 def test_custom_class_serialization_allowed_with_pickle(
-        monkeypatch: pytest.MonkeyPatch):
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Test that serializing a custom class succeeds when allow_pickle=True."""
 
     with monkeypatch.context() as m:
@@ -259,8 +266,7 @@ def test_custom_class_serialization_allowed_with_pickle(
         decoded = decoder.decode(encoded)
 
         # Verify the decoded object matches the original
-        assert obj == decoded, (
-            "Decoded object does not match the original object.")
+        assert obj == decoded, "Decoded object does not match the original object."
 
 
 def test_custom_class_serialization_disallowed_without_pickle():

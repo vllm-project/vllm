@@ -1,1 +1,2 @@
 lmcache
+nixl >= 0.7.1 # Required for disaggregated prefill

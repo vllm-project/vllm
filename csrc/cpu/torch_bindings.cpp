@@ -19,20 +19,23 @@ void onednn_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
                       const std::optional<torch::Tensor>& azp,
                       const std::optional<torch::Tensor>& azp_adj,
                       const std::optional<torch::Tensor>& bias,
-                      int64_t handler);
+                      const torch::Tensor& handler_tensor);
 
 int64_t create_onednn_mm_handler(const torch::Tensor& b,
                                  int64_t primitive_cache_size);
 
 void onednn_mm(torch::Tensor& c, const torch::Tensor& a,
-               const std::optional<torch::Tensor>& bias, int64_t handler);
+               const std::optional<torch::Tensor>& bias,
+               const torch::Tensor& handler_tensor);
+
+bool is_onednn_acl_supported();
 
 void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& kv_cache, double scale,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens);
 
 int64_t init_shm_manager(const std::string& name, const int64_t group_size,
-                         const int64_t rank);
+                         const int64_t rank, const int64_t thread_num);
 
 std::string join_shm_manager(int64_t handle, const std::string& name);
 
@@ -72,37 +75,64 @@ at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      const std::optional<at::Tensor>& bias,
                                      at::ScalarType out_dtype, bool is_vnni);
 
+torch::Tensor get_scheduler_metadata(
+    const int64_t num_req, const int64_t num_heads_q,
+    const int64_t num_heads_kv, const int64_t head_dim,
+    const torch::Tensor& seq_lens, at::ScalarType dtype,
+    const torch::Tensor& query_start_loc, const bool casual,
+    const int64_t window_size, const std::string& isa_hint,
+    const bool enable_kv_split);
+
+void cpu_attn_reshape_and_cache(const torch::Tensor& key,
+                                const torch::Tensor& value,
+                                torch::Tensor& key_cache,
+                                torch::Tensor& value_cache,
+                                const torch::Tensor& slot_mapping,
+                                const std::string& isa);
+
+void cpu_attention_with_kv_cache(
+    const torch::Tensor& query, const torch::Tensor& key_cache,
+    const torch::Tensor& value_cache, torch::Tensor& output,
+    const torch::Tensor& query_start_loc, const torch::Tensor& seq_lens,
+    const double scale, const bool causal,
+    const std::optional<torch::Tensor>& alibi_slopes,
+    const int64_t sliding_window_left, const int64_t sliding_window_right,
+    const torch::Tensor& block_table, const double softcap,
+    const torch::Tensor& scheduler_metadata,
+    const std::optional<torch::Tensor>& s_aux);
+
+// Note: just for avoiding importing errors
+void placeholder_op() { TORCH_CHECK(false, "Unimplemented"); }
+
+void cpu_gemm_wna16(const torch::Tensor& input, const torch::Tensor& q_weight,
+                    torch::Tensor& output, const torch::Tensor& scales,
+                    const std::optional<torch::Tensor>& zeros,
+                    const std::optional<torch::Tensor>& g_idx,
+                    const std::optional<torch::Tensor>& bias,
+                    const int64_t pack_factor, const std::string& isa_hint);
+
+void prepack_moe_weight(const torch::Tensor& weight,
+                        torch::Tensor& packed_weight, const std::string& isa);
+
+void cpu_fused_moe(torch::Tensor& output, const torch::Tensor& input,
+                   const torch::Tensor& w13, const torch::Tensor& w2,
+                   const std::optional<torch::Tensor>& w13_bias,
+                   const std::optional<torch::Tensor>& w2_bias,
+                   const torch::Tensor& topk_weights,
+                   const torch::Tensor& topk_id, const std::string& act,
+                   const std::string& isa);
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
-  // Attention ops
-  // Compute the attention between an input query and the cached keys/values
-  // using PagedAttention.
   ops.def(
-      "paged_attention_v1("
-      "    Tensor! out, Tensor query, Tensor key_cache,"
-      "    Tensor value_cache, int num_kv_heads, float scale,"
-      "    Tensor block_tables, Tensor seq_lens, int block_size,"
-      "    int max_seq_len, Tensor? alibi_slopes,"
-      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
-      "    int tp_rank, int blocksparse_local_blocks,"
-      "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
-  ops.impl("paged_attention_v1", torch::kCPU, &paged_attention_v1);
+      "dynamic_4bit_int_moe("
+      "Tensor x, Tensor topk_ids, Tensor topk_weights,"
+      "Tensor w13_packed, Tensor w2_packed, int H, int I, int I2,"
+      "int group_size, bool apply_router_weight_on_input, int activation_kind"
+      ") -> Tensor");
 
-  // PagedAttention V2.
-  ops.def(
-      "paged_attention_v2("
-      "    Tensor! out, Tensor! exp_sums, Tensor! max_logits,"
-      "    Tensor! tmp_out, Tensor query, Tensor key_cache,"
-      "    Tensor value_cache, int num_kv_heads, float scale,"
-      "    Tensor block_tables, Tensor seq_lens, int block_size,"
-      "    int max_seq_len, Tensor? alibi_slopes,"
-      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
-      "    int tp_rank, int blocksparse_local_blocks,"
-      "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
-  ops.impl("paged_attention_v2", torch::kCPU, &paged_attention_v2);
+  ops.impl("dynamic_4bit_int_moe", torch::kCPU, &dynamic_4bit_int_moe_cpu);
 
   // Activation ops
 
@@ -154,7 +184,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quantization
 #if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__)) || \
     defined(__powerpc64__)
-  at::Tag stride_tag = at::Tag::needs_fixed_stride_order;
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
@@ -168,8 +197,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // oneDNN GEMM
   ops.def(
       "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
-      "int handler) -> ()");
+      "Tensor handler_tensor) -> ()");
   ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
+
+  // Check if oneDNN was built with ACL backend
+  ops.def("is_onednn_acl_supported() -> bool", &is_onednn_acl_supported);
 
   // Create oneDNN W8A8 handler
   ops.def(
@@ -181,29 +213,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // oneDNN scaled_mm for W8A8 with static per-tensor activation quantization
   ops.def(
       "onednn_scaled_mm(Tensor! c, Tensor a, Tensor a_scales, Tensor? azp, "
-      "Tensor? azp_adj, Tensor? bias, int handler) -> ()");
+      "Tensor? azp_adj, Tensor? bias, Tensor handler_tensor) -> ()");
   ops.impl("onednn_scaled_mm", torch::kCPU, &onednn_scaled_mm);
 
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
-      "Tensor? azp) -> ()",
-      {stride_tag});
+      "Tensor? azp) -> ()");
   ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
 
   // Compute int8 quantized tensor and scaling factor
   ops.def(
       "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
-      "Tensor!? azp) -> ()",
-      {stride_tag});
+      "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
            &dynamic_scaled_int8_quant);
 #endif
 
 // SHM CCL
-#ifdef __AVX512F__
-  ops.def("init_shm_manager(str name, int group_size, int rank) -> int",
-          &init_shm_manager);
+#if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__))
+  ops.def(
+      "init_shm_manager(str name, int group_size, int rank, int thread_num) -> "
+      "int",
+      &init_shm_manager);
   ops.def("join_shm_manager(int handle, str name) -> str", &join_shm_manager);
   ops.def("shm_allreduce(int handle, Tensor! data) -> ()");
   ops.impl("shm_allreduce", torch::kCPU, &shm_allreduce);
@@ -221,7 +253,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("shm_send_tensor_list", torch::kCPU, &shm_send_tensor_list);
   ops.def("shm_recv_tensor_list(int handle, int src) -> Tensor[](a)",
           &shm_recv_tensor_list);
-#endif
+#endif  // #if defined(__AVX512F__) || defined(__aarch64__)
 
   // sgl-kernels
 #if defined(__AVX512BF16__) && defined(__AVX512F__) && defined(__AVX512VNNI__)
@@ -244,37 +276,53 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("int8_scaled_mm_with_quant", torch::kCPU,
            &int8_scaled_mm_with_quant);
 #endif
-}
 
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
-  // Cache ops
-  // Swap in (out) the cache blocks from src to dst.
-  cache_ops.def(
-      "swap_blocks(Tensor src, Tensor! dst, Tensor block_mapping) -> ()");
-  cache_ops.impl("swap_blocks", torch::kCPU, &swap_blocks);
+  // CPU attention kernels
+  ops.def(
+      "get_scheduler_metadata(int num_req, int num_heads_q, int num_heads_kv, "
+      "int head_dim, Tensor seq_lens, ScalarType dtype, Tensor "
+      "query_start_loc, bool casual, int window_size, str isa_hint, bool "
+      "enable_kv_split) -> Tensor",
+      &get_scheduler_metadata);
+  ops.def(
+      "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "
+      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str "
+      "isa) -> ()",
+      &cpu_attn_reshape_and_cache);
+  ops.def(
+      "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "
+      "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
+      "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
+      "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
+      &cpu_attention_with_kv_cache);
 
-  // Copy the cache blocks from src to dst.
-  cache_ops.def(
-      "copy_blocks(Tensor(a!)[] key_caches, Tensor[](b!) value_caches, "
-      "Tensor block_mapping) -> ()");
-  cache_ops.impl("copy_blocks", torch::kCPU, &copy_blocks);
+  // placeholders
+  ops.def("static_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def("dynamic_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def("dynamic_per_token_scaled_fp8_quant() -> ()", placeholder_op);
 
-  // Reshape the key and value tensors and cache them.
-  cache_ops.def(
-      "reshape_and_cache(Tensor key, Tensor value,"
-      "                  Tensor! key_cache, Tensor! value_cache,"
-      "                  Tensor slot_mapping,"
-      "                  str kv_cache_dtype,"
-      "                  Tensor k_scale, Tensor v_scale) -> ()");
-  cache_ops.impl("reshape_and_cache", torch::kCPU, &reshape_and_cache);
+  // WNA16
+#if defined(__AVX512F__)
+  ops.def(
+      "cpu_gemm_wna16(Tensor input, Tensor q_weight, Tensor(a2!) output, "
+      "Tensor scales, Tensor? zeros, Tensor? g_idx, Tensor? bias, SymInt "
+      "pack_factor, str isa_hint) -> ()");
+  ops.impl("cpu_gemm_wna16", torch::kCPU, &cpu_gemm_wna16);
+#endif
 
-  cache_ops.def(
-      "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
-      "                     Tensor! kv_cache,"
-      "                     Tensor slot_mapping,"
-      "                     str kv_cache_dtype,"
-      "                     Tensor scale) -> ()");
-  cache_ops.impl("concat_and_cache_mla", torch::kCPU, &concat_and_cache_mla);
+  // fused moe
+#if defined(__AVX512F__)
+  ops.def(
+      "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
+      "-> ()");
+  ops.impl("prepack_moe_weight", torch::kCPU, &prepack_moe_weight);
+  ops.def(
+      "cpu_fused_moe(Tensor(a0!) output, Tensor input, Tensor w13, Tensor w2, "
+      "Tensor? w13_bias, Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, "
+      "str act, str isa) -> ()");
+  ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
+#endif
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {

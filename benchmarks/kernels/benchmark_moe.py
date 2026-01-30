@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import gc
 import json
 import os
 import time
@@ -14,13 +15,63 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    RoutingMethodType,
+    _get_config_dtype_str,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import *
+from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+    TritonOrDeepGemmExperts,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import set_random_seed
 
 FP8_DTYPE = current_platform.fp8_dtype()
+
+# Default interval for clearing Triton JIT cache during tuning
+# Set to 0 to disable automatic cache clearing
+_CACHE_CLEAR_INTERVAL_ENV = "VLLM_MOE_TUNE_CACHE_CLEAR_INTERVAL"
+TRITON_CACHE_CLEAR_INTERVAL = int(os.environ.get(_CACHE_CLEAR_INTERVAL_ENV, "50"))
+
+
+def clear_triton_cache():
+    """Clear Triton JIT compilation cache and Python/CUDA memory.
+
+    This helps prevent OOM during tuning with large models (many experts).
+    """
+    # Force Python garbage collection
+    gc.collect()
+
+    # Clear CUDA memory cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Try to clear Triton's runtime cache
+    try:
+        if (
+            hasattr(triton, "runtime")
+            and hasattr(triton.runtime, "cache")
+            and hasattr(triton.runtime.cache, "clear")
+        ):
+            triton.runtime.cache.clear()
+    except ImportError:
+        # Triton not installed, skip cache clearing
+        pass
+    except AttributeError:
+        # Triton version doesn't have expected cache API
+        pass
+    except Exception as e:
+        print(f"Warning: Failed to clear Triton cache: {e}")
+
+    # Additional garbage collection after clearing caches
+    gc.collect()
 
 
 def ensure_divisibility(numerator, denominator, text):
@@ -134,43 +185,61 @@ def benchmark_config(
     def run():
         from vllm.model_executor.layers.fused_moe import override_config
 
+        if use_fp8_w8a8:
+            quant_dtype = torch.float8_e4m3fn
+        elif use_int8_w8a16:
+            quant_dtype = torch.int8
+        else:
+            quant_dtype = None
+
+        quant_config = FusedMoEQuantConfig.make(
+            quant_dtype=quant_dtype,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_quant_shape,
+        )
+
+        deep_gemm_experts = None
+        if use_deep_gemm:
+            deep_gemm_experts = mk.FusedMoEModularKernel(
+                prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+                fused_experts=TritonOrDeepGemmExperts(
+                    moe_config=FusedMoEConfig(
+                        num_experts=num_experts,
+                        experts_per_token=topk,
+                        hidden_dim=hidden_size,
+                        intermediate_size_per_partition=shard_intermediate_size,
+                        num_local_experts=num_experts,
+                        activation="silu",
+                        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+                        in_dtype=init_dtype,
+                        routing_method=RoutingMethodType.TopK,
+                        device="cuda",
+                    ),
+                    quant_config=quant_config,
+                ),
+            )
+
         with override_config(config):
+            topk_weights, topk_ids, token_expert_indices = fused_topk(
+                x, input_gating, topk, renormalize=not use_deep_gemm
+            )
+
             if use_deep_gemm:
-                topk_weights, topk_ids, token_expert_indices = fused_topk(
-                    x, input_gating, topk, False
+                return deep_gemm_experts(
+                    x, w1, w2, topk_weights, topk_ids, inplace=True
                 )
-                return fused_experts(
-                    x,
-                    w1,
-                    w2,
-                    topk_weights,
-                    topk_ids,
-                    inplace=True,
-                    use_fp8_w8a8=use_fp8_w8a8,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    a1_scale=a1_scale,
-                    a2_scale=a2_scale,
-                    block_shape=block_quant_shape,
-                    allow_deep_gemm=True,
-                )
-            else:
-                fused_moe(
-                    x,
-                    w1,
-                    w2,
-                    input_gating,
-                    topk,
-                    renormalize=True,
-                    inplace=True,
-                    use_fp8_w8a8=use_fp8_w8a8,
-                    use_int8_w8a16=use_int8_w8a16,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    a1_scale=a1_scale,
-                    a2_scale=a2_scale,
-                    block_shape=block_quant_shape,
-                )
+            return fused_experts(
+                x,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                inplace=True,
+                quant_config=quant_config,
+            )
 
     # JIT compilation & warmup
     run()
@@ -188,8 +257,8 @@ def benchmark_config(
         graph.replay()
     torch.cuda.synchronize()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch.Event(enable_timing=True)
+    end_event = torch.Event(enable_timing=True)
 
     latencies: list[float] = []
     for i in range(num_iters):
@@ -214,7 +283,7 @@ def get_rocm_tuning_space(use_fp16):
     num_warps_range = [1, 2, 4, 8]
     group_m_range = [1, 4, 8, 16, 32]
     num_stage_range = [2]
-    waves_per_eu_range = [0]
+    waves_per_eu_range = [0, 1, 2, 4]
     matrix_instr_nonkdim_range = [16, 32] if use_fp16 else []
     kpack_range = [1, 2] if use_fp16 else []
 
@@ -393,7 +462,7 @@ def merge_unique_dicts(list1, list2):
 class BenchmarkWorker:
     def __init__(self, seed: int) -> None:
         torch.set_default_device("cuda")
-        current_platform.seed_everything(seed)
+        set_random_seed(seed)
         self.seed = seed
         # Get the device ID to allocate tensors and kernels
         # on the respective GPU. This is required for Ray to work
@@ -413,8 +482,8 @@ class BenchmarkWorker:
         block_quant_shape: list[int] = None,
         use_deep_gemm: bool = False,
     ) -> tuple[dict[str, int], float]:
-        current_platform.seed_everything(self.seed)
-        dtype_str = get_config_dtype_str(
+        set_random_seed(self.seed)
+        dtype_str = _get_config_dtype_str(
             dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
         )
         # NOTE(woosuk): The current naming convention uses w2.shape[2], which
@@ -486,7 +555,7 @@ class BenchmarkWorker:
                 need_device_guard = True
 
         with torch.cuda.device(self.device_id) if need_device_guard else nullcontext():
-            for config in tqdm(search_space):
+            for idx, config in enumerate(tqdm(search_space)):
                 try:
                     kernel_time = benchmark_config(
                         config,
@@ -509,6 +578,19 @@ class BenchmarkWorker:
                 if kernel_time < best_time:
                     best_time = kernel_time
                     best_config = config
+
+                # Periodically clear Triton JIT cache to prevent OOM
+                # This is especially important for large models with many experts
+                if (
+                    TRITON_CACHE_CLEAR_INTERVAL > 0
+                    and idx > 0
+                    and idx % TRITON_CACHE_CLEAR_INTERVAL == 0
+                ):
+                    clear_triton_cache()
+
+        # Final cleanup after tuning completes
+        clear_triton_cache()
+
         now = datetime.now()
         print(f"{now.ctime()}] Completed tuning for batch_size={num_tokens}")
         assert best_config is not None
@@ -547,7 +629,7 @@ def save_configs(
     block_quant_shape: list[int],
     save_dir: str,
 ) -> None:
-    dtype_str = get_config_dtype_str(
+    dtype_str = _get_config_dtype_str(
         dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
     )
 
@@ -560,7 +642,7 @@ def save_configs(
     filename = os.path.join(save_dir, filename)
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
-        json.dump(configs, f, indent=4)
+        json.dump({"triton_version": triton.__version__, **configs}, f, indent=4)
         f.write("\n")
 
 
@@ -582,26 +664,49 @@ def main(args: argparse.Namespace):
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
         intermediate_size = config.ffn_config.ffn_hidden_size
+        hidden_size = config.hidden_size
     elif config.architectures[0] == "JambaForCausalLM":
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
+        hidden_size = config.hidden_size
     elif config.architectures[0] in (
-        "DeepseekV3ForCausalLM",
         "DeepseekV2ForCausalLM",
+        "DeepseekV3ForCausalLM",
+        "DeepseekV32ForCausalLM",
         "Glm4MoeForCausalLM",
+        "Glm4MoeLiteForCausalLM",
+        "NemotronHForCausalLM",
     ):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
-    elif config.architectures[0] in ("Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"):
+        hidden_size = config.hidden_size
+    elif config.architectures[0] in (
+        "Qwen2MoeForCausalLM",
+        "Qwen3MoeForCausalLM",
+        "Qwen3NextForCausalLM",
+    ):
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
+        hidden_size = config.hidden_size
+    elif config.architectures[0] == "Qwen3VLMoeForConditionalGeneration":
+        text_config = config.get_text_config()
+        E = text_config.num_experts
+        topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
     elif config.architectures[0] in ("HunYuanMoEV1ForCausalLM"):
         E = config.num_experts
         topk = config.moe_topk[0]
         intermediate_size = config.moe_intermediate_size[0]
+        hidden_size = config.hidden_size
+    elif config.architectures[0] in ["Qwen3OmniMoeForConditionalGeneration"]:
+        E = config.thinker_config.text_config.num_experts
+        topk = config.thinker_config.text_config.num_experts_per_tok
+        intermediate_size = config.thinker_config.text_config.moe_intermediate_size
+        hidden_size = config.thinker_config.text_config.hidden_size
     else:
         # Support for llama4
         config = config.get_text_config()
@@ -609,6 +714,7 @@ def main(args: argparse.Namespace):
         E = config.num_local_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
+        hidden_size = config.hidden_size
     enable_ep = bool(args.enable_expert_parallel)
     if enable_ep:
         ensure_divisibility(E, args.tp_size, "Number of experts")
@@ -617,8 +723,7 @@ def main(args: argparse.Namespace):
     else:
         ensure_divisibility(intermediate_size, args.tp_size, "intermediate_size")
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    hidden_size = config.hidden_size
-    dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
+    dtype = torch.float16 if current_platform.is_rocm() else config.dtype
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
     block_quant_shape = get_weight_block_size_safety(config)

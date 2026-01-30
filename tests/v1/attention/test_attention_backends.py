@@ -2,30 +2,49 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 
+from functools import partial
+
 import pytest
 import torch
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
-from tests.v1.attention.utils import (BatchSpec, _Backend,
-                                      create_common_attn_metadata,
-                                      create_standard_kv_cache_spec,
-                                      create_vllm_config,
-                                      get_attention_backend)
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
-from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
-                                              set_kv_cache_layout)
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_standard_kv_cache_spec,
+    create_vllm_config,
+    try_backend_includes_kv_cache_update,
+    try_get_attention_backend,
+)
+from vllm.config import ModelConfig
+from vllm.platforms import current_platform
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    is_torch_equal_or_newer,
+    set_random_seed,
+)
+from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.utils import (
+    set_kv_cache_layout,
+)
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLASHINFER_VLLM_V1,
-    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1, _Backend.TREE_ATTN,
-    "FLEX_ATTENTION_SLOW"
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.FLASHINFER,
+    AttentionBackendEnum.FLEX_ATTENTION,
+    AttentionBackendEnum.TRITON_ATTN,
+    AttentionBackendEnum.TREE_ATTN,
+    "FLEX_ATTENTION_SLOW",
 ]
 
 # Remove flashinfer from the list if it's not available
 try:
     import flashinfer  # noqa: F401
 except ImportError:
-    BACKENDS_TO_TEST.remove(_Backend.FLASHINFER_VLLM_V1)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER)
 
 
 def _convert_dtype_to_torch(dtype):
@@ -45,42 +64,48 @@ def _convert_dtype_to_torch(dtype):
 
 # Define common batch configurations
 BATCH_SPECS = {
-    "small_decode":
-    BatchSpec(seq_lens=[32, 40], query_lens=[1, 1]),
-    "small_prefill":
-    BatchSpec(seq_lens=[32, 40], query_lens=[8, 8]),
-    "mixed_small":
-    BatchSpec(seq_lens=[32, 40, 48, 56], query_lens=[1, 1, 5, 5]),
-    "medium_decode":
-    BatchSpec(seq_lens=[128, 256, 512, 1024, 128, 256, 512, 1024],
-              query_lens=[1, 1, 1, 1, 1, 1, 1, 1]),
-    "medium_prefill":
-    BatchSpec(seq_lens=[256, 512, 1024, 2048], query_lens=[16, 16, 16, 16]),
-    "mixed_medium":
-    BatchSpec(seq_lens=[512, 1024, 2048, 512, 1024, 2048],
-              query_lens=[1, 1, 1, 7, 7, 7]),
-    "large_decode":
-    BatchSpec(seq_lens=[2048] * 32, query_lens=[1] * 32),
-    "large_prefill":
-    BatchSpec(seq_lens=[4096] * 8, query_lens=[32] * 8),
-    "single_decode":
-    BatchSpec(seq_lens=[1024], query_lens=[1]),
-    "single_prefill":
-    BatchSpec(seq_lens=[1024], query_lens=[64]),
+    "small_decode": BatchSpec(seq_lens=[32, 40], query_lens=[1, 1]),
+    "small_prefill": BatchSpec(seq_lens=[32, 40], query_lens=[8, 8]),
+    "mixed_small": BatchSpec(seq_lens=[32, 40, 48, 56], query_lens=[1, 1, 5, 5]),
+    "medium_decode": BatchSpec(
+        seq_lens=[128, 256, 512, 1024, 128, 256, 512, 1024],
+        query_lens=[1, 1, 1, 1, 1, 1, 1, 1],
+    ),
+    "medium_prefill": BatchSpec(
+        seq_lens=[256, 512, 1024, 2048], query_lens=[16, 16, 16, 16]
+    ),
+    "mixed_medium": BatchSpec(
+        seq_lens=[512, 1024, 2048, 512, 1024, 2048], query_lens=[1, 1, 1, 7, 7, 7]
+    ),
+    "large_decode": BatchSpec(seq_lens=[2048] * 32, query_lens=[1] * 32),
+    "large_prefill": BatchSpec(seq_lens=[4096] * 8, query_lens=[32] * 8),
+    "mixed_large": BatchSpec(
+        seq_lens=[1024, 2048, 4096, 1024, 2048, 4096], query_lens=[1, 1, 1, 32, 32, 32]
+    ),
+    "single_decode": BatchSpec(seq_lens=[1024], query_lens=[1]),
+    "single_prefill": BatchSpec(seq_lens=[1024], query_lens=[64]),
+    # encoder-only
+    "small_encoder_prefill": BatchSpec(
+        seq_lens=[32, 64, 128, 256], query_lens=[32, 64, 128, 256]
+    ),
+    "medium_encoder_prefill": BatchSpec(
+        seq_lens=[256, 512, 1024, 2048], query_lens=[256, 512, 1024, 2048]
+    ),
 }
 
 
 def create_and_prepopulate_kv_cache(
-        k_contexts: list[torch.Tensor],
-        v_contexts: list[torch.Tensor],
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-        num_blocks: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        randomize_blocks: bool = True) -> torch.Tensor:
+    k_contexts: list[torch.Tensor],
+    v_contexts: list[torch.Tensor],
+    block_size: int,
+    num_kv_heads: int,
+    head_size: int,
+    dtype: torch.dtype,
+    device: torch.device,
+    num_blocks: int,
+    common_attn_metadata: CommonAttentionMetadata,
+    randomize_blocks: bool = True,
+) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
 
     Args:
@@ -101,21 +126,19 @@ def create_and_prepopulate_kv_cache(
         Tuple of (kv_cache, updated_block_table)
     """
     batch_size = len(k_contexts)
-    seq_lens = common_attn_metadata.seq_lens_cpu
-    query_lens = common_attn_metadata.query_start_loc_cpu[
-        1:] - common_attn_metadata.query_start_loc_cpu[:-1]
-    context_lens = common_attn_metadata.num_computed_tokens_cpu
+    seq_lens = common_attn_metadata.seq_lens.cpu()
+    query_lens = (
+        common_attn_metadata.query_start_loc_cpu[1:]
+        - common_attn_metadata.query_start_loc_cpu[:-1]
+    )
+    context_lens = seq_lens - query_lens
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
     # Create KV cache
-    kv_cache = torch.empty(2,
-                           num_blocks,
-                           block_size,
-                           num_kv_heads,
-                           head_size,
-                           dtype=dtype,
-                           device=device)
+    kv_cache = torch.zeros(
+        2, num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
+    )
     kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
 
     # Populate the cache with the context tokens
@@ -164,8 +187,8 @@ def create_and_prepopulate_kv_cache(
         start = common_attn_metadata.query_start_loc_cpu[i]
         end = common_attn_metadata.query_start_loc_cpu[i + 1]
         slot_mapping[start:end] = block_table[
-            i,
-            block_indices] * block_size + token_inter_block_offsets.to(device)
+            i, block_indices
+        ] * block_size + token_inter_block_offsets.to(device)
 
     return kv_cache
 
@@ -178,17 +201,25 @@ class MockAttentionLayer:
         self._k_scale = torch.tensor(1.0, device=device)
         self._v_scale = torch.tensor(1.0, device=device)
         # Add float versions for flashinfer
+        self._q_scale_float = 1.0
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
 
 
-def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
-                          layer_names: list[str], vllm_config,
-                          device: torch.device,
-                          common_attn_metadata: CommonAttentionMetadata,
-                          query: torch.Tensor, key: torch.Tensor,
-                          value: torch.Tensor,
-                          kv_cache: torch.Tensor) -> torch.Tensor:
+def run_attention_backend(
+    backend: AttentionBackendEnum,
+    kv_cache_spec: FullAttentionSpec,
+    layer_names: list[str],
+    vllm_config,
+    device: torch.device,
+    common_attn_metadata: CommonAttentionMetadata,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    attn_type: AttentionType = AttentionType.DECODER,
+    sliding_window: int | None = None,
+) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
     # Handle special case for FLEX_ATTENTION_SLOW
@@ -196,13 +227,13 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
 
     use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
     if backend == "FLEX_ATTENTION_SLOW":
-        actual_backend = _Backend.FLEX_ATTENTION
+        actual_backend = AttentionBackendEnum.FLEX_ATTENTION
         use_direct_block_mask = False
 
-    builder_cls, impl_cls = get_attention_backend(actual_backend)
+    builder_cls, impl_cls = try_get_attention_backend(actual_backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
-    if actual_backend == _Backend.FLASHINFER_VLLM_V1:
+    if actual_backend == AttentionBackendEnum.FLASHINFER:
         import unittest.mock
 
         from vllm.v1.attention.backends.utils import PerLayerParameters
@@ -211,20 +242,19 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
             # Return mock parameters for a single layer
             head_size = vllm_config.model_config.get_head_size()
             return {
-                layer_name:
-                PerLayerParameters(
+                layer_name: PerLayerParameters(
                     window_left=-1,  # No sliding window
                     logits_soft_cap=0.0,  # No soft cap
-                    sm_scale=1.0 / (head_size**0.5)  # Standard scale
+                    sm_scale=1.0 / (head_size**0.5),  # Standard scale
                 )
                 for layer_name in layer_names
             }
 
         with unittest.mock.patch(
-                'vllm.v1.attention.backends.flashinfer.get_per_layer_parameters',
-                mock_get_per_layer_parameters):
-            builder = builder_cls(kv_cache_spec, layer_names, vllm_config,
-                                  device)
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            mock_get_per_layer_parameters,
+        ):
+            builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
             attn_metadata = builder.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
@@ -232,7 +262,7 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
     else:
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-        if actual_backend == _Backend.FLEX_ATTENTION:
+        if actual_backend == AttentionBackendEnum.FLEX_ATTENTION:
             builder.direct_build = use_direct_block_mask
         attn_metadata = builder.build(
             common_prefix_len=0,
@@ -241,9 +271,11 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
 
     # Instantiate implementation
     num_heads = vllm_config.model_config.get_num_attention_heads(
-        vllm_config.parallel_config)
+        vllm_config.parallel_config
+    )
     num_kv_heads = vllm_config.model_config.get_num_kv_heads(
-        vllm_config.parallel_config)
+        vllm_config.parallel_config
+    )
     head_size = vllm_config.model_config.get_head_size()
     scale = 1.0 / (head_size**0.5)
     impl = impl_cls(
@@ -252,7 +284,8 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
         scale=scale,
         num_kv_heads=num_kv_heads,
         alibi_slopes=None,
-        sliding_window=None,
+        sliding_window=sliding_window,
+        attn_type=attn_type,
         kv_cache_dtype="auto",
     )
 
@@ -263,24 +296,29 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
     # Run forward pass
     # NOTE: The query, key, and value are already shaped correctly
     # in the calling test function.
-    output = impl.forward(mock_layer,
-                          query,
-                          key,
-                          value,
-                          kv_cache,
-                          attn_metadata,
-                          output=output)
+    if not try_backend_includes_kv_cache_update(actual_backend):
+        impl.do_kv_cache_update(
+            mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
+        )
+    output = impl.forward(
+        mock_layer, query, key, value, kv_cache, attn_metadata, output=output
+    )
 
     return output
 
 
-@pytest.mark.parametrize("batch_spec_name", [
-    "small_decode", "small_prefill", "mixed_small", "medium_decode",
-    "medium_prefill", "mixed_medium", "large_decode", "large_prefill",
-    "single_decode", "single_prefill"
-])
-@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
-def test_backend_correctness(batch_spec_name: str, model: str):
+def _test_backend_correctness(
+    batch_spec: BatchSpec,
+    model: str,
+    backend_to_test: list[AttentionBackendEnum | str],
+    mask_mod,
+    *,
+    attn_type: AttentionType = AttentionType.DECODER,
+    block_size: int = 16,
+    atol: float = 1e-2,
+    rtol: float = 1e-2,
+    tensor_parallel_size: int = 1,
+):
     """
     Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
@@ -295,11 +333,39 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     4. Running each vLLM attention backend with the new queries and the
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
+
+    Note: When tensor_parallel_size > 1, we simulate the head partitioning
+    by overriding the model config to use fewer heads, without requiring
+    multiple GPUs. This tests that backends work correctly with different
+    head counts.
     """
-    batch_spec = BATCH_SPECS[batch_spec_name]
-    vllm_config = create_vllm_config(model_name=model,
-                                     max_model_len=max(batch_spec.seq_lens),
-                                     num_gpu_blocks=8192)
+    set_random_seed(42)
+
+    hf_config_override = None
+    if tensor_parallel_size > 1:
+        from vllm.config import ModelConfig
+
+        temp_config = ModelConfig(model=model, max_model_len=1)
+        original_num_heads = temp_config.hf_text_config.num_attention_heads
+        original_num_kv_heads = getattr(
+            temp_config.hf_text_config, "num_key_value_heads", None
+        )
+        hf_config_override = {
+            "num_attention_heads": original_num_heads // tensor_parallel_size,
+        }
+        if original_num_kv_heads is not None:
+            hf_config_override["num_key_value_heads"] = max(
+                1, original_num_kv_heads // tensor_parallel_size
+            )
+
+    vllm_config = create_vllm_config(
+        model_name=model,
+        tensor_parallel_size=1,  # Always use TP=1 to avoid multi-GPU requirements
+        max_model_len=max(batch_spec.seq_lens),
+        block_size=block_size,
+        num_gpu_blocks=8192,
+        hf_config_override=hf_config_override,
+    )
     device = torch.device("cuda:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
@@ -309,10 +375,13 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     seq_lens = batch_spec.seq_lens
     query_lens = batch_spec.query_lens
     num_q_heads = vllm_config.model_config.get_num_attention_heads(
-        vllm_config.parallel_config)
+        vllm_config.parallel_config
+    )
     num_kv_heads = vllm_config.model_config.get_num_kv_heads(
-        vllm_config.parallel_config)
+        vllm_config.parallel_config
+    )
     head_size = vllm_config.model_config.get_head_size()
+    sliding_window = vllm_config.model_config.get_sliding_window()
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
     block_size = vllm_config.cache_config.block_size
     scale = 1.0 / (head_size**0.5)
@@ -328,21 +397,9 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         context_len = s_len - q_len
 
         # Generate Q, K, V for the whole sequence to be used in SDPA
-        q = torch.randn(q_len,
-                        num_q_heads,
-                        head_size,
-                        dtype=dtype,
-                        device=device)
-        k_full = torch.randn(s_len,
-                             num_kv_heads,
-                             head_size,
-                             dtype=dtype,
-                             device=device)
-        v_full = torch.randn(s_len,
-                             num_kv_heads,
-                             head_size,
-                             dtype=dtype,
-                             device=device)
+        q = torch.randn(q_len, num_q_heads, head_size, dtype=dtype, device=device)
+        k_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
+        v_full = torch.randn(s_len, num_kv_heads, head_size, dtype=dtype, device=device)
 
         # SDPA expects (N, H, L, D), so unsqueeze batch and permute
         q_sdpa_in = q.unsqueeze(0).transpose(1, 2)
@@ -352,7 +409,8 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         if num_q_heads != num_kv_heads:
             assert num_q_heads % num_kv_heads == 0, (
                 f"num_q_heads ({num_q_heads}) must be divisible by "
-                f"num_kv_heads ({num_kv_heads})")
+                f"num_kv_heads ({num_kv_heads})"
+            )
             repeats = num_q_heads // num_kv_heads
             k_sdpa_in = k_sdpa_in.repeat_interleave(repeats, dim=1)
             v_sdpa_in = v_sdpa_in.repeat_interleave(repeats, dim=1)
@@ -360,22 +418,20 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         # Create causal mask: query token i attends to positions 0 to
         #  (context_len + i)
         kv_len = s_len
-        offset = context_len
-        attn_mask = torch.full((q_len, kv_len),
-                               float('-inf'),
-                               device=device,
-                               dtype=dtype)
-        for i in range(q_len):
-            attn_mask[i, :offset + i + 1] = 0.0
 
-        sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
+        final_mask_mod = partial(mask_mod, context_len=context_len)
+        block_mask = create_block_mask(
+            final_mask_mod, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len, device=device
+        )
+        sdpa_out_i = flex_attention(
             q_sdpa_in,
             k_sdpa_in,
             v_sdpa_in,
-            attn_mask=attn_mask,
+            block_mask=block_mask,
             scale=scale,
-            enable_gqa=True)
-        # Convert back to (L, H, D)
+            enable_gqa=True,
+        )
+
         all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
 
         # Inputs for vLLM backends are just the new tokens
@@ -393,7 +449,11 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     sdpa_output = torch.cat(all_sdpa_outputs, dim=0)
 
     common_attn_metadata = create_common_attn_metadata(
-        batch_spec, vllm_config.cache_config.block_size, device)
+        batch_spec, vllm_config.cache_config.block_size, device
+    )
+    if attn_type == AttentionType.ENCODER_ONLY:
+        # For encoder-only, all tokens are prefill tokens
+        common_attn_metadata.causal = False
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
     kv_cache = create_and_prepopulate_kv_cache(
@@ -406,57 +466,274 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         device=device,
         num_blocks=vllm_config.cache_config.num_gpu_blocks or 1000,
         common_attn_metadata=common_attn_metadata,
-        randomize_blocks=True)
+        randomize_blocks=True,
+    )
 
     # 4. Run vLLM backends and compare
     # Note: flex_attention has known Triton kernel compatibility issues
     # with test infrastructures
-    for backend_name in BACKENDS_TO_TEST:
+    for backend_name in backend_to_test:
         # FlashAttentionm + FlexAttention:
         #   [2, num_blocks, block_size, num_kv_heads, head_size]
-        # FlashInfer:
+        # FlashInfer + Triton:
         #   [num_blocks, 2, block_size, num_kv_heads, head_size]
         # Select the appropriate KV cache format for each backend
         kv_cache_for_backend = kv_cache
-        if backend_name == _Backend.FLASHINFER_VLLM_V1:
+        reset_kv_cache_layout = False
+        if backend_name in (
+            AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.TRITON_ATTN,
+        ):
             kv_cache_for_backend = kv_cache.transpose(0, 1)
 
+        if backend_name == AttentionBackendEnum.FLASHINFER:
             # For FlashInfer default to HND layout and
-            kv_cache_for_backend = kv_cache_for_backend.transpose(
-                2, 3).contiguous().transpose(2, 3)
+            kv_cache_for_backend = (
+                kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
+            )
             set_kv_cache_layout("HND")
+            reset_kv_cache_layout = True
+        elif backend_name == AttentionBackendEnum.TRITON_ATTN:
+            kv_cache_for_backend = kv_cache_for_backend.contiguous()
 
-        backend_output = run_attention_backend(backend_name, kv_cache_spec,
-                                               ["placeholder"], vllm_config,
-                                               device, common_attn_metadata,
-                                               query_vllm, key_vllm,
-                                               value_vllm,
-                                               kv_cache_for_backend)
+        try:
+            backend_output = run_attention_backend(
+                backend_name,
+                kv_cache_spec,
+                ["placeholder"],
+                vllm_config,
+                device,
+                common_attn_metadata,
+                query_vllm,
+                key_vllm,
+                value_vllm,
+                kv_cache_for_backend,
+                sliding_window=sliding_window,
+                attn_type=attn_type,
+            )
+        finally:
+            if reset_kv_cache_layout:
+                set_kv_cache_layout(None)
 
         # Check shape and dtype consistency
         assert backend_output.shape == sdpa_output.shape, (
             f"[{backend_name}] shape {backend_output.shape} != "
-            f"SDPA shape {sdpa_output.shape}")
+            f"SDPA shape {sdpa_output.shape}"
+        )
         assert backend_output.dtype == sdpa_output.dtype, (
             f"[{backend_name}] dtype {backend_output.dtype} != "
-            f"SDPA dtype {sdpa_output.dtype}")
+            f"SDPA dtype {sdpa_output.dtype}"
+        )
 
         assert torch.isfinite(backend_output).all(), (
-            f"[{backend_name}] produced non-finite values")
+            f"[{backend_name}] produced non-finite values"
+        )
 
         # Check numerical similarity
-        rtol = 1e-2
-        atol = 5e-3
+        def error_msg(msg: str, backend_name: str):
+            return f"[{backend_name}] output differs from SDPA baseline. {msg}"
 
-        max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
-        max_rel_diff = torch.max(
-            torch.abs(backend_output - sdpa_output) /
-            torch.abs(sdpa_output)).item()
-        all_close = torch.allclose(backend_output,
-                                   sdpa_output,
-                                   rtol=rtol,
-                                   atol=atol)
+        torch.testing.assert_close(
+            backend_output,
+            sdpa_output,
+            rtol=rtol,
+            atol=atol,
+            msg=partial(error_msg, backend_name=backend_name),
+        )
 
-        assert all_close, (
-            f"[{backend_name}] output differs from SDPA baseline. "
-            f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    [
+        "small_decode",
+        "small_prefill",
+        "mixed_small",
+        "medium_decode",
+        "medium_prefill",
+        "mixed_medium",
+        "large_decode",
+        "large_prefill",
+        "single_decode",
+        "single_prefill",
+    ],
+)
+@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+def test_causal_backend_correctness(
+    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
+):
+    """Test backend's correctness with causal attention."""
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    batch_spec = BATCH_SPECS[batch_spec_name]
+    LARGE_BLOCK_BACKENDS = (
+        [AttentionBackendEnum.FLEX_ATTENTION]
+        if is_torch_equal_or_newer("2.9.0.dev0")
+        else []
+    )
+
+    if current_platform.is_rocm():
+        SMALL_BLOCK_BACKENDS = [
+            x
+            for x in BACKENDS_TO_TEST
+            if (
+                x not in LARGE_BLOCK_BACKENDS
+                and x is not AttentionBackendEnum.FLASH_ATTN
+            )
+        ]
+    else:
+        SMALL_BLOCK_BACKENDS = [
+            x for x in BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
+        ]
+
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        SMALL_BLOCK_BACKENDS,
+        causal_mask_mod,
+        tensor_parallel_size=tensor_parallel_size,
+    )
+
+    # Fast FlexAttention needs to run with block_size=128
+    if LARGE_BLOCK_BACKENDS:
+        _test_backend_correctness(
+            batch_spec,
+            model,
+            LARGE_BLOCK_BACKENDS,
+            causal_mask_mod,
+            block_size=128,
+            tensor_parallel_size=tensor_parallel_size,
+        )
+
+
+if current_platform.is_rocm():
+    # FLASH_ATTN is not supported on ROCm
+    SLIDING_WINDOW_BACKENDS_TO_TEST = [
+        AttentionBackendEnum.FLEX_ATTENTION,
+        AttentionBackendEnum.TRITON_ATTN,
+        "FLEX_ATTENTION_SLOW",
+    ]
+else:
+    SLIDING_WINDOW_BACKENDS_TO_TEST = [
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.FLEX_ATTENTION,
+        AttentionBackendEnum.TRITON_ATTN,
+        "FLEX_ATTENTION_SLOW",
+    ]
+
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    [
+        "small_decode",
+        "small_prefill",
+        "mixed_medium",
+        "large_decode",
+        "large_prefill",
+        "mixed_large",
+    ],
+)
+@pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+def test_sliding_window_backend_correctness(
+    batch_spec_name: str, model: str, tensor_parallel_size: int
+):
+    """Test backend's correctness with sliding window attention."""
+
+    def sliding_window_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+        sliding_window: int,
+    ):
+        causal_mask = q_idx + context_len >= kv_idx
+        window_mask = q_idx + context_len - kv_idx < sliding_window
+        return causal_mask & window_mask
+
+    batch_spec = BATCH_SPECS[batch_spec_name]
+    model_config = ModelConfig(model=model, max_model_len=max(batch_spec.seq_lens))
+    sliding_window = model_config.get_sliding_window()
+    sliding_window_mask_mod_fn = partial(
+        sliding_window_mask_mod, sliding_window=sliding_window
+    )
+
+    LARGE_BLOCK_BACKENDS = (
+        [AttentionBackendEnum.FLEX_ATTENTION]
+        if is_torch_equal_or_newer("2.9.0.dev0")
+        else []
+    )
+    SMALL_BLOCK_BACKENDS = [
+        x for x in SLIDING_WINDOW_BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
+    ]
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        SMALL_BLOCK_BACKENDS,
+        sliding_window_mask_mod_fn,
+        tensor_parallel_size=tensor_parallel_size,
+    )
+
+    # Fast FlexAttention needs to run with block_size=128
+    if LARGE_BLOCK_BACKENDS:
+        _test_backend_correctness(
+            batch_spec,
+            model,
+            LARGE_BLOCK_BACKENDS,
+            sliding_window_mask_mod_fn,
+            block_size=128,
+            tensor_parallel_size=tensor_parallel_size,
+        )
+
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    [
+        "small_encoder_prefill",
+        "medium_encoder_prefill",
+    ],
+)
+@pytest.mark.parametrize("model", ["google/embeddinggemma-300m"])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+def test_sliding_window_encoder_backend_correctness(
+    batch_spec_name: str, model: str, tensor_parallel_size: int
+):
+    """Test backend's correctness with sliding window attention."""
+
+    def bidi_sliding_window_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+        sliding_window: int,
+    ):
+        return torch.abs(q_idx + context_len - kv_idx) < sliding_window
+
+    batch_spec = BATCH_SPECS[batch_spec_name]
+    model_config = ModelConfig(model=model, max_model_len=max(batch_spec.seq_lens))
+    sliding_window = model_config.get_sliding_window()
+    sliding_window_mask_mod_fn = partial(
+        bidi_sliding_window_mask_mod, sliding_window=sliding_window
+    )
+
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        SLIDING_WINDOW_BACKENDS_TO_TEST,
+        sliding_window_mask_mod_fn,
+        attn_type=AttentionType.ENCODER_ONLY,
+        tensor_parallel_size=tensor_parallel_size,
+    )

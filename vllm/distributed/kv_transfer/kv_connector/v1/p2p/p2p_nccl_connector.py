@@ -9,18 +9,23 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
-    P2pNcclEngine)
+    P2pNcclEngine,
+)
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.mla.common import MLACommonMetadata
+from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -36,8 +41,9 @@ class ReqMeta:
     num_tokens: int
 
     @staticmethod
-    def make_meta(request_id: str, token_ids: list[int], block_ids: list[int],
-                  block_size: int) -> "ReqMeta":
+    def make_meta(
+        request_id: str, token_ids: list[int], block_ids: list[int], block_size: int
+    ) -> "ReqMeta":
         block_ids_tensor = torch.tensor(block_ids)
         return ReqMeta(
             request_id=request_id,
@@ -61,37 +67,48 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
         block_size: int,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(request_id, token_ids, block_ids, block_size))
+            ReqMeta.make_meta(request_id, token_ids, block_ids, block_size)
+        )
 
 
 class P2pNcclConnector(KVConnectorBase_V1):
-
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
+        super().__init__(
+            vllm_config=vllm_config,
+            role=role,
+            kv_cache_config=kv_cache_config,
+        )
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Any] = {}
-        self.config = vllm_config.kv_transfer_config
-        self.is_producer = self.config.is_kv_producer
-        self.chunked_prefill: dict[str, Any] = {}
+        self.is_producer = self._kv_transfer_config.is_kv_producer
+        self.chunked_prefill: dict[str, tuple[list[int], list[int] | None]] = {}
 
-        self._rank = get_world_group().rank \
-            if role == KVConnectorRole.WORKER else 0
-        self._local_rank = get_world_group().local_rank \
-            if role == KVConnectorRole.WORKER else 0
+        self._rank = get_world_group().rank if role == KVConnectorRole.WORKER else 0
+        self._local_rank = (
+            get_world_group().local_rank if role == KVConnectorRole.WORKER else 0
+        )
 
-        self.p2p_nccl_engine = P2pNcclEngine(
-            local_rank=self._local_rank,
-            config=self.config,
-            hostname="",
-            port_offset=self._rank,
-        ) if role == KVConnectorRole.WORKER else None
+        self.p2p_nccl_engine = (
+            P2pNcclEngine(
+                local_rank=self._local_rank,
+                config=self._kv_transfer_config,
+                hostname="",
+                port_offset=self._rank,
+            )
+            if role == KVConnectorRole.WORKER
+            else None
+        )
 
     # ==============================
     # Worker-side methods
     # ==============================
 
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
@@ -143,8 +160,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
             Returns:
                 None. The function modifies `layer` in-place.
             """
-            if (isinstance(attn_metadata, MLACommonMetadata)
-                    or layer.shape[1] == 2):  # MLA or FlashInfer
+            if (
+                isinstance(attn_metadata, MLACommonMetadata) or layer.shape[1] == 2
+            ):  # MLA or FlashInfer
                 num_block = kv_cache.shape[0]
                 self.check_tensors_except_dim(layer, kv_cache, 0)
                 if len(block_ids) == num_block:
@@ -153,8 +171,11 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     layer[block_ids[:num_block], ...] = kv_cache
                     logger.warning(
                         "🚧kv_cache does not match, block_ids:%d, "
-                        "num_block:%d, request_id:%s", len(block_ids),
-                        num_block, request_id)
+                        "num_block:%d, request_id:%s",
+                        len(block_ids),
+                        num_block,
+                        request_id,
+                    )
 
             elif layer.shape[0] == 2:  # FlashAttention
                 num_block = kv_cache.shape[1]
@@ -165,12 +186,14 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     layer[:, block_ids[:num_block], ...] = kv_cache
                     logger.warning(
                         "🚧kv_cache does not match, block_ids:%d, "
-                        "num_block:%d, request_id:%s", len(block_ids),
-                        num_block, request_id)
+                        "num_block:%d, request_id:%s",
+                        len(block_ids),
+                        num_block,
+                        request_id,
+                    )
 
         # Get the metadata
-        metadata: KVConnectorMetadata = \
-            self._get_connector_metadata()
+        metadata: KVConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, P2pNcclConnectorMetadata)
 
         if metadata is None:
@@ -178,27 +201,32 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         # Load the KV for each request each layer
         for request in metadata.requests:
+            request_id = request.request_id
+            ip, port = self.parse_request_id(request_id, False)
+            remote_address = ip + ":" + str(port + self._rank)
             for layer_name in forward_context.no_compile_layers:
                 layer = forward_context.no_compile_layers[layer_name]
 
                 # Only process layers that have kv_cache
                 # attribute (attention layers) Skip non-attention
                 # layers like FusedMoE
-                kv_cache = getattr(layer, 'kv_cache', None)
+                kv_cache = getattr(layer, "kv_cache", None)
                 if kv_cache is None:
                     continue
 
                 layer = kv_cache[forward_context.virtual_engine]
 
                 kv_cache = self.p2p_nccl_engine.recv_tensor(
-                    request.request_id + "#" + layer_name)
+                    request.request_id + "#" + layer_name, remote_address
+                )
 
                 if kv_cache is None:
                     logger.warning("🚧kv_cache is None, %s", request.request_id)
                     continue
 
-                inject_kv_into_layer(layer, kv_cache, request.block_ids,
-                                     request.request_id)
+                inject_kv_into_layer(
+                    layer, kv_cache, request.block_ids, request.request_id
+                )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
@@ -211,8 +239,13 @@ class P2pNcclConnector(KVConnectorBase_V1):
         """
         return
 
-    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None:
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+        **kwargs: Any,
+    ) -> None:
         """Start saving the KV cache of the layer from vLLM's paged buffer
         to the connector.
 
@@ -251,8 +284,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 torch.Tensor: A tensor containing the extracted KV slices.
                 Returns None if the layout is unsupported.
             """
-            if (isinstance(attn_metadata, MLACommonMetadata)
-                    or layer.shape[1] == 2):  # MLA or FlashInfer
+            if (
+                isinstance(attn_metadata, MLACommonMetadata) or layer.shape[1] == 2
+            ):  # MLA or FlashInfer
                 return layer[block_ids, ...]
 
             if layer.shape[0] == 2:  # FlashAttention
@@ -268,8 +302,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
             remote_address = ip + ":" + str(port + self._rank)
 
             kv_cache = extract_kv_from_layer(kv_layer, request.block_ids)
-            self.p2p_nccl_engine.send_tensor(request_id + "#" + layer_name,
-                                             kv_cache, remote_address)
+            self.p2p_nccl_engine.send_tensor(
+                request_id + "#" + layer_name, kv_cache, remote_address
+            )
 
     def wait_for_save(self):
         if self.is_producer:
@@ -277,8 +312,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
             self.p2p_nccl_engine.wait_for_sent()
 
     def get_finished(
-            self, finished_req_ids: set[str],
-            **kwargs) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        self, finished_req_ids: set[str], **kwargs: Any
+    ) -> tuple[set[str] | None, set[str] | None]:
         """
         Notifies worker-side connector ids of requests that have
         finished generating tokens.
@@ -292,10 +327,8 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         assert self.p2p_nccl_engine is not None
 
-        no_compile_layers = (
-            self._vllm_config.compilation_config.static_forward_context)
-        return self.p2p_nccl_engine.get_finished(finished_req_ids,
-                                                 no_compile_layers)
+        no_compile_layers = self._vllm_config.compilation_config.static_forward_context
+        return self.p2p_nccl_engine.get_finished(finished_req_ids, no_compile_layers)
 
     # ==============================
     # Scheduler-side methods
@@ -322,23 +355,25 @@ class P2pNcclConnector(KVConnectorBase_V1):
         if self.is_producer:
             return 0, False
 
-        num_external_tokens = (len(request.prompt_token_ids) - 1 -
-                               num_computed_tokens)
+        prompt_token_ids = request.prompt_token_ids or []
+        num_external_tokens = len(prompt_token_ids) - 1 - num_computed_tokens
 
         if num_external_tokens < 0:
             num_external_tokens = 0
 
         return num_external_tokens, False
 
-    def update_state_after_alloc(self, request: "Request",
-                                 blocks: "KVCacheBlocks",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+    ):
         """
         Update KVConnector state after block allocation.
         """
         if not self.is_producer and num_external_tokens > 0:
             self._requests_need_load[request.request_id] = (
-                request, blocks.get_block_ids()[0])
+                request,
+                blocks.get_block_ids()[0],
+            )
 
     def build_connector_meta(
         self,
@@ -357,53 +392,62 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
         for new_req in scheduler_output.scheduled_new_reqs:
             if self.is_producer:
-                num_scheduled_tokens = (
-                    scheduler_output.num_scheduled_tokens)[new_req.req_id]
+                num_scheduled_tokens = (scheduler_output.num_scheduled_tokens)[
+                    new_req.req_id
+                ]
                 num_tokens = num_scheduled_tokens + new_req.num_computed_tokens
                 # the request's prompt is chunked prefill
-                if num_tokens < len(new_req.prompt_token_ids):
+                if num_tokens < len(new_req.prompt_token_ids or []):
                     # 'CachedRequestData' has no attribute 'prompt_token_ids'
                     self.chunked_prefill[new_req.req_id] = (
-                        new_req.block_ids[0], new_req.prompt_token_ids)
+                        new_req.block_ids[0],
+                        new_req.prompt_token_ids,
+                    )
                     continue
                 # the request's prompt is not chunked prefill
-                meta.add_request(request_id=new_req.req_id,
-                                 token_ids=new_req.prompt_token_ids,
-                                 block_ids=new_req.block_ids[0],
-                                 block_size=self._block_size)
+                meta.add_request(
+                    request_id=new_req.req_id,
+                    token_ids=new_req.prompt_token_ids or [],
+                    block_ids=new_req.block_ids[0],
+                    block_size=self._block_size,
+                )
                 continue
             if new_req.req_id in self._requests_need_load:
-                meta.add_request(request_id=new_req.req_id,
-                                 token_ids=new_req.prompt_token_ids,
-                                 block_ids=new_req.block_ids[0],
-                                 block_size=self._block_size)
+                meta.add_request(
+                    request_id=new_req.req_id,
+                    token_ids=new_req.prompt_token_ids or [],
+                    block_ids=new_req.block_ids[0],
+                    block_size=self._block_size,
+                )
                 self._requests_need_load.pop(new_req.req_id)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
             num_computed_tokens = cached_reqs.num_computed_tokens[i]
             new_block_ids = cached_reqs.new_block_ids[i]
-            resumed_from_preemption = cached_reqs.resumed_from_preemption[i]
+            resumed_from_preemption = req_id in cached_reqs.resumed_req_ids
 
             if self.is_producer:
-                num_scheduled_tokens = (
-                    scheduler_output.num_scheduled_tokens)[req_id]
-                num_tokens = (num_scheduled_tokens + num_computed_tokens)
+                num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+                num_tokens = num_scheduled_tokens + num_computed_tokens
                 assert req_id in self.chunked_prefill
+                assert new_block_ids is not None
                 block_ids = new_block_ids[0]
                 if not resumed_from_preemption:
-                    block_ids = (self.chunked_prefill[req_id][0] + block_ids)
+                    block_ids = self.chunked_prefill[req_id][0] + block_ids
                 prompt_token_ids = self.chunked_prefill[req_id][1]
+                assert prompt_token_ids is not None
                 # the request's prompt is chunked prefill again
                 if num_tokens < len(prompt_token_ids):
-                    self.chunked_prefill[req_id] = (block_ids,
-                                                    prompt_token_ids)
+                    self.chunked_prefill[req_id] = (block_ids, prompt_token_ids)
                     continue
                 # the request's prompt is all prefilled finally
-                meta.add_request(request_id=req_id,
-                                 token_ids=prompt_token_ids,
-                                 block_ids=block_ids,
-                                 block_size=self._block_size)
+                meta.add_request(
+                    request_id=req_id,
+                    token_ids=prompt_token_ids,
+                    block_ids=block_ids,
+                    block_size=self._block_size,
+                )
                 self.chunked_prefill.pop(req_id, None)
                 continue
 
@@ -418,12 +462,15 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
                 # NOTE(rob): For resumed req, new_block_ids is all
                 # of the block_ids for the request.
+                assert new_block_ids is not None
                 block_ids = new_block_ids[0]
 
-                meta.add_request(request_id=req_id,
-                                 token_ids=token_ids,
-                                 block_ids=block_ids,
-                                 block_size=self._block_size)
+                meta.add_request(
+                    request_id=req_id,
+                    token_ids=token_ids,
+                    block_ids=block_ids,
+                    block_size=self._block_size,
+                )
 
         self._requests_need_load.clear()
         return meta
@@ -432,7 +479,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
 
@@ -468,8 +515,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             port = int(match.group(2))
 
             return ip, port
-        raise ValueError(
-            f"Request id {request_id} does not contain hostname and port")
+        raise ValueError(f"Request id {request_id} does not contain hostname and port")
 
     @staticmethod
     def check_tensors_except_dim(tensor1, tensor2, dim):
@@ -477,8 +523,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
         shape2 = tensor2.size()
 
         if len(shape1) != len(shape2) or not all(
-                s1 == s2
-                for i, (s1, s2) in enumerate(zip(shape1, shape2)) if i != dim):
+            s1 == s2 for i, (s1, s2) in enumerate(zip(shape1, shape2)) if i != dim
+        ):
             raise NotImplementedError(
                 "Currently, only symmetric TP is supported. Asymmetric TP, PP,"
-                "and others will be supported in future PRs.")
+                "and others will be supported in future PRs."
+            )

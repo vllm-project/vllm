@@ -1,68 +1,74 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (divide, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.activation import (get_act_and_mul_fn,
-                                                   get_act_fn)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk, torch_vllm_outplace_fused_experts)
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.distributed import (
+    divide,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
+from vllm.model_executor.layers.activation import get_act_and_mul_fn, get_act_fn
+from vllm.model_executor.layers.attention import (
+    EncoderOnlyAttention,
+)
+from vllm.model_executor.layers.fused_moe import activation_without_mul, fused_topk
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
-                                              maybe_prefix)
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    maybe_prefix,
+)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from ..layers.pooler import ClassifierPooler, DispatchPooler, Pooler
 from .bert import BertPooler
 from .interfaces import SupportsCrossEncoding, SupportsQuant
 from .interfaces_base import default_pooling_type
 
 
 class BertWithRopeEmbedding(nn.Module):
-
     def __init__(self, config: PretrainedConfig):
-
         super().__init__()
         if config.position_embedding_type not in ["rope", "rotary"]:
-            raise ValueError("Only 'rotary'('rope') position_embedding_type" +
-                             " is supported")
+            raise ValueError(
+                "Only 'rotary'('rope') position_embedding_type" + " is supported"
+            )
 
-        self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
-                                                      config.hidden_size)
+        self.word_embeddings = VocabParallelEmbedding(
+            config.vocab_size, config.hidden_size
+        )
         if config.type_vocab_size > 0:
             self.token_type_embeddings = VocabParallelEmbedding(
-                config.type_vocab_size, config.hidden_size)
+                config.type_vocab_size, config.hidden_size
+            )
         else:
             self.token_type_embeddings = None
 
-        self.LayerNorm = nn.LayerNorm(config.hidden_size,
-                                      eps=config.layer_norm_eps)
+        self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
         self,
         input_ids: torch.Tensor,
-        token_type_ids: Optional[torch.Tensor] = None,
+        token_type_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         input_shape = input_ids.size()
         inputs_embeds = self.word_embeddings(input_ids)
@@ -70,9 +76,9 @@ class BertWithRopeEmbedding(nn.Module):
         embeddings = inputs_embeds
         if self.token_type_embeddings is not None:
             if token_type_ids is None:
-                token_type_ids = torch.zeros(input_shape,
-                                             dtype=torch.long,
-                                             device=inputs_embeds.device)
+                token_type_ids = torch.zeros(
+                    input_shape, dtype=torch.long, device=inputs_embeds.device
+                )
 
             token_type_embeddings = self.token_type_embeddings(token_type_ids)
             embeddings += token_type_embeddings
@@ -82,15 +88,14 @@ class BertWithRopeEmbedding(nn.Module):
 
 
 class BertWithRopeAttention(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
         num_attention_heads: int,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = True,
-        rotary_kwargs: Optional[dict] = None,
+        rotary_kwargs: dict | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -119,23 +124,28 @@ class BertWithRopeAttention(nn.Module):
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj")
+            prefix=f"{prefix}.qkv_proj",
+        )
 
         self.rotary_emb = get_rope(**rotary_kwargs)
 
-        self.attn = EncoderOnlyAttention(num_heads=self.num_heads,
-                                         head_size=self.head_dim,
-                                         scale=self.scaling,
-                                         num_kv_heads=self.num_kv_heads,
-                                         cache_config=cache_config,
-                                         quant_config=quant_config,
-                                         prefix=f"{prefix}.attn")
+        self.attn = EncoderOnlyAttention(
+            num_heads=self.num_heads,
+            head_size=self.head_dim,
+            scale=self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
-        self.out_proj = RowParallelLinear(input_size=hidden_size,
-                                          output_size=hidden_size,
-                                          bias=bias,
-                                          quant_config=quant_config,
-                                          prefix=f"{prefix}.dense")
+        self.out_proj = RowParallelLinear(
+            input_size=hidden_size,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense",
+        )
 
     def forward(
         self,
@@ -151,14 +161,15 @@ class BertWithRopeAttention(nn.Module):
 
 
 class BertWithRopeGatedMLP(nn.Module):
-
-    def __init__(self,
-                 hidden_size: int,
-                 intermediate_size: int,
-                 hidden_act: str,
-                 bias: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        bias: bool = True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.act_fn = get_act_and_mul_fn(hidden_act)
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -168,11 +179,13 @@ class BertWithRopeGatedMLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
         )
-        self.down_proj = RowParallelLinear(input_size=intermediate_size,
-                                           output_size=hidden_size,
-                                           bias=bias,
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.down_proj")
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(hidden_states)
@@ -182,26 +195,31 @@ class BertWithRopeGatedMLP(nn.Module):
 
 
 class BertWithRopeMLP(nn.Module):
-
-    def __init__(self,
-                 hidden_size: int,
-                 intermediate_size: int,
-                 hidden_act: str,
-                 bias: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        bias: bool = True,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.act_fn = get_act_fn(hidden_act)
-        self.up_proj = ColumnParallelLinear(input_size=hidden_size,
-                                            output_size=intermediate_size,
-                                            bias=bias,
-                                            quant_config=quant_config,
-                                            prefix=f"{prefix}.up_proj")
-        self.down_proj = RowParallelLinear(input_size=intermediate_size,
-                                           output_size=hidden_size,
-                                           bias=bias,
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.down_proj")
+        self.up_proj = ColumnParallelLinear(
+            input_size=hidden_size,
+            output_size=intermediate_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.up_proj(hidden_states)
@@ -211,7 +229,6 @@ class BertWithRopeMLP(nn.Module):
 
 
 class NomicMoE(nn.Module):
-
     def __init__(
         self,
         num_experts: int,
@@ -219,8 +236,8 @@ class NomicMoE(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        params_dtype: Optional[torch.dtype] = None,
-        tp_size: Optional[int] = None,
+        params_dtype: torch.dtype | None = None,
+        tp_size: int | None = None,
     ):
         super().__init__()
 
@@ -230,34 +247,46 @@ class NomicMoE(nn.Module):
         self.hidden_size = hidden_size
         self.total_intermediate_size = intermediate_size
         self.intermediate_size = divide(intermediate_size, self.tp_size)
-        self.hidden_act = hidden_act
+        self.hidden_act = activation_without_mul(hidden_act)
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        self.router = ReplicatedLinear(self.hidden_size,
-                                       self.num_total_experts,
-                                       bias=False)
+        self.router = ReplicatedLinear(
+            self.hidden_size, self.num_total_experts, bias=False
+        )
         self.w1 = nn.Parameter(
-            torch.empty(self.num_total_experts,
-                        self.intermediate_size,
-                        self.hidden_size,
-                        device=current_platform.device_type,
-                        dtype=self.params_dtype))
+            torch.empty(
+                self.num_total_experts,
+                self.intermediate_size,
+                self.hidden_size,
+                device=current_platform.device_type,
+                dtype=self.params_dtype,
+            )
+        )
         self.w2 = nn.Parameter(
-            torch.empty(self.num_total_experts,
-                        self.hidden_size,
-                        self.intermediate_size,
-                        device=current_platform.device_type,
-                        dtype=self.params_dtype))
+            torch.empty(
+                self.num_total_experts,
+                self.hidden_size,
+                self.intermediate_size,
+                device=current_platform.device_type,
+                dtype=self.params_dtype,
+            )
+        )
         self.bias = nn.Parameter(torch.zeros(self.hidden_size))
-        set_weight_attrs(self.w1, {
-            "weight_loader": self.weight_loader,
-        })
-        set_weight_attrs(self.w2, {
-            "weight_loader": self.weight_loader,
-        })
+        set_weight_attrs(
+            self.w1,
+            {
+                "weight_loader": self.weight_loader,
+            },
+        )
+        set_weight_attrs(
+            self.w2,
+            {
+                "weight_loader": self.weight_loader,
+            },
+        )
 
     def weight_loader(
         self,
@@ -293,37 +322,36 @@ class NomicMoE(nn.Module):
         # FIXME(Isotr0py): This implementation is too tricky,
         # we should use FusedMoE instead in the future
         # after supporting ungated activation for it.
-        topk_weights, topk_ids, _ = fused_topk(hidden_states,
-                                               router_logits,
-                                               self.top_k,
-                                               renormalize=False)
-        final_hidden_states = torch_vllm_outplace_fused_experts(
+        topk_weights, topk_ids, _ = fused_topk(
+            hidden_states, router_logits, self.top_k, renormalize=False
+        )
+
+        final_hidden_states = torch.ops.vllm.outplace_fused_experts(
             hidden_states=hidden_states,
             w1=self.w1,
             w2=self.w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=self.hidden_act,
-            is_act_and_mul=False,
         )
 
         if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(num_tokens, hidden_size) + self.bias
 
 
 class BertWithRopeBlock(nn.Module):
-
-    def __init__(self,
-                 config: PretrainedConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 moe: bool = False,
-                 bias: bool = True,
-                 rotary_kwargs: Optional[dict] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        moe: bool = False,
+        bias: bool = True,
+        rotary_kwargs: dict | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.attn = BertWithRopeAttention(
             hidden_size=config.hidden_size,
@@ -332,14 +360,17 @@ class BertWithRopeBlock(nn.Module):
             quant_config=quant_config,
             bias=bias,
             rotary_kwargs=rotary_kwargs,
-            prefix=f"{prefix}.attention")
+            prefix=f"{prefix}.attention",
+        )
 
         if moe:
-            self.mlp = NomicMoE(num_experts=config.num_experts,
-                                top_k=config.moe_top_k,
-                                hidden_size=config.hidden_size,
-                                intermediate_size=config.intermediate_size,
-                                hidden_act=config.hidden_act)
+            self.mlp = NomicMoE(
+                num_experts=config.num_experts,
+                top_k=config.moe_top_k,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+            )
         else:
             if config.hidden_act in ["silu", "geglu"]:
                 self.mlp = BertWithRopeGatedMLP(
@@ -348,7 +379,8 @@ class BertWithRopeBlock(nn.Module):
                     hidden_act=config.hidden_act,
                     bias=bias,
                     quant_config=quant_config,
-                    prefix=f"{prefix}.mlp")
+                    prefix=f"{prefix}.mlp",
+                )
             else:
                 self.mlp = BertWithRopeMLP(
                     hidden_size=config.hidden_size,
@@ -356,12 +388,11 @@ class BertWithRopeBlock(nn.Module):
                     hidden_act=config.hidden_act,
                     bias=bias,
                     quant_config=quant_config,
-                    prefix=f"{prefix}.mlp")
+                    prefix=f"{prefix}.mlp",
+                )
 
-        self.attn_ln = nn.LayerNorm(config.hidden_size,
-                                    eps=config.layer_norm_eps)
-        self.mlp_ln = nn.LayerNorm(config.hidden_size,
-                                   eps=config.layer_norm_eps)
+        self.attn_ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.mlp_ln = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor):
         attn_output = self.attn(positions, hidden_states)
@@ -372,27 +403,32 @@ class BertWithRopeBlock(nn.Module):
 
 
 class BertWithRopeEncoder(nn.Module):
-
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 bias: bool = True,
-                 rotary_kwargs: Optional[dict] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        bias: bool = True,
+        rotary_kwargs: dict | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         every_n = getattr(config, "moe_every_n_layers", 0)
-        self.layers = nn.ModuleList([
-            BertWithRopeBlock(config=config,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              bias=bias,
-                              moe=every_n > 0 and (layer_idx % every_n == 1),
-                              rotary_kwargs=rotary_kwargs,
-                              prefix=f"{prefix}.layer.{layer_idx}")
-            for layer_idx in range(config.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                BertWithRopeBlock(
+                    config=config,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    bias=bias,
+                    moe=every_n > 0 and (layer_idx % every_n == 1),
+                    rotary_kwargs=rotary_kwargs,
+                    prefix=f"{prefix}.layer.{layer_idx}",
+                )
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+        )
 
     def forward(
         self,
@@ -405,16 +441,19 @@ class BertWithRopeEncoder(nn.Module):
 
 
 @support_torch_compile
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 add_pooling_layer: bool = False):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        add_pooling_layer: bool = False,
+    ):
         super().__init__()
+
         self.vllm_config = vllm_config
         self.add_pooling_layer = add_pooling_layer
         self.config = vllm_config.model_config.hf_config
@@ -423,26 +462,34 @@ class BertWithRope(nn.Module, SupportsQuant):
             vllm_config=vllm_config,
             bias=getattr(self.config, "bias", True),
             rotary_kwargs=self.config.rotary_kwargs,
-            prefix=f"{prefix}.encoder")
-        self.pooler = BertPooler(self.config) if add_pooling_layer else None
+            prefix=f"{prefix}.encoder",
+        )
+
+        if add_pooling_layer:
+            self.pooler = BertPooler(vllm_config.model_config)
+        else:
+            self.pooler = None
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embeddings(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        token_type_ids: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
-            hidden_states = self.embeddings(input_ids=input_ids,
-                                            token_type_ids=token_type_ids)
+            hidden_states = self.embeddings(
+                input_ids=input_ids, token_type_ids=token_type_ids
+            )
         return self.encoder(positions, hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
 
         if self.config.hidden_act in ["silu", "geglu"]:
@@ -459,7 +506,7 @@ class BertWithRope(nn.Module, SupportsQuant):
         for name, loaded_weight in weights:
             if not self.add_pooling_layer and "pooler" in name:
                 continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -475,8 +522,7 @@ class BertWithRope(nn.Module, SupportsQuant):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if name.endswith((".w1", ".w2")):
                     # Nomic-MoE has fused experts weights
                     weight_loader(param, loaded_weight, name)
@@ -503,7 +549,8 @@ class NomicBertModel(BertWithRope):
             "experts.mlp.": "",
             "experts.": "",
             "router.layer": "router",
-        })
+        }
+    )
 
 
 class GteNewModel(BertWithRope):
@@ -515,7 +562,8 @@ class GteNewModel(BertWithRope):
             "layer": "layers",
             "attention.qkv_proj": "attn.qkv_proj",
             "attention.o_proj": "attn.out_proj",
-        })
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs):
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
@@ -536,15 +584,13 @@ class GteNewModel(BertWithRope):
             else:
                 yield name, weight
 
-    def ignore_unnecessary_layers(self,
-                                  weights: Iterable[tuple[str, torch.Tensor]]):
+    def ignore_unnecessary_layers(self, weights: Iterable[tuple[str, torch.Tensor]]):
         for name, weight in weights:
             if name.startswith("classifier"):
                 continue
             yield name, weight
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.ignore_unnecessary_layers(weights)
         weights = self.split_up_gate_proj(weights)
         return super().load_weights(weights)
@@ -558,7 +604,8 @@ class SnowflakeGteNewModel(GteNewModel):
             "layer": "layers",
             "attention.qkv_proj": "attn.qkv_proj",
             "attention.o_proj": "attn.out_proj",
-        })
+        }
+    )
 
 
 class JinaRobertaModel(BertWithRope):
@@ -573,11 +620,11 @@ class JinaRobertaModel(BertWithRope):
             "mlp.fc1.": "mlp.up_proj.",
             "mlp.fc2": "mlp.down_proj",
             "norm2": "mlp_ln",
-        })
+        }
+    )
 
     @torch.inference_mode()
-    def jina_merge_lora_weights(self, weights: Iterable[tuple[str,
-                                                              torch.Tensor]]):
+    def jina_merge_lora_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         # use for jina-embeddings-v3
         # Merge Lora weights into a single weight tensor.
         # This is a temporary solution until we have a better way to handle
@@ -598,7 +645,7 @@ class JinaRobertaModel(BertWithRope):
             if o in name:
                 dtype = weights[name].dtype
                 shape = weights[name].shape
-                weight_name = name[:-len(o)]
+                weight_name = name[: -len(o)]
 
                 if "embeddings" in weight_name:
                     B = weights[weight_name + a][i].to(device).float()
@@ -607,25 +654,28 @@ class JinaRobertaModel(BertWithRope):
                     B = weights[weight_name + b][i].to(device).float()
                     A = weights[weight_name + a][i].to(device).float()
 
-                weight = (weights[weight_name + o].to(device) +
-                          torch.matmul(B, A).view(shape) * scaling)
+                weight = (
+                    weights[weight_name + o].to(device)
+                    + torch.matmul(B, A).view(shape) * scaling
+                )
                 weight = weight.cpu().to(dtype)
 
                 weights[weight_name.replace(".parametrizations", "")] = weight
 
-                del weights[weight_name + o], weights[weight_name +
-                                                      a], weights[weight_name +
-                                                                  b]
+                del (
+                    weights[weight_name + o],
+                    weights[weight_name + a],
+                    weights[weight_name + b],
+                )
 
         return [(name, weight) for name, weight in weights.items()]
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.jina_merge_lora_weights(weights)
         return super().load_weights(weights)
 
 
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
     is_pooling_model = True
 
@@ -634,54 +684,46 @@ class GteNewForSequenceClassification(nn.Module, SupportsCrossEncoding):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.new = GteNewModel(vllm_config=vllm_config,
-                               prefix=prefix,
-                               add_pooling_layer=True)
-        self.classifier = RowParallelLinear(config.hidden_size,
-                                            config.num_labels,
-                                            input_is_parallel=False,
-                                            bias=True,
-                                            quant_config=quant_config,
-                                            prefix=maybe_prefix(
-                                                prefix, "classifier"),
-                                            return_bias=False)
+        self.new = GteNewModel(
+            vllm_config=vllm_config, prefix=prefix, add_pooling_layer=True
+        )
+        self.classifier = ReplicatedLinear(
+            config.hidden_size,
+            config.num_labels,
+            bias=True,
+            quant_config=quant_config,
+            params_dtype=vllm_config.model_config.head_dtype,
+            prefix=maybe_prefix(prefix, "classifier"),
+            return_bias=False,
+        )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
-            "classify":
-            ClassifierPooler(
-                pooling=self.new.pooler,
-                classifier=self.classifier,
-                act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                    vllm_config.model_config),
-            ),
-            "score":
-            ClassifierPooler(
-                pooling=self.new.pooler,
-                classifier=self.classifier,
-                act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                    vllm_config.model_config),
-            ),
-        })
+        self.pooler = DispatchPooler.for_seq_cls(
+            pooler_config,
+            pooling=self.new.pooler,
+            classifier=self.classifier,
+        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         loaded_params = loader.load_weights(weights)
         return loaded_params
 
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.new.embed_input_ids(input_ids)
+
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-
-        return self.new(input_ids=input_ids,
-                        positions=positions,
-                        inputs_embeds=inputs_embeds,
-                        intermediate_tensors=intermediate_tensors)
+        return self.new(
+            input_ids=input_ids,
+            positions=positions,
+            inputs_embeds=inputs_embeds,
+            intermediate_tensors=intermediate_tensors,
+        )

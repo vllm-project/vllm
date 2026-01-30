@@ -10,43 +10,44 @@ https://arxiv.org/abs/2310.18547
 import torch
 
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
-from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr
-from vllm.platforms import current_platform
+from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
 def _lora_expand_kernel(
-        input_ptr,
-        lora_ptr,
-        out_ptr,
-        M,
-        N,
-        K,
-        token_indices_sorted_by_lora_ids,
-        num_tokens_per_lora,
-        lora_token_start_loc,
-        lora_ids,
-        slice_start_loc,
-        input_d0_stride,
-        input_d1_stride,
-        input_d2_stride,  # 1
-        ls_d0_ptr,
-        ls_d1_ptr,
-        ls_d2_ptr,  # 1
-        output_d0_stride,
-        output_d1_stride,  # 1
-        output_hs_ptr,
-        BLOCK_M: tl.constexpr,
-        BLOCK_N: tl.constexpr,
-        BLOCK_K: tl.constexpr,
-        EVEN_K: tl.constexpr,
-        ADD_INPUTS: tl.constexpr,
-        CAST_TYPE: tl.constexpr,
-        SLICE_NUM: tl.constexpr,
-        SAME_STRIDE: tl.constexpr):
-
+    input_ptr,
+    lora_ptr,
+    out_ptr,
+    M,
+    N,
+    K,
+    token_indices_sorted_by_lora_ids,
+    num_tokens_per_lora,
+    lora_token_start_loc,
+    lora_ids,
+    slice_start_loc,
+    input_d0_stride,
+    input_d1_stride,
+    input_d2_stride,  # 1
+    ls_d0_ptr,
+    ls_d1_ptr,
+    ls_d2_ptr,  # 1
+    output_d0_stride,
+    output_d1_stride,  # 1
+    output_hs_ptr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    EVEN_K: tl.constexpr,
+    ADD_INPUTS: tl.constexpr,
+    CAST_TYPE: tl.constexpr,
+    SLICE_NUM: tl.constexpr,
+    SAME_STRIDE: tl.constexpr,
+    USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,
+):
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
 
@@ -82,8 +83,9 @@ def _lora_expand_kernel(
 
     # Identify all rows that this CTA should process.
     lora_m_indices_start = tl.load(lora_token_start_loc + lora_idx)
-    cta_lora_seq_indices = (token_indices_sorted_by_lora_ids +
-                            lora_m_indices_start + cta_m_offset)
+    cta_lora_seq_indices = (
+        token_indices_sorted_by_lora_ids + lora_m_indices_start + cta_m_offset
+    )
 
     # Load all relevant row indices.
     offset_m = tl.arange(0, BLOCK_M) % cta_m_len
@@ -120,22 +122,22 @@ def _lora_expand_kernel(
         SLICE_NUM,
         EVEN_K,
         CAST_TYPE,
-        ADD_INPUTS)
+        ADD_INPUTS,
+        USE_GDC,
+    )
 
 
 @torch.inference_mode()
 def _lora_expand(
     inputs: torch.Tensor,  # shape [num_slices, num_tokens, lora_rank]
-    lora_b_weights: list[
-        torch.Tensor],  # shape [num_lora, hidden_size, lora_rank]
-    output_tensor: torch.
-    Tensor,  # shape [num_tokens, hidden_size * num_slices]
+    lora_b_weights: list[torch.Tensor],  # shape [num_lora, hidden_size, lora_rank]
+    output_tensor: torch.Tensor,  # shape [num_tokens, hidden_size * num_slices]
     token_lora_mapping: torch.Tensor,  # shape [num_tokens]
     token_indices_sorted_by_lora_ids: torch.Tensor,  # shape [num_tokens]
     num_tokens_per_lora: torch.Tensor,  # shape [max-loras + 1]
     lora_token_start_loc: torch.Tensor,  # shape [max-loras + 2]
     lora_ids: torch.Tensor,  # shape [max-loras + 1]
-    no_lora_flag_cpu: torch.Tensor,  # shape [1] 
+    no_lora_flag_cpu: torch.Tensor,  # shape [1]
     offset_start: int = 0,
     add_inputs: bool = False,
 ) -> None:
@@ -150,7 +152,7 @@ def _lora_expand(
         token_indices_sorted_by_lora_ids (torch.Tensor): Row/Token indices from
             the A matrix grouped by LoRA IDs.
         num_tokens_per_lora (torch.Tensor): num_tokens_per_lora[i] is the number
-            of tokens that are to be processed by LoRA ID lora_ids[i] 
+            of tokens that are to be processed by LoRA ID lora_ids[i]
         lora_token_start_loc (torch.Tensor): A cumulative sum of
             num_tokens_per_lora. lora_token_start_loc[0] is always 0 so that
             lora_token_start_loc[i], along with num_tokens_per_lora[i]
@@ -159,9 +161,9 @@ def _lora_expand(
         lora_ids (torch.Tensor): LoRA ids to process.
         no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates
             if there are any requests that require LoRA.
-        offset_start (int, optional): Offset start for output_tensor. 
+        offset_start (int, optional): Offset start for output_tensor.
             Defaults to 0.
-        add_inputs (bool, optional): Whether to add the input tensor to the 
+        add_inputs (bool, optional): Whether to add the input tensor to the
             output tensor. Defaults to False.
     """
 
@@ -180,15 +182,20 @@ def _lora_expand(
     # metadata sanity check.
     M = inputs.size(1)
     assert token_lora_mapping.size(0) == M
-    assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(
-        0)
+    assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
     assert lora_token_start_loc.size(0) == lora_ids.size(0) + 1
 
-    (slice_start_tensor, lora_ptr_tensor, lora_strides_d0_tensor,
-     lora_strides_d1_tensor, lora_strides_d2_tensor, hidden_sizes_tensor,
-     same_stride, MAX_N) = _get_lora_b_ptr(lora_b_weights, offset_start,
-                                           inputs.device)
+    (
+        slice_start_tensor,
+        lora_ptr_tensor,
+        lora_strides_d0_tensor,
+        lora_strides_d1_tensor,
+        lora_strides_d2_tensor,
+        hidden_sizes_tensor,
+        same_stride,
+        MAX_N,
+    ) = _get_lora_b_ptr(lora_b_weights, offset_start, inputs.device)
 
     K = lora_b_weights[0].shape[-1]  # K= rank
     ADD_INPUTS = add_inputs
@@ -197,18 +204,27 @@ def _lora_expand(
     NUM_SLICES = len(lora_b_weights)
 
     # Triton kernel configs.
-    BLOCK_M = 64
-    BLOCK_N = 128
-    BLOCK_K = 16
-    NUM_WARPS = 4
-    NUM_CTAS = 1
-    NUM_STAGES = 2
+    kernel_config = get_lora_op_configs(
+        op_type="expand",
+        max_loras=MAX_LORAS,
+        batch=M,
+        hidden_size=MAX_N,
+        rank=K,
+        num_slices=NUM_SLICES,
+        add_inputs=add_inputs,
+    )
+    BLOCK_M = kernel_config["block_m"]
+    BLOCK_N = kernel_config["block_n"]
+    BLOCK_K = kernel_config["block_k"]
+    NUM_WARPS = kernel_config["num_warps"]
+    NUM_CTAS = kernel_config["num_ctas"]
+    NUM_STAGES = kernel_config["num_stages"]
 
     EVEN_K = K % BLOCK_K == 0  # type: ignore
 
     if inputs.dtype == torch.float32 and lora_b_weights[0].dtype in [
-            torch.float16,
-            torch.bfloat16,
+        torch.float16,
+        torch.bfloat16,
     ]:
         CAST_TYPE = True
 
@@ -223,7 +239,9 @@ def _lora_expand(
         # thread blocks simply exit.
         MAX_LORAS,
     )
-
+    # We disable PDL temporarily because LoRA kernels are not launching back-to-back,
+    # making PDL invalid and affecting the kernel performance.
+    use_gdc = False  # supports_pdl(inputs.device)
     _lora_expand_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -253,9 +271,11 @@ def _lora_expand(
         CAST_TYPE,
         NUM_SLICES,
         same_stride,
+        use_gdc,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
+        launch_pdl=use_gdc,
     )
 
     return
@@ -283,7 +303,6 @@ try:
         op_func=_lora_expand,
         mutates_args=["output_tensor"],
         fake_impl=_lora_expand_fake,
-        dispatch_key=current_platform.dispatch_key,
     )
     lora_expand = torch.ops.vllm.lora_expand
 

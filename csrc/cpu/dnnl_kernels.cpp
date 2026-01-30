@@ -360,13 +360,14 @@ void onednn_scaled_mm(
     const std::optional<torch::Tensor>& azp,      // [M] or [1]
     const std::optional<torch::Tensor>& azp_adj,  // [M] or [1]
     const std::optional<torch::Tensor>& bias,     // [N]
-    int64_t handler) {
+    const torch::Tensor& handler_tensor) {
   CPU_KERNEL_GUARD_IN(onednn_scaled_mm)
   TORCH_CHECK(a.dim() == 2);
   TORCH_CHECK(a.is_contiguous());
   TORCH_CHECK(c.is_contiguous());
   W8A8MatMulPrimitiveHandler* ptr =
-      reinterpret_cast<W8A8MatMulPrimitiveHandler*>(handler);
+      reinterpret_cast<W8A8MatMulPrimitiveHandler*>(
+          handler_tensor.item<int64_t>());
   const int32_t* azp_ptr = nullptr;
   if (azp.has_value()) {
     azp_ptr = azp->data_ptr<int32_t>();
@@ -519,29 +520,51 @@ int64_t create_onednn_mm_handler(const torch::Tensor& b,
 
 void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
                const torch::Tensor& a,  // [M, IC], row-major
-               const std::optional<torch::Tensor>& bias, int64_t handler) {
+               const std::optional<torch::Tensor>& bias,
+               const torch::Tensor& handler_tensor) {
   CPU_KERNEL_GUARD_IN(onednn_mm)
   TORCH_CHECK(a.dim() == 2);
   TORCH_CHECK(a.stride(-1) == 1);
-  TORCH_CHECK(c.is_contiguous());
+  TORCH_CHECK(c.stride(-1) == 1);
   MatMulPrimitiveHandler* ptr =
-      reinterpret_cast<MatMulPrimitiveHandler*>(handler);
+      reinterpret_cast<MatMulPrimitiveHandler*>(handler_tensor.item<int64_t>());
+
+// ACL matmuls expect contiguous source tensors
+#ifdef VLLM_USE_ACL
+  torch::Tensor a_contig = a.contiguous();
+#endif
 
   MatMulPrimitiveHandler::ExecArgs exec_args;
+
+#ifdef VLLM_USE_ACL
+  exec_args.a_m_size = a_contig.size(0);
+  exec_args.a_m_stride = a_contig.stride(0);
+#else
   exec_args.a_m_size = a.size(0);
   exec_args.a_m_stride = a.stride(0);
-
+#endif
   VLLM_DISPATCH_FLOATING_TYPES(a.scalar_type(), "onednn_mm", [&] {
     if (bias.has_value()) {
       exec_args.use_bias = true;
       exec_args.bias_type = get_dnnl_type<scalar_t>();
+#ifdef VLLM_USE_ACL
+      // ACL matmuls in oneDNN do not support a bias.
+      // We handle a matmul with bias by doing: c = bias; c += matmul(a, b)
+      c.copy_(bias.value());
+#else
       exec_args.bias_ptr = bias->data_ptr<scalar_t>();
+#endif
     } else {
       exec_args.use_bias = false;
       exec_args.bias_type = get_dnnl_type<void>();
       exec_args.bias_ptr = nullptr;
     }
+#ifdef VLLM_USE_ACL
+    exec_args.a_ptr = a_contig.data_ptr<scalar_t>();
+#else
     exec_args.a_ptr = a.data_ptr<scalar_t>();
+
+#endif
     exec_args.c_ptr = c.data_ptr<scalar_t>();
 
     ptr->execute(exec_args);

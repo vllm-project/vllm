@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from statistics import mean
-from typing import Any, NamedTuple, Optional, Union
+from typing import Any, NamedTuple
 
 import numpy as np  # type: ignore
 import pandas as pd  # type: ignore
@@ -11,6 +11,7 @@ from bench_utils import (
     Color,
     logger,
 )
+from tqdm import tqdm
 from transformers import AutoTokenizer  # type: ignore
 
 # Conversation ID is a string (e.g: "UzTK34D")
@@ -35,8 +36,8 @@ class Distribution(ABC):
 class UniformDistribution(Distribution):
     def __init__(
         self,
-        min_val: Union[int, float],
-        max_val: Union[int, float],
+        min_val: int | float,
+        max_val: int | float,
         is_integer: bool = True,
     ) -> None:
         self.min_val = min_val
@@ -56,7 +57,7 @@ class UniformDistribution(Distribution):
 
 
 class ConstantDistribution(Distribution):
-    def __init__(self, value: Union[int, float]) -> None:
+    def __init__(self, value: int | float) -> None:
         self.value = value
         self.max_val = value
 
@@ -68,7 +69,7 @@ class ConstantDistribution(Distribution):
 
 
 class ZipfDistribution(Distribution):
-    def __init__(self, alpha: float, max_val: Optional[int] = None) -> None:
+    def __init__(self, alpha: float, max_val: int | None = None) -> None:
         self.alpha = alpha
         self.max_val = max_val
 
@@ -83,7 +84,7 @@ class ZipfDistribution(Distribution):
 
 
 class PoissonDistribution(Distribution):
-    def __init__(self, alpha: float, max_val: Optional[int] = None) -> None:
+    def __init__(self, alpha: float, max_val: int | None = None) -> None:
         self.alpha = alpha
         self.max_val = max_val
 
@@ -99,21 +100,105 @@ class PoissonDistribution(Distribution):
 
 class LognormalDistribution(Distribution):
     def __init__(
-        self, mean: float, sigma: float, max_val: Optional[int] = None
+        self,
+        mean: float | None = None,
+        sigma: float | None = None,
+        average: int | None = None,
+        median_ratio: float | None = None,
+        max_val: int | None = None,
     ) -> None:
+        self.average = average
+        self.median_ratio = median_ratio
+        self.max_val = max_val
+
+        if average is not None:
+            if average < 1:
+                raise ValueError("Lognormal average must be positive")
+
+            if mean or sigma:
+                raise ValueError(
+                    "When using lognormal average, you can't provide mean/sigma"
+                )
+
+            if self.median_ratio is None:
+                # Default value that provides relatively wide range of values
+                self.median_ratio = 0.85
+
+            # Calculate mean/sigma of np.random.lognormal based on the average
+            mean, sigma = self._generate_lognormal_by_median(
+                target_average=self.average, median_ratio=self.median_ratio
+            )
+        else:
+            if mean is None or sigma is None:
+                raise ValueError(
+                    "Must provide both mean and sigma if average is not used"
+                )
+
+            if mean <= 0 or sigma < 0:
+                raise ValueError(
+                    "Lognormal mean must be positive and sigma must be non-negative"
+                )
+
+        # Mean and standard deviation of the underlying normal distribution
+        # Based on numpy.random.lognormal
         self.mean = mean
         self.sigma = sigma
-        self.max_val = max_val
+
+    @staticmethod
+    def _generate_lognormal_by_median(
+        target_average: int, median_ratio: float
+    ) -> tuple[float, float]:
+        """
+        Compute (mu, sigma) for a lognormal distribution given:
+        - a target average (mean of the distribution)
+        - a ratio of median / mean (controls skewness), assume mean > median
+
+        Background:
+        If Z ~ Normal(mu, sigma^2), then X = exp(Z) ~ LogNormal(mu, sigma).
+        * mean(X)   = exp(mu + sigma^2 / 2)
+        * median(X) = exp(mu)
+
+        So:
+        median / mean = exp(mu) / exp(mu + sigma^2 / 2)
+                      = exp(-sigma^2 / 2)
+
+        Rearranging:
+        sigma^2 = 2 * ln(mean / median)
+        mu      = ln(median)
+
+        This gives a unique (mu, sigma) for any valid mean and median.
+        """
+        # Check input validity: median must be smaller than mean
+        if median_ratio <= 0 or median_ratio >= 1:
+            raise ValueError("median_ratio must be in range (0, 1)")
+
+        target_median = target_average * median_ratio
+
+        # Solve sigma^2 = 2 * ln(mean / median)
+        sigma = np.sqrt(2 * np.log(target_average / target_median))
+        mu = np.log(target_median)
+
+        return mu, sigma
 
     def sample(self, size: int = 1) -> np.ndarray:
         samples = np.random.lognormal(mean=self.mean, sigma=self.sigma, size=size)
+
+        if self.average is not None:
+            # Scale to average
+            samples *= self.average / samples.mean()
+
         if self.max_val:
             samples = np.minimum(samples, self.max_val)
 
         return np.round(samples).astype(int)
 
     def __repr__(self) -> str:
-        return f"LognormalDistribution[{self.mean}, {self.sigma}]"
+        if self.average:
+            return (
+                f"LognormalDistribution[{self.average}, "
+                f"{self.median_ratio}, {self.max_val}]"
+            )
+        return f"LognormalDistribution[{self.mean}, {self.sigma}, {self.max_val}]"
 
 
 class GenConvArgs(NamedTuple):
@@ -173,10 +258,21 @@ def get_random_distribution(
         return PoissonDistribution(conf["alpha"], max_val=max_val)
 
     elif distribution == "lognormal":
+        max_val = conf.get("max", None)
+
+        if "average" in conf:
+            # Infer lognormal mean/sigma (numpy) from input average
+            median_ratio = conf.get("median_ratio", None)
+            return LognormalDistribution(
+                average=conf["average"], median_ratio=median_ratio, max_val=max_val
+            )
+
+        # Use mean/sigma directly (for full control over the distribution)
         verify_field_exists(conf, "mean", section, subsection)
         verify_field_exists(conf, "sigma", section, subsection)
-        max_val = conf.get("max", None)
-        return LognormalDistribution(conf["mean"], conf["sigma"], max_val=max_val)
+        return LognormalDistribution(
+            mean=conf["mean"], sigma=conf["sigma"], max_val=max_val
+        )
 
     elif distribution == "uniform":
         verify_field_exists(conf, "min", section, subsection)
@@ -322,6 +418,10 @@ def generate_conversations(
             data = file.read()
             tokens_in_file = tokenizer.encode(data, add_special_tokens=False)
             list_of_tokens.extend(tokens_in_file)
+        logger.info(
+            f"Loaded {len(tokens_in_file)} tokens from file {filename}, "
+            f"total tokens so far: {len(list_of_tokens)}"
+        )
 
     conversations: ConversationsMap = {}
     conv_id = 0
@@ -354,18 +454,25 @@ def generate_conversations(
         )
         base_offset += common_prefix_tokens
 
-    for conv_id in range(args.num_conversations):
+    for conv_id in tqdm(
+        range(args.num_conversations),
+        total=args.num_conversations,
+        desc="Generating conversations",
+        unit="conv",
+    ):
         # Generate a single conversation
         messages: MessagesList = []
 
         nturns = turn_count[conv_id]
 
         # User prompt token count per turn (with lower limit)
-        input_token_count: np.ndarray = args.input_num_tokens.sample(nturns)
+        input_token_count: np.ndarray = args.input_num_tokens.sample(nturns).astype(int)
         input_token_count = np.maximum(input_token_count, base_prompt_token_count)
 
         # Assistant answer token count per turn (with lower limit)
-        output_token_count: np.ndarray = args.output_num_tokens.sample(nturns)
+        output_token_count: np.ndarray = args.output_num_tokens.sample(nturns).astype(
+            int
+        )
         output_token_count = np.maximum(output_token_count, 1)
 
         user_turn = True

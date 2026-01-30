@@ -9,7 +9,6 @@
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
 from collections.abc import Mapping, Sequence
-from typing import Optional, Union
 
 import torch
 from PIL import Image
@@ -17,21 +16,34 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargsItems
-from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
-                                   MultiModalDataItems)
-from vllm.multimodal.processing import (MultiModalProcessingInfo,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.multimodal.inputs import MultiModalKwargsItems, MultiModalUUIDDict
+from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
+    ImageProcessorItems,
+    MultiModalDataItems,
+)
+from vllm.multimodal.processing.processor import (
+    MultiModalProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
+from vllm.tokenizers import TokenizerLike
 
 from .intern_vit import InternVisionModel
-from .internvl import (IMG_CONTEXT, IMG_END, IMG_START,
-                       BaseInternVLDummyInputsBuilder,
-                       BaseInternVLMultiModalProcessor,
-                       BaseInternVLProcessingInfo, BaseInternVLProcessor,
-                       InternVLChatModel, build_transform,
-                       find_closest_aspect_ratio, get_internvl_target_ratios)
+from .internvl import (
+    IMG_CONTEXT,
+    IMG_END,
+    IMG_START,
+    BaseInternVLDummyInputsBuilder,
+    BaseInternVLMultiModalProcessor,
+    BaseInternVLProcessingInfo,
+    BaseInternVLProcessor,
+    InternVLChatModel,
+    build_transform,
+    find_closest_aspect_ratio,
+    get_internvl_target_ratios,
+)
 
 
 def resolve_h2ovl_min_max_num(
@@ -54,15 +66,17 @@ def get_h2ovl_target_ratios(
     min_num: int,
     max_num: int,
     *,
-    prior_aspect_ratio: Optional[tuple[int, int]],
+    prior_aspect_ratio: tuple[int, int] | None,
 ) -> list[tuple[int, int]]:
     target_ratios = get_internvl_target_ratios(min_num, max_num)
 
     # if prior_aspect_ratio is provided, filter the target ratios
     if prior_aspect_ratio is not None:
         target_ratios = [
-            ratio for ratio in target_ratios if prior_aspect_ratio[0] %
-            ratio[0] != 0 and prior_aspect_ratio[1] % ratio[1] != 0
+            ratio
+            for ratio in target_ratios
+            if prior_aspect_ratio[0] % ratio[0] != 0
+            and prior_aspect_ratio[1] % ratio[1] != 0
         ]
 
     return target_ratios
@@ -155,7 +169,7 @@ def _preprocess_image(
     min_num: int,
     max_num: int,
     use_thumbnail: bool,
-    prior_aspect_ratio: Optional[tuple[int, int]],
+    prior_aspect_ratio: tuple[int, int] | None,
 ) -> tuple[torch.Tensor, tuple[int, int]]:
     target_ratios = get_h2ovl_target_ratios(
         min_num,
@@ -207,7 +221,8 @@ def image_to_pixel_values_h2ovl(
         )
         # combine pixel values
         pixel_values = torch.cat(
-            [pixel_values2[:-1], pixel_values1[:-1], pixel_values2[-1:]], 0)
+            [pixel_values2[:-1], pixel_values1[:-1], pixel_values2[-1:]], 0
+        )
 
     else:
         pixel_values, _ = _preprocess_image(
@@ -223,16 +238,15 @@ def image_to_pixel_values_h2ovl(
 
 
 class H2OVLProcessor(BaseInternVLProcessor):
-
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        use_msac: Optional[bool] = None,
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
+        use_msac: bool | None = None,
     ) -> None:
         super().__init__(
             config,
@@ -255,7 +269,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
     def get_image_repl(
         self,
         feature_size: int,
-        num_patches: Optional[int],
+        num_patches: int | None,
     ) -> PromptUpdateDetails[str]:
         repl_features = IMG_CONTEXT * feature_size
         repl_full = IMG_START + repl_features + IMG_END
@@ -265,19 +279,23 @@ class H2OVLProcessor(BaseInternVLProcessor):
     def resolve_min_max_num(
         self,
         *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        use_thumbnail: Optional[bool] = None,
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
+        use_thumbnail: bool | None = None,
     ) -> tuple[int, int]:
-        min_dynamic_patch = (self.min_dynamic_patch if min_dynamic_patch
-                             is None else min_dynamic_patch)
-        max_dynamic_patch = (self.max_dynamic_patch if max_dynamic_patch
-                             is None else max_dynamic_patch)
-        dynamic_image_size = (self.dynamic_image_size if dynamic_image_size
-                              is None else dynamic_image_size)
-        use_thumbnail = (self.use_thumbnail
-                         if use_thumbnail is None else use_thumbnail)
+        min_dynamic_patch = (
+            self.min_dynamic_patch if min_dynamic_patch is None else min_dynamic_patch
+        )
+        max_dynamic_patch = (
+            self.max_dynamic_patch if max_dynamic_patch is None else max_dynamic_patch
+        )
+        dynamic_image_size = (
+            self.dynamic_image_size
+            if dynamic_image_size is None
+            else dynamic_image_size
+        )
+        use_thumbnail = self.use_thumbnail if use_thumbnail is None else use_thumbnail
 
         return resolve_h2ovl_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
@@ -289,12 +307,12 @@ class H2OVLProcessor(BaseInternVLProcessor):
     def resolve_target_ratios(
         self,
         *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        use_thumbnail: Optional[bool] = None,
-        prior_aspect_ratio: Optional[tuple[int, int]] = None,
-        override_min_num: Optional[int] = None,
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
+        use_thumbnail: bool | None = None,
+        prior_aspect_ratio: tuple[int, int] | None = None,
+        override_min_num: int | None = None,
     ) -> list[tuple[int, int]]:
         min_num, max_num = self.resolve_min_max_num(
             min_dynamic_patch=min_dynamic_patch,
@@ -316,9 +334,9 @@ class H2OVLProcessor(BaseInternVLProcessor):
         *,
         image_width: int,
         image_height: int,
-        use_msac: Optional[bool] = None,
+        use_msac: bool | None = None,
     ) -> int:
-        use_msac = (self.use_msac if use_msac is None else use_msac)
+        use_msac = self.use_msac if use_msac is None else use_msac
 
         use_thumbnail = self.use_thumbnail
 
@@ -366,9 +384,9 @@ class H2OVLProcessor(BaseInternVLProcessor):
     def _images_to_pixel_values_lst(
         self,
         images: list[Image.Image],
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
+        min_dynamic_patch: int | None = None,
+        max_dynamic_patch: int | None = None,
+        dynamic_image_size: bool | None = None,
     ) -> list[torch.Tensor]:
         use_msac = self.use_msac if len(images) == 1 else False
 
@@ -387,12 +405,12 @@ class H2OVLProcessor(BaseInternVLProcessor):
                 max_num=max_num,
                 use_thumbnail=self.use_thumbnail,
                 use_msac=use_msac,
-            ) for image in images
+            )
+            for image in images
         ]
 
 
 class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
-
     def get_hf_processor(self, **kwargs: object) -> H2OVLProcessor:
         return self.ctx.init_processor(
             H2OVLProcessor,
@@ -406,8 +424,8 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[H2OVLProcessor],
-        use_msac: Optional[bool] = None,
+        processor: H2OVLProcessor | None,
+        use_msac: bool | None = None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -419,9 +437,7 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class H2OVLMultiModalProcessor(
-        BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
-
+class H2OVLMultiModalProcessor(BaseInternVLMultiModalProcessor[H2OVLProcessingInfo]):
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -446,7 +462,8 @@ class H2OVLMultiModalProcessor(
 
         def get_replacement_internvl(item_idx: int):
             images = mm_items.get_items(
-                "image", (ImageEmbeddingItems, ImageProcessorItems))
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
+            )
 
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
@@ -475,11 +492,11 @@ class H2OVLMultiModalProcessor(
 
     def _cached_apply_hf_processor(
         self,
-        prompt: Union[str, list[int]],
+        prompt: str | list[int],
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 1 vs > 1
         # Since the processing cache assumes that the processor output is
@@ -491,7 +508,7 @@ class H2OVLMultiModalProcessor(
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 tokenization_kwargs=tokenization_kwargs,
-                mm_hash_overrides=mm_hash_overrides,
+                mm_uuids=mm_uuids,
             )
 
         return super()._cached_apply_hf_processor(
@@ -499,20 +516,20 @@ class H2OVLMultiModalProcessor(
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_hash_overrides=mm_hash_overrides,
+            mm_uuids=mm_uuids,
         )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
     H2OVLMultiModalProcessor,
     info=H2OVLProcessingInfo,
-    dummy_inputs=BaseInternVLDummyInputsBuilder)
+    dummy_inputs=BaseInternVLDummyInputsBuilder,
+)
 class H2OVLChatModel(InternVLChatModel):
-
     def _init_vision_model(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         *,
         is_mono: bool,
         prefix: str,
@@ -520,8 +537,9 @@ class H2OVLChatModel(InternVLChatModel):
         if not is_mono:
             vision_feature_layer = config.select_layer
             if vision_feature_layer < 0:
-                num_hidden_layers = (config.vision_config.num_hidden_layers +
-                                     vision_feature_layer + 1)
+                num_hidden_layers = (
+                    config.vision_config.num_hidden_layers + vision_feature_layer + 1
+                )
             else:
                 num_hidden_layers = vision_feature_layer + 1
 

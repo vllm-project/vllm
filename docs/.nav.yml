@@ -5,11 +5,7 @@ nav:
     - Getting Started:
       - getting_started/quickstart.md
       - getting_started/installation
-    - Examples:
-      - examples/README.md
-      - Offline Inference: examples/offline_inference
-      - Online Serving: examples/online_serving
-      - Others: examples/others
+      - Examples: examples
     - General:
       - usage/v1_guide.md
       - usage/*
@@ -24,18 +20,17 @@ nav:
       - deployment/integrations
     - Training: training
     - Configuration:
-      - configuration/README.md
       - configuration/*
+      - TPU: https://docs.vllm.ai/projects/tpu/en/latest/
     - Models:
       - models/supported_models.md
       - models/generative_models.md
       - models/pooling_models.md
       - models/extensions
-      - Hardware Supported Models: models/hardware_supported_models
-    - Features:
-      - features/compatibility_matrix.md
-      - features/*
-      - features/quantization
+      - Hardware Supported Models:
+        - models/hardware_supported_models/*
+        - TPU: https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/
+    - Features: features
   - Developer Guide:
     - contributing/README.md
     - General:
@@ -47,14 +42,24 @@ nav:
       - contributing/model/registration.md
       - contributing/model/tests.md
       - contributing/model/multimodal.md
+      - contributing/model/transcription.md
     - CI: contributing/ci
-    - Design Documents: design
+    - Design Documents:
+      - Plugins:
+        - design/*plugin*.md
+      - design/*
+  - Benchmarking:
+      - benchmarking/README.md
+      - benchmarking/cli.md
+      - benchmarking/sweeps.md
+      - benchmarking/dashboard.md
   - API Reference:
     - api/README.md
-    - api/vllm/*
+    - api/vllm
   - CLI Reference: cli
   - Community:
     - community/*
+    - Governance: governance
     - Blog: https://blog.vllm.ai
     - Forum: https://discuss.vllm.ai
     - Slack: https://slack.vllm.ai

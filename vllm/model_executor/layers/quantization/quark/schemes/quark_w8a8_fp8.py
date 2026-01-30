@@ -1,43 +1,61 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional, cast
+from collections.abc import Callable
+from typing import Any, cast
 
 import torch
 from torch.nn import Parameter
 
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
+    GroupShape,
+    kFp8DynamicTokenSym,
+    kFp8StaticTensorSym,
+    kFp8StaticTokenSym,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp, normalize_e4m3fn_to_e4m3fnuz, requantize_with_max_scale)
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
-                                           ModelWeightParameter,
-                                           PerTensorScaleParameter)
+    normalize_e4m3fn_to_e4m3fnuz,
+    requantize_with_max_scale,
+)
+from vllm.model_executor.parameter import (
+    ChannelQuantScaleParameter,
+    ModelWeightParameter,
+    PerTensorScaleParameter,
+)
 from vllm.platforms import current_platform
 
 __all__ = ["QuarkW8A8Fp8"]
 
+logger = init_logger(__name__)
+
 
 class QuarkW8A8Fp8(QuarkScheme):
-
-    def __init__(self, weight_config: dict[str, Any],
-                 input_config: Optional[dict[str, Any]]):
+    def __init__(
+        self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
+    ):
         self.weight_qscheme = cast(str, weight_config.get("qscheme"))
         self.is_static_input_scheme: bool = False
-        self.input_qscheme: Optional[str] = None
+        self.input_qscheme: str | None = None
         if input_config is not None:
-            self.is_static_input_scheme = not cast(
-                bool, input_config.get("is_dynamic"))
+            self.is_static_input_scheme = not cast(bool, input_config.get("is_dynamic"))
             self.input_qscheme = cast(str, input_config.get("qscheme"))
 
-        per_token = (not self.is_static_input_scheme
-                     and self.input_qscheme == "per_channel")
-        self.act_quant_group_shape = GroupShape.PER_TOKEN \
-            if per_token else GroupShape.PER_TENSOR
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.is_static_input_scheme,
-            act_quant_group_shape=self.act_quant_group_shape)
+        per_token_activation = (
+            not self.is_static_input_scheme and self.input_qscheme == "per_channel"
+        )
+        per_token_weight = self.weight_qscheme == "per_channel"
+
+        self.activation_quant_key = (
+            kFp8DynamicTokenSym if per_token_activation else kFp8StaticTensorSym
+        )
+        self.weight_quant_key = (
+            kFp8StaticTokenSym if per_token_weight else kFp8StaticTensorSym
+        )
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -51,14 +69,14 @@ class QuarkW8A8Fp8(QuarkScheme):
         # requantize so we can always run per tensor
         if self.weight_qscheme == "per_tensor":
             if current_platform.is_fp8_fnuz():
-                input_scale = getattr(layer, 'input_scale', None)
+                input_scale = getattr(layer, "input_scale", None)
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
                     weight=layer.weight,
                     weight_scale=layer.weight_scale,
-                    input_scale=input_scale)
+                    input_scale=input_scale,
+                )
                 if input_scale is not None:
-                    layer.input_scale = Parameter(input_scale,
-                                                  requires_grad=False)
+                    layer.input_scale = Parameter(input_scale, requires_grad=False)
             else:
                 max_w_scale = layer.weight_scale
                 weight = layer.weight
@@ -77,50 +95,52 @@ class QuarkW8A8Fp8(QuarkScheme):
             weight = layer.weight
 
             if current_platform.is_fp8_fnuz():
-                input_scale = getattr(layer, 'input_scale', None)
-                weight, weight_scale, input_scale = \
-                    normalize_e4m3fn_to_e4m3fnuz(
-                        weight=weight,
-                        weight_scale=layer.weight_scale,
-                        input_scale=input_scale)
+                input_scale = getattr(layer, "input_scale", None)
+                weight, weight_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                    weight=weight,
+                    weight_scale=layer.weight_scale,
+                    input_scale=input_scale,
+                )
                 if input_scale is not None:
-                    layer.input_scale = Parameter(input_scale,
-                                                  requires_grad=False)
+                    layer.input_scale = Parameter(input_scale, requires_grad=False)
             else:
                 weight_scale = layer.weight_scale.data
-            if self.act_quant_group_shape == GroupShape.PER_TOKEN:
+            if self.activation_quant_key.scale.group_shape == GroupShape.PER_TOKEN:
                 weight_scale = weight_scale.view(-1, 1)
             layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
         else:
-            raise ValueError(
-                f"Unknown quantization scheme {self.weight_qscheme}")
+            raise ValueError(f"Unknown quantization scheme {self.weight_qscheme}")
 
         # INPUT SCALE
         if self.is_static_input_scheme:
-            layer.input_scale = Parameter(layer.input_scale.max(),
-                                          requires_grad=False)
-        else:
-            layer.input_scale = None
+            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
 
-    def create_weights(self, layer: torch.nn.Module,
-                       output_partition_sizes: list[int],
-                       input_size_per_partition: int,
-                       params_dtype: torch.dtype, weight_loader: Callable,
-                       **kwargs):
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        output_partition_sizes: list[int],
+        input_size_per_partition: int,
+        params_dtype: torch.dtype,
+        weight_loader: Callable,
+        **kwargs,
+    ):
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
 
         # WEIGHT
-        weight = ModelWeightParameter(data=torch.empty(
-            output_size_per_partition,
-            input_size_per_partition,
-            dtype=torch.float8_e4m3fn),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = ModelWeightParameter(
+            data=torch.empty(
+                output_size_per_partition,
+                input_size_per_partition,
+                dtype=torch.float8_e4m3fn,
+            ),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
+        )
         layer.register_parameter("weight", weight)
 
         # WEIGHT SCALE
@@ -128,15 +148,16 @@ class QuarkW8A8Fp8(QuarkScheme):
         # the newly added parameters
         if self.weight_qscheme == "per_channel":
             weight_scale = ChannelQuantScaleParameter(
-                data=torch.empty((sum(output_partition_sizes)),
-                                 dtype=torch.float32),
+                data=torch.empty((sum(output_partition_sizes)), dtype=torch.float32),
                 output_dim=0,
-                weight_loader=weight_loader)
+                weight_loader=weight_loader,
+            )
         else:
             assert self.weight_qscheme == "per_tensor"
-            weight_scale = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float32),
-                                                   weight_loader=weight_loader)
+            weight_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
 
         # min requirement for fp8 kernels
         weight_scale[:] = torch.finfo(torch.float32).min
@@ -144,20 +165,24 @@ class QuarkW8A8Fp8(QuarkScheme):
 
         # INPUT SCALE
         if self.is_static_input_scheme:
-            input_scale = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float32),
-                                                  weight_loader=weight_loader)
+            input_scale = PerTensorScaleParameter(
+                data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
+                weight_loader=weight_loader,
+            )
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
+        )
 
-        return self.fp8_linear.apply(input=x,
-                                     weight=layer.weight,
-                                     weight_scale=layer.weight_scale,
-                                     out_dtype=self.out_dtype,
-                                     input_scale=layer.input_scale,
-                                     bias=bias)
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.fp8_linear.apply_weights(layer, x, bias)

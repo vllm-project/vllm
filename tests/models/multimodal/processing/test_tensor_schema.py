@@ -4,53 +4,53 @@ import tempfile
 from collections.abc import Iterable
 from contextlib import contextmanager
 from functools import partial
-from typing import Any, Union
+from typing import Any, TypeAlias
 
 import numpy as np
 import pytest
+import torch
 import torch.nn as nn
-from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
-                                                       UserMessage)
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
-from vllm.distributed import (cleanup_dist_env_and_memory,
-                              init_distributed_environment,
-                              initialize_model_parallel)
-from vllm.inputs import InputProcessingContext
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+from vllm.config.multimodal import (
+    AudioDummyOptions,
+    BaseDummyOptions,
+    ImageDummyOptions,
+    VideoDummyOptions,
+)
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+from vllm.model_executor.models.interfaces import (
+    SupportsMultiModal,
+    supports_multimodal,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
-from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
-from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.utils import is_list_of
+from vllm.platforms import current_platform
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.utils.collection_utils import is_list_of
+from vllm.utils.torch_utils import set_default_torch_dtype
 
-from ...registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
+from ....utils import create_new_process_for_each_test
+from ...registry import HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
-
-ARCH_TO_SKIP = {
-    "MolmoForCausalLM": "incompatible requirements",
-}
-ARCH_NEEDS_EXTRAS = [
-    "InternVLChatModel",
-    "Idefics3ForConditionalGeneration",
-    "LlavaForConditionalGeneration",
-    "MiniCPMV",
-    "PaliGemmaForConditionalGeneration",
-]
-REPO_ID_TO_SKIP = {
-    "nm-testing/pixtral-12b-FP8-dynamic": "duplicated test",
-}
+from .test_common import get_model_ids_to_test, get_text_token_prompts
 
 ImageInput = list[Image.Image]
-VideoInput = Union[list[Image.Image], list[np.ndarray],
-                   list[tuple[np.ndarray, dict[str, Any]]]]
+VideoInput: TypeAlias = (
+    list[Image.Image] | list[np.ndarray] | list[tuple[np.ndarray, dict[str, Any]]]
+)
 AudioInput = list[tuple[np.ndarray, int]]
 
 
-def _resize_data(_data: Union[Image.Image, np.ndarray],
-                 size_factor: float) -> Union[Image.Image, np.ndarray]:
+def _resize_data(
+    _data: Image.Image | np.ndarray, size_factor: float
+) -> Image.Image | np.ndarray:
     assert size_factor <= 1, "Size factor must be less than 1"
     # Image input
     if isinstance(_data, Image.Image):
@@ -61,33 +61,32 @@ def _resize_data(_data: Union[Image.Image, np.ndarray],
     elif is_list_of(_data, Image.Image):
         W, H = next(iter(_data)).width, next(iter(_data)).height
         T = len(_data)
-        T, W, H = map(lambda x: max(int(x * size_factor), 1), (T, W, H))
+        T, W, H = map(lambda x: max(int(x * size_factor), 2), (T, W, H))
         return [d.resize((W, H)) for d in _data[:T]]
     # Video input with numpy arrays
     elif isinstance(_data, np.ndarray) and _data.ndim >= 4:
         T, H, W, C = _data.shape[-4:]
-        T, H, W = map(lambda x: max(int(x * size_factor), 1), (T, H, W))
+        T, H, W = map(lambda x: max(int(x * size_factor), 2), (T, H, W))
         return _data[..., :T, :H, :W, :C]
     # Audio input
     elif isinstance(_data, np.ndarray) and _data.ndim == 1:
-        return _data[:int(len(_data) * size_factor)]
+        return _data[: int(len(_data) * size_factor)]
     raise AssertionError("This line should be unreachable.")
 
 
 def resize_mm_data(
-    data: Union[ImageInput, VideoInput, AudioInput],
-    size_factors: tuple[float,
-                        ...]) -> Union[ImageInput, VideoInput, AudioInput]:
-    size_factors = size_factors[:len(data)]
+    data: ImageInput | VideoInput | AudioInput, size_factors: tuple[float, ...]
+) -> ImageInput | VideoInput | AudioInput:
+    size_factors = size_factors[: len(data)]
     if is_list_of(data, (Image.Image, np.ndarray, list)):
         return [_resize_data(d, s) for d, s in zip(data, size_factors)]
     elif is_list_of(data, tuple):
-        return [(_resize_data(d, s), meta)
-                for (d, meta), s in zip(data, size_factors)]
+        return [_resize_data(d, s) for (d, _), s in zip(data, size_factors)]
     raise ValueError("Unsupported multimodal data type.")
 
 
 def create_batched_mm_kwargs(
+    model_cls: type[SupportsMultiModal],
     model_config: ModelConfig,
     processor: BaseMultiModalProcessor,
     size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
@@ -108,86 +107,87 @@ def create_batched_mm_kwargs(
         modality: resize_mm_data(data, size_factors)
         for modality, data in mm_data.items()
     }
-    # Mistral chat outputs tokens directly, rather than text prompts
-    if model_config.tokenizer_mode == "mistral":
-        images = resized_mm_data.get("image", [])
-        request = ChatCompletionRequest(messages=[
-            UserMessage(content=[
-                TextChunk(text=""),
-                *(ImageChunk(image=image) for image in images),
-            ]),
-        ])
-        tokenizer = processing_info.get_tokenizer()
-        res = tokenizer.mistral.encode_chat_completion(request)
-        prompt = res.tokens
-    else:
-        prompt = processor_inputs.prompt
+
+    # video metadata will be added back to the resized video data here.
+    text_prompt, token_prompt = get_text_token_prompts(processor, resized_mm_data)
+
     mm_kwargs = processor.apply(
-        prompt=prompt,
+        prompt=token_prompt if text_prompt is None else text_prompt,
         mm_data=resized_mm_data,
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
         tokenization_kwargs=processor_inputs.tokenization_kwargs,
-    )["mm_kwargs"]
-    items = [
-        item for modality in supported_mm_limits
-        for item in mm_kwargs[modality]
-    ]
-    return group_mm_kwargs_by_modality(items)
+    )["mm_kwargs"].require_data()
 
-
-@contextmanager
-def initialize_dummy_model(model_cls: nn.Module, model_config: ModelConfig):
-    temp_file = tempfile.mkstemp()[1]
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend="nccl",
+    return group_mm_kwargs_by_modality(
+        [
+            (modality, item)
+            for modality in supported_mm_limits
+            for item in mm_kwargs[modality]
+        ]
     )
-    initialize_model_parallel(tensor_model_parallel_size=1)
+
+
+# TODO(Isotr0py): Don't initialize model during test
+@contextmanager
+def initialize_dummy_model(
+    model_cls: type[nn.Module],
+    model_config: ModelConfig,
+):
+    temp_file = tempfile.mkstemp()[1]
+    current_device = torch.get_default_device()
     vllm_config = VllmConfig(model_config=model_config)
     with set_current_vllm_config(vllm_config=vllm_config):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=0,
+            backend="nccl",
+        )
+        initialize_model_parallel(tensor_model_parallel_size=1)
+
         with set_default_torch_dtype(model_config.dtype):
+            torch.set_default_device(current_platform.device_type)
             model = model_cls(vllm_config=vllm_config)
+            torch.set_default_device(current_device)
         yield model
 
     del model
     cleanup_dist_env_and_memory()
 
 
-def get_model_id_to_test(
-        model_arch_list: Iterable[str]) -> list[tuple[str, str]]:
-    filtered_results = []
-    for model_arch in model_arch_list:
-        model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-        if model_info.extras and model_arch in ARCH_NEEDS_EXTRAS:
-            available_repos = list(
-                map(lambda model_id: (model_arch, model_id),
-                    [model_info.default, *model_info.extras.values()]))
-            filtered_results.extend(available_repos)
-        else:
-            filtered_results.append((model_arch, model_info.default))
-    return filtered_results
+@create_new_process_for_each_test()
+@pytest.mark.parametrize("model_id", get_model_ids_to_test())
+def test_model_tensor_schema(model_id: str):
+    if model_id == "moonshotai/Kimi-K2.5":
+        # FIXME(Isotr0py): Fix Kimi-K2.5's offline inference about vision chunks.
+        pytest.skip(
+            "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
+        )
 
-
-@pytest.mark.parametrize(
-    "model_arch, model_id",
-    get_model_id_to_test(_MULTIMODAL_EXAMPLE_MODELS.keys()))
-def test_model_tensor_schema(model_arch: str, model_id: str):
-    if model_arch in ARCH_TO_SKIP:
-        pytest.skip(f"Skipping {model_arch} due to {ARCH_TO_SKIP[model_arch]}")
-    if model_id in REPO_ID_TO_SKIP:
-        pytest.skip(f"Skipping {model_id} due to {REPO_ID_TO_SKIP[model_id]}")
-
-    model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
-    model_info.check_transformers_version(on_fail="skip",
-                                          check_max_version=False)
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
 
-    hf_overrides_fn = partial(dummy_hf_overrides,
-                              model_arch=model_arch,
-                              exist_overrides=model_info.hf_overrides)
+    model_arch = next(
+        arch for arch, info in HF_EXAMPLE_MODELS.hf_models.items() if info == model_info
+    )
+
+    hf_overrides_fn = partial(
+        dummy_hf_overrides,
+        model_arch=model_arch,
+        exist_overrides=model_info.hf_overrides,
+    )
+
+    # ROCm: Detect if model uses AWQ quantization and set appropriate dtype
+    if "awq" in model_id.lower() and current_platform.is_rocm():
+        dtype = "float16"
+    else:
+        dtype = model_info.dtype
 
     model_config = ModelConfig(
         model_id,
@@ -196,11 +196,17 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=hf_overrides_fn,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
-        dtype=model_info.dtype)
+        dtype=dtype,
+    )
+
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
-    factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
+    assert supports_multimodal(model_cls)
+
+    factories = model_cls._processor_factory
 
     inputs_parse_methods = []
     for attr_name in dir(model_cls):
@@ -223,13 +229,29 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
         modality: 3 if limit is None else limit
         for modality, limit in supported_mm_limits.items()
     }
-    model_config.get_multimodal_config().limit_per_prompt = limit_mm_per_prompt
+
+    def _to_dummy_options(modality: str, count: int) -> BaseDummyOptions:
+        if modality == "video":
+            return VideoDummyOptions(count=count)
+        if modality == "image":
+            return ImageDummyOptions(count=count)
+        if modality == "audio":
+            return AudioDummyOptions(count=count)
+        return BaseDummyOptions(count=count)
+
+    model_config.get_multimodal_config().limit_per_prompt = {
+        modality: _to_dummy_options(modality, count)
+        for modality, count in limit_mm_per_prompt.items()
+    }
     processor = factories.build_processor(ctx, cache=None)
 
     with initialize_dummy_model(model_cls, model_config) as model:
         for modality, _, mm_kwargs in create_batched_mm_kwargs(
-                model_config, processor):
+            model_cls, model_config, processor
+        ):
             for method_name in inputs_parse_methods:
-                print(f"Testing `{method_name}` with modality={modality} "
-                      f"and mm_kwargs{list(mm_kwargs.keys())}")
+                print(
+                    f"Testing `{method_name}` with modality={modality} "
+                    f"and mm_kwargs{list(mm_kwargs.keys())}"
+                )
                 getattr(model, method_name)(modality=modality, **mm_kwargs)

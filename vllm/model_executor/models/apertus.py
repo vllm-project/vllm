@@ -24,48 +24,61 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Apertus model compatible with HuggingFace weights."""
+
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from itertools import islice
 
 import torch
 from torch import nn
 from transformers import ApertusConfig
 
-from vllm.attention import Attention, AttentionType
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import XIELU
+from vllm.model_executor.layers.attention import (
+    Attention,
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
-                    is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    extract_layer_index,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
 
 class ApertusMLP(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
         intermediate_size: int,
         hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         prefix: str = "",
         reduce_results: bool = True,
@@ -87,8 +100,10 @@ class ApertusMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "xielu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only xIELU is supported for now.")
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. "
+                "Only xIELU is supported for now."
+            )
         self.act_fn = XIELU()
 
     def forward(self, x):
@@ -99,20 +114,17 @@ class ApertusMLP(nn.Module):
 
 
 class ApertusAttention(nn.Module):
-
     def __init__(
         self,
         config: ApertusConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         bias: bool = False,
         bias_o_proj: bool = False,
-        cache_config: Optional[CacheConfig] = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -138,13 +150,9 @@ class ApertusAttention(nn.Module):
         if head_dim is None:
             head_dim = self.hidden_size // self.total_num_heads
         self.head_dim = head_dim
-        # Phi models introduced a partial_rotary_factor parameter in the config
-        self.partial_rotary_factor = getattr(config, "partial_rotary_factor",
-                                             1)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -165,9 +173,7 @@ class ApertusAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self._init_rotary_emb(config,
-                              rope_scaling=rope_scaling,
-                              quant_config=quant_config)
+        self._init_rotary_emb(config, quant_config=quant_config)
 
         sliding_window = None
         if layer_types := getattr(config, "layer_types", None):
@@ -175,8 +181,11 @@ class ApertusAttention(nn.Module):
             if is_sliding:
                 sliding_window = config.sliding_window
 
-        attn_cls = (EncoderOnlyAttention
-                    if attn_type == AttentionType.ENCODER_ONLY else Attention)
+        attn_cls = (
+            EncoderOnlyAttention
+            if attn_type == AttentionType.ENCODER_ONLY
+            else Attention
+        )
 
         self.attn = attn_cls(
             self.num_heads,
@@ -207,9 +216,11 @@ class ApertusAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
-    def _init_rotary_emb(self, config: ApertusConfig,
-                         rope_scaling: Optional[dict[str, Any]],
-                         quant_config: Optional[QuantizationConfig]) -> None:
+    def _init_rotary_emb(
+        self,
+        config: ApertusConfig,
+        quant_config: QuantizationConfig | None,
+    ) -> None:
         is_neox_style = True
         is_gguf = quant_config and quant_config.get_name() == "gguf"
         if is_gguf and config.model_type == "apertus":
@@ -217,41 +228,31 @@ class ApertusAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=int(self.partial_rotary_factor * self.head_dim),
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
 
 class ApertusDecoderLayer(nn.Module):
-
     def __init__(
         self,
         config: ApertusConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        if rope_scaling is not None and getattr(
-                config, "original_max_position_embeddings", None):
-            rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings)
-        max_position_embeddings = getattr(config, "max_position_embeddings",
-                                          8192)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
-            config, "bias", False)
+            config, "bias", False
+        )
         bias_o_proj = attention_bias
         # support internlm/internlm3-8b with qkv_bias
-        if hasattr(config, 'qkv_bias'):
+        if hasattr(config, "qkv_bias"):
             attention_bias = config.qkv_bias
 
         # Apertus defaults to causal attention as it is a decoder-only model.
@@ -267,10 +268,9 @@ class ApertusDecoderLayer(nn.Module):
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=getattr(config, "num_key_value_heads",
-                                 config.num_attention_heads),
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            num_kv_heads=getattr(
+                config, "num_key_value_heads", config.num_attention_heads
+            ),
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,
@@ -287,71 +287,69 @@ class ApertusDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
         )
-        self.attention_layernorm = RMSNorm(config.hidden_size,
-                                           eps=config.rms_norm_eps)
-        self.feedforward_layernorm = RMSNorm(config.hidden_size,
-                                             eps=config.rms_norm_eps)
+        self.attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.feedforward_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.attention_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.attention_layernorm(
-                hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states)
+            hidden_states, residual = self.attention_layernorm(hidden_states, residual)
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.feedforward_layernorm(
-            hidden_states, residual)
+        hidden_states, residual = self.feedforward_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
 @support_torch_compile
 class ApertusModel(nn.Module):
-
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 layer_type: type[nn.Module] = ApertusDecoderLayer):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: type[nn.Module] = ApertusDecoderLayer,
+    ):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         self.quant_config = quant_config
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
-        if get_pp_group().is_first_rank or (config.tie_word_embeddings
-                                            and get_pp_group().is_last_rank):
+
+        self.vocab_size = config.vocab_size
+
+        if get_pp_group().is_first_rank or (
+            config.tie_word_embeddings and get_pp_group().is_last_rank
+        ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
             )
         else:
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: layer_type(config=config,
-                                      cache_config=cache_config,
-                                      quant_config=quant_config,
-                                      prefix=prefix),
+            lambda prefix: layer_type(
+                config=config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix,
+            ),
             prefix=f"{prefix}.layers",
         )
         if get_pp_group().is_last_rank:
@@ -361,26 +359,25 @@ class ApertusModel(nn.Module):
 
         self.aux_hidden_state_layers = tuple[int, ...]()
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors, tuple[torch.Tensor,
-                                                        list[torch.Tensor]]]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -389,16 +386,16 @@ class ApertusModel(nn.Module):
 
         aux_hidden_states = []
         for idx, layer in enumerate(
-                self.layers[self.start_layer:self.end_layer]):
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual
-            })
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
@@ -406,8 +403,7 @@ class ApertusModel(nn.Module):
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -425,23 +421,23 @@ class ApertusModel(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ("rotary_emb.cos_cached" in name
-                    or "rotary_emb.sin_cached" in name):
+            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            if "scale" in name:
+            if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
@@ -470,8 +466,7 @@ class ApertusModel(nn.Module):
                     continue
 
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -483,56 +478,47 @@ class ApertusForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     # LoRA specific attributes
     embedding_modules = {
         "embed_tokens": "input_embeddings",
-        "lm_head": "output_embeddings"
+        "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 layer_type: type[nn.Module] = ApertusDecoderLayer):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: type[nn.Module] = ApertusDecoderLayer,
+    ):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         self.config = config
-        self.lora_config = lora_config
 
-        self.model = self._init_model(vllm_config=vllm_config,
-                                      prefix=maybe_prefix(prefix, "model"),
-                                      layer_type=layer_type)
+        self.model = self._init_model(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            layer_type=layer_type,
+        )
 
         if get_pp_group().is_last_rank:
-            self.unpadded_vocab_size = config.vocab_size
-            if lora_config:
-                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=(
-                    DEFAULT_VOCAB_PADDING_SIZE
-                    # We need bigger padding if using lora for kernel
-                    # compatibility
-                    if not lora_config else
-                    lora_config.lora_vocab_padding_size),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(
-                    self.model.embed_tokens)
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
             logit_scale = getattr(config, "logit_scale", 1.0)
-            self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
-                                                    config.vocab_size,
-                                                    logit_scale)
+            self.logits_processor = LogitsProcessor(
+                config.vocab_size, scale=logit_scale
+            )
         else:
             self.lm_head = PPMissingLayer()
 
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+            self.model.make_empty_intermediate_tensors
+        )
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
@@ -541,42 +527,41 @@ class ApertusForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
-    def _init_model(self,
-                    vllm_config: VllmConfig,
-                    prefix: str = "",
-                    layer_type: type[nn.Module] = ApertusDecoderLayer):
-        return ApertusModel(vllm_config=vllm_config,
-                            prefix=prefix,
-                            layer_type=layer_type)
+    def _init_model(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: type[nn.Module] = ApertusDecoderLayer,
+    ):
+        return ApertusModel(
+            vllm_config=vllm_config, prefix=prefix, layer_type=layer_type
+        )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        model_output = self.model(input_ids, positions, intermediate_tensors,
-                                  inputs_embeds)
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        model_output = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
         return model_output
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
+    ) -> torch.Tensor | None:
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)

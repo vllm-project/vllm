@@ -22,13 +22,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
 
   // Custom gemm op for skinny matrix-matrix multiplication
   rocm_ops.def(
-      "wvSplitK(Tensor in_a, Tensor in_b, int CuCount) -> "
+      "wvSplitK(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "
       "Tensor");
   rocm_ops.impl("wvSplitK", torch::kCUDA, &wvSplitK);
 
+  // Custom gemm op for skinny matrix-matrix multiplication
+  rocm_ops.def(
+      "wvSplitKrc(Tensor in_a, Tensor in_b, Tensor? in_bias, int CuCount) -> "
+      "Tensor");
+  rocm_ops.impl("wvSplitKrc", torch::kCUDA, &wvSplitKrc);
+
   // wvSplitK for fp8
   rocm_ops.def(
-      "wvSplitKQ(Tensor in_a, Tensor in_b, Tensor! out_c, Tensor scale_a, "
+      "wvSplitKQ(Tensor in_a, Tensor in_b, Tensor? in_bias, Tensor! out_c, "
+      "Tensor scale_a, "
       "          Tensor scale_b, int CuCount) -> ()");
   rocm_ops.impl("wvSplitKQ", torch::kCUDA, &wvSplitKQ);
 
@@ -48,7 +55,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                Tensor? alibi_slopes,"
       "                str kv_cache_dtype,"
       "                Tensor k_scale, Tensor v_scale,"
-      "                Tensor? fp8_out_scale) -> ()");
+      "                Tensor? fp8_out_scale,"
+      "                str mfma_type) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
 }
 

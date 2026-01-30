@@ -6,30 +6,19 @@ default_stages:
   - manual # Run in CI
 exclude: 'vllm/third_party/.*'
 repos:
-- repo: https://github.com/google/yapf
-  rev: v0.43.0
-  hooks:
-  - id: yapf
-    args: [--in-place, --verbose]
-    # Keep the same list from yapfignore here to avoid yapf failing without any inputs
-    exclude: '(.buildkite|benchmarks|build|examples)/.*'
 - repo: https://github.com/astral-sh/ruff-pre-commit
-  rev: v0.11.7
+  rev: v0.14.0
   hooks:
-  - id: ruff
+  - id: ruff-check
     args: [--output-format, github, --fix]
   - id: ruff-format
-    files: ^(.buildkite|benchmarks|examples)/.*
 - repo: https://github.com/crate-ci/typos
-  rev: v1.35.5
+  rev: v1.38.1
   hooks:
   - id: typos
-- repo: https://github.com/PyCQA/isort
-  rev: 6.0.1
-  hooks:
-  - id: isort
+    args: [--force-exclude]
 - repo: https://github.com/pre-commit/mirrors-clang-format
-  rev: v20.1.3
+  rev: v21.1.2
   hooks:
   - id: clang-format
     exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
@@ -46,61 +35,55 @@ repos:
   hooks:
   - id: actionlint
 - repo: https://github.com/astral-sh/uv-pre-commit
-  rev: 0.6.17
+  rev: 0.9.1
   hooks:
     - id: pip-compile
-      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu128]
+      args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu129, --python-platform, x86_64-manylinux_2_28, --python-version, "3.12"]
       files: ^requirements/test\.(in|txt)$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
     name: reformat nightly_torch_test.txt to be in sync with test.in
     language: python
-    entry: python tools/generate_nightly_torch_test.py
+    entry: python tools/pre_commit/generate_nightly_torch_test.py
     files: ^requirements/test\.(in|txt)$
   - id: mypy-local
-    name: Run mypy for local Python installation
-    entry: tools/mypy.sh 0 "local"
-    language: python
-    types: [python]
-    additional_dependencies: &mypy_deps [mypy==1.11.1, types-cachetools, types-setuptools, types-PyYAML, types-requests, pydantic]
+    name: Run mypy locally for lowest supported Python version
+    entry: python tools/pre_commit/mypy.py 0 "3.10"
     stages: [pre-commit] # Don't run in CI
-  - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.9
-    entry: tools/mypy.sh 1 "3.9"
-    language: python
-    types: [python]
-    additional_dependencies: *mypy_deps
-    stages: [manual] # Only run in CI
+    <<: &mypy_common
+      language: python
+      types_or: [python, pyi]
+      require_serial: true
+      additional_dependencies: [mypy==1.11.1, regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
-    entry: tools/mypy.sh 1 "3.10"
-    language: python
-    types: [python]
-    additional_dependencies: *mypy_deps
+    entry: python tools/pre_commit/mypy.py 1 "3.10"
+    <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.11
-    entry: tools/mypy.sh 1 "3.11"
-    language: python
-    types: [python]
-    additional_dependencies: *mypy_deps
+    entry: python tools/pre_commit/mypy.py 1 "3.11"
+    <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.12
-    entry: tools/mypy.sh 1 "3.12"
-    language: python
-    types: [python]
-    additional_dependencies: *mypy_deps
+    entry: python tools/pre_commit/mypy.py 1 "3.12"
+    <<: *mypy_common
+    stages: [manual] # Only run in CI
+  - id: mypy-3.13 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.13
+    entry: python tools/pre_commit/mypy.py 1 "3.13"
+    <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: shellcheck
     name: Lint shell scripts
-    entry: tools/shellcheck.sh
+    entry: tools/pre_commit/shellcheck.sh
     language: script
     types: [shell]
   - id: png-lint
     name: Lint PNG exports from excalidraw
-    entry: tools/png-lint.sh
+    entry: tools/pre_commit/png-lint.sh
     language: script
     types: [png]
   - id: signoff-commit
@@ -117,12 +100,12 @@ repos:
     stages: [commit-msg]
   - id: check-spdx-header
     name: Check SPDX headers
-    entry: python tools/check_spdx_header.py
+    entry: python tools/pre_commit/check_spdx_header.py
     language: python
     types: [python]
   - id: check-root-lazy-imports
     name: Check root lazy imports
-    entry: python tools/check_init_lazy_imports.py
+    entry: python tools/pre_commit/check_init_lazy_imports.py
     language: python
     types: [python]
   - id: check-filenames
@@ -136,11 +119,11 @@ repos:
     pass_filenames: false
   - id: update-dockerfile-graph
     name: Update Dockerfile dependency graph
-    entry: tools/update-dockerfile-graph.sh
+    entry: tools/pre_commit/update-dockerfile-graph.sh
     language: script
   - id: enforce-import-regex-instead-of-re
     name: Enforce import regex as re
-    entry: python tools/enforce_regex_import.py
+    entry: python tools/pre_commit/enforce_regex_import.py
     language: python
     types: [python]
     pass_filenames: false
@@ -148,25 +131,33 @@ repos:
   # forbid directly import triton
   - id: forbid-direct-triton-import
     name: "Forbid direct 'import triton'"
-    entry: python tools/check_triton_import.py
+    entry: python tools/pre_commit/check_triton_import.py
     language: python
     types: [python]
     pass_filenames: false
     additional_dependencies: [regex]
   - id: check-pickle-imports
     name: Prevent new pickle/cloudpickle imports
-    entry: python tools/check_pickle_imports.py
+    entry: python tools/pre_commit/check_pickle_imports.py
     language: python
     types: [python]
-    pass_filenames: false
-    additional_dependencies: [pathspec, regex]
+    additional_dependencies: [regex]
   - id: validate-config
     name: Validate configuration has default values and that each field has a docstring
-    entry: python tools/validate_config.py
+    entry: python tools/pre_commit/validate_config.py
     language: python
-    types: [python]
-    pass_filenames: true
-    files: vllm/config.py|tests/test_config.py|vllm/entrypoints/openai/cli_args.py
+    additional_dependencies: [regex]
+  - id: validate-docker-versions
+    name: Validate docker/versions.json matches Dockerfile
+    entry: python tools/generate_versions_json.py --check
+    language: python
+    files: ^docker/(Dockerfile|versions\.json)$
+    pass_filenames: false
+    additional_dependencies: [dockerfile-parse]
+  - id: attention-backend-docs
+    name: Check attention backend documentation is up to date
+    entry: python tools/pre_commit/generate_attention_backend_docs.py --check
+    language: python
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

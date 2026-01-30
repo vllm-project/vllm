@@ -10,16 +10,20 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from itertools import product
-from typing import Optional
+from typing import Any
 
+import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
-from vllm.utils import (cuda_device_count_stateless,
-                        update_environment_variables)
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
+from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
@@ -36,9 +40,9 @@ CUSTOM_ALL_REDUCE_MAX_SIZES = {
     "10.0": {
         2: 2 * MiB,  # 2 MB
         4: 2 * MiB,  # 2 MB
-        6: 2 * MiB,  # 2 MB
-        8: 2 * MiB,  # 2 MB
-    }
+        6: 1 * MiB,  # 1 MB
+        8: 1 * MiB,  # 1 MB
+    },
 }
 
 SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
@@ -53,18 +57,46 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
         4: 32 * MiB,  # 32 MB
         6: 128 * MiB,  # 128 MB
         8: 128 * MiB,  # 128 MB
-    }
+    },
+}
+
+NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
+    "min_world_size": 4,
+    "thresholds": {
+        4: 2 * MiB,  # 2 MB
+        8: 1 * MiB,  # 1 MB
+    },
+    "always_use_above_world_size": 8,  # Always use symm mem for world_size > 8
 }
 
 
-def producer(batch_src: Sequence[int],
-             producer_queue,
-             consumer_queue,
-             result_queue,
-             cuda_visible_devices: Optional[str] = None):
+def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) -> bool:
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        is_symmetric_memory_enabled,
+    )
+
+    if vllm_is_batch_invariant():
+        return False
+
+    if not is_symmetric_memory_enabled():
+        return False
+    if world_size < NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["min_world_size"]:
+        return False
+    threshold = NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["thresholds"].get(world_size)
+    if threshold is not None and input_tensor.nbytes >= threshold:
+        return True
+    return world_size > NCCL_SYMM_MEM_ALL_REDUCE_CONFIG["always_use_above_world_size"]
+
+
+def producer(
+    batch_src: Sequence[int],
+    producer_queue,
+    consumer_queue,
+    result_queue,
+    cuda_visible_devices: str | None = None,
+):
     if cuda_visible_devices is not None:
-        update_environment_variables(
-            {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
+        update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
 
     lib = CudaRTLibrary()
     for i in batch_src:
@@ -90,14 +122,15 @@ def producer(batch_src: Sequence[int],
         lib.cudaDeviceReset()
 
 
-def consumer(batch_tgt: Sequence[int],
-             producer_queue,
-             consumer_queue,
-             result_queue,
-             cuda_visible_devices: Optional[str] = None):
+def consumer(
+    batch_tgt: Sequence[int],
+    producer_queue,
+    consumer_queue,
+    result_queue,
+    cuda_visible_devices: str | None = None,
+):
     if cuda_visible_devices is not None:
-        update_environment_variables(
-            {"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
+        update_environment_variables({"CUDA_VISIBLE_DEVICES": cuda_visible_devices})
 
     lib = CudaRTLibrary()
     for j in batch_tgt:
@@ -173,12 +206,26 @@ def can_actually_p2p(
     producer_queue = smp.Queue()
     consumer_queue = smp.Queue()
     result_queue = smp.Queue()
-    p_src = smp.Process(target=producer,
-                        args=(batch_src, producer_queue, consumer_queue,
-                              result_queue, cuda_visible_devices))
-    p_tgt = smp.Process(target=consumer,
-                        args=(batch_tgt, producer_queue, consumer_queue,
-                              result_queue, cuda_visible_devices))
+    p_src = smp.Process(
+        target=producer,
+        args=(
+            batch_src,
+            producer_queue,
+            consumer_queue,
+            result_queue,
+            cuda_visible_devices,
+        ),
+    )
+    p_tgt = smp.Process(
+        target=consumer,
+        args=(
+            batch_tgt,
+            producer_queue,
+            consumer_queue,
+            result_queue,
+            cuda_visible_devices,
+        ),
+    )
     p_src.start()
     p_tgt.start()
     p_src.join()
@@ -191,7 +238,10 @@ def can_actually_p2p(
         if a != b:
             logger.warning(
                 "Two processes do not agree on the P2P access"
-                " status on %d -> %d, treat as disabled.", src, tgt)
+                " status on %d -> %d, treat as disabled.",
+                src,
+                tgt,
+            )
             result.append(False)
         else:
             result.append(a)
@@ -210,7 +260,7 @@ def can_actually_p2p(
 #  e.g. used by different vllm engines. The device id in the cache file is a
 #  **local** device id, i.e. from 0 to num_dev-1, where num_dev is the number
 #  of visible devices in the vllm engine.
-_gpu_p2p_access_cache: Optional[dict[str, bool]] = None
+_gpu_p2p_access_cache: dict[str, bool] | None = None
 
 
 def gpu_p2p_access_check(src: int, tgt: int) -> bool:
@@ -230,12 +280,14 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         cuda_visible_devices = ",".join(str(i) for i in range(num_dev))
 
     path = os.path.join(
-        envs.VLLM_CACHE_ROOT,
-        f"gpu_p2p_access_cache_for_{cuda_visible_devices}.json")
+        envs.VLLM_CACHE_ROOT, f"gpu_p2p_access_cache_for_{cuda_visible_devices}.json"
+    )
     os.makedirs(os.path.dirname(path), exist_ok=True)
     from vllm.distributed.parallel_state import get_world_group
-    if ((not is_distributed or get_world_group().local_rank == 0)
-            and (not os.path.exists(path))):
+
+    if (not is_distributed or get_world_group().local_rank == 0) and (
+        not os.path.exists(path)
+    ):
         # only the local master process (with local_rank == 0) can
         #  enter this block to calculate the cache
         logger.info("generating GPU P2P access cache in %s", path)
@@ -254,11 +306,10 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
         # we don't use the output of the subprocess directly,
         # because the subprocess might produce logging output
         with tempfile.NamedTemporaryFile() as output_file:
-            input_bytes = pickle.dumps(
-                (batch_src, batch_tgt, output_file.name))
-            returned = subprocess.run([sys.executable, __file__],
-                                      input=input_bytes,
-                                      capture_output=True)
+            input_bytes = pickle.dumps((batch_src, batch_tgt, output_file.name))
+            returned = subprocess.run(
+                [sys.executable, __file__], input=input_bytes, capture_output=True
+            )
             # check if the subprocess is successful
             try:
                 returned.check_returncode()
@@ -267,7 +318,8 @@ def gpu_p2p_access_check(src: int, tgt: int) -> bool:
                 raise RuntimeError(
                     f"Error happened when batch testing "
                     f"peer-to-peer access from {batch_src} to {batch_tgt}:\n"
-                    f"{returned.stderr.decode()}") from e
+                    f"{returned.stderr.decode()}"
+                ) from e
             with open(output_file.name, "rb") as f:
                 result = pickle.load(f)
         for _i, _j, r in zip(batch_src, batch_tgt, result):

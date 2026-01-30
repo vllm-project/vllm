@@ -152,7 +152,9 @@ def generate_presigned_url(s3_client, client_method, method_parameters, expires_
     """
     try:
         url = s3_client.generate_presigned_url(
-            ClientMethod=client_method, Params=method_parameters, ExpiresIn=expires_in
+            ClientMethod=client_method,
+            Params=method_parameters,
+            ExpiresIn=expires_in,
         )
     except ClientError:
         raise
@@ -161,10 +163,16 @@ def generate_presigned_url(s3_client, client_method, method_parameters, expires_
 
 s3_client = boto3.client("s3")
 input_url = generate_presigned_url(
-    s3_client, "get_object", {"Bucket": "MY_BUCKET", "Key": "MY_INPUT_FILE.jsonl"}, 3600
+    s3_client,
+    "get_object",
+    {"Bucket": "MY_BUCKET", "Key": "MY_INPUT_FILE.jsonl"},
+    expires_in=3600,
 )
 output_url = generate_presigned_url(
-    s3_client, "put_object", {"Bucket": "MY_BUCKET", "Key": "MY_OUTPUT_FILE.jsonl"}, 3600
+    s3_client,
+    "put_object",
+    {"Bucket": "MY_BUCKET", "Key": "MY_OUTPUT_FILE.jsonl"},
+    expires_in=3600,
 )
 print(f"{input_url=}")
 print(f"{output_url=}")
@@ -247,8 +255,8 @@ cat results.jsonl
 Add score requests to your batch file. The following is an example:
 
 ```text
-{"custom_id": "request-1", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "text_1": "What is the capital of France?", "text_2": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
-{"custom_id": "request-2", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "text_1": "What is the capital of France?", "text_2": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
+{"custom_id": "request-1", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "queries": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
+{"custom_id": "request-2", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "queries": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
 ```
 
 You can mix chat completion, embedding, and score requests in the batch file, as long as the model you are using supports them all (note that all requests must use the same model).
