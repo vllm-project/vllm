@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -22,10 +21,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     swizzle_blockscale,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutlass_fused_moe,
-)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -36,8 +31,6 @@ logger = init_logger(__name__)
 
 
 __all__ = [
-    "is_flashinfer_fp4_cutlass_moe_available",
-    "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
 ]
 
@@ -47,11 +40,9 @@ __all__ = [
 
 
 def _supports_current_device() -> bool:
-    """Supports only Blackwell-family GPUs (SM10.x and SM12.x)."""
+    """Supports only Blackwell-family GPUs."""
     p = current_platform
-    return p.is_cuda() and (
-        p.is_device_capability_family(100) or p.is_device_capability_family(120)
-    )  # RTX Blackwell
+    return p.is_cuda() and p.is_device_capability_family(100)
 
 
 def _supports_no_act_and_mul() -> bool:
@@ -122,29 +113,6 @@ def is_supported_config_trtllm(
         return False, _make_reason("activation format")
 
     return True, None
-
-
-def is_flashinfer_fp4_cutlass_moe_available() -> bool:
-    """Return `True` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutlass_fused_moe()
-        and current_platform.is_cuda()
-        and current_platform.has_device_capability(100)
-    )
-
-
-def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
-    """Return ``True`` when FlashInfer CUTEDSL NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
-        and current_platform.is_cuda()
-        and (
-            current_platform.is_device_capability_family(100)
-            or current_platform.is_device_capability_family(120)
-        )  # RTX Blackwell
-    )
 
 
 def reorder_w1w3_to_w3w1(
