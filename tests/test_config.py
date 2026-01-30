@@ -1005,7 +1005,7 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.pass_config.fuse_attn_quant is True
 
     # Explicit cudagraph mode override on quantized model at O2
-    pass_config = PassConfig(fuse_gemm_comms=True)
+    pass_config = PassConfig(enable_qk_norm_rope_fusion=True)
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.NONE, pass_config=pass_config
     )
@@ -1015,7 +1015,7 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert config.compilation_config.pass_config.fuse_gemm_comms is True
+    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is True
     # Mode should still use default for O2
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
 

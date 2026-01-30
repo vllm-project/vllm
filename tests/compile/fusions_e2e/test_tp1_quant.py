@@ -46,6 +46,7 @@ def test_tp1_fp8_fusions(
     custom_ops: str,
     inductor_graph_partition: bool,
     run_e2e_fusion_test,
+    monkeypatch,
 ):
     matches = matches_fn(n_layers)
 
@@ -57,6 +58,9 @@ def test_tp1_fp8_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
+
+    # TODO(eliza): remove this after rms+quant block fusion is fixed
+    monkeypatch.setenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "0")
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
