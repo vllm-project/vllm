@@ -1273,10 +1273,11 @@ class Scheduler(SchedulerInterface):
             if request is None or request.is_finished():
                 # The request is already finished. This can happen if the
                 # request is aborted while the model is executing it (e.g.,
-                # in pipeline parallelism). When delay_free_blocks=True (for
-                # KV transfer), the request stays in self.requests but is
-                # already finished - we must check is_finished() to avoid
-                # double-free.
+                # in pipeline parallelism).
+                # NOTE(Kuntai): When delay_free_blocks=True (for async KV
+                # cache transfer in KV connector), the request stays in
+                # self.requests but is already finished - we must check
+                # is_finished() to avoid double-free.
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
