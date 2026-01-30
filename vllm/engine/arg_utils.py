@@ -22,8 +22,6 @@ from typing import (
     cast,
     get_args,
     get_origin,
-    Optional,
-
 )
 
 import huggingface_hub
@@ -1126,8 +1124,8 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
         )
-        scheduler_group.add_argument("--external_parameters",
-                                     **scheduler_kwargs["external_parameters"]
+        scheduler_group.add_argument(
+            "--external_parameters", **scheduler_kwargs["external_parameters"]
         )
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
