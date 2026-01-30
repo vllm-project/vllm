@@ -4,6 +4,7 @@
 numba == 0.61.2 # Required for N-gram speculative decoding
 
 # Dependencies for NVIDIA GPUs
+ray[cgraph]>=2.48.0
 torch==2.9.1
 torchaudio==2.9.1
 # These must be updated alongside torch

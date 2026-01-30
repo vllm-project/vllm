@@ -5,6 +5,7 @@ numba == 0.61.2 # Required for N-gram speculative decoding
 
 # Dependencies for AMD GPUs
 datasets
+ray[cgraph]>=2.48.0
 peft
 pytest-asyncio
 tensorizer==2.10.1
