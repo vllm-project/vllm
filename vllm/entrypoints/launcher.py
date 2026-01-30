@@ -110,8 +110,9 @@ async def serve_http(
 
         inflight_count = engine_client.get_num_unfinished_requests()
         logger.info(
-            "Drain: draining %d in-flight requests",
+            "Drain: draining %d in-flight requests (timeout: %ds)",
             inflight_count,
+            drain_timeout,
         )
 
         set_rejecting_requests(True)
@@ -146,13 +147,8 @@ async def serve_http(
         shutting_down = True
 
         if enable_drain:
-            drain_timeout = getattr(
-                args, "shutdown_drain_timeout", FrontendArgs.shutdown_drain_timeout
-            )
             logger.info(
-                "Drain initiated (timeout: %ds). "
-                "Send SIGTERM again to force immediate shutdown.",
-                drain_timeout,
+                "Drain initiated. Send SIGTERM again to force immediate shutdown."
             )
             drain_task = loop.create_task(drain_then_shutdown())
         else:
