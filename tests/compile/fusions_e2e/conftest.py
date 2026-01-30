@@ -34,6 +34,10 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         model_kwargs["attention_config"] = {"backend": attn_backend.backend.name}
         model_kwargs["tensor_parallel_size"] = tp_size
 
+        # Always compile the full graph instead of piecewise
+        if not compilation_config["inductor_graph_partition"]:
+            compilation_config["splitting_ops"] = []
+
         full_compilation_config = CompilationConfig(
             cudagraph_mode=CUDAGraphMode.NONE,
             mode=CompilationMode.VLLM_COMPILE,
