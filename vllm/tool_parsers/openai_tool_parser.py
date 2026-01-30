@@ -102,6 +102,12 @@ class OpenAIToolParser(ToolParser):
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         """Adjust request for Harmony format tool_choice='required'."""
+        logger.debug(
+            "[PIPELINE] OpenAIToolParser.adjust_request called: "
+            "tool_choice=%s, tools=%s",
+            request.tool_choice,
+            request.tools is not None,
+        )
         request = super().adjust_request(request)
 
         if request.tool_choice == "required" and request.tools:
@@ -109,6 +115,7 @@ class OpenAIToolParser(ToolParser):
                 request.vllm_xargs = {}
             request.vllm_xargs["harmony_tool_required"] = True
             request.structured_outputs = None
+            logger.debug("[PIPELINE] Set harmony_tool_required=True in vllm_xargs")
 
         return request
 

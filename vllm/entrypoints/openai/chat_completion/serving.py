@@ -327,8 +327,19 @@ class OpenAIServingChat(OpenAIServing):
                     request, should_include_tools
                 )
                 # Apply tool_choice adjustments (e.g., tool_choice="required")
+                logger.debug(
+                    "[PIPELINE] GPT-OSS path: tool_parser=%s, tokenizer=%s, "
+                    "tool_choice=%s",
+                    tool_parser,
+                    tokenizer is not None,
+                    request.tool_choice,
+                )
                 if tool_parser is not None and tokenizer is not None:
                     request = tool_parser(tokenizer).adjust_request(request)
+                    logger.debug(
+                        "[PIPELINE] After adjust_request: vllm_xargs=%s",
+                        request.vllm_xargs,
+                    )
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(e)
