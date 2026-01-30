@@ -80,17 +80,31 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
         process_dict_updates(self.req_states, batch_update, self._add_request)
 
         for index, (state, pos, output_ids) in list(self.req_states.items()):
+            # Log current state for debugging
+            if len(output_ids) > 0:
+                last_tokens = output_ids[-min(6, len(output_ids)) :]
+                logger.info(
+                    "[PIPELINE] update_state: index=%d, state=%s, len(output_ids)=%d, "
+                    "last_tokens=%s",
+                    index,
+                    state.name,
+                    len(output_ids),
+                    last_tokens,
+                )
+
             if state == ForcingState.NORMAL:
-                if (
-                    len(output_ids) >= len(TRIGGER_PATTERN)
-                    and output_ids[-len(TRIGGER_PATTERN) :] == TRIGGER_PATTERN
-                ):
+                if len(output_ids) >= len(TRIGGER_PATTERN):
+                    tail = output_ids[-len(TRIGGER_PATTERN) :]
+                    matches = tail == TRIGGER_PATTERN
                     logger.info(
-                        "[PIPELINE] Trigger pattern detected! output_ids[-4:]=%s, "
-                        "transitioning to FORCING",
-                        output_ids[-len(TRIGGER_PATTERN) :],
+                        "[PIPELINE] Pattern check: tail=%s, pattern=%s, matches=%s",
+                        tail,
+                        TRIGGER_PATTERN,
+                        matches,
                     )
-                    self.req_states[index] = (ForcingState.FORCING, 0, output_ids)
+                    if matches:
+                        logger.info("[PIPELINE] Trigger detected! -> FORCING")
+                        self.req_states[index] = (ForcingState.FORCING, 0, output_ids)
             elif state == ForcingState.FORCING and pos >= len(FORCED_SEQUENCE):
                 logger.info("[PIPELINE] Forced sequence complete, returning to NORMAL")
                 self.req_states[index] = (ForcingState.NORMAL, 0, output_ids)
