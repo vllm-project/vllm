@@ -64,7 +64,7 @@ class SJFScheduler(Scheduler):
 
     def sort_waiting_queue(self):
         with self.lock:
-            sorted_items = sorted(self.waiting, key=lambda req: req.prompt_token_ids)
+            sorted_items = sorted(self.waiting, key=lambda req: len(req.prompt_token_ids))
 
             self.waiting.clear()
             self.waiting.extend(sorted_items)
