@@ -98,18 +98,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLA V1 with FP8 KV cache not yet supported"
             )
 
-    def _flash_attn_varlen_diff_headdims(
-        self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
-    ):
-        return super()._flash_attn_varlen_diff_headdims(
-            q,
-            k,
-            v,
-            return_softmax_lse=return_softmax_lse,
-            softmax_scale=softmax_scale,
-            **kwargs,
-        )
-
     def _forward_decode(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
