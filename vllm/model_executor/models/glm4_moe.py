@@ -32,6 +32,11 @@ import torch
 from torch import nn
 from transformers.models.glm4_moe import Glm4MoeConfig
 
+import triton
+import triton.language as tl
+
+from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -214,8 +219,10 @@ class Glm4MoE(nn.Module):
         if self.shared_experts is not None:
             shared_output, final_hidden_states = fused_moe_out
             assert shared_output is not None
-            final_hidden_states = (
-                final_hidden_states * self.routed_scaling_factor + shared_output
+            final_hidden_states = muls_add_triton(
+                x = final_hidden_states,
+                y = shared_output,
+                scale = float(self.routed_scaling_factor)
             )
         else:
             final_hidden_states = fused_moe_out * self.routed_scaling_factor
@@ -226,6 +233,59 @@ class Glm4MoE(nn.Module):
             )
         return final_hidden_states.view(num_tokens, hidden_dim)
 
+@triton.jit
+def muls_add_kernel(
+        x_ptr,  # *Pointer* to first input vector.
+        y_ptr,  # *Pointer* to second input vector.
+        output_ptr,  # *Pointer* to output vector.
+        scale,  # Scale factor.
+        n_elements,  # Size of the vector.
+        n_blocks,  # Total number of blocks.
+        BLOCK_SIZE: tl.
+        constexpr,  # Number of elements each program should process.
+):
+    pid = tl.program_id(axis=0)
+    num_programs = tl.num_programs(axis=0)
+    for block_id in range(pid, n_blocks, num_programs):
+        block_start = block_id * BLOCK_SIZE
+        offsets = block_start + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask)
+        y = tl.load(y_ptr + offsets, mask=mask)
+        output = x * scale + y
+        tl.store(output_ptr + offsets, output, mask=mask)
+
+
+def muls_add_triton(x: torch.Tensor, y: torch.Tensor,
+                    scale: float) -> torch.Tensor:
+    assert x.shape == y.shape, "Input tensors must have the same shape."
+    hidden_size = x.shape[-1]
+
+    n_elements = x.numel()
+    output = torch.empty_like(x)
+
+    # Determine the number of vector cores available
+    num_cores = get_vectorcore_num()
+
+    # Define block size
+    BLOCK_SIZE = max(hidden_size // 2, 1024)
+
+    # Calculate the number of programs to launch
+    num_blocks = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
+    num_programs = min(num_blocks, num_cores)
+
+    # Launch the Triton kernel
+    muls_add_kernel[(num_programs, )](
+        x,
+        y,
+        output,
+        scale,
+        n_elements,
+        num_blocks,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+    return output
 
 class Glm4MoeAttention(nn.Module):
     def __init__(
