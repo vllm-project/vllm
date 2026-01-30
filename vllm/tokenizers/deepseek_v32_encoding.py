@@ -269,9 +269,9 @@ def render_message(
         summary_content = content or ""
 
         if thinking_mode == "thinking" and index > last_user_idx:
-            if not (reasoning_content or tool_calls):
+            if not (reasoning or tool_calls):
                 raise ValueError(
-                    f"ThinkingMode: {thinking_mode}, invalid message without reasoning_content/tool_calls `{msg}` after last user message"
+                    f"ThinkingMode: {thinking_mode}, invalid message without reasoning/tool_calls `{msg}` after last user message"
                 )
             thinking_part = (
                 thinking_template.format(reasoning=reasoning or "") + thinking_end_token
@@ -429,7 +429,7 @@ def parse_message_from_completion_text(text: str, thinking_mode: str):
         index, content_delta, stop_token = _read_until_stop(
             index, text, [thinking_end_token, tool_calls_start_token]
         )
-        reasoning_content = content_delta
+        reasoning = content_delta
         if stop_token != thinking_end_token:
             raise RuntimeError("Invalid thinking format")
 
@@ -460,7 +460,7 @@ def parse_message_from_completion_text(text: str, thinking_mode: str):
         thinking_end_token,
         dsml_token,
     ]:
-        if sp_token in summary_content or sp_token in reasoning_content:
+        if sp_token in summary_content or sp_token in reasoning:
             raise RuntimeError("Unexpected special token in content")
 
     return {
