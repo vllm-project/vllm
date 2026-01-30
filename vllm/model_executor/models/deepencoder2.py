@@ -70,6 +70,37 @@ class CustomQwen2Decoder(nn.Module):
         """Qwen2Model"""
 
         class CustomQwen2ModelInner(Qwen2Model):
+            def __init__(self, config):
+                super().__init__(config)
+                # Detect transformers version by checking the forward method source
+                # New version uses create_causal_mask function and doesn't call _update_causal_mask
+                # Old version calls self._update_causal_mask in forward
+                import inspect
+                try:
+                    source = inspect.getsource(Qwen2Model.forward)
+                    # Check for new version patterns (uses create_causal_mask function)
+                    has_new_pattern = ('create_causal_mask' in source and
+                                      'causal_mask_mapping' in source)
+                    # Check for old version patterns (calls self._update_causal_mask)
+                    has_old_pattern = 'self._update_causal_mask' in source
+
+                    # New version: has new pattern and no old pattern
+                    # Old version: has old pattern
+                    self._is_new_version = has_new_pattern and not has_old_pattern
+
+                    # Debug output (can be removed in production)
+                    import sys
+                    print(f"[DeepEncoder2] Transformers version detection:", file=sys.stderr)
+                    print(f"  - Has new pattern (create_causal_mask): {has_new_pattern}", file=sys.stderr)
+                    print(f"  - Has old pattern (self._update_causal_mask): {has_old_pattern}", file=sys.stderr)
+                    print(f"  - Detected as: {'NEW' if self._is_new_version else 'OLD'} version", file=sys.stderr)
+                except Exception as e:
+                    # If we can't get source, assume old version (safer default)
+                    self._is_new_version = False
+                    import sys
+                    print(f"[DeepEncoder2] Version detection failed: {e}", file=sys.stderr)
+                    print(f"  - Defaulting to OLD version", file=sys.stderr)
+
             def forward(
                 self,
                 input_ids=None,
@@ -84,23 +115,94 @@ class CustomQwen2Decoder(nn.Module):
                 return_dict=None,
                 cache_position=None,
             ):
-                # token_type_ids
+                # Save token_type_ids for custom mask creation
                 self._current_token_type_ids = token_type_ids
 
-                outputs = super().forward(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=position_ids,
-                    past_key_values=past_key_values,
-                    inputs_embeds=inputs_embeds,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                    return_dict=return_dict,
-                    cache_position=cache_position,
-                )
+                # Check if this is the new version by inspecting if the method will be called
+                if self._is_new_version:
+                    # NEW VERSION: Create custom mask dict and pass it to bypass default mask creation
+                    if inputs_embeds is None:
+                        inputs_embeds = self.embed_tokens(input_ids)
+
+                    custom_causal_mask = self._create_custom_causal_mask_for_new_version(
+                        attention_mask=attention_mask,
+                        inputs_embeds=inputs_embeds,
+                        cache_position=cache_position,
+                        past_key_values=past_key_values,
+                        token_type_ids=token_type_ids,
+                    )
+
+                    # Pass the custom mask as a dict to bypass the new version's mask creation
+                    causal_mask_mapping = {
+                        "full_attention": custom_causal_mask,
+                        "sliding_attention": custom_causal_mask,
+                    }
+
+                    outputs = super().forward(
+                        input_ids=input_ids,
+                        attention_mask=causal_mask_mapping,  # Pass dict for new version
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        inputs_embeds=inputs_embeds,
+                        use_cache=use_cache,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        return_dict=return_dict,
+                        cache_position=cache_position,
+                    )
+                else:
+                    # OLD VERSION: Pass original attention_mask, _update_causal_mask will be called
+                    outputs = super().forward(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,  # Pass original mask for old version
+                        position_ids=position_ids,
+                        past_key_values=past_key_values,
+                        inputs_embeds=inputs_embeds,
+                        use_cache=use_cache,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                        return_dict=return_dict,
+                        cache_position=cache_position,
+                    )
 
                 return outputs
+
+            def _create_custom_causal_mask_for_new_version(
+                self,
+                attention_mask,
+                inputs_embeds,
+                cache_position,
+                past_key_values,
+                token_type_ids,
+            ):
+                """
+                Create custom causal mask for new transformers version.
+                This replaces the old _update_causal_mask method.
+                """
+                dtype, device = inputs_embeds.dtype, inputs_embeds.device
+                min_dtype = torch.finfo(dtype).min
+                batch_size, sequence_length = (
+                    inputs_embeds.shape[0],
+                    inputs_embeds.shape[1],
+                )
+
+                # Create custom attention mask based on token_type_ids
+                causal_mask = self._create_custom_4d_mask(
+                    sequence_length=sequence_length,
+                    dtype=dtype,
+                    device=device,
+                    batch_size=batch_size,
+                    token_type_ids=token_type_ids,
+                )
+
+                # Apply padding mask if provided (and if it's a tensor, not a dict)
+                if attention_mask is not None and not isinstance(attention_mask, dict):
+                    if attention_mask.dim() == 2:
+                        padding_mask = attention_mask[:, None, None, :].to(dtype=dtype)
+                        padding_mask = (1.0 - padding_mask) * min_dtype
+                        causal_mask = causal_mask + padding_mask
+
+                return causal_mask
 
             def _update_causal_mask(
                 self,
@@ -110,31 +212,25 @@ class CustomQwen2Decoder(nn.Module):
                 past_key_values,
                 output_attentions,
             ):
-                dtype, device = input_tensor.dtype, input_tensor.device
-                min_dtype = torch.finfo(dtype).min
-                batch_size, sequence_length = (
-                    input_tensor.shape[0],
-                    input_tensor.shape[1],
-                )
+                """
+                Legacy method for old transformers version compatibility.
+                Kept for backward compatibility with old transformers versions.
+                """
+                # Safety check: if attention_mask is a dict, we're in the wrong code path
+                # This shouldn't happen if version detection is correct, but just in case
+                if isinstance(attention_mask, dict):
+                    # Extract the actual mask from dict (new version behavior leaked into old version)
+                    # Return the full_attention mask as fallback
+                    return attention_mask.get('full_attention', None)
 
                 token_type_ids = self._current_token_type_ids
-
-                # attention mask
-                causal_mask = self._create_custom_4d_mask(
-                    sequence_length=sequence_length,
-                    dtype=dtype,
-                    device=device,
-                    batch_size=batch_size,
+                return self._create_custom_causal_mask_for_new_version(
+                    attention_mask=attention_mask,
+                    inputs_embeds=input_tensor,
+                    cache_position=cache_position,
+                    past_key_values=past_key_values,
                     token_type_ids=token_type_ids,
                 )
-
-                #  padding mask
-                if attention_mask is not None and attention_mask.dim() == 2:
-                    padding_mask = attention_mask[:, None, None, :].to(dtype=dtype)
-                    padding_mask = (1.0 - padding_mask) * min_dtype
-                    causal_mask = causal_mask + padding_mask
-
-                return causal_mask
 
             def _create_custom_4d_mask(
                 self,
