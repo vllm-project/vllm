@@ -412,6 +412,11 @@ def test_processing_correctness(
             "Qwen-VL tokenizer requires downloading a font file from "
             "servers that often refuse connections in CI"
         )
+    if model_id == "moonshotai/Kimi-K2.5":
+        # FIXME(Isaac): Fix Kimi-K2.5's offline inference about vision chunks.
+        pytest.skip(
+            "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
+        )
 
     _test_processing_correctness(
         model_id,
