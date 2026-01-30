@@ -396,9 +396,11 @@ class CompletionRenderer(BaseRenderer):
         """Create validated TokensPrompt."""
         if max_length is not None and len(token_ids) > max_length:
             raise VLLMValidationError(
-                f"This model's maximum context length is {max_length} tokens. "
-                f"However, your request has {len(token_ids)} input tokens. "
-                "Please reduce the length of the input messages.",
+                f"The token count of your prompt ({len(token_ids)})"
+                f"plus request's max_tokens cannot exceed the"
+                f"model's context length of {self.model_config.max_model_len}. "
+                f"Maximum allowed input is {max_length} tokens. "
+                "Please reduce the input length or decrease max_tokens.",
                 parameter="input_tokens",
                 value=len(token_ids),
             )
