@@ -1042,7 +1042,7 @@ class InputBatch:
         return len(self.has_allowed_token_ids) == 0
 
     @property
-    def logprobs_mode_override(self) -> list | None:
+    def logprobs_mode_override(self) -> LogprobsMode | list[LogprobsMode] | None:
         if self.non_default_logprobs_mode==0:
             return None
         logprobs_mode = self.logprobs_mode[:self.num_reqs]
