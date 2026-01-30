@@ -12,25 +12,52 @@ on HuggingFace model repository.
 import argparse
 from dataclasses import asdict
 
+from PIL.Image import Image
+
 from vllm import LLM, EngineArgs
 from vllm.multimodal.utils import fetch_image
 
-image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
-text = "A cat standing in the snow."
+image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+text = "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust."
 multi_modal_data = {"image": fetch_image(image_url)}
 
 
-def print_embeddings(embeds):
+def print_embeddings(embeds: list[float]):
     embeds_trimmed = (str(embeds[:4])[:-1] + ", ...]") if len(embeds) > 4 else embeds
     print(f"Embeddings: {embeds_trimmed} (size={len(embeds)})")
 
 
 def run_qwen3_vl():
+    try:
+        from qwen_vl_utils import smart_resize
+    except ModuleNotFoundError:
+        print(
+            "WARNING: `qwen-vl-utils` not installed, input images will not "
+            "be automatically resized. This can cause different results "
+            "comparing with HF repo's example. "
+            "You can enable this functionality by `pip install qwen-vl-utils`."
+        )
+        smart_resize = None
+
+    if smart_resize is not None:
+
+        def post_process_image(image: Image) -> Image:
+            width, height = image.size
+            resized_height, resized_width = smart_resize(
+                height,
+                width,
+                factor=32,
+            )
+            return image.resize((resized_width, resized_height))
+
+        multi_modal_data["image"] = post_process_image(multi_modal_data["image"])
+
     engine_args = EngineArgs(
         model="Qwen/Qwen3-VL-Embedding-2B",
         runner="pooling",
         max_model_len=8192,
         limit_mm_per_prompt={"image": 1},
+        mm_processor_kwargs={"do_resize": False} if smart_resize is not None else None,
     )
     default_instruction = "Represent the user's input."
     image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
