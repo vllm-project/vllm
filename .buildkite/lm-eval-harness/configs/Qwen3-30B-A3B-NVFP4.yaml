@@ -1,0 +1,22 @@
+model_name: "nvidia/Qwen3-30B-A3B-NVFP4"
+tasks:
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,strict-match"
+        value: 0.89
+      - name: "exact_match,flexible-extract"
+        value: 0.89
+limit: 1319
+num_fewshot: 5
+kv_cache_dtype: nvfp4
+model_name: "nvidia/Qwen3-30B-A3B-NVFP4"
+tasks:
+  - name: "gsm8k"
+    metrics:
+      - name: "exact_match,strict-match"
+        value: 0.89
+      - name: "exact_match,flexible-extract"
+        value: 0.89
+limit: 1319
+num_fewshot: 5
+kv_cache_dtype: nvfp4

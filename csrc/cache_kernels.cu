@@ -424,8 +424,8 @@ __global__ void concat_and_cache_mla_nvfp4_kernel(
           make_float2(scaled_values[8 + i * 2], scaled_values[8 + i * 2 + 1]);
     }
 
-    const uint32_t packed1 = vllm::fp32_vec_to_e2m1(vec1);
-    const uint32_t packed2 = vllm::fp32_vec_to_e2m1(vec2);
+    const uint32_t packed1 = vllm::fp32_vec8_to_e2m1(vec1);
+    const uint32_t packed2 = vllm::fp32_vec8_to_e2m1(vec2);
     const int packed_offset = block_start_idx / 2;
 
     *reinterpret_cast<uint32_t*>(token_ptr + packed_offset) = packed1;
@@ -701,7 +701,7 @@ __global__ void indexer_k_quant_and_cache_nvfp4_kernel(
   for (int i = 0; i < 4; i++) {
     vec1[i] = make_float2(scaled_values[i * 2], scaled_values[i * 2 + 1]);
   }
-  uint32_t packed1 = vllm::fp32_vec_to_e2m1(vec1);
+  uint32_t packed1 = vllm::fp32_vec8_to_e2m1(vec1);
 
   // Convert second 8 values
   float2 vec2[4];
@@ -709,7 +709,7 @@ __global__ void indexer_k_quant_and_cache_nvfp4_kernel(
     vec2[i] =
         make_float2(scaled_values[8 + i * 2], scaled_values[8 + i * 2 + 1]);
   }
-  uint32_t packed2 = vllm::fp32_vec_to_e2m1(vec2);
+  uint32_t packed2 = vllm::fp32_vec8_to_e2m1(vec2);
 
   // Store packed values (4 uint8 per uint32)
   if (block_start_idx + NVFP4_BLOCK_SIZE <= head_dim) {
