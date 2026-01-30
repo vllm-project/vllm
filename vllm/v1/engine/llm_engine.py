@@ -219,6 +219,7 @@ class LLMEngine:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         prompt_text: str | None = None,
+        cache_hit_threshold: float | None = None,
     ) -> None:
         # Validate the request_id type.
         if not isinstance(request_id, str):
@@ -244,6 +245,7 @@ class LLMEngine:
                 tokenization_kwargs,
                 trace_headers,
                 priority,
+                cache_hit_threshold=cache_hit_threshold,
             )
             if isinstance(prompt, str):
                 prompt_text = prompt

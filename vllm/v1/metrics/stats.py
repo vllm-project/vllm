@@ -266,7 +266,10 @@ class IterationStats:
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
-        if is_prefilling:
+
+        # num_new_generation_tokens can be 0, e.g. if cache hit threshold is not met
+        # and in that case we do not want to influence TTFT stats
+        if is_prefilling and num_new_generation_tokens > 0:
             self.num_prompt_tokens += prompt_len
 
             first_token_latency = self._time_since(req_stats.arrival_time)

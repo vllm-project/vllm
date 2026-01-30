@@ -168,6 +168,11 @@ class CompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
+    cache_hit_threshold: float | None = Field(
+        default=None,
+        description="Minimum required KV-cache hit ratio to process the request.",
+    )
+
     vllm_xargs: dict[str, str | int | float] | None = Field(
         default=None,
         description=(
@@ -397,6 +402,18 @@ class CompletionRequest(OpenAIBaseModel):
         ):
             raise ValueError(
                 "Parameter 'cache_salt' must be a non-empty string if provided."
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_cache_hit_threshold(cls, data):
+        cache_hit_threshold = data.get("cache_hit_threshold")
+        if cache_hit_threshold is not None and (
+            cache_hit_threshold < 0.0 or cache_hit_threshold > 1.0
+        ):
+            raise ValueError(
+                "`cache_hit_threshold` must be between 0.0 and 1.0 if provided."
             )
         return data
 

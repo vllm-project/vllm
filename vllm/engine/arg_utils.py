@@ -579,6 +579,7 @@ class EngineArgs:
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
+    global_cache_hit_threshold: float = SchedulerConfig.global_cache_hit_threshold
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1125,6 +1126,10 @@ class EngineArgs:
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
         )
         scheduler_group.add_argument(
+            "--global-cache-hit-threshold",
+            **scheduler_kwargs["global_cache_hit_threshold"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -1641,6 +1646,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            global_cache_hit_threshold=self.global_cache_hit_threshold,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:

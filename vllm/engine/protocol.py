@@ -59,6 +59,7 @@ class EngineClient(ABC):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        cache_hit_threshold: float | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
@@ -74,6 +75,7 @@ class EngineClient(ABC):
         priority: int = 0,
         truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        cache_hit_threshold: float | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """Generate outputs for a request from a pooling model.
 

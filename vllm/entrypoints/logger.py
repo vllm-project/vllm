@@ -26,6 +26,7 @@ class RequestLogger:
         prompt_embeds: torch.Tensor | None,
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
+        cache_hit_threshold: float | None = None,
     ) -> None:
         if logger.isEnabledFor(logging.DEBUG):
             max_log_len = self.max_log_len
@@ -47,10 +48,12 @@ class RequestLogger:
             )
 
         logger.info(
-            "Received request %s: params: %s, lora_request: %s.",
+            "Received request %s: params: %s, lora_request: %s ",
+            "cache_hit_threshold: %s.",
             request_id,
             params,
             lora_request,
+            cache_hit_threshold,
         )
 
     def log_outputs(

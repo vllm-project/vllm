@@ -20,7 +20,7 @@ from vllm.v1.serial_utils import UtilityResult
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort", "error")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "cache_threshold")
 
 
 class FinishReason(enum.IntEnum):
@@ -34,6 +34,7 @@ class FinishReason(enum.IntEnum):
     abort - aborted by client
     error - retryable request-level internal error (e.g., KV load failure).
             Invariant: always converted to 500 Internal Server Error.
+    cache_threshold - not handled due to cache hit below threshold
 
     """
 
@@ -41,6 +42,7 @@ class FinishReason(enum.IntEnum):
     LENGTH = 1
     ABORT = 2
     ERROR = 3
+    CACHE_THRESHOLD = 4
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
@@ -63,6 +65,7 @@ class EngineCoreRequest(
     cache_salt: str | None
     data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
+    cache_hit_threshold: float | None = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
