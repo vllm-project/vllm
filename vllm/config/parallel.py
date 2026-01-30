@@ -348,6 +348,17 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
+        # Note(hc): In the current implementation of decode context
+        # parallel(DCP), tp_size needs to be divisible by dcp_size,
+        # because the world size does not change by dcp, it simply
+        # reuses the GPUs of TP group, and split one TP group into
+        # tp_size//dcp_size DCP groups.
+        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+            raise ValueError(
+                f"tp_size={self.tensor_parallel_size} must be divisible by"
+                f"dcp_size={self.decode_context_parallel_size}."
+            )
+
         return self
 
     @property

@@ -3652,6 +3652,9 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         if self.execute_model_state is None:
+            # receive sampled token ids from the last PP rank.
+            if self.use_async_scheduling and get_pp_group().world_size > 1:
+                self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # type: ignore[return-value]
 
@@ -3692,6 +3695,12 @@ class GPUModelRunner(
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
         )
+        if self.use_async_scheduling:
+            pp = get_pp_group()
+            if pp.world_size > 1 and pp.is_last_rank:
+                self._pp_broadcast_prev_sampled_token_ids(
+                    sampler_output.sampled_token_ids
+                )
 
         self._draft_token_ids = None
         self._draft_token_req_ids = None

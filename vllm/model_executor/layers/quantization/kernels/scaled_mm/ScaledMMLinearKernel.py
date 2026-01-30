@@ -22,7 +22,7 @@ class ScaledMMLinearLayerConfig:
 
 @dataclass
 class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
-    # TODO: Chnage to QuantKey like FP8ScaledMMLinearLayerConfig
+    # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
     is_static_input_scheme: bool
     is_channelwise: bool
     input_symmetric: bool
