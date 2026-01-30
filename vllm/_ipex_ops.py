@@ -476,10 +476,12 @@ class ipex_ops:
         q = q.to(torch.bfloat16)
 
         mask_lo = (
-            torch.arange(0, seq_len_kv, device=q.device)[None, :] >= cu_seqlen_ks[:, None]
+            torch.arange(0, seq_len_kv, device=q.device)[None, :]
+            >= cu_seqlen_ks[:, None]
         )
         mask_hi = (
-            torch.arange(0, seq_len_kv, device=q.device)[None, :] < cu_seqlen_ke[:, None]
+            torch.arange(0, seq_len_kv, device=q.device)[None, :]
+            < cu_seqlen_ke[:, None]
         )
         mask = mask_lo & mask_hi
 
@@ -542,90 +544,10 @@ class ipex_ops:
                 logits[
                     i * next_n : (i + 1) * next_n,
                     block_rk * block_size : (block_rk + 1) * block_size,
-                ] = torch.where(k_offsets[None, :] <= q_offsets[:, None], s, float("-inf"))
+                ] = torch.where(
+                    k_offsets[None, :] <= q_offsets[:, None], s, float("-inf")
+                )
         return logits
-
-    @staticmethod
-    def group_quant_torch(
-        x: torch.Tensor,
-        group_size: int,
-        eps: float = 1e-10,
-        dtype: torch.dtype | None = None,
-        column_major_scales: bool = False,
-        out_q: torch.Tensor | None = None,
-        use_ue8m0: bool | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if use_ue8m0 is None:
-            # Default fallback - could import is_deep_gemm_e8m0_used if needed
-            use_ue8m0 = False
-
-        if dtype is None:
-            dtype = current_platform.fp8_dtype()
-
-        # Validate inputs
-        assert x.shape[-1] % group_size == 0, (
-            f"Last dimension {x.shape[-1]} must be divisible by group_size {group_size}"
-        )
-        assert x.stride(-1) == 1, "Input tensor groups must be contiguous"
-
-        # Prepare output tensor
-        if out_q is None:
-            x_q = torch.empty_like(x, dtype=dtype)
-        else:
-            assert out_q.shape == x.shape
-            x_q = out_q
-
-        # Reshape input for group processing
-        # Original shape: (..., last_dim)
-        # Target shape: (..., num_groups, group_size)
-        original_shape = x.shape
-        num_groups = original_shape[-1] // group_size
-
-        # Reshape to separate groups
-        group_shape = original_shape[:-1] + (num_groups, group_size)
-        x_grouped = x.view(group_shape)
-
-        # Compute per-group absolute maximum values
-        # Shape: (..., num_groups)
-        abs_max = torch.amax(torch.abs(x_grouped), dim=-1, keepdim=False)
-        abs_max = torch.maximum(abs_max, torch.tensor(eps, device=x.device, dtype=x.dtype))
-
-        # Compute scales
-        FP8_MAX = torch.finfo(dtype).max
-        FP8_MIN = torch.finfo(dtype).min
-        scale_raw = abs_max / FP8_MAX
-
-        if use_ue8m0:
-            # For UE8M0 format, scales must be powers of 2
-            scales = torch.pow(2.0, torch.ceil(torch.log2(scale_raw)))
-        else:
-            scales = scale_raw
-
-        # Expand scales for broadcasting with grouped data
-        # Shape: (..., num_groups, 1)
-        scales_expanded = scales.unsqueeze(-1)
-
-        # Quantize the grouped data
-        x_scaled = x_grouped / scales_expanded
-        x_clamped = torch.clamp(x_scaled, FP8_MIN, FP8_MAX)
-        x_quantized = x_clamped.to(dtype)
-
-        # Reshape back to original shape
-        x_q.copy_(x_quantized.view(original_shape))
-
-        # Prepare scales tensor in requested format
-        if column_major_scales:
-            # Column-major: (num_groups,) + batch_dims
-            # Transpose the scales to put group dimension first
-            scales_shape = (num_groups,) + original_shape[:-1]
-            x_s = scales.permute(-1, *range(len(original_shape) - 1))
-            x_s = x_s.contiguous().view(scales_shape)
-        else:
-            # Row-major: batch_dims + (num_groups,)
-            x_s = scales.contiguous()
-
-        # Ensure scales are float32
-        return x_q, x_s.float()
 
     @staticmethod
     def indexer_k_quant_and_cache(
@@ -638,6 +560,90 @@ class ipex_ops:
         head_dim = k.shape[-1]
         k = k.view(-1, head_dim)  # [total_tokens, head_dim]
 
+        def group_quant_torch(
+            x: torch.Tensor,
+            group_size: int,
+            eps: float = 1e-10,
+            dtype: torch.dtype | None = None,
+            column_major_scales: bool = False,
+            out_q: torch.Tensor | None = None,
+            use_ue8m0: bool | None = None,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            if use_ue8m0 is None:
+                # Default fallback - could import is_deep_gemm_e8m0_used if needed
+                use_ue8m0 = False
+
+            if dtype is None:
+                dtype = current_platform.fp8_dtype()
+
+            # Validate inputs
+            assert x.shape[-1] % group_size == 0, (
+                f"Last dimension {x.shape[-1]} must be divisible by "
+                f"group_size {group_size}"
+            )
+            assert x.stride(-1) == 1, "Input tensor groups must be contiguous"
+
+            # Prepare output tensor
+            if out_q is None:
+                x_q = torch.empty_like(x, dtype=dtype)
+            else:
+                assert out_q.shape == x.shape
+                x_q = out_q
+
+            # Reshape input for group processing
+            # Original shape: (..., last_dim)
+            # Target shape: (..., num_groups, group_size)
+            original_shape = x.shape
+            num_groups = original_shape[-1] // group_size
+
+            # Reshape to separate groups
+            group_shape = original_shape[:-1] + (num_groups, group_size)
+            x_grouped = x.view(group_shape)
+
+            # Compute per-group absolute maximum values
+            # Shape: (..., num_groups)
+            abs_max = torch.amax(torch.abs(x_grouped), dim=-1, keepdim=False)
+            abs_max = torch.maximum(
+                abs_max, torch.tensor(eps, device=x.device, dtype=x.dtype)
+            )
+
+            # Compute scales
+            FP8_MAX = torch.finfo(dtype).max
+            FP8_MIN = torch.finfo(dtype).min
+            scale_raw = abs_max / FP8_MAX
+
+            if use_ue8m0:
+                # For UE8M0 format, scales must be powers of 2
+                scales = torch.pow(2.0, torch.ceil(torch.log2(scale_raw)))
+            else:
+                scales = scale_raw
+
+            # Expand scales for broadcasting with grouped data
+            # Shape: (..., num_groups, 1)
+            scales_expanded = scales.unsqueeze(-1)
+
+            # Quantize the grouped data
+            x_scaled = x_grouped / scales_expanded
+            x_clamped = torch.clamp(x_scaled, FP8_MIN, FP8_MAX)
+            x_quantized = x_clamped.to(dtype)
+
+            # Reshape back to original shape
+            x_q.copy_(x_quantized.view(original_shape))
+
+            # Prepare scales tensor in requested format
+            if column_major_scales:
+                # Column-major: (num_groups,) + batch_dims
+                # Transpose the scales to put group dimension first
+                scales_shape = (num_groups,) + original_shape[:-1]
+                x_s = scales.permute(-1, *range(len(original_shape) - 1))
+                x_s = x_s.contiguous().view(scales_shape)
+            else:
+                # Row-major: batch_dims + (num_groups,)
+                x_s = scales.contiguous()
+
+            # Ensure scales are float32
+            return x_q, x_s.float()
+
         k_fp8, k_scale = group_quant_torch(
             k,
             group_size=quant_block_size,
@@ -647,7 +653,9 @@ class ipex_ops:
 
         k_fp8_bytes = k_fp8.view(-1, head_dim).view(torch.uint8)
         scale_bytes = k_scale.view(torch.uint8).view(-1, 4)
-        k = torch.cat([k_fp8_bytes, scale_bytes], dim=-1)  # [total_tokens, head_dim + 4]
+        k = torch.cat(
+            [k_fp8_bytes, scale_bytes], dim=-1
+        )  # [total_tokens, head_dim + 4]
 
         slot_mapping = slot_mapping.flatten()
         # kv_cache: [num_block, block_size, head_dim + 4]
@@ -668,7 +676,8 @@ class ipex_ops:
                     - k_values: [block_size * head_dim]
                     - scale_values: [block_size * head_dim * 4 / quant_block_size]
             dst_k: [num_tokens, head_dim] - output tensor for K values
-            dst_scale: [num_tokens, head_dim / quant_block_size * 4] - output tensor for scale values
+            dst_scale: [num_tokens, head_dim / quant_block_size * 4]
+                - output tensor for scale values
             block_table: [batch_size, num_blocks] - block table for indexing
             cu_seq_lens: [batch_size + 1] - cumulative sequence lengths
         """
@@ -681,7 +690,8 @@ class ipex_ops:
 
         # For each token, find which batch it belongs to using searchsorted
         token_indices = torch.arange(num_tokens, device=dst_k.device) + 1
-        # cu_seq_lens is [batch_size + 1], we need to find which interval each token belongs to
+        # cu_seq_lens is [batch_size + 1], we need to find which interval each
+        # token belongs to
         batch_indices = torch.searchsorted(cu_seq_lens, token_indices) - 1
         batch_indices = torch.clamp(batch_indices, 0, batch_size - 1)
 
@@ -707,7 +717,9 @@ class ipex_ops:
 
         # Gather K values using advanced indexing
         # Create indices for all elements we need to gather
-        k_indices = src_k_offsets.unsqueeze(1) + torch.arange(head_dim, device=dst_k.device)
+        k_indices = src_k_offsets.unsqueeze(1) + torch.arange(
+            head_dim, device=dst_k.device
+        )
         dst_k[:] = kv_cache_flat[k_indices]
 
         # Calculate source offset for scale values (vectorized)
@@ -716,7 +728,9 @@ class ipex_ops:
         src_scale_offsets = src_block_offsets + head_dim + inblock_offsets * scale_size
 
         # Gather scale values
-        scale_indices = src_scale_offsets.unsqueeze(1) + torch.arange(scale_size, device=dst_scale.device)
+        scale_indices = src_scale_offsets.unsqueeze(1) + torch.arange(
+            scale_size, device=dst_scale.device
+        )
         dst_scale[:] = kv_cache_flat[scale_indices]
 
     @staticmethod
@@ -726,12 +740,12 @@ class ipex_ops:
         cu_seqlen_ke: torch.Tensor,
         topk_tokens: int,
     ) -> torch.Tensor:
-        topk_indices = logits.topk(min(topk_tokens, logits.shape[-1]), dim=-1)[1].to(torch.int32)
+        topk_indices = logits.topk(min(topk_tokens, logits.shape[-1]), dim=-1)[1].to(
+            torch.int32
+        )
         topk_indices -= cu_seqlen_ks[:, None]
         mask_lo = topk_indices >= 0
-        mask_hi = (
-            topk_indices - (cu_seqlen_ke - cu_seqlen_ks)[:, None] < 0
-        )
+        mask_hi = topk_indices - (cu_seqlen_ke - cu_seqlen_ks)[:, None] < 0
         mask = torch.full_like(
             topk_indices, False, dtype=torch.bool, device=topk_indices.device
         )
@@ -745,7 +759,7 @@ class ipex_ops:
         next_n: int,
         topk_tokens: int,
         max_model_len: int,
-        seq_lens: torch.Tensor
+        seq_lens: torch.Tensor,
     ) -> torch.Tensor:
         device = logits.device
         # padded query len
@@ -756,13 +770,8 @@ class ipex_ops:
             .expand(batch_size * next_n, -1)
         )
         row_indices = torch.arange(padded_num_tokens, device=device) // next_n
-        next_n_offset = (
-            torch.arange(padded_num_tokens, device=device)
-            % next_n
-        )
-        index_end_pos = (
-            seq_lens[row_indices] - next_n + next_n_offset
-        ).unsqueeze(1)
+        next_n_offset = torch.arange(padded_num_tokens, device=device) % next_n
+        index_end_pos = (seq_lens[row_indices] - next_n + next_n_offset).unsqueeze(1)
         # index_end_pos: [B * N, 1]
         mask = positions <= index_end_pos
         # mask: [B * N, L]
@@ -774,4 +783,3 @@ class ipex_ops:
         topk_indices[topk_indices > index_end_pos] = -1
 
         return topk_indices
-
