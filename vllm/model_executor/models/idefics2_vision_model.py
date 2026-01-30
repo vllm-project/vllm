@@ -27,9 +27,10 @@ from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2VisionConfig,
 )
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -38,7 +39,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .vision import run_dp_sharded_vision_model
+from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Idefics2VisionEmbeddings(nn.Module):
@@ -60,7 +61,7 @@ class Idefics2VisionEmbeddings(nn.Module):
         self.embed_dim = config.hidden_size
         self.image_size = config.image_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Conv2d(
+        self.patch_embedding = Conv2dLayer(
             in_channels=config.num_channels,
             out_channels=self.embed_dim,
             kernel_size=self.patch_size,
@@ -125,9 +126,9 @@ class Idefics2VisionAttention(nn.Module):
         config: Idefics2VisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -160,8 +161,8 @@ class Idefics2VisionAttention(nn.Module):
             prefix=f"{prefix}.out_proj",
             disable_tp=use_data_parallel,
         )
-        # Use unified MultiHeadAttention with Flash Attention support
-        self.attn = MultiHeadAttention(
+        # Use unified MMEncoderAttention with Flash Attention support
+        self.attn = MMEncoderAttention(
             self.num_heads_per_partition, self.head_dim, self.scale
         )
 
@@ -174,7 +175,7 @@ class Idefics2VisionAttention(nn.Module):
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
 
-        # Use unified MultiHeadAttention implementation
+        # Use unified MMEncoderAttention implementation
         out = self.attn(query_states, key_states, value_states)
         attn_output, _ = self.out_proj(out)
         return attn_output
@@ -186,11 +187,12 @@ class Idefics2VisionMLP(nn.Module):
         config: Idefics2VisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
+
+        use_data_parallel = is_vit_use_data_parallel()
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
@@ -221,7 +223,6 @@ class Idefics2EncoderLayer(nn.Module):
         config: Idefics2Config,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -229,14 +230,12 @@ class Idefics2EncoderLayer(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            use_data_parallel=use_data_parallel,
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Idefics2VisionMLP(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
@@ -278,7 +277,6 @@ class Idefics2Encoder(nn.Module):
         *,
         num_hidden_layers_override: int | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
@@ -295,7 +293,6 @@ class Idefics2Encoder(nn.Module):
                     config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
-                    use_data_parallel=use_data_parallel,
                 )
                 for layer_idx in range(num_hidden_layers)
             ]
@@ -330,20 +327,18 @@ class Idefics2VisionTransformer(nn.Module):
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool = True,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
         embed_dim = config.hidden_size
         self.config = config
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = is_vit_use_data_parallel()
         self.embeddings = Idefics2VisionEmbeddings(config)
         self.encoder = Idefics2Encoder(
             config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
-            use_data_parallel=use_data_parallel,
         )
 
         num_hidden_layers = config.num_hidden_layers

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import logging
 import os
 import threading
@@ -96,19 +97,30 @@ class P2pNcclEngine:
         # Each card corresponds to a ZMQ address.
         self.zmq_address = f"{self._hostname}:{self._port}"
 
-        # The `http_port` must be consistent with the port of OpenAI.
-        self.http_address = (
-            f"{self._hostname}:{self.config.kv_connector_extra_config['http_port']}"
-        )
-
         # If `proxy_ip` or `proxy_port` is `""`,
         # then the ping thread will not be enabled.
         proxy_ip = self.config.get_from_extra_config("proxy_ip", "")
         proxy_port = self.config.get_from_extra_config("proxy_port", "")
         if proxy_ip == "" or proxy_port == "":
             self.proxy_address = ""
+            self.http_address = ""
         else:
             self.proxy_address = proxy_ip + ":" + proxy_port
+            # the `http_port` must be consistent with the port of OpenAI.
+            http_port = self.config.get_from_extra_config("http_port", None)
+            if http_port is None:
+                example_cfg = {
+                    "kv_connector": "P2pNcclConnector",
+                    "kv_connector_extra_config": {"http_port": 8000},
+                }
+                example = (
+                    f"--port=8000 --kv-transfer-config='{json.dumps(example_cfg)}'"
+                )
+                raise ValueError(
+                    "kv_connector_extra_config.http_port is required. "
+                    f"Example: {example}"
+                )
+            self.http_address = f"{self._hostname}:{http_port}"
 
         self.context = zmq.Context()
         self.router_socket = self.context.socket(zmq.ROUTER)

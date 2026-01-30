@@ -17,8 +17,8 @@ EMBEDDING_MODELS = [
     ),
 ]
 
-classify_parameters = ["activation"]
-embed_parameters = ["dimensions", "normalize"]
+classify_parameters = ["use_activation"]
+embed_parameters = ["dimensions", "use_activation"]
 step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
 
 
@@ -40,19 +40,19 @@ def test_task():
 
 def test_embed():
     task = "embed"
-    model_config = MockModelConfig(pooler_config=PoolerConfig(pooling_type="CLS"))
+    model_config = MockModelConfig(pooler_config=PoolerConfig(seq_pooling_type="CLS"))
 
-    pooling_params = PoolingParams(normalize=None)
+    pooling_params = PoolingParams(use_activation=None)
     pooling_params.verify(task=task, model_config=model_config)
 
-    pooling_params = PoolingParams(normalize=True)
+    pooling_params = PoolingParams(use_activation=True)
     pooling_params.verify(task=task, model_config=model_config)
 
-    pooling_params = PoolingParams(normalize=False)
+    pooling_params = PoolingParams(use_activation=False)
     pooling_params.verify(task=task, model_config=model_config)
 
     invalid_parameters = classify_parameters + step_pooling_parameters
-    for p in invalid_parameters:
+    for p in set(invalid_parameters) - set(embed_parameters):
         with pytest.raises(ValueError):
             pooling_params = PoolingParams(**{p: True})
             pooling_params.verify(task=task, model_config=model_config)
@@ -86,19 +86,19 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
 
 @pytest.mark.parametrize("task", ["score", "classify"])
 def test_classify(task):
-    model_config = MockModelConfig(pooler_config=PoolerConfig(pooling_type="CLS"))
+    model_config = MockModelConfig(pooler_config=PoolerConfig(seq_pooling_type="CLS"))
 
-    pooling_params = PoolingParams(activation=None)
+    pooling_params = PoolingParams(use_activation=None)
     pooling_params.verify(task=task, model_config=model_config)
 
-    pooling_params = PoolingParams(activation=True)
+    pooling_params = PoolingParams(use_activation=True)
     pooling_params.verify(task=task, model_config=model_config)
 
-    pooling_params = PoolingParams(activation=False)
+    pooling_params = PoolingParams(use_activation=False)
     pooling_params.verify(task=task, model_config=model_config)
 
     invalid_parameters = embed_parameters + step_pooling_parameters
-    for p in invalid_parameters:
+    for p in set(invalid_parameters) - set(classify_parameters):
         with pytest.raises(ValueError):
             pooling_params = PoolingParams(**{p: True})
             pooling_params.verify(task=task, model_config=model_config)
@@ -108,23 +108,23 @@ def test_classify(task):
 def test_token_embed(pooling_type: str):
     task = "token_embed"
     model_config = MockModelConfig(
-        pooler_config=PoolerConfig(pooling_type=pooling_type)
+        pooler_config=PoolerConfig(tok_pooling_type=pooling_type)
     )
 
-    pooling_params = PoolingParams(normalize=None)
+    pooling_params = PoolingParams(use_activation=None)
     pooling_params.verify(task=task, model_config=model_config)
 
-    pooling_params = PoolingParams(normalize=True)
+    pooling_params = PoolingParams(use_activation=True)
     pooling_params.verify(task=task, model_config=model_config)
 
-    pooling_params = PoolingParams(normalize=False)
+    pooling_params = PoolingParams(use_activation=False)
     pooling_params.verify(task=task, model_config=model_config)
 
     invalid_parameters = classify_parameters
     if pooling_type != "STEP":
         invalid_parameters = classify_parameters + step_pooling_parameters
 
-    for p in invalid_parameters:
+    for p in set(invalid_parameters) - set(embed_parameters):
         with pytest.raises(ValueError):
             pooling_params = PoolingParams(**{p: True})
             pooling_params.verify(task=task, model_config=model_config)
@@ -134,23 +134,23 @@ def test_token_embed(pooling_type: str):
 def test_token_classify(pooling_type: str):
     task = "token_classify"
     model_config = MockModelConfig(
-        pooler_config=PoolerConfig(pooling_type=pooling_type)
+        pooler_config=PoolerConfig(tok_pooling_type=pooling_type)
     )
 
-    pooling_params = PoolingParams(activation=None)
+    pooling_params = PoolingParams(use_activation=None)
     pooling_params.verify(task=task, model_config=model_config)
 
-    pooling_params = PoolingParams(activation=True)
+    pooling_params = PoolingParams(use_activation=True)
     pooling_params.verify(task=task, model_config=model_config)
 
-    pooling_params = PoolingParams(activation=False)
+    pooling_params = PoolingParams(use_activation=False)
     pooling_params.verify(task=task, model_config=model_config)
 
     invalid_parameters = embed_parameters
     if pooling_type != "STEP":
         invalid_parameters = embed_parameters + step_pooling_parameters
 
-    for p in invalid_parameters:
+    for p in set(invalid_parameters) - set(classify_parameters):
         with pytest.raises(ValueError):
             pooling_params = PoolingParams(**{p: True})
             pooling_params.verify(task=task, model_config=model_config)

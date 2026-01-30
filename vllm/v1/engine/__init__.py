@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import msgspec
+import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
@@ -15,27 +16,31 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.serial_utils import UtilityResult
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
-FINISH_REASON_STRINGS = ("stop", "length", "abort")
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "error")
 
 
 class FinishReason(enum.IntEnum):
     """
-    Reason a request finished - stop, length, or abort.
+    Reason a request finished - stop, length, abort, or error.
 
     Int rather than Str for more compact serialization.
 
     stop - a stop string was emitted
     length - max_tokens was consumed, or max_model_len was reached
-    abort - aborted for another reason
+    abort - aborted by client
+    error - retryable request-level internal error (e.g., KV load failure).
+            Invariant: always converted to 500 Internal Server Error.
 
     """
 
     STOP = 0
     LENGTH = 1
     ABORT = 2
+    ERROR = 3
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
@@ -70,6 +75,21 @@ class EngineCoreRequest(
     priority: int = 0
 
     trace_headers: Mapping[str, str] | None = None
+    resumable: bool = False
+
+    # The user-provided request ID. This field is set internally,
+    # copied from the provided request_id that's originally assigned
+    # to the request_id field, see InputProcessor.assign_request_id().
+    # Used in outputs and to support abort(req_id, internal=False).
+    external_req_id: str | None = None
+
+    @property
+    def params(self) -> SamplingParams | PoolingParams:
+        """Return the processed params (sampling or pooling)."""
+        if self.sampling_params is not None:
+            return self.sampling_params
+        assert self.pooling_params is not None
+        return self.pooling_params
 
 
 class EngineCoreEventType(enum.IntEnum):
@@ -121,17 +141,14 @@ class EngineCoreOutput(
     trace_headers: Mapping[str, str] | None = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
+    routed_experts: np.ndarray | None = None
+    # The number of NaNs in logits.
+    # A value greater than 0 indicates that the output is corrupted.
+    num_nans_in_logits: int = 0
 
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
-
-
-class UtilityResult:
-    """Wrapper for special handling when serializing/deserializing."""
-
-    def __init__(self, r: Any = None):
-        self.result = r
 
 
 class UtilityOutput(

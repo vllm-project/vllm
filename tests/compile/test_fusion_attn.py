@@ -1,26 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+import logging
+from typing import Any
 
 import pytest
+import regex as re
 import torch._dynamo
 
 from tests.compile.backend import LazyInitPass, TestBackend
+from tests.compile.fusion_test_utils import (
+    CUSTOM_OPS_FP8,
+    MODELS_FP4,
+    MODELS_FP8,
+    Matches,
+    has_cuda_graph_wrapper_metadata,
+    is_blackwell,
+    run_model,
+)
 from tests.utils import flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.attention import Attention, AttentionMetadata
-from vllm.attention.backends.registry import _Backend
-from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.matcher_utils import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     CompilationMode,
+    CUDAGraphMode,
     ModelConfig,
     PassConfig,
     SchedulerConfig,
@@ -28,15 +39,20 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
+
+from ..utils import TestFP8Layer
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -104,7 +120,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
         # TODO(luka) use get_kv_cache_stride_order
         # Create dummy KV cache for the selected backend
-        if backend == _Backend.ROCM_ATTN:
+        if backend == AttentionBackendEnum.ROCM_ATTN:
             # k/v as 1st dimention
             # HND: [num_blocks, num_kv_heads, block_size, head_size]
             kv_cache = torch.zeros(
@@ -116,7 +132,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
                 device=self.device,
             )
-        elif backend == _Backend.ROCM_AITER_UNIFIED_ATTN:
+        elif backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
             # k/v as 1st dimention
             # NHD: [num_blocks, block_size, num_kv_heads, head_size]
             kv_cache = torch.zeros(
@@ -128,7 +144,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
                 device=self.device,
             )
-        elif backend == _Backend.TRITON_ATTN:
+        elif backend == AttentionBackendEnum.TRITON_ATTN:
             # k/v as 2nd dimention
             # NHD: [num_blocks, block_size, num_kv_heads, head_size]
             kv_cache = torch.zeros(
@@ -140,7 +156,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
                 device=self.device,
             )
-        elif backend == _Backend.FLASHINFER:
+        elif backend == AttentionBackendEnum.FLASHINFER:
             kv_cache = torch.zeros(
                 num_blocks,
                 2,
@@ -170,38 +186,36 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.quant_key.scale.static,
-            act_quant_group_shape=self.quant_key.scale.group_shape,
+        hidden_size = self.num_qo_heads * self.head_size
+        self.fp8_linear = TestFP8Layer(
+            weight_shape=(hidden_size, hidden_size),
+            activation_quant_key=self.quant_key,
+            weight_quant_key=self.quant_key,
+            device=self.device,
         )
 
-        hidden_size = self.num_qo_heads * self.head_size
-        self.w = kwargs.get(
-            "w",
-            {
-                "weight": torch.randn(hidden_size, hidden_size)
-                .to(dtype=FP8_DTYPE, device=self.device)
-                .t(),
-                "wscale": torch.tensor([1.0], dtype=torch.float32, device=self.device),
-                "scale": torch.tensor([1.0], dtype=torch.float32, device=self.device),
-            },
-        )
+        w = kwargs.get("w")
+        if w is not None:
+            self.fp8_linear.weight = w["weight"]
+            self.fp8_linear.weight_scale = w["wscale"]
+            self.fp8_linear.input_scale = w["scale"]
+
+        self.w = {
+            "weight": self.fp8_linear.weight,
+            "wscale": self.fp8_linear.weight_scale,
+            "scale": self.fp8_linear.input_scale,
+        }
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         """Forward pass that creates the pattern to be fused."""
         attn_output = self.attn(q, k, v)
-        return self.fp8_linear.apply(
-            input=attn_output,
-            weight=self.w["weight"],
-            weight_scale=self.w["wscale"],
-            input_scale=self.w["scale"],
-        )
+        return self.fp8_linear(attn_output)
 
 
 class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
     """Test model for AttentionNvfp4QuantPattern fusion."""
 
-    quant_key = kNvfp4Quant
+    quant_key = kNvfp4Dynamic
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -240,39 +254,39 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
         )
 
 
-MODELS_FP8: list[tuple[str, type]] = []
-MODELS_FP4: list[tuple[str, type]] = []
+PATTERN_TEST_MODELS_FP8: list[tuple[str, type]] = []
+PATTERN_TEST_MODELS_FP4: list[tuple[str, type]] = []
 HEADS: list[tuple[int, int]] = []
 SPLIT_ATTENTION: list[bool] = []
-BACKENDS_FP8: list[_Backend] = []
-BACKENDS_FP4: list[_Backend] = []
+BACKENDS_FP8: list[AttentionBackendEnum] = []
+BACKENDS_FP4: list[AttentionBackendEnum] = []
 
 if current_platform.is_cuda():
     HEADS = [(64, 8), (40, 8)]
-    MODELS_FP8 = [
+    PATTERN_TEST_MODELS_FP8 = [
         (
-            "nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+            "RedHatAI/Meta-Llama-3.1-8B-FP8",
             TestAttentionFp8StaticQuantPatternModel,
         )
     ]
-    MODELS_FP4 = [
+    PATTERN_TEST_MODELS_FP4 = [
         (
-            "nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+            "nvidia/Llama-3.1-8B-Instruct-NVFP4",
             TestAttentionNvfp4QuantPatternModel,
         )
     ]
-    BACKENDS_FP8 = [_Backend.TRITON_ATTN, _Backend.FLASHINFER]
-    BACKENDS_FP4 = [_Backend.FLASHINFER]
+    BACKENDS_FP8 = [AttentionBackendEnum.TRITON_ATTN, AttentionBackendEnum.FLASHINFER]
+    BACKENDS_FP4 = [AttentionBackendEnum.FLASHINFER]
 
 elif current_platform.is_rocm():
     HEADS = [(32, 8), (40, 8)]
-    MODELS_FP8 = [
+    PATTERN_TEST_MODELS_FP8 = [
         ("amd/Llama-3.1-8B-Instruct-FP8-KV", TestAttentionFp8StaticQuantPatternModel)
     ]
     BACKENDS = [
-        _Backend.ROCM_AITER_UNIFIED_ATTN,
-        _Backend.ROCM_ATTN,
-        _Backend.TRITON_ATTN,
+        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.TRITON_ATTN,
     ]
 
 
@@ -285,9 +299,13 @@ elif current_platform.is_rocm():
 @pytest.mark.parametrize(
     "backend, model_name, model_class, custom_ops",
     # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
-    list(flat_product(BACKENDS_FP8, MODELS_FP8, ["+quant_fp8", "-quant_fp8"]))
+    list(
+        flat_product(
+            BACKENDS_FP8, PATTERN_TEST_MODELS_FP8, ["+quant_fp8", "-quant_fp8"]
+        )
+    )
     # quant_fp4 only has the custom impl
-    + list(flat_product(BACKENDS_FP4, MODELS_FP4, [""])),
+    + list(flat_product(BACKENDS_FP4, PATTERN_TEST_MODELS_FP4, [""])),
 )
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(), reason="Only test ROCm or CUDA"
@@ -302,32 +320,44 @@ def test_attention_quant_pattern(
     custom_ops: str,
     model_name: str,
     model_class: type[AttentionQuantPatternModel],
-    backend: _Backend,
+    backend: AttentionBackendEnum,
     dist_init,
+    monkeypatch,
+    use_fresh_inductor_cache,
 ):
     """Test AttentionStaticQuantPattern fusion pass"""
-    if backend == _Backend.FLASHINFER and (
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    if backend == AttentionBackendEnum.FLASHINFER and (
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
     ):
+        # This also captures the FP4 case
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     device = torch.device("cuda:0")
+    torch.set_default_dtype(dtype)
     torch.manual_seed(42)
 
+    model_config = ModelConfig(
+        model=model_name,
+        max_model_len=2048,
+        dtype=dtype,
+    )
     vllm_config = VllmConfig(
-        model_config=ModelConfig(
-            model=model_name,
-            max_model_len=2048,
-            dtype=dtype,
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1024,
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
         ),
-        scheduler_config=SchedulerConfig(max_num_seqs=1024),
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops_list,
         ),
         cache_config=CacheConfig(cache_dtype="fp8"),
+        attention_config=AttentionConfig(backend=backend),
     )
 
     # Create test inputs
@@ -345,7 +375,6 @@ def test_attention_quant_pattern(
     with (
         set_current_vllm_config(vllm_config_unfused),
         set_forward_context(attn_metadata=None, vllm_config=vllm_config_unfused),
-        global_force_attn_backend_context_manager(backend),
     ):
         model_unfused = model_class(
             num_qo_heads=num_qo_heads,
@@ -356,22 +385,23 @@ def test_attention_quant_pattern(
             vllm_config=vllm_config_unfused,
         )
         model_unfused = model_unfused.to(device)
+        result_unfused_0 = model_unfused(q, k, v)  # noqa: F841  HACK: See #131044
 
         forward_ctx = get_forward_context()
         forward_ctx.attn_metadata = model_unfused.build_attn_metadata(batch_size)
 
         # Run model directly without fusion
         # Still compile so query QuantFP8 has closer numerics
-        result_unfused = torch.compile(model_unfused, fullgraph=True)(q, k, v)
+        compiled_unfused = torch.compile(model_unfused, fullgraph=True)
+        result_unfused = compiled_unfused(q, k, v)
 
     # Run model with attn fusion enabled
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_attn_fusion=True, enable_noop=True
+        fuse_attn_quant=True, eliminate_noops=True
     )
     with (
         set_current_vllm_config(vllm_config),
         set_forward_context(attn_metadata=None, vllm_config=vllm_config),
-        global_force_attn_backend_context_manager(backend),
     ):
         model_fused = model_class(
             num_qo_heads=num_qo_heads,
@@ -393,24 +423,26 @@ def test_attention_quant_pattern(
         cleanup_pass = PostCleanupPass(vllm_config)
 
         test_backend = TestBackend(noop_pass, attn_pass, cleanup_pass)
+        # HACK: See https://github.com/vllm-project/vllm/issues/31044
+        result_fused_0 = model_fused(q, k, v)  # noqa: F841
 
         # Compile model with fusion enabled
-        model_compiled = torch.compile(
+        compiled_fused = torch.compile(
             model_fused, backend=test_backend, fullgraph=True
         )
-        assert model_compiled.attn._o_scale_float is None
+        assert compiled_fused.attn._o_scale_float is None
 
-        result_fused_1 = model_compiled(q, k, v)
+        result_fused = compiled_fused(q, k, v)
 
-        if backend == _Backend.FLASHINFER:
+        if backend == AttentionBackendEnum.FLASHINFER:
             # With the Flashinfer backend after the 1st round of the forward
             # pass, output quant scale should be loaded into the attn layer's
             # _o_scale_float, the 2nd round should reuse the loaded
             # _o_scale_float
-            assert model_compiled.attn._o_scale_float is not None
-            result_fused_2 = model_compiled(q, k, v)
+            assert compiled_fused.attn._o_scale_float is not None
+            result_fused_2 = compiled_fused(q, k, v)
 
-            assert model_compiled.attn._o_scale_float is not None
+            assert compiled_fused.attn._o_scale_float is not None
 
             torch.testing.assert_close(
                 result_unfused, result_fused_2, atol=1e-2, rtol=1e-2
@@ -435,7 +467,7 @@ def test_attention_quant_pattern(
 
     # Note: for fp8, fully_replaced=False because query quant ops remain in graph.
     # Only output quant ops are fused into attention.
-    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Quant)
+    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
 
     # access the underlying `AttnFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
@@ -468,4 +500,89 @@ def test_attention_quant_pattern(
         )
 
     # Check that results are close
-    torch.testing.assert_close(result_unfused, result_fused_1, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize(
+    "model_name, model_kwargs, backend, matches, custom_ops",
+    # Test attention+quant_fp8 fusion with custom and torch impls of QuantFP8
+    list(flat_product(MODELS_FP8, CUSTOM_OPS_FP8))
+    # quant_fp4 only has the custom impl
+    + list(flat_product(MODELS_FP4, [""])),
+)
+@pytest.mark.parametrize(
+    "inductor_graph_partition",
+    [
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not has_cuda_graph_wrapper_metadata(),
+                reason="This test requires"
+                "torch._inductor.utils.CUDAGraphWrapperMetadata to run",
+            ),
+        ),
+        False,
+    ],
+)
+def test_attn_quant(
+    model_name: str,
+    model_kwargs: dict[str, Any],
+    backend: AttentionBackendEnum,
+    matches: Matches,
+    custom_ops: str,
+    inductor_graph_partition: bool,
+    caplog_mp_spawn,
+    monkeypatch,
+):
+    if not current_platform.has_device_capability(90):
+        pytest.skip("test_attn_quant requires H100 (SM90) or B200 (SM100) GPU")
+    if backend == AttentionBackendEnum.FLASHINFER and (
+        not is_blackwell() or not has_flashinfer()
+    ):
+        pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
+    if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("Inductor graph partition requires torch>=2.9")
+
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
+
+    if inductor_graph_partition:
+        mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        splitting_ops: list[str] | None = None
+    else:
+        # FIXME: Llama-4-Scout-17B-16E-Instruct-FP8 + FlashInfer + Blackwell end at
+        # CUDAGraphMode.NONE here because it derives an attention backend that
+        # does not support full cudagraphs
+        mode = CUDAGraphMode.FULL_DECODE_ONLY
+        splitting_ops = []
+
+    # Disable, compile cache to make sure custom passes run.
+    # Otherwise, we can't verify fusion happened through the logs.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    # To capture subprocess logs, we need to know whether spawn or fork is used.
+    # Force spawn as it is more general.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    model_kwargs["attention_config"] = {"backend": backend.name}
+
+    compilation_config = CompilationConfig(
+        # Testing properties
+        custom_ops=custom_ops_list,
+        use_inductor_graph_partition=inductor_graph_partition,
+        cudagraph_mode=mode,
+        splitting_ops=splitting_ops,
+        # Common
+        mode=CompilationMode.VLLM_COMPILE,
+        pass_config=PassConfig(fuse_attn_quant=True, eliminate_noops=True),
+        # Inductor caches custom passes by default as well via uuid
+        inductor_compile_config={"force_disable_caches": True},
+    )
+
+    with caplog_mp_spawn(logging.DEBUG) as log_holder:
+        run_model(compilation_config, model_name, **model_kwargs)
+
+    log_matches = re.findall(
+        r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes",
+        log_holder.text,
+    )
+    assert len(log_matches) == 1, log_holder.text
+    assert int(log_matches[0]) == matches.attention_fusion

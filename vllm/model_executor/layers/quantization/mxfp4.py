@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 from enum import Enum
 from typing import Optional
 
@@ -10,6 +9,7 @@ from torch.nn.parameter import Parameter
 from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
+    UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -37,12 +38,16 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_moe_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _can_support_mxfp4,
     _swizzle_mxfp4,
+    get_padding_alignment,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
@@ -51,7 +56,6 @@ from vllm.scalar_type import scalar_types
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -73,8 +77,36 @@ class Mxfp4Backend(Enum):
     TRITON = 6
 
 
-def get_mxfp4_backend():
+def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
+    """
+    Not all MXFP4 backends support LoRA. Select backends that are known to
+    have LoRA support.
+    """
+    if not current_platform.is_cuda():
+        return Mxfp4Backend.NONE
+
+    # If FlashInfer is not available, try either Marlin or Triton
+    triton_kernels_supported = (
+        has_triton_kernels()
+        # NOTE: triton_kernels are only confirmed to work on SM90 and SM100
+        # SM110 fails with this error: https://github.com/vllm-project/vllm/issues/29317
+        # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
+        and (9, 0) <= current_platform.get_device_capability() < (11, 0)
+    )
+    if envs.VLLM_MXFP4_USE_MARLIN is False and triton_kernels_supported:
+        logger.info_once("[get_mxfp4_backend_with_lora] Using Triton backend")
+        return Mxfp4Backend.TRITON
+
+    logger.info_once("[get_mxfp4_backend_with_lora] Using Marlin backend")
+    return Mxfp4Backend.MARLIN
+
+
+def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
     # Backend Selection
+
+    if with_lora_support:
+        return get_mxfp4_backend_with_lora()
+
     if current_platform.is_cuda():
         if (
             current_platform.is_device_capability(90)
@@ -84,19 +116,19 @@ def get_mxfp4_backend():
             logger.info_once("Using FlashInfer MXFP4 BF16 backend for SM90")
             return Mxfp4Backend.SM90_FI_MXFP4_BF16
         elif (
-            current_platform.is_device_capability(100)
+            current_platform.is_device_capability_family(100)
             and has_flashinfer()
             and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
         ):
             logger.info_once("Using FlashInfer MXFP4 MXFP8 CUTLASS backend for SM100")
             return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
         elif (
-            current_platform.is_device_capability(100)
+            current_platform.is_device_capability_family(100)
             and has_flashinfer()
             and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         ):
             return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-        elif current_platform.is_device_capability(100) and has_flashinfer():
+        elif current_platform.is_device_capability_family(100) and has_flashinfer():
             logger.info_once(
                 "Using FlashInfer MXFP4 BF16 backend for SM100, "
                 "For faster performance on SM100, consider setting "
@@ -105,7 +137,7 @@ def get_mxfp4_backend():
             )
             return Mxfp4Backend.SM100_FI_MXFP4_BF16
         elif (
-            current_platform.is_device_capability(100)
+            current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability(90)
         ) and not has_flashinfer():
             logger.warning_once(
@@ -115,17 +147,22 @@ def get_mxfp4_backend():
             )
 
         # If FlashInfer is not available, try either Marlin or Triton
-        if (
-            envs.VLLM_MXFP4_USE_MARLIN
-            or current_platform.get_device_capability()[0] < 9
-            or not has_triton_kernels()
-            or not is_torch_equal_or_newer("2.8.0")
-        ):
+        triton_kernels_supported = (
+            has_triton_kernels()
+            # NOTE: triton_kernels are only confirmed to work on SM90 and SM100
+            # SM110 fails with this error: https://github.com/vllm-project/vllm/issues/29317
+            # SM120 needs this fix: https://github.com/triton-lang/triton/pull/8498
+            and (9, 0) <= current_platform.get_device_capability() < (11, 0)
+        )
+        if envs.VLLM_MXFP4_USE_MARLIN or not triton_kernels_supported:
             logger.info_once("Using Marlin backend")
             return Mxfp4Backend.MARLIN
         else:
             logger.info_once("Using Triton backend")
             return Mxfp4Backend.TRITON
+    elif current_platform.is_xpu():
+        logger.info_once("Using ipex marlin backend on XPU")
+        return Mxfp4Backend.MARLIN
     elif current_platform.is_rocm() and has_triton_kernels():
         logger.info_once("Using Triton backend")
         return Mxfp4Backend.TRITON
@@ -161,8 +198,6 @@ class Mxfp4Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
         if isinstance(layer, LinearBase):
             if self.ignored_layers and is_layer_skipped(
                 prefix=prefix,
@@ -170,26 +205,45 @@ class Mxfp4Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-            raise NotImplementedError("Mxfp4 linear layer is not implemented")
+            # TODO: Add support for MXFP4 Linear Method.
+            # MXFP4 LinearMethod is available in AMD-Quark, refer to that implementation
+            # if you are interested in enabling MXFP4 here.
+            logger.debug_once(
+                "MXFP4 linear layer is not implemented - falling back to "
+                "UnquantizedLinearMethod.",
+                scope="local",
+            )
+            return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
-            return Mxfp4MoEMethod(layer.moe_config)
+            if current_platform.is_xpu():
+                return IpexMxfp4MoEMethod(layer.moe_config)
+            else:
+                quant_method = Mxfp4MoEMethod(layer.moe_config)
+                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
+                return quant_method
         elif isinstance(layer, Attention):
-            raise NotImplementedError("Mxfp4 attention layer is not implemented")
+            # TODO: Add support for MXFP4 Attention.
+            logger.debug_once(
+                "MXFP4 attention layer is not implemented. "
+                "Skipping quantization for this layer.",
+                scope="local",
+            )
         return None
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.topk_indices_dtype = None
-        self.moe = moe
-        self.mxfp4_backend = get_mxfp4_backend()
+        self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
+
+        self.marlin_input_dtype = None
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
 
         assert self.mxfp4_backend != Mxfp4Backend.NONE, (
-            "No MXFP4 MoE backend (FlashInfer/Marlin/Triton) available."
+            f"get_mxfp4_backend(with_lora_support={moe.is_lora_enabled}) found"
+            "no compatible MXFP4 MoE backend (FlashInfer/Marlin/Triton)."
             "Please check your environment and try again."
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
@@ -230,7 +284,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128
             )
-            hidden_size = round_up(hidden_size, 256)
+            if current_platform.is_xpu():
+                hidden_size = round_up(hidden_size, 128)
+            else:
+                hidden_size = round_up(hidden_size, 256)
 
             layer.params_dtype = params_dtype
             layer.num_experts = num_experts
@@ -258,10 +315,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             hidden_size = round_up(hidden_size, 128)
         elif current_platform.is_rocm():
+            pad_align = get_padding_alignment()
             intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 256
+                intermediate_size_per_partition, pad_align
             )
-            hidden_size = round_up(hidden_size, 256)
+            hidden_size = round_up(hidden_size, pad_align)
         else:
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 64
@@ -343,7 +401,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            prepare_moe_fp4_layer_for_marlin(layer)
+            prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
         elif (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
@@ -715,17 +773,17 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
             )
 
-            self.w13_weight_triton_tensor = w13_weight
-            self.w2_weight_triton_tensor = w2_weight
-
-            # need to delete the original weights to save memory on single GPU
+            self.w13_weight = w13_weight
+            self.w2_weight = w2_weight
             del layer.w13_weight
             del layer.w2_weight
-            layer.w13_weight = None
-            layer.w2_weight = None
-            torch.cuda.empty_cache()
+            layer.w13_weight = w13_weight
+            layer.w2_weight = w2_weight
         else:
-            raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
+            raise ValueError(
+                f"Unsupported mxfp4_backend: {self.mxfp4_backend}: "
+                f"should be one of: {list(Mxfp4Backend)}."
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -791,6 +849,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     max_num_tokens=max_num_tokens_per_rank,
                     num_dispatchers=prepare_finalize.num_dispatchers(),
                     quant_config=self.moe_quant_config,
+                    moe_config=self.moe,
                 )
             else:
                 raise NotImplementedError(
@@ -813,144 +872,40 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 }
                 return TrtLlmGenExperts(self.moe, self.moe_quant_config, **kwargs)
             elif self.mxfp4_backend == Mxfp4Backend.MARLIN:
-                return MarlinExperts(self.moe_quant_config)
+                return MarlinExperts(self.moe, self.moe_quant_config)
             elif self.mxfp4_backend == Mxfp4Backend.TRITON:
-                return OAITritonExperts(self.moe_quant_config)
+                if self.moe.is_lora_enabled:
+                    return UnfusedOAITritonExperts(self.moe, self.moe_quant_config)
+                return OAITritonExperts(self.moe, self.moe_quant_config)
             else:
                 raise NotImplementedError(
                     f"Incompatible Mxfp4 backend ({self.mxfp4_backend}) for EP"
                 )
 
-    def _route_and_experts(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        assert isinstance(self.fused_experts, mk.FusedMoEModularKernel)
+    @property
+    def allow_inplace(self) -> bool:
+        return True
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-            enable_eplb=enable_eplb,
-            expert_map=expert_map,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
-        )
-
-        w13_weight = (
-            self.w13_weight_triton_tensor
-            if layer.w13_weight is None
-            else layer.w13_weight
-        )
-        w2_weight = (
-            self.w2_weight_triton_tensor if layer.w2_weight is None else layer.w2_weight
-        )
-        assert all([w is not None for w in [w13_weight, w2_weight]])
-
-        return self.fused_experts(
-            hidden_states=x,
-            w1=w13_weight,
-            w2=w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
+    @property
+    def is_monolithic(self) -> bool:
+        return (
+            self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+            or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
+            or self.mxfp4_backend == Mxfp4Backend.TRITON
         )
 
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if enable_eplb:
+        assert not self.is_monolithic
+        if layer.enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
-        if self.fused_experts is not None:
-            return self._route_and_experts(
-                layer,
-                x,
-                router_logits,
-                top_k,
-                renormalize,
-                use_grouped_topk,
-                topk_group,
-                num_expert_group,
-                global_num_experts,
-                expert_map,
-                custom_routing_function,
-                scoring_func,
-                e_score_correction_bias,
-                apply_router_weight_on_input,
-                activation,
-                enable_eplb,
-                expert_load_view,
-                logical_to_physical_map,
-                logical_replica_count,
-            )
-
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            topk_weights, topk_ids, _ = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
-            )
-
             return fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -959,31 +914,123 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer.w2_bias,
                 layer.w13_weight_scale,
                 layer.w2_weight_scale,
-                router_logits,
                 topk_weights,
                 topk_ids,
                 global_scale1=None,
                 global_scale2=None,
                 quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                activation=activation,
-                expert_map=expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                activation=layer.activation,
+                expert_map=layer.expert_map,
+                input_dtype=self.marlin_input_dtype,
             )
 
         assert _can_support_mxfp4(
-            use_grouped_topk,
-            topk_group,
-            num_expert_group,
-            expert_map,
-            custom_routing_function,
-            e_score_correction_bias,
-            apply_router_weight_on_input,
-            scoring_func,
-            activation,
-            expert_load_view,
-            logical_to_physical_map,
-            logical_replica_count,
+            layer.use_grouped_topk,
+            layer.topk_group,
+            layer.num_expert_group,
+            layer.expert_map,
+            layer.custom_routing_function,
+            layer.e_score_correction_bias,
+            layer.apply_router_weight_on_input,
+            layer.scoring_func,
+            layer.activation,
+            layer.eplb_state.expert_load_view,
+            layer.eplb_state.logical_to_physical_map,
+            layer.eplb_state.logical_replica_count,
+        ), "MXFP4 are not supported with this configuration."
+
+        assert (
+            self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+            or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+        )
+        from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
+
+        # Backend-specific preparation
+        if self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS:
+            from flashinfer import mxfp8_quantize
+
+            x_quant, x_scale = mxfp8_quantize(x, True, 32)
+
+            fake_input_scale = torch.ones(self.num_experts, device=x.device)
+            quant_scales = [
+                layer.w13_weight_scale.contiguous().view(torch.int32),
+                fake_input_scale,
+                layer.w2_weight_scale.contiguous().view(torch.int32),
+                fake_input_scale,
+            ]
+
+            fi_input = x_quant
+            extra_kwargs = dict(
+                use_mxfp8_act_scaling=True,
+                input_sf=x_scale,
+                fc1_expert_weights=layer.w13_weight.contiguous().view(torch.long),
+                fc2_expert_weights=layer.w2_weight.contiguous().view(torch.long),
+            )
+        elif self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16:
+            assert x.dtype == torch.bfloat16
+
+            quant_scales = [
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+            ]
+
+            fi_input = x
+            extra_kwargs = dict(
+                use_w4_group_scaling=True,
+                fc1_expert_weights=layer.w13_weight,
+                fc2_expert_weights=layer.w2_weight,
+            )
+
+        output = torch.empty_like(x, dtype=torch.bfloat16)
+
+        flashinfer_cutlass_fused_moe(
+            input=fi_input,
+            token_selected_experts=topk_ids.to(torch.int).contiguous(),
+            token_final_scales=topk_weights,
+            output_dtype=torch.bfloat16,
+            output=output,
+            quant_scales=quant_scales,
+            fc1_expert_biases=layer.w13_bias,
+            fc2_expert_biases=layer.w2_bias,
+            swiglu_alpha=layer.gemm1_alpha,
+            swiglu_beta=layer.gemm1_beta,
+            swiglu_limit=layer.gemm1_clamp_limit,
+            tp_size=self.moe.tp_size,
+            tp_rank=self.moe.tp_rank,
+            ep_size=self.moe.ep_size,
+            ep_rank=self.moe.ep_rank,
+            tune_max_num_tokens=max(self.max_capture_size, 1),
+            **extra_kwargs,
+        )
+
+        return output
+
+    def apply_monolithic(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert self.is_monolithic
+
+        if layer.enable_eplb:
+            raise NotImplementedError("EPLB is not supported for mxfp4")
+
+        assert _can_support_mxfp4(
+            layer.use_grouped_topk,
+            layer.topk_group,
+            layer.num_expert_group,
+            layer.expert_map,
+            layer.custom_routing_function,
+            layer.e_score_correction_bias,
+            layer.apply_router_weight_on_input,
+            layer.scoring_func,
+            layer.activation,
+            layer.eplb_state.expert_load_view,
+            layer.eplb_state.logical_to_physical_map,
+            layer.eplb_state.logical_replica_count,
         ), "MXFP4 are not supported with this configuration."
 
         if (
@@ -1003,113 +1050,35 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 x_scale = x_scale.view(torch.float8_e4m3fn).reshape(*x.shape[:-1], -1)
 
             trtllm_gen_output = trtllm_fp4_block_scale_moe(
-                router_logits.to(torch.bfloat16),
-                None,  # routing_bias
-                x_quant,
-                x_scale,
-                layer.w13_weight,  # uint8 (e2m1 x 2)
-                layer.w13_weight_scale,  # uint8 (e4m3 x 2)
-                layer.w13_bias,  # fp32 per expert per channel
-                layer.gemm1_alpha,  # fp32 per expert
-                layer.gemm1_beta,  # fp32 per expert
-                layer.gemm1_clamp_limit,  # fp32 per expert
-                layer.w2_weight,  # uint8 (e2m1 x 2)
-                layer.w2_weight_scale,  # ue8m0
-                layer.w2_bias,  # fp32 per expert per channel
-                None,  # output1_scale_scalar
-                None,  # output1_scale_gate_scalar
-                None,  # output2_scale_scalar
-                global_num_experts,
-                top_k,
-                None,  # n_group
-                None,  # topk_group
-                self.intermediate_size,  # padded to multiple of 256
-                layer.ep_rank * layer.local_num_experts,  # local_expert_offset
-                self.num_experts,  # local num experts
-                None,
-                None,
-                1 if renormalize else 0,  # routing_method_type, renormalize
-                True,  # do finalize
-                tune_max_num_tokens=self.max_capture_size,
+                routing_logits=router_logits.to(torch.bfloat16),
+                routing_bias=None,
+                hidden_states=x_quant,
+                hidden_states_scale=x_scale,
+                gemm1_weights=layer.w13_weight,  # uint8 (e2m1 x 2)
+                gemm1_weights_scale=layer.w13_weight_scale,  # uint8 (e4m3 x 2)
+                gemm1_bias=layer.w13_bias,  # fp32 per expert per channel
+                gemm1_alpha=layer.gemm1_alpha,  # fp32 per expert
+                gemm1_beta=layer.gemm1_beta,  # fp32 per expert
+                gemm1_clamp_limit=layer.gemm1_clamp_limit,  # fp32 per expert
+                gemm2_weights=layer.w2_weight,  # uint8 (e2m1 x 2)
+                gemm2_weights_scale=layer.w2_weight_scale,  # ue8m0
+                gemm2_bias=layer.w2_bias,  # fp32 per expert per channel
+                output1_scale_scalar=None,
+                output1_scale_gate_scalar=None,
+                output2_scale_scalar=None,
+                num_experts=layer.global_num_experts,
+                top_k=layer.top_k,
+                n_group=None,
+                topk_group=None,
+                intermediate_size=self.intermediate_size,  # padded to multiple of 256
+                local_expert_offset=layer.ep_rank * layer.local_num_experts,
+                local_num_experts=self.num_experts,
+                routed_scaling_factor=None,
+                routing_method_type=1 if layer.renormalize else 0,
+                do_finalize=True,
+                tune_max_num_tokens=max(self.max_capture_size, 1),
             )[0]
             return trtllm_gen_output
-        elif (
-            self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-            or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-        ):
-            from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
-
-            topk_weights, topk_ids, _ = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-            )
-
-            # Backend-specific preparation
-            if self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS:
-                from flashinfer import mxfp8_quantize
-
-                x_quant, x_scale = mxfp8_quantize(x, True, 32)
-
-                fake_input_scale = torch.ones(self.num_experts, device=x.device)
-                quant_scales = [
-                    layer.w13_weight_scale.contiguous().view(torch.int32),
-                    fake_input_scale,
-                    layer.w2_weight_scale.contiguous().view(torch.int32),
-                    fake_input_scale,
-                ]
-
-                fi_input = x_quant
-                extra_kwargs = dict(
-                    use_mxfp8_act_scaling=True,
-                    input_sf=x_scale,
-                    fc1_expert_weights=layer.w13_weight.contiguous().view(torch.long),
-                    fc2_expert_weights=layer.w2_weight.contiguous().view(torch.long),
-                )
-            elif self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16:
-                assert x.dtype == torch.bfloat16
-
-                quant_scales = [
-                    layer.w13_weight_scale,
-                    layer.w2_weight_scale,
-                ]
-
-                fi_input = x
-                extra_kwargs = dict(
-                    use_w4_group_scaling=True,
-                    fc1_expert_weights=layer.w13_weight,
-                    fc2_expert_weights=layer.w2_weight,
-                )
-
-            output = torch.empty_like(x, dtype=torch.bfloat16)
-            _ = flashinfer_cutlass_fused_moe(
-                input=fi_input,
-                token_selected_experts=topk_ids.to(torch.int).contiguous(),
-                token_final_scales=topk_weights,
-                output_dtype=torch.bfloat16,
-                output=output,
-                quant_scales=quant_scales,
-                fc1_expert_biases=layer.w13_bias,
-                fc2_expert_biases=layer.w2_bias,
-                swiglu_alpha=layer.gemm1_alpha,
-                swiglu_beta=layer.gemm1_beta,
-                swiglu_limit=layer.gemm1_clamp_limit,
-                tp_size=self.moe.tp_size,
-                tp_rank=self.moe.tp_rank,
-                ep_size=self.moe.ep_size,
-                ep_rank=self.moe.ep_rank,
-                tune_max_num_tokens=self.max_capture_size,
-                **extra_kwargs,
-            )
-
-            return output
         elif self.mxfp4_backend == Mxfp4Backend.TRITON:
             from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
                 triton_kernel_moe_forward,
@@ -1117,15 +1086,85 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             return triton_kernel_moe_forward(
                 hidden_states=x,
-                w1=self.w13_weight_triton_tensor,
-                w2=self.w2_weight_triton_tensor,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
                 gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
+                topk=layer.top_k,
+                renormalize=layer.renormalize,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
                 quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
             )
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
+
+
+class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
+    def __init__(self, moe_config: FusedMoEConfig):
+        super().__init__(moe_config)
+        self.moe_config = moe_config
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer,
+            num_experts,
+            hidden_size,
+            intermediate_size_per_partition,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        self.original_hidden_size = hidden_size
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        import intel_extension_for_pytorch as ipex
+
+        layer.w13_weight.data = layer.w13_weight.data.view(torch.int32)
+        layer.w2_weight.data = layer.w2_weight.data.view(torch.int32)
+        ep_rank_start = self.moe_config.ep_rank * self.moe_config.num_local_experts
+        layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
+            layer.w13_weight,
+            layer.w2_weight,
+            w1_scale_inv=layer.w13_weight_scale,
+            w2_scale_inv=layer.w2_weight_scale,
+            w13_bias=layer.w13_bias,
+            w2_bias=layer.w2_bias,
+            is_mxfp4=True,
+            experts_start_id=ep_rank_start,
+        )
+
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
+    def apply_monolithic(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        assert layer.activation == "swigluoai", (
+            "Only swiglu_oai activation is supported for IPEX MXFP4 MoE"
+        )
+        hidden_size_pad = round_up(self.original_hidden_size, 128)
+        x_pad = torch.nn.functional.pad(x, (0, hidden_size_pad - x.size(-1)))
+        hidden_states = layer.ipex_fusion(
+            x_pad,
+            layer.use_grouped_topk,
+            layer.top_k,
+            router_logits,
+            layer.renormalize,
+            layer.topk_group,
+            layer.num_expert_group,
+            activation="swiglu_oai",
+        )
+        hidden_states = hidden_states[..., : self.original_hidden_size].contiguous()
+        return hidden_states

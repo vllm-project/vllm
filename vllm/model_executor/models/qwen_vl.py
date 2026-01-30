@@ -25,6 +25,7 @@ from transformers.tokenization_utils_base import TextInput
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
@@ -41,13 +42,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -57,7 +58,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .qwen import QWenBaseModel, QWenModel
+from .qwen import QWenBaseModel, QWenBlock, QWenModel
 
 
 class QwenImagePixelInputs(TensorSchema):
@@ -108,6 +109,7 @@ class VisualAttention(nn.Module):
         bias: bool = True,
         kdim: int | None = None,
         vdim: int | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -127,8 +129,12 @@ class VisualAttention(nn.Module):
         assert self._qkv_same_embed_dim, (
             "Visual Attention implementation only supports self-attention"
         )
-        self.in_proj = ReplicatedLinear(embed_dim, 3 * embed_dim)
-        self.out_proj = ReplicatedLinear(embed_dim, embed_dim)
+        self.in_proj = ReplicatedLinear(
+            embed_dim, 3 * embed_dim, prefix=f"{prefix}.in_proj"
+        )
+        self.out_proj = ReplicatedLinear(
+            embed_dim, embed_dim, prefix=f"{prefix}.out_proj"
+        )
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
     def forward(
@@ -213,10 +219,15 @@ class QwenVLMLP(nn.Module):
         hidden_size: int,
         intermediate_size: int,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.c_fc = ColumnParallelLinear(
-            hidden_size, intermediate_size, bias=True, quant_config=quant_config
+            hidden_size,
+            intermediate_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.c_fc",
         )
         self.act_fn = get_act_fn("gelu")
         self.c_proj = RowParallelLinear(
@@ -224,6 +235,7 @@ class QwenVLMLP(nn.Module):
             hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_proj",
         )
 
     def forward(self, x):
@@ -241,17 +253,19 @@ class VisualAttentionBlock(nn.Module):
         mlp_ratio: float = 4.0,
         norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
         self.ln_1 = norm_layer(d_model)
         self.ln_2 = norm_layer(d_model)
         mlp_width = int(d_model * mlp_ratio)
-        self.attn = VisualAttention(d_model, n_head)
+        self.attn = VisualAttention(d_model, n_head, prefix=f"{prefix}.attn")
         self.mlp = QwenVLMLP(
             hidden_size=d_model,
             intermediate_size=mlp_width,
             quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
         )
 
     def attention(
@@ -281,6 +295,7 @@ class TransformerBlock(nn.Module):
         mlp_ratio: float = 4.0,
         norm_layer: Callable[[int], nn.Module] = nn.LayerNorm,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.width = width
@@ -294,8 +309,9 @@ class TransformerBlock(nn.Module):
                     mlp_ratio,
                     norm_layer=norm_layer,
                     quant_config=quant_config,
+                    prefix=f"{prefix}.resblocks.{i}",
                 )
-                for _ in range(layers)
+                for i in range(layers)
             ]
         )
 
@@ -326,6 +342,7 @@ class VisionTransformer(nn.Module):
         output_dim: int = 512,
         image_start_id: int = 151857,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
         **kwargs,
     ):
         super().__init__()
@@ -333,7 +350,7 @@ class VisionTransformer(nn.Module):
         patch_height, patch_width = self.patch_size = (patch_size, patch_size)
         self.grid_size = (image_height // patch_height, image_width // patch_width)
         self.output_dim = output_dim
-        self.conv1 = nn.Conv2d(
+        self.conv1 = Conv2dLayer(
             in_channels=3,
             out_channels=width,
             kernel_size=patch_size,
@@ -355,6 +372,7 @@ class VisionTransformer(nn.Module):
             mlp_ratio,
             norm_layer=norm_layer,
             quant_config=quant_config,
+            prefix=f"{prefix}.transformer",
         )
 
         self.attn_pool = Resampler2(
@@ -365,6 +383,7 @@ class VisionTransformer(nn.Module):
             norm_layer=norm_layer,
             adaptive=False,
             do_post_projection=False,
+            prefix=f"{prefix}.attn_pool",
         ).to(
             device=self.positional_embedding.device,
             dtype=self.positional_embedding.dtype,
@@ -412,7 +431,9 @@ class QwenVLModel(QWenModel):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        self.visual = VisionTransformer(**config.visual, quant_config=quant_config)
+        self.visual = VisionTransformer(
+            **config.visual, quant_config=quant_config, prefix=f"{prefix}.visual"
+        )
 
 
 @lru_cache(maxsize=1)
@@ -554,7 +575,7 @@ class QwenVLProcessor:
 
 class QwenVLProcessingInfo(BaseProcessingInfo):
     def get_tokenizer(self) -> PreTrainedTokenizer:
-        tokenizer = self.ctx.tokenizer
+        tokenizer = self.ctx.get_tokenizer()
         assert isinstance(tokenizer, PreTrainedTokenizer)
 
         return _get_tokenizer_without_image_pad(tokenizer)
@@ -702,8 +723,6 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
 class QwenVLForConditionalGeneration(
     QWenBaseModel, SupportsPP, SupportsLoRA, SupportsMultiModal
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "c_attn": ["c_attn"],
         "gate_up_proj": [
@@ -711,6 +730,8 @@ class QwenVLForConditionalGeneration(
             "w1",
         ],
     }
+
+    embed_input_ids = SupportsMultiModal.embed_input_ids
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -736,11 +757,16 @@ class QwenVLForConditionalGeneration(
         prefix: str = "",
         transformer_type: type[QwenVLModel] = QwenVLModel,
     ) -> None:
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            transformer_type=transformer_type,
-        )
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=QWenBlock,
+            tower_targets={"image": VisionTransformer},
+        ):
+            super().__init__(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                transformer_type=transformer_type,
+            )
 
         self.transformer: QwenVLModel
 
@@ -774,10 +800,7 @@ class QwenVLForConditionalGeneration(
 
         return self.transformer.visual(image_input["data"])
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.transformer
-
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -787,7 +810,7 @@ class QwenVLForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

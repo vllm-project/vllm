@@ -42,13 +42,29 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    FP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import (
+    cuda_device_count_stateless,
+    set_random_seed,  # noqa: F401 - re-exported for use in test files
+)
+
+FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -106,6 +122,7 @@ class RemoteOpenAIServer:
             env.update(env_dict)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        print(f"Environment variables: {env}")
         self.proc: subprocess.Popen = subprocess.Popen(
             serve_cmd,
             env=env,
@@ -119,7 +136,7 @@ class RemoteOpenAIServer:
         vllm_serve_args: list[str],
         *,
         env_dict: dict[str, str] | None = None,
-        seed: int | None = 0,
+        seed: int = 0,
         auto_port: bool = True,
         max_wait_seconds: float | None = None,
         override_hf_configs: dict[str, Any] | None = None,
@@ -247,6 +264,23 @@ class RemoteOpenAIServer:
             **kwargs,
         )
 
+    def get_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.Anthropic(
+            base_url=self.url_for(),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
+
+    def get_async_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.AsyncAnthropic(
+            base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
+        )
+
 
 class RemoteOpenAIServerCustom(RemoteOpenAIServer):
     """Launch test server with custom child process"""
@@ -266,7 +300,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
         *,
         env_dict: dict[str, str] | None = None,
-        seed: int | None = 0,
+        seed: int = 0,
         auto_port: bool = True,
         max_wait_seconds: float | None = None,
     ) -> None:
@@ -291,131 +325,6 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         if self.proc.is_alive():
             # force kill if needed
             self.proc.kill()
-
-
-class RemoteAnthropicServer:
-    DUMMY_API_KEY = "token-abc123"  # vLLM's Anthropic server does not need API key
-
-    def __init__(
-        self,
-        model: str,
-        vllm_serve_args: list[str],
-        *,
-        env_dict: dict[str, str] | None = None,
-        seed: int | None = 0,
-        auto_port: bool = True,
-        max_wait_seconds: float | None = None,
-    ) -> None:
-        if auto_port:
-            if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
-                raise ValueError(
-                    "You have manually specified the port when `auto_port=True`."
-                )
-
-            # Don't mutate the input args
-            vllm_serve_args = vllm_serve_args + ["--port", str(get_open_port())]
-        if seed is not None:
-            if "--seed" in vllm_serve_args:
-                raise ValueError(
-                    f"You have manually specified the seed when `seed={seed}`."
-                )
-
-            vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
-
-        parser = FlexibleArgumentParser(description="vLLM's remote Anthropic server.")
-        subparsers = parser.add_subparsers(required=False, dest="subparser")
-        parser = ServeSubcommand().subparser_init(subparsers)
-        args = parser.parse_args(["--model", model, *vllm_serve_args])
-        self.host = str(args.host or "localhost")
-        self.port = int(args.port)
-
-        self.show_hidden_metrics = args.show_hidden_metrics_for_version is not None
-
-        # download the model before starting the server to avoid timeout
-        is_local = os.path.isdir(model)
-        if not is_local:
-            engine_args = AsyncEngineArgs.from_cli_args(args)
-            model_config = engine_args.create_model_config()
-            load_config = engine_args.create_load_config()
-
-            model_loader = get_model_loader(load_config)
-            model_loader.download_model(model_config)
-
-        env = os.environ.copy()
-        # the current process might initialize cuda,
-        # to be safe, we should use spawn method
-        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        if env_dict is not None:
-            env.update(env_dict)
-        self.proc = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "vllm.entrypoints.anthropic.api_server",
-                model,
-                *vllm_serve_args,
-            ],
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
-        max_wait_seconds = max_wait_seconds or 240
-        self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
-        try:
-            self.proc.wait(8)
-        except subprocess.TimeoutExpired:
-            # force kill if needed
-            self.proc.kill()
-
-    def _wait_for_server(self, *, url: str, timeout: float):
-        # run health check
-        start = time.time()
-        while True:
-            try:
-                if requests.get(url).status_code == 200:
-                    break
-            except Exception:
-                # this exception can only be raised by requests.get,
-                # which means the server is not ready yet.
-                # the stack trace is not useful, so we suppress it
-                # by using `raise from None`.
-                result = self.proc.poll()
-                if result is not None and result != 0:
-                    raise RuntimeError("Server exited unexpectedly.") from None
-
-                time.sleep(0.5)
-                if time.time() - start > timeout:
-                    raise RuntimeError("Server failed to start in time.") from None
-
-    @property
-    def url_root(self) -> str:
-        return f"http://{self.host}:{self.port}"
-
-    def url_for(self, *parts: str) -> str:
-        return self.url_root + "/" + "/".join(parts)
-
-    def get_client(self, **kwargs):
-        if "timeout" not in kwargs:
-            kwargs["timeout"] = 600
-        return anthropic.Anthropic(
-            base_url=self.url_for(),
-            api_key=self.DUMMY_API_KEY,
-            max_retries=0,
-            **kwargs,
-        )
-
-    def get_async_client(self, **kwargs):
-        if "timeout" not in kwargs:
-            kwargs["timeout"] = 600
-        return anthropic.AsyncAnthropic(
-            base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
-        )
 
 
 def _test_completion(
@@ -784,7 +693,7 @@ def compare_all_settings(
                 results += _test_image_text(
                     client,
                     model,
-                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+                    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
                 )
             elif method == "encode":
                 results += _test_embeddings(client, model, prompt)
@@ -828,13 +737,34 @@ def init_test_distributed_environment(
     distributed_init_port: str,
     local_rank: int = -1,
 ) -> None:
-    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
-    init_distributed_environment(
-        world_size=pp_size * tp_size,
-        rank=rank,
-        distributed_init_method=distributed_init_method,
-        local_rank=local_rank,
+    # Note: This function is often called from Ray worker processes, so we
+    # can't rely on pytest fixtures to set the config. We check if the config
+    # is already set and only create a default one if needed.
+    from vllm.config import (
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
     )
+
+    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+
+    if get_current_vllm_config_or_none() is not None:
+        # Config already set, use it directly
+        init_distributed_environment(
+            world_size=pp_size * tp_size,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
+            local_rank=local_rank,
+        )
+    else:
+        # No config set, create a default one for the test
+        with set_current_vllm_config(VllmConfig()):
+            init_distributed_environment(
+                world_size=pp_size * tp_size,
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                local_rank=local_rank,
+            )
     ensure_model_parallel_initialized(tp_size, pp_size)
 
 
@@ -1183,6 +1113,13 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
     )
 
 
+requires_fp8 = pytest.mark.skipif(
+    not current_platform.supports_fp8(),
+    reason="FP8 is not supported on this GPU (requires Hopper or "
+    "Ada architecture, compute capability 8.9+)",
+)
+
+
 def large_gpu_test(*, min_gb: int):
     """
     Decorate a test to be skipped if no GPU is available or it does not have
@@ -1326,9 +1263,9 @@ def get_attn_backend_list_based_on_platform() -> list[str]:
         try:
             import aiter  # noqa: F401
 
-            attn_backend_list.append("FLASH_ATTN")
+            attn_backend_list.append("ROCM_AITER_FA")
         except Exception:
-            print("Skip FLASH_ATTN on ROCm as aiter is not installed")
+            print("Skip ROCM_AITER_FA on ROCm as aiter is not installed")
 
         return attn_backend_list
     elif current_platform.is_xpu():
@@ -1365,7 +1302,7 @@ def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
         indices.append(idx)
         prompt = (
             "```python\n# We set a number of variables, "
-            + f"x{idx} will be important later\n"
+            f"x{idx} will be important later\n"
         )
         ln = random.randint(*ln_range)
         for k in range(30, ln):
@@ -1411,3 +1348,117 @@ def flat_product(*iterables: Iterable[Any]):
     for element in itertools.product(*iterables):
         normalized = (e if isinstance(e, tuple) else (e,) for e in element)
         yield tuple(itertools.chain(*normalized))
+
+
+class TestFP8Layer(torch.nn.Module):
+    """
+    Test helper for FP8 linear operations. Creates random weights and scales
+    based on quantization configuration.
+
+    Args:
+        weight_shape: Shape of the weight tensor (out_features, in_features).
+        activation_quant_key: Activation quantization configuration.
+        weight_quant_key: Weight quantization configuration.
+        out_dtype: Output dtype. Defaults to current default dtype.
+        force_kernel: Optional kernel to force use of specific implementation.
+    """
+
+    def __init__(
+        self,
+        weight_shape: tuple[int, int],
+        activation_quant_key: QuantKey,
+        weight_quant_key: QuantKey,
+        out_dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+        force_kernel: FP8ScaledMMLinearKernel | None = None,
+    ):
+        super().__init__()
+        per_tensor_weights = weight_quant_key.scale.group_shape.is_per_tensor()
+        is_static_activation_scale = activation_quant_key.scale.static
+        weight_scale_shape = (1,) if per_tensor_weights else (weight_shape[0], 1)
+
+        self.weight_scale = torch.rand(
+            weight_scale_shape, dtype=torch.float32, device=device
+        )
+        self.input_scale = (
+            torch.rand(1, dtype=torch.float32, device=device)
+            if is_static_activation_scale
+            else None
+        )
+        self.weight = torch.rand(weight_shape, device=device).to(dtype=FP8_DTYPE).t()
+        self.input_scale_ub = None
+
+        out_dtype = torch.get_default_dtype() if out_dtype is None else out_dtype
+
+        self.kernel = init_fp8_linear_kernel(
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
+            out_dtype=out_dtype,
+            force_kernel=force_kernel,
+        )
+
+    def is_quant_fp8_enabled(self) -> bool:
+        return self.kernel.quant_fp8.enabled()
+
+    def forward(
+        self, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.kernel.apply_weights(self, y, bias)
+
+
+# TODO: Drop TestBlockFP8Layer in favour of a unified TestFP8Layer
+# after refactoring W8A8BlockFp8LinearOp.
+# https://github.com/vllm-project/vllm/issues/31818
+class TestBlockFP8Layer:
+    """
+    Test helper for blockwise FP8 linear operations. Creates random weights
+    and scales for W8A8BlockFp8LinearOp.
+
+    This is a workaround until W8A8BlockFp8LinearOp implements the kernel
+    abstraction (ScaledMMLinearKernel) for blockwise quantization.
+
+    Args:
+        weight_shape: Shape of the weight tensor (out_features, in_features).
+        group_shape: Blockwise quantization group shape.
+        cutlass_block_fp8_supported: Whether CUTLASS blockwise FP8 is available.
+        use_aiter_and_is_supported: Whether to use aiter quantization ops.
+        transpose_weights: Whether to transpose weights after creation.
+    """
+
+    def __init__(
+        self,
+        weight_shape: tuple[int, int],
+        group_shape: GroupShape,
+        cutlass_block_fp8_supported: bool = False,
+        use_aiter_and_is_supported: bool = False,
+        transpose_weights: bool = False,
+    ):
+        weight_scale_shape = weight_shape[0] // group_shape[1]
+        self.weight_scale = torch.rand(
+            (weight_scale_shape, weight_scale_shape), dtype=torch.float32
+        )
+        self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
+        self.input_scale = None
+        if transpose_weights:
+            self.weight = self.weight.t()
+
+        self.linear_op = W8A8BlockFp8LinearOp(
+            weight_group_shape=GroupShape(group_shape[1], group_shape[1]),
+            act_quant_group_shape=group_shape,
+            cutlass_block_fp8_supported=cutlass_block_fp8_supported,
+            use_aiter_and_is_supported=use_aiter_and_is_supported,
+        )
+
+    def __call__(
+        self, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.linear_op.apply(
+            input=y,
+            weight=self.weight,
+            weight_scale=self.weight_scale,
+            input_scale=self.input_scale,
+            bias=bias,
+        )
+
+    def is_quant_fp8_enabled(self) -> bool:
+        return self.linear_op.input_quant_op.enabled()

@@ -2,15 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Annotated, Any, Optional
+from typing import Annotated, Any, Optional
 
 import msgspec
 
+from vllm.config import ModelConfig, PoolerConfig
+from vllm.config.pooler import get_use_activation
 from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
-
-if TYPE_CHECKING:
-    from vllm.config import ModelConfig, PoolerConfig
 
 
 class PoolingParams(
@@ -25,10 +24,12 @@ class PoolingParams(
             Set to -1 to use the model's default truncation size.
             Set to k to keep only the last k tokens (left truncation).
             Set to None to disable truncation.
-        normalize: Whether to normalize the embeddings outputs.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
-        activation: Whether to apply activation function to
+        normalize: Deprecated, please use use_activation instead.
+        softmax: Deprecated, please use use_activation instead.
+        activation: Deprecated, please use use_activation instead.
+        use_activation: Whether to apply activation function to
             the classification outputs.
     """
 
@@ -37,15 +38,17 @@ class PoolingParams(
     # --8<-- [end:common-pooling-params]
 
     ## for embeddings models
-    # --8<-- [start:embedding-pooling-params]
+    # --8<-- [start:embed-pooling-params]
     dimensions: int | None = None
     normalize: bool | None = None
-    # --8<-- [end:embedding-pooling-params]
+    # --8<-- [end:embed-pooling-params]
 
     ## for classification, scoring and rerank
-    # --8<-- [start:classification-pooling-params]
+    # --8<-- [start:classify-pooling-params]
+    softmax: bool | None = None
     activation: bool | None = None
-    # --8<-- [end:classification-pooling-params]
+    use_activation: bool | None = None
+    # --8<-- [end:classify-pooling-params]
 
     ## for step pooling models
     step_tag_id: int | None = None
@@ -54,21 +57,22 @@ class PoolingParams(
     ## Internal use only
     task: PoolingTask | None = None
     requires_token_ids: bool = False
+    skip_reading_prefix_cache: bool | None = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
     @property
     def all_parameters(self) -> list[str]:
-        return ["dimensions", "normalize", "activation"]
+        return ["dimensions", "use_activation"]
 
     @property
     def valid_parameters(self):
         return {
-            "embed": ["dimensions", "normalize"],
-            "classify": ["activation"],
-            "score": ["activation"],
-            "token_embed": ["dimensions", "normalize"],
-            "token_classify": ["activation"],
+            "embed": ["dimensions", "use_activation"],
+            "classify": ["use_activation"],
+            "score": ["use_activation"],
+            "token_embed": ["dimensions", "use_activation"],
+            "token_classify": ["use_activation"],
         }
 
     def clone(self) -> "PoolingParams":
@@ -84,9 +88,14 @@ class PoolingParams(
             msg = f"You cannot overwrite {self.task=!r} with {task=!r}!"
             raise ValueError(msg)
 
+        # raise deprecated warning for softmax and activation
+        self.use_activation = get_use_activation(self)
+
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
+            if self.skip_reading_prefix_cache is None:
+                self.skip_reading_prefix_cache = True
             return
 
         # NOTE: Task validation needs to done against the model instance,
@@ -116,13 +125,22 @@ class PoolingParams(
             if getattr(self, k, None) is None:
                 setattr(self, k, getattr(pooler_config, k))
 
+        if self.skip_reading_prefix_cache is None:
+            # If prefix caching is enabled,
+            # the output of all pooling may less than n_prompt_tokens,
+            # we need to skip reading cache at this request.
+            if self.task in ["token_embed", "token_classify"]:
+                self.skip_reading_prefix_cache = True
+            else:
+                self.skip_reading_prefix_cache = False
+
         self._verify_step_pooling(pooler_config, valid_parameters)
 
     def _verify_step_pooling(
         self, pooler_config: "PoolerConfig", valid_parameters: list[str]
     ):
         step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
-        if pooler_config.pooling_type != "STEP":
+        if pooler_config.tok_pooling_type != "STEP":
             invalid_parameters = []
             for k in step_pooling_parameters:
                 if getattr(self, k, None) is not None:
@@ -144,8 +162,8 @@ class PoolingParams(
 
     def _set_default_parameters(self, model_config: Optional["ModelConfig"]):
         if self.task in ["embed", "token_embed"]:
-            if self.normalize is None:
-                self.normalize = True
+            if self.use_activation is None:
+                self.use_activation = True
 
             if self.dimensions is not None and model_config is not None:
                 if not model_config.is_matryoshka:
@@ -168,8 +186,8 @@ class PoolingParams(
                     raise ValueError("Dimensions must be greater than 0")
 
         elif self.task in ["classify", "score", "token_classify"]:
-            if self.activation is None:
-                self.activation = True
+            if self.use_activation is None:
+                self.use_activation = True
         else:
             raise ValueError(f"Unknown pooling task: {self.task}")
 
@@ -195,12 +213,13 @@ class PoolingParams(
         return (
             f"PoolingParams("
             f"task={self.task}, "
-            f"normalize={self.normalize}, "
             f"dimensions={self.dimensions}, "
-            f"activation={self.activation}, "
+            f"use_activation={self.use_activation}, "
             f"step_tag_id={self.step_tag_id}, "
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "
+            f"skip_reading_prefix_cache={self.skip_reading_prefix_cache}, "
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"extra_kwargs={self.extra_kwargs})"
         )
 

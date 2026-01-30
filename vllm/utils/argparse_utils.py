@@ -10,35 +10,19 @@ from argparse import (
     ArgumentDefaultsHelpFormatter,
     ArgumentParser,
     ArgumentTypeError,
+    Namespace,
     RawDescriptionHelpFormatter,
     _ArgumentGroup,
 )
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import regex as re
 import yaml
 
 from vllm.logger import init_logger
 
-if TYPE_CHECKING:
-    from argparse import Namespace
-else:
-    Namespace = object
-
 logger = init_logger(__name__)
-
-
-class StoreBoolean(Action):
-    def __call__(self, parser, namespace, values, option_string=None):
-        if values.lower() == "true":
-            setattr(namespace, self.dest, True)
-        elif values.lower() == "false":
-            setattr(namespace, self.dest, False)
-        else:
-            raise ValueError(
-                f"Invalid boolean value: {values}. Expected 'true' or 'false'."
-            )
 
 
 class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
@@ -89,14 +73,6 @@ class FlexibleArgumentParser(ArgumentParser):
         # Enable the deprecated kwarg for Python 3.12 and below
 
         def parse_known_args(self, args=None, namespace=None):
-            if args is not None and "--disable-log-requests" in args:
-                # Special case warning because the warning below won't trigger
-                # if –-disable-log-requests because its value is default.
-                logger.warning_once(
-                    "argument '--disable-log-requests' is deprecated and "
-                    "replaced with '--enable-log-requests'. This will be "
-                    "removed in v0.12.0."
-                )
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
                 if (
@@ -268,19 +244,18 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
+            elif arg.startswith("-O") and arg != "-O":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
-                # -O.<...> handled later
-                # also handle -O=<mode> here
-                mode = arg[3:] if arg[2] == "=" else arg[2:]
-                processed_args.append(f"-O.mode={mode}")
+                # also handle -O=<optimization_level> here
+                optimization_level = arg[3:] if arg[2] == "=" else arg[2:]
+                processed_args += ["--optimization-level", optimization_level]
             elif (
                 arg == "-O"
                 and i + 1 < len(args)
                 and args[i + 1] in {"0", "1", "2", "3"}
             ):
-                # Convert -O <n> to -O.mode <n>
-                processed_args.append("-O.mode")
+                # Convert -O <n> to --optimization-level <n>
+                processed_args.append("--optimization-level")
             else:
                 processed_args.append(arg)
 
@@ -318,8 +293,22 @@ class FlexibleArgumentParser(ArgumentParser):
         delete = set[int]()
         dict_args = defaultdict[str, dict[str, Any]](dict)
         duplicates = set[str]()
+        # Track regular arguments (non-dict args) for duplicate detection
+        regular_args_seen = set[str]()
         for i, processed_arg in enumerate(processed_args):
             if i in delete:  # skip if value from previous arg
+                continue
+
+            if processed_arg.startswith("--") and "." not in processed_arg:
+                if "=" in processed_arg:
+                    arg_name = processed_arg.split("=", 1)[0]
+                else:
+                    arg_name = processed_arg
+
+                if arg_name in regular_args_seen:
+                    duplicates.add(arg_name)
+                else:
+                    regular_args_seen.add(arg_name)
                 continue
 
             if processed_arg.startswith("-") and "." in processed_arg:
@@ -410,8 +399,7 @@ class FlexibleArgumentParser(ArgumentParser):
         index = args.index("--config")
         if index == len(args) - 1:
             raise ValueError(
-                "No config file specified! \
-                             Please check your command-line arguments."
+                "No config file specified! Please check your command-line arguments."
             )
 
         file_path = args[index + 1]
@@ -456,16 +444,30 @@ class FlexibleArgumentParser(ArgumentParser):
 
     def load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
-        flattened list with argparse like pattern
+        flattened list with argparse like pattern.
+
+        Supports both flat configs and nested YAML structures.
+
+        Flat config example:
         ```yaml
             port: 12323
             tensor-parallel-size: 4
         ```
         returns:
-            processed_args: list[str] = [
-                '--port': '12323',
-                '--tensor-parallel-size': '4'
-            ]
+            ['--port', '12323', '--tensor-parallel-size', '4']
+
+        Nested config example:
+        ```yaml
+            compilation-config:
+              pass_config:
+                fuse_allreduce_rms: true
+            speculative-config:
+              model: "nvidia/gpt-oss-120b-Eagle3-v2"
+              num_speculative_tokens: 3
+        ```
+        returns:
+            ['--compilation-config', '{"pass_config": {"fuse_allreduce_rms": true}}',
+             '--speculative-config', '{"model": "nvidia/gpt-oss-120b-Eagle3-v2", ...}']
         """
         extension: str = file_path.split(".")[-1]
         if extension not in ("yaml", "yml"):
@@ -473,10 +475,10 @@ class FlexibleArgumentParser(ArgumentParser):
                 f"Config file must be of a yaml/yml type. {extension} supplied"
             )
 
-        # only expecting a flat dictionary of atomic types
+        # Supports both flat configs and nested dicts
         processed_args: list[str] = []
 
-        config: dict[str, int | str] = {}
+        config: dict[str, Any] = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -487,12 +489,8 @@ class FlexibleArgumentParser(ArgumentParser):
             )
             raise ex
 
-        store_boolean_arguments = [
-            action.dest for action in self._actions if isinstance(action, StoreBoolean)
-        ]
-
         for key, value in config.items():
-            if isinstance(value, bool) and key not in store_boolean_arguments:
+            if isinstance(value, bool):
                 if value:
                     processed_args.append("--" + key)
             elif isinstance(value, list):
@@ -500,6 +498,11 @@ class FlexibleArgumentParser(ArgumentParser):
                     processed_args.append("--" + key)
                     for item in value:
                         processed_args.append(str(item))
+            elif isinstance(value, dict):
+                # Convert nested dicts to JSON strings so they can be parsed
+                # by the existing JSON argument parsing machinery.
+                processed_args.append("--" + key)
+                processed_args.append(json.dumps(value))
             else:
                 processed_args.append("--" + key)
                 processed_args.append(str(value))

@@ -30,18 +30,18 @@
         {{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}
     {%- elif message.role == "assistant" %}
         {%- set content = message.content %}
-        {%- set reasoning_content = '' %}
-        {%- if message.reasoning_content is defined and message.reasoning_content is not none %}
-            {%- set reasoning_content = message.reasoning_content %}
+        {%- set reasoning = '' %}
+        {%- if message.reasoning is defined and message.reasoning is not none %}
+            {%- set reasoning = message.reasoning %}
         {%- else %}
             {%- if '</think>' in message.content %}
                 {%- set content = message.content.split('</think>')[-1].lstrip('\n') %}
-                {%- set reasoning_content = message.content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}
+                {%- set reasoning = message.content.split('</think>')[0].rstrip('\n').split('<think>')[-1].lstrip('\n') %}
             {%- endif %}
         {%- endif %}
         {%- if loop.index0 > ns.last_query_index %}
-            {%- if loop.last or (not loop.last and reasoning_content) %}
-                {{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content.strip('\n') + '\n</think>\n\n' + content.lstrip('\n') }}
+            {%- if loop.last or (not loop.last and reasoning) %}
+                {{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning.strip('\n') + '\n</think>\n\n' + content.lstrip('\n') }}
             {%- else %}
                 {{- '<|im_start|>' + message.role + '\n' + content }}
             {%- endif %}

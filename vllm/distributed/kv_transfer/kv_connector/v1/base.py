@@ -25,6 +25,9 @@ The class provides the following primitives:
 
     Worker-side: runs in each worker, loads/saves KV cache to/from
     the Connector based on the metadata.
+        handle_preemptions() - called if there are preempted requests,
+            before their blocks are overwritten
+
         start_load_kv() - starts loading all KVs (maybe async)
         wait_for_layer_load() - blocks until layer i load is done
 
@@ -43,16 +46,22 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 import torch
 
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_events import KVCacheEvent
-    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+    from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVConnectorPromMetrics,
+        KVConnectorStats,
+        PromMetric,
+        PromMetricT,
+    )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
@@ -117,6 +126,15 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
+class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
+    """
+    Metadata used for out of band connector handshake between
+    P/D workers. This needs to serializeable.
+    """
+
+    pass
+
+
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
     Abstract Metadata used to communicate between the
@@ -127,7 +145,24 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 
 
 class KVConnectorBase_V1(ABC):
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+    """
+    Base class for KV connectors.
+    """
+
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        """
+        Indicates whether this connector prefers KV blocks that hold KV data for all
+        layers, which can speed up KV data transfers. Defaults to False.
+        """
+        return False
+
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design."
@@ -138,6 +173,14 @@ class KVConnectorBase_V1(ABC):
             self._kv_transfer_config = vllm_config.kv_transfer_config
         else:
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
+        self._kv_cache_config = kv_cache_config
+        if self._kv_cache_config is None:
+            logger.warning(
+                "KVConnectorBase_V1 initialized without kv_cache_config. "
+                "This is deprecated - please update your connector to accept "
+                "kv_cache_config as the third constructor argument and pass it "
+                "to super().__init__()."
+            )
         self._role = role
 
     @property
@@ -176,10 +219,17 @@ class KVConnectorBase_V1(ABC):
         Returns:
             ConnectorMetadata: the connector metadata.
         """
-
         # Should only be called while set to valid metadata.
         assert self._connector_metadata is not None
         return self._connector_metadata
+
+    def has_connector_metadata(self) -> bool:
+        """Check whether the connector metadata is currently set.
+
+        Returns:
+            bool: True if connector metadata exists, False otherwise.
+        """
+        return self._connector_metadata is not None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
@@ -191,10 +241,34 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
+    ):
+        """
+        Initialize with a single KV cache tensor used by all layers.
+        The first dimension should be num_layers.
+        This function will only be called for models with uniform layers,
+        and only if the prefers_cross_layer_blocks is set to True.
+        Only one of the functions
+        {register_kv_caches, register_cross_layers_kv_cache} will be called.
+
+        Args:
+            kv_cache: a cross-layers kv cache tensor
+            attn_backend: The attention backend that corresponds to all layers
+        """
+        return
+
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """
         Set the xPU-specific ops for copying KV between host and device.
         Needed when host buffer is used for kv transfer (e.g., in NixlConnector)
+        """
+        return
+
+    def handle_preemptions(self, preempted_req_ids: set[str]):
+        """
+        Handle preempted requests BEFORE their blocks are overwritten.
+        Needed for connectors which use async saves (e.g., OffloadingConnector)
         """
         return
 
@@ -312,6 +386,26 @@ class KVConnectorBase_V1(ABC):
     def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
         """
         Get the KV connector stats collected during the last interval.
+        """
+        return None
+
+    def get_kv_connector_kv_cache_events(self) -> Optional["KVConnectorKVEvents"]:
+        """
+        Get the KV connector kv cache events collected during the last interval.
+        This function should be called by the model runner every time after the
+        model execution and before cleanup.
+        """
+        return None
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """
+        Get the KVConnector handshake metadata for this connector.
+        This metadata is used for out-of-band connector handshake
+        between P/D workers.
+
+        Returns:
+            KVConnectorHandshakeMetadata: the handshake metadata.
+            None if no handshake metadata is available.
         """
         return None
 
@@ -470,4 +564,44 @@ class KVConnectorBase_V1(ABC):
         registered connectors to return their own KVConnectorStats object,
         which can implement custom aggregation logic on the data dict.
         """
+        return None
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set the KV connector handshake metadata for this connector.
+
+        Args:
+            metadata (KVConnectorHandshakeMetadata): the handshake metadata to set.
+        """
+        return None
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: "VllmConfig",
+        metric_types: dict[type["PromMetric"], type["PromMetricT"]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> Optional["KVConnectorPromMetrics"]:
+        """
+        Create a KVConnectorPromMetrics subclass which should register
+        per-connector Prometheus metrics and implement observe() to
+        expose connector transfer stats via Prometheus.
+        """
+        return None
+
+    def reset_cache(self) -> bool | None:
+        """
+        Reset the connector's internal cache.
+
+        Returns:
+            bool: True if the cache was successfully reset, False otherwise.
+        """
+        logger.debug(
+            "Connector cache reset requested, but %s does not implement reset_cache().",
+            type(self).__name__,
+        )
+
         return None

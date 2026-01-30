@@ -8,8 +8,9 @@ import os
 import pytest
 import yaml
 from transformers import AutoTokenizer
+from pydantic import ValidationError
 
-from vllm.transformers_utils.detokenizer_utils import convert_ids_list_to_tokens
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from ..utils import flat_product
@@ -26,7 +27,8 @@ def parser():
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--enable-feature", action="store_true")
     parser.add_argument("--hf-overrides", type=json.loads)
-    parser.add_argument("-O", "--compilation-config", type=json.loads)
+    parser.add_argument("-cc", "--compilation-config", type=json.loads)
+    parser.add_argument("--optimization-level", type=int)
     return parser
 
 
@@ -165,8 +167,8 @@ def test_dict_args(parser):
         "--hf-overrides.key2.key4",
         "val3",
         # Test compile config and compilation mode
-        "-O.use_inductor=true",
-        "-O.backend",
+        "-cc.use_inductor_graph_partition=true",
+        "-cc.backend",
         "custom",
         "-O1",
         # Test = sign
@@ -189,9 +191,9 @@ def test_dict_args(parser):
         "--hf_overrides.key14.key15",
         "-minus.and.dot",
         # Test array values
-        "-O.custom_ops+",
+        "-cc.custom_ops+",
         "-quant_fp8",
-        "-O.custom_ops+=+silu_mul,-rms_norm",
+        "-cc.custom_ops+=+silu_mul,-rms_norm",
     ]
     parsed_args = parser.parse_args(args)
     assert parsed_args.model_name == "something.something"
@@ -216,9 +218,9 @@ def test_dict_args(parser):
             "key15": "-minus.and.dot",
         },
     }
+    assert parsed_args.optimization_level == 1
     assert parsed_args.compilation_config == {
-        "mode": 1,
-        "use_inductor": True,
+        "use_inductor_graph_partition": True,
         "backend": "custom",
         "custom_ops": ["-quant_fp8", "+silu_mul", "-rms_norm"],
     }
@@ -232,7 +234,7 @@ def test_duplicate_dict_args(caplog_vllm, parser):
         "--hf-overrides.key1",
         "val2",
         "-O1",
-        "-O.mode",
+        "-cc.mode",
         "2",
         "-O3",
     ]
@@ -240,12 +242,13 @@ def test_duplicate_dict_args(caplog_vllm, parser):
     parsed_args = parser.parse_args(args)
     # Should be the last value
     assert parsed_args.hf_overrides == {"key1": "val2"}
-    assert parsed_args.compilation_config == {"mode": 3}
+    assert parsed_args.optimization_level == 3
+    assert parsed_args.compilation_config == {"mode": 2}
 
     assert len(caplog_vllm.records) == 1
     assert "duplicate" in caplog_vllm.text
     assert "--hf-overrides.key1" in caplog_vllm.text
-    assert "-O.mode" in caplog_vllm.text
+    assert "--optimization-level" in caplog_vllm.text
 
 
 def test_model_specification(
@@ -374,6 +377,109 @@ def test_load_config_file(tmp_path):
     # Assert that the processed arguments match the expected output
     assert processed_args == expected_args
     os.remove(str(config_file_path))
+
+
+def test_load_config_file_nested(tmp_path):
+    """Test that nested dicts in YAML config are converted to JSON strings."""
+    config_data = {
+        "port": 8000,
+        "compilation-config": {
+            "pass_config": {"fuse_allreduce_rms": True},
+        },
+    }
+    config_file_path = tmp_path / "nested_config.yaml"
+    with open(config_file_path, "w") as f:
+        yaml.dump(config_data, f)
+
+    parser = FlexibleArgumentParser()
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    assert processed_args[processed_args.index("--port") + 1] == "8000"
+    cc_value = json.loads(
+        processed_args[processed_args.index("--compilation-config") + 1]
+    )
+    assert cc_value == {"pass_config": {"fuse_allreduce_rms": True}}
+
+
+def test_nested_config_end_to_end(tmp_path):
+    """Test end-to-end parsing of nested configs in YAML files."""
+    config_data = {
+        "compilation-config": {
+            "mode": 3,
+            "pass_config": {"fuse_allreduce_rms": True},
+        },
+    }
+    config_file_path = tmp_path / "nested_config.yaml"
+    with open(config_file_path, "w") as f:
+        yaml.dump(config_data, f)
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("-cc", "--compilation-config", type=json.loads)
+    args = parser.parse_args(["--config", str(config_file_path)])
+
+    assert args.compilation_config == {
+        "mode": 3,
+        "pass_config": {"fuse_allreduce_rms": True},
+    }
+
+
+def test_compilation_mode_string_values(parser):
+    """Test that -cc.mode accepts both integer and string mode values."""
+    args = parser.parse_args(["-cc.mode", "0"])
+    assert args.compilation_config == {"mode": 0}
+
+    args = parser.parse_args(["-O3"])
+    assert args.optimization_level == 3
+
+    args = parser.parse_args(["-cc.mode=NONE"])
+    assert args.compilation_config == {"mode": "NONE"}
+
+    args = parser.parse_args(["-cc.mode", "STOCK_TORCH_COMPILE"])
+    assert args.compilation_config == {"mode": "STOCK_TORCH_COMPILE"}
+
+    args = parser.parse_args(["-cc.mode=DYNAMO_TRACE_ONCE"])
+    assert args.compilation_config == {"mode": "DYNAMO_TRACE_ONCE"}
+
+    args = parser.parse_args(["-cc.mode", "VLLM_COMPILE"])
+    assert args.compilation_config == {"mode": "VLLM_COMPILE"}
+
+    args = parser.parse_args(["-cc.mode=none"])
+    assert args.compilation_config == {"mode": "none"}
+
+    args = parser.parse_args(["-cc.mode=vllm_compile"])
+    assert args.compilation_config == {"mode": "vllm_compile"}
+
+
+def test_compilation_config_mode_validator():
+    """Test that CompilationConfig.mode field validator converts strings to integers."""
+    from vllm.config.compilation import CompilationConfig, CompilationMode
+
+    config = CompilationConfig(mode=0)
+    assert config.mode == CompilationMode.NONE
+
+    config = CompilationConfig(mode=3)
+    assert config.mode == CompilationMode.VLLM_COMPILE
+
+    config = CompilationConfig(mode="NONE")
+    assert config.mode == CompilationMode.NONE
+
+    config = CompilationConfig(mode="STOCK_TORCH_COMPILE")
+    assert config.mode == CompilationMode.STOCK_TORCH_COMPILE
+
+    config = CompilationConfig(mode="DYNAMO_TRACE_ONCE")
+    assert config.mode == CompilationMode.DYNAMO_TRACE_ONCE
+
+    config = CompilationConfig(mode="VLLM_COMPILE")
+    assert config.mode == CompilationMode.VLLM_COMPILE
+
+    config = CompilationConfig(mode="none")
+    assert config.mode == CompilationMode.NONE
+
+    config = CompilationConfig(mode="vllm_compile")
+    assert config.mode == CompilationMode.VLLM_COMPILE
+
+    with pytest.raises(ValidationError, match="Invalid compilation mode"):
+        CompilationConfig(mode="INVALID_MODE")
 
 
 def test_flat_product():

@@ -31,10 +31,13 @@ from transformers.models.llama4.image_processing_llama4_fast import (
     get_best_fit,
 )
 
-from vllm.attention.layer import MultiHeadAttention
-from vllm.config import VllmConfig
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -45,6 +48,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -53,6 +58,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
@@ -60,19 +66,20 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
+    MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
 from .llama4 import Llama4ForCausalLM
-from .utils import AutoWeightsLoader, maybe_prefix
-from .vision import run_dp_sharded_vision_model
+from .utils import AutoWeightsLoader, StageMissingLayer, maybe_prefix
+from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
 class Llama4ImagePatchInputs(TensorSchema):
@@ -117,9 +124,9 @@ class Llama4VisionMLP(nn.Module):
         output_activation: bool,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
+        use_data_parallel = is_vit_use_data_parallel()
         self.fc1 = ColumnParallelLinear(
             input_size=input_size,
             output_size=intermediate_size,
@@ -201,7 +208,6 @@ class Llama4VisionPixelShuffleMLP(nn.Module):
         config,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.pixel_shuffle_ratio = config.pixel_shuffle_ratio
@@ -217,7 +223,6 @@ class Llama4VisionPixelShuffleMLP(nn.Module):
             output_activation=True,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
         )
 
     def forward(self, encoded_patches: torch.Tensor) -> torch.Tensor:
@@ -231,10 +236,10 @@ class Llama4VisionAttention(nn.Module):
         config: Llama4VisionConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.config = config
+        use_data_parallel = is_vit_use_data_parallel()
         self.tp_size = (
             1 if use_data_parallel else get_tensor_model_parallel_world_size()
         )
@@ -248,7 +253,7 @@ class Llama4VisionAttention(nn.Module):
         self.attention_dropout = config.attention_dropout
         self.scaling = self.head_dim**-0.5
 
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_local_heads, self.head_dim, self.scaling
         )
 
@@ -285,13 +290,17 @@ class Llama4VisionAttention(nn.Module):
                 prefix=f"{prefix}.o_proj",
             )
 
+        rope_parameters = {
+            "rope_type": "mllama4",
+            "rope_theta": config.rope_parameters["rope_theta"],
+            "partial_rotary_factor": 0.5,
+        }
+
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
-            rotary_dim=config.hidden_size // config.num_attention_heads // 2,
             # number of image patches
             max_position=(config.image_size // config.patch_size) ** 2,
-            base=config.rope_theta,
-            rope_scaling={"rope_type": "mllama4"},
+            rope_parameters=rope_parameters,
             is_neox_style=False,
             dtype=torch.complex64,  # important
         )
@@ -325,7 +334,6 @@ class Llama4VisionEncoderLayer(nn.Module):
         config: Llama4VisionConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -336,7 +344,6 @@ class Llama4VisionEncoderLayer(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            use_data_parallel=use_data_parallel,
         )
         self.mlp = Llama4VisionMLP(
             input_size=config.hidden_size,
@@ -346,7 +353,6 @@ class Llama4VisionEncoderLayer(nn.Module):
             output_activation=False,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
         )
 
         self.input_layernorm = nn.LayerNorm(config.hidden_size)
@@ -378,7 +384,6 @@ class Llama4VisionEncoder(nn.Module):
         config: Llama4VisionConfig,
         quant_config: QuantizationConfig | None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -388,7 +393,6 @@ class Llama4VisionEncoder(nn.Module):
                     config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
-                    use_data_parallel=use_data_parallel,
                 )
                 for layer_idx in range(config.num_hidden_layers)
             ]
@@ -421,13 +425,13 @@ class Llama4UnfoldConvolution(nn.Module):
         config: Llama4VisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         kernel_size = config.patch_size
         if isinstance(kernel_size, int):
             kernel_size = (kernel_size, kernel_size)
         self.unfold = torch.nn.Unfold(kernel_size=kernel_size, stride=config.patch_size)
+        use_data_parallel = is_vit_use_data_parallel()
         self.linear = ColumnParallelLinear(
             input_size=config.num_channels * kernel_size[0] * kernel_size[1],
             output_size=config.hidden_size,
@@ -445,13 +449,15 @@ class Llama4UnfoldConvolution(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(
+    dynamic_arg_dims={"images_flattened": 0}, enable_if=should_torch_compile_mm_vit
+)
 class Llama4VisionModel(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.config = config
@@ -467,7 +473,6 @@ class Llama4VisionModel(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.patch_embedding",
-            use_data_parallel=use_data_parallel,
         )
 
         self.class_embedding = nn.Parameter(self.scale * torch.randn(self.hidden_size))
@@ -484,13 +489,12 @@ class Llama4VisionModel(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.model",
-            use_data_parallel=use_data_parallel,
         )
+
         self.vision_adapter = Llama4VisionPixelShuffleMLP(
             config,
             quant_config,
             prefix=f"{prefix}.vision_adapter",
-            use_data_parallel=use_data_parallel,
         )
 
     def forward(
@@ -605,10 +609,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
             )
 
             images = mm_data["images"]
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", ImageProcessorItems)
+            parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
+                "image", ImageProcessorItems
             )
 
             tile_size = vision_config.image_size
@@ -723,10 +725,13 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
     dummy_inputs=Mllama4DummyInputsBuilder,
 )
 class Llama4ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module,
+    SupportsMultiModal,
+    SupportsPP,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsLoRA,
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -748,33 +753,53 @@ class Llama4ForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
+        self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
-        if multimodal_config.get_limit_per_prompt("image"):
-            self.vision_model = Llama4VisionModel(
-                config.vision_config,
-                None,
-                prefix=maybe_prefix(prefix, "vision_model"),
-                use_data_parallel=self.use_data_parallel,
-            )
+
+        with self._mark_tower_model(vllm_config, "image"):
+            from vllm.compilation.backends import set_model_tag
+
+            with (
+                set_current_vllm_config(vllm_config),
+                set_model_tag("Llama4VisionModel", is_encoder=True),
+            ):
+                self.vision_model = Llama4VisionModel(
+                    config=config.vision_config,
+                    quant_config=None,
+                    prefix=maybe_prefix(prefix, "vision_model"),
+                )
+
             self.multi_modal_projector = Llama4MultiModalProjector(
-                self.config, None, prefix=maybe_prefix(prefix, "multi_modal_projector")
+                config=self.config,
+                quant_config=None,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
-        else:
-            self.vision_model = None
-            self.multi_modal_projector = None
-        self.language_model = initialize_model(
-            vllm_config=vllm_config.with_hf_config(
-                config.text_config, ["LlamaForCausalLM"]
-            ),
-            prefix=maybe_prefix(prefix, "language_model"),
-            model_class=Llama4ForCausalLM,
-        )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = initialize_model(
+                vllm_config=vllm_config.with_hf_config(
+                    config.text_config, ["LlamaForCausalLM"]
+                ),
+                prefix=maybe_prefix(prefix, "language_model"),
+                model_class=Llama4ForCausalLM,
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
+        # Set MoE hyperparameters
+        self.num_expert_groups = 1
+        self.num_logical_experts = self.language_model.num_logical_experts
+        self.num_physical_experts = self.language_model.num_physical_experts
+        self.num_local_physical_experts = self.language_model.num_local_physical_experts
+        self.num_routed_experts = self.language_model.num_routed_experts
+        self.num_shared_experts = self.language_model.num_shared_experts
+        self.num_redundant_experts = self.language_model.num_redundant_experts
+        self.moe_layers = self.language_model.moe_layers
+        self.num_moe_layers = len(self.moe_layers)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """Set which layers should output auxiliary hidden states for EAGLE3."""
@@ -791,6 +816,24 @@ class Llama4ForConditionalGeneration(
         # Delegate to underlying language model (Llama4ForCausalLM)
         assert hasattr(self.language_model, "get_eagle3_aux_hidden_state_layers")
         return self.language_model.get_eagle3_aux_hidden_state_layers()
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ):
+        self.language_model.set_eplb_state(
+            expert_load_view, logical_to_physical_map, logical_replica_count
+        )
+        self.expert_weights = self.language_model.expert_weights
+
+    def update_physical_experts_metadata(
+        self, num_physical_experts: int, num_local_physical_experts: int
+    ):
+        self.language_model.update_physical_experts_metadata(
+            num_physical_experts, num_local_physical_experts
+        )
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -832,19 +875,19 @@ class Llama4ForConditionalGeneration(
             for img in vision_embeddings_flat.split(patches_per_image, dim=0)
         ]
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
-    def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
 
-        return self._process_image_input(image_input)
+        with (
+            set_forward_context(None, self.vllm_config),
+        ):
+            return self._process_image_input(image_input)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -961,6 +1004,10 @@ class Llama4ForConditionalGeneration(
         for name, weight in weights:
             renamed = self._rename_weight_for_modelopt_checkpoint(name)
 
+            attr = renamed.split(".", 1)[0]
+            if isinstance(getattr(self, attr), StageMissingLayer):
+                continue
+
             if renamed.startswith("language_model."):
                 language_model_weights.append((renamed, weight))
             else:
@@ -1037,6 +1084,18 @@ class Llama4ForConditionalGeneration(
 
         return updated_params
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.text_config.num_local_experts,
+            num_redundant_experts=self.num_redundant_experts,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -1057,10 +1116,6 @@ class Llama4ForConditionalGeneration(
         language_model_weights, other_weights = self._separate_and_rename_weights(
             weights
         )
-
-        # Skip loading vision model and projector if they're not initialized.
-        if self.vision_model is None and self.multi_modal_projector is None:
-            other_weights = []
 
         # Handle expert scale parameters
         regular_weights, expert_scale_weights, updated_params_from_experts = (
@@ -1083,3 +1138,13 @@ class Llama4ForConditionalGeneration(
         )
 
         return updated_params
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector.",
+            tower_model="vision_model.",
+        )

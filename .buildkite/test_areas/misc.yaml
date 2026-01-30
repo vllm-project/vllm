@@ -1,0 +1,169 @@
+group: Miscellaneous
+depends_on: 
+  - image-build
+steps:
+- label: V1 Others
+  timeout_in_minutes: 60
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    # split the test to avoid interference
+    - pytest -v -s -m 'not cpu_test' v1/core
+    - pytest -v -s v1/executor
+    - pytest -v -s v1/kv_offload
+    - pytest -v -s v1/sample
+    - pytest -v -s v1/logits_processors
+    - pytest -v -s v1/worker
+    - pytest -v -s v1/spec_decode
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'not cpu_test' v1/metrics
+    - pytest -v -s v1/test_oracle.py
+    - pytest -v -s v1/test_request.py
+    - pytest -v -s v1/test_outputs.py
+    # Integration test for streaming correctness (requires special branch).
+    - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
+    - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+
+- label: V1 Others (CPU)
+  depends_on:
+    - image-build-cpu
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  device: cpu
+  commands:
+    # split the test to avoid interference
+    - pytest -v -s -m 'cpu_test' v1/core
+    - pytest -v -s v1/structured_output
+    - pytest -v -s v1/test_serial_utils.py
+    - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'cpu_test' v1/metrics
+
+- label: Regression
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - vllm/
+  - tests/test_regression
+  commands:
+  - pip install modelscope
+  - pytest -v -s test_regression.py
+  working_dir: "/vllm-workspace/tests" # optional
+
+- label: Examples
+  timeout_in_minutes: 45
+  working_dir: "/vllm-workspace/examples"
+  source_file_dependencies:
+  - vllm/entrypoints
+  - vllm/multimodal
+  - examples/
+  commands:
+    - pip install tensorizer # for tensorizer test
+    - python3 offline_inference/basic/chat.py # for basic
+    - python3 offline_inference/basic/generate.py --model facebook/opt-125m
+    - python3 offline_inference/basic/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
+    - python3 offline_inference/basic/classify.py
+    - python3 offline_inference/basic/embed.py
+    - python3 offline_inference/basic/score.py
+    # for multi-modal models
+    - python3 offline_inference/audio_language.py --seed 0
+    - python3 offline_inference/vision_language.py --seed 0
+    - python3 offline_inference/vision_language_multi_image.py --seed 0
+    - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
+     # for pooling models
+    - python3 pooling/pooling/vision_language_pooling.py --seed 0
+    # for features demo
+    - python3 offline_inference/prefix_caching.py
+    - python3 offline_inference/llm_engine_example.py
+    - python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
+    # https://github.com/vllm-project/vllm/pull/26682 uses slightly more memory in PyTorch 2.9+ causing this test to OOM in 1xL4 GPU
+    - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+
+- label: Metrics, Tracing (2 GPUs)
+  timeout_in_minutes: 20
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/
+  - tests/v1/tracing
+  commands:
+  - "pip install \
+      'opentelemetry-sdk>=1.26.0' \
+      'opentelemetry-api>=1.26.0' \
+      'opentelemetry-exporter-otlp>=1.26.0' \
+      'opentelemetry-semantic-conventions-ai>=0.4.1'"
+  - pytest -v -s v1/tracing
+
+- label: Python-only Installation
+  depends_on: ~
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - tests/standalone_tests/python_only_compile.sh
+  - setup.py
+  commands:
+  - bash standalone_tests/python_only_compile.sh
+
+- label: Async Engine, Inputs, Utils, Worker
+  timeout_in_minutes: 50
+  source_file_dependencies:
+  - vllm/
+  - tests/multimodal
+  - tests/utils_
+  commands:
+  - pytest -v -s -m 'not cpu_test' multimodal
+  - pytest -v -s utils_
+
+- label: Async Engine, Inputs, Utils, Worker, Config (CPU)
+  depends_on: 
+  - image-build-cpu
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - vllm/
+  - tests/test_inputs.py
+  - tests/test_outputs.py
+  - tests/multimodal
+  - tests/renderers
+  - tests/standalone_tests/lazy_imports.py
+  - tests/tokenizers_
+  - tests/tool_parsers
+  - tests/transformers_utils
+  - tests/config
+  device: cpu
+  commands:
+  - python3 standalone_tests/lazy_imports.py
+  - pytest -v -s test_inputs.py
+  - pytest -v -s test_outputs.py
+  - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s renderers
+  - pytest -v -s tokenizers_
+  - pytest -v -s tool_parsers
+  - pytest -v -s transformers_utils
+  - pytest -v -s config
+
+- label: GPT-OSS Eval (B200)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  device: b200
+  optional: true
+  source_file_dependencies:
+  - tests/evals/gpt_oss
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/v1/attention/backends/flashinfer.py
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
+
+- label: Batch Invariance (H100)
+  timeout_in_minutes: 25
+  device: h100
+  source_file_dependencies:
+    - vllm/v1/attention
+    - vllm/model_executor/layers
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py

@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
@@ -23,20 +22,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
-
-
-def flashinfer_autotune_supported(vllm_config: VllmConfig) -> bool:
-    """
-    Record known issues with vllm + flashinfer autotune here. Return True if
-    and only if flashinfer autotune will run through without issues.
-    """
-    return not (
-        vllm_config.parallel_config.data_parallel_size > 1
-        and (
-            envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
-            or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-        )
-    )
 
 
 def kernel_warmup(worker: "Worker"):
@@ -52,11 +37,7 @@ def kernel_warmup(worker: "Worker"):
         deep_gemm_warmup(model, max_tokens)
 
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
-    if (
-        has_flashinfer()
-        and current_platform.has_device_capability(90)
-        and flashinfer_autotune_supported(worker.vllm_config)
-    ):
+    if has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
     # FlashInfer attention warmup
@@ -68,10 +49,17 @@ def kernel_warmup(worker: "Worker"):
         except NotImplementedError:
             return False
 
-    if not worker.model_runner.is_pooling_model and all(
-        _is_flashinfer_backend(group.backend)
-        for groups in worker.model_runner.attn_groups
-        for group in groups
+    if (
+        not worker.model_runner.is_pooling_model
+        and worker.model_runner.attn_groups
+        # NOTE: This should be `any` instead of `all` but other hybrid attention
+        # backends don't support this dummy run. Once we remove
+        # `build_for_cudagraph_capture`, we can change it to `any`.
+        and all(
+            _is_flashinfer_backend(group.backend)
+            for groups in worker.model_runner.attn_groups
+            for group in groups
+        )
     ):
         logger.info("Warming up FlashInfer attention.")
         # Warmup with mixed batch containing both prefill and decode tokens
