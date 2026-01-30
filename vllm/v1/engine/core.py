@@ -614,10 +614,6 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
-    def has_pending_kv_transfers(self) -> bool:
-        """Check if there are pending async KV transfers."""
-        return self.scheduler.has_pending_kv_transfers()
-
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 
@@ -723,7 +719,6 @@ class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
-    READY_TO_EXIT = b"READY_TO_EXIT"
 
     @instrument(span_name="EngineCoreProc init")
     def __init__(
@@ -1064,8 +1059,6 @@ class EngineCoreProc(EngineCore):
         finally:
             if engine_core is not None:
                 engine_core.shutdown()
-                if shutdown_monitor is None or not shutdown_monitor.parent_died:
-                    engine_core._send_ready_to_exit()
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
@@ -1081,11 +1074,7 @@ class EngineCoreProc(EngineCore):
             self._process_engine_step()
 
             # 3) Check if drain is complete.
-            if (
-                self._drain_requested
-                and not self.scheduler.has_requests()
-                and not self.scheduler.has_pending_kv_transfers()
-            ):
+            if self._drain_requested and not self.scheduler.has_requests():
                 logger.info("Drain complete, exiting")
                 break
 
@@ -1211,16 +1200,6 @@ class EngineCoreProc(EngineCore):
                 "to send. Please report this issue."
             )
 
-    def _send_ready_to_exit(self):
-        """Send ready-to-exit notification after drain completes."""
-
-        self.output_queue.put_nowait(EngineCoreProc.READY_TO_EXIT)
-
-        # wait for daemon to flush before we exit
-        self.output_thread.join(timeout=_OUTPUT_THREAD_FLUSH_TIMEOUT)
-        if self.output_thread.is_alive():
-            logger.warning("Ready-to-exit message may not have been sent.")
-
     def process_input_sockets(
         self,
         input_addresses: list[str],
@@ -1343,10 +1322,7 @@ class EngineCoreProc(EngineCore):
 
             while True:
                 output = self.output_queue.get()
-                if output in (
-                    EngineCoreProc.ENGINE_CORE_DEAD,
-                    EngineCoreProc.READY_TO_EXIT,
-                ):
+                if output == EngineCoreProc.ENGINE_CORE_DEAD:
                     for socket in sockets:
                         socket.send(output)
                     break
@@ -1543,11 +1519,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 self.step_counter = 0
 
             # 4) Check if drain is complete.
-            if (
-                self._drain_requested
-                and not self.scheduler.has_requests()
-                and not self.scheduler.has_pending_kv_transfers()
-            ):
+            if self._drain_requested and not self.scheduler.has_requests():
                 logger.info("Drain complete, exiting")
                 break
 

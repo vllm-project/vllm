@@ -212,7 +212,3 @@ class SchedulerInterface(ABC):
 
     def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
         return None
-
-    def has_pending_kv_transfers(self) -> bool:
-        """Check if any requests have pending async KV transfers."""
-        return False

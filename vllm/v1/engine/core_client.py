@@ -5,7 +5,6 @@ import contextlib
 import multiprocessing
 import queue
 import sys
-import threading
 import time
 import uuid
 import weakref
@@ -13,14 +12,13 @@ from abc import ABC, abstractmethod
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
 import msgspec.msgpack
 import zmq
 import zmq.asyncio
-from typing_extensions import override
 
 from vllm.config import VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
@@ -268,9 +266,6 @@ class EngineCoreClient(ABC):
     async def call_utility_async(self, method: str, *args) -> Any:
         raise NotImplementedError
 
-    async def has_pending_kv_transfers_async(self) -> bool:
-        raise NotImplementedError
-
     async def drain_async(self, timeout: float) -> bool:
         """Signal engine to drain and wait for completion.
 
@@ -396,11 +391,6 @@ class BackgroundResources:
     # processing threads can access it without holding a ref to the client.
     engine_dead: bool = False
 
-    # drain coordination
-    ready_to_exit_event: threading.Event = field(default_factory=threading.Event)
-    ready_to_exit_count: int = 0
-    expected_engine_count: int = 0
-
     def __call__(self):
         """Clean up background resources."""
 
@@ -462,19 +452,6 @@ class BackgroundResources:
         if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
             self.engine_dead = True
             raise EngineDeadError()
-
-    def is_ready_to_exit(self, frames: Sequence[zmq.Frame]) -> bool:
-        if len(frames) == 1 and frames[0].buffer == EngineCoreProc.READY_TO_EXIT:
-            self.ready_to_exit_count += 1
-            logger.info(
-                "Received READY_TO_EXIT from engine (%d/%d)",
-                self.ready_to_exit_count,
-                self.expected_engine_count,
-            )
-            if self.ready_to_exit_count >= self.expected_engine_count:
-                self.ready_to_exit_event.set()
-            return True
-        return False
 
 
 class MPClient(EngineCoreClient):
@@ -591,9 +568,6 @@ class MPClient(EngineCoreClient):
             # underlying data.
             self.pending_messages = deque[tuple[zmq.MessageTracker, Any]]()
 
-            # Track expected engine count for drain coordination
-            self.resources.expected_engine_count = len(self.core_engines)
-
             # Start monitoring engine core processes for unexpected failures
             self.start_engine_core_monitor()
 
@@ -633,21 +607,17 @@ class MPClient(EngineCoreClient):
                 logger.debug_once("Failed to send DRAIN, engines may be gone")
 
     async def drain_async(self, timeout: float) -> bool:
-        """Signal engines to drain and wait for completion."""
+        """Signal engines to drain and wait for them to exit."""
         start_time = time.monotonic()
         self._send_drain_to_engines()
 
-        ready_to_exit = self.resources.ready_to_exit_event
-        while not ready_to_exit.is_set():
+        while not self.resources.engine_dead:
             elapsed = time.monotonic() - start_time
             if elapsed >= timeout:
                 logger.warning(
                     "Drain: timed out after %.1fs, proceeding with shutdown",
                     elapsed,
                 )
-                return False
-            if self.resources.engine_dead:
-                logger.warning("Drain: engine died during drain")
                 return False
             await asyncio.sleep(0.1)
 
@@ -786,8 +756,6 @@ class SyncMPClient(MPClient):
 
                     frames = out_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
-                    if resources.is_ready_to_exit(frames):
-                        break
                     outputs: EngineCoreOutputs = decoder.decode(frames)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output, utility_results)
@@ -967,12 +935,6 @@ class AsyncMPClient(MPClient):
                 while True:
                     frames = await output_socket.recv_multipart(copy=False)
                     resources.validate_alive(frames)
-                    if resources.is_ready_to_exit(frames):
-                        # engine drained and ready to exit, signal waiters
-                        logger.info("Engine ready to exit, marking engine as dead")
-                        resources.engine_dead = True
-                        outputs_queue.put_nowait(EngineDeadError())
-                        return
                     outputs: EngineCoreOutputs = decoder.decode(frames)
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output, utility_results)
@@ -1141,9 +1103,6 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
-
-    async def has_pending_kv_transfers_async(self) -> bool:
-        return await self.call_utility_async("has_pending_kv_transfers")
 
 
 class DPAsyncMPClient(AsyncMPClient):
@@ -1383,21 +1342,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 ]
             )
         )[0]
-
-    @override
-    async def has_pending_kv_transfers_async(self) -> bool:
-        """
-        Note: We override the method here using internal _call_utility_async
-        becuase it lets us to a custom any() reduce across all engines, instead
-        of a naiive first()
-        """
-        results = await asyncio.gather(
-            *[
-                self._call_utility_async("has_pending_kv_transfers", engine=engine)
-                for engine in self.core_engines
-            ]
-        )
-        return any(results)
 
     @staticmethod
     async def process_engine_outputs(
