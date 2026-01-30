@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 import msgspec
 
@@ -38,17 +38,17 @@ class PoolingParams(
     # --8<-- [end:common-pooling-params]
 
     ## for embeddings models
-    # --8<-- [start:embedding-pooling-params]
+    # --8<-- [start:embed-pooling-params]
     dimensions: int | None = None
     normalize: bool | None = None
-    # --8<-- [end:embedding-pooling-params]
+    # --8<-- [end:embed-pooling-params]
 
     ## for classification, scoring and rerank
-    # --8<-- [start:classification-pooling-params]
+    # --8<-- [start:classify-pooling-params]
     softmax: bool | None = None
     activation: bool | None = None
     use_activation: bool | None = None
-    # --8<-- [end:classification-pooling-params]
+    # --8<-- [end:classify-pooling-params]
 
     ## for step pooling models
     step_tag_id: int | None = None
@@ -80,7 +80,7 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(
-        self, task: PoolingTask, model_config: Optional["ModelConfig"] = None
+        self, task: PoolingTask, model_config: "ModelConfig | None" = None
     ) -> None:
         if self.task is None:
             self.task = task
@@ -106,7 +106,7 @@ class PoolingParams(
         self._verify_valid_parameters()
 
     def _merge_default_parameters(
-        self, model_config: Optional["ModelConfig"] = None
+        self, model_config: "ModelConfig | None" = None
     ) -> None:
         if model_config is None:
             return
@@ -160,7 +160,7 @@ class PoolingParams(
                 if getattr(self, k, None) is None:
                     setattr(self, k, getattr(pooler_config, k))
 
-    def _set_default_parameters(self, model_config: Optional["ModelConfig"]):
+    def _set_default_parameters(self, model_config: "ModelConfig | None"):
         if self.task in ["embed", "token_embed"]:
             if self.use_activation is None:
                 self.use_activation = True

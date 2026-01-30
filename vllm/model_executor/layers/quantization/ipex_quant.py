@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from packaging import version
@@ -9,9 +9,6 @@ from torch.nn import Module
 
 from vllm._ipex_ops import ipex_ops as ops
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.fused_moe_router import (
-    FusedMoERouter,
-)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -147,7 +144,7 @@ class IPEXConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["LinearMethodBase"]:
+    ) -> "LinearMethodBase | None":
         if isinstance(layer, LinearBase):
             if self.method == "awq":
                 if is_layer_skipped(
@@ -384,10 +381,13 @@ class XPUFp8MoEMethod(Fp8OnlineMoEMethod):
     ) -> FusedMoEQuantConfig | None:
         return None
 
-    def apply(
+    @property
+    def is_monolithic(self) -> bool:
+        return True
+
+    def apply_monolithic(
         self,
         layer: torch.nn.Module,
-        router: FusedMoERouter,
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
