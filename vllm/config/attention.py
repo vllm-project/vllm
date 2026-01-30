@@ -102,7 +102,7 @@ class AttentionConfig:
             self.mla_prefill_backend = MLAPrefillBackendEnum.CUDNN
             logger.warning_once(
                 "use_cudnn_prefill is deprecated and will be removed in "
-                "v0.16. Use --attention-config.mla_prefill_backend="
+                "v0.17. Use --attention-config.mla_prefill_backend="
                 "CUDNN instead."
             )
 
@@ -119,7 +119,7 @@ class AttentionConfig:
                 self.mla_prefill_backend = MLAPrefillBackendEnum.TRTLLM_RAGGED
                 logger.warning_once(
                     "use_trtllm_ragged_deepseek_prefill is deprecated and "
-                    "will be removed in v0.16. Use "
+                    "will be removed in v0.17. Use "
                     "--attention-config.mla_prefill_backend=TRTLLM_RAGGED "
                     "instead."
                 )
@@ -130,6 +130,6 @@ class AttentionConfig:
             self.mla_prefill_backend = MLAPrefillBackendEnum.FLASH_ATTN
             logger.warning_once(
                 "disable_flashinfer_prefill is deprecated and will be removed "
-                "in v0.16. Use --attention-config.mla_prefill_backend="
+                "in v0.17. Use --attention-config.mla_prefill_backend="
                 "FLASH_ATTN instead."
             )
