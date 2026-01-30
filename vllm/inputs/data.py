@@ -9,6 +9,8 @@ from typing_extensions import NotRequired, TypedDict, TypeVar
 
 from vllm.sampling_params import SamplingParams
 
+from vllm.sampling_params import SamplingParams
+
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import (
         MultiModalDataDict,

@@ -50,6 +50,7 @@ logger = init_logger(__name__)
 _PRE_ALLOCATE_BUFFER_SIZE_IN_S = 30
 
 
+
 class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
     def __init__(
         self,
@@ -129,13 +130,94 @@ def _expand_tensor(input_tensor: torch.Tensor, scaling: int) -> torch.Tensor:
     return (base.unsqueeze(1) + offsets).view(-1)
 
 
+class VoxtralRealtimeBuffer:
+    def __init__(self, config: AudioConfig) -> None:
+        self._config = config
+
+        self._look_ahead_in_ms = config.streaming_look_ahead_ms
+        self._look_back_in_ms = config.streaming_look_back_ms
+
+        self._sampling_rate = self._config.sampling_rate
+
+        self._look_ahead = self._get_len_in_samples(self._look_ahead_in_ms)
+        self._look_back = self._get_len_in_samples(self._look_back_in_ms)
+        self._streaming_size = self._get_len_in_samples(1000 / self._config.frame_rate)
+
+        # mutable objects
+        streaming_delay = self._get_len_in_samples(self._config.transcription_delay_ms)
+        self._start = 0
+        self._end = streaming_delay + self._streaming_size
+
+        # always pre-allocate 30 second buffers
+        self._buffer_size = _PRE_ALLOCATE_BUFFER_SIZE_IN_S * self._sampling_rate
+        self._buffer: np.ndarray = np.empty(self._buffer_size, dtype=np.float32)
+        self._filled_buffer_len = 0
+
+    @property
+    def start_idx(self):
+        return max(self._start - self._look_back, 0)
+
+    @property
+    def end_idx(self):
+        return self._end + self._look_ahead
+
+    @property
+    def is_audio_complete(self) -> bool:
+        return self._filled_buffer_len >= self.end_idx
+
+    def _get_len_in_samples(self, len_in_ms: float) -> int:
+        _len_in_s = self._sampling_rate * len_in_ms / 1000
+        assert _len_in_s.is_integer(), _len_in_s
+        len_in_s = int(_len_in_s)
+
+        return len_in_s
+
+    def _allocate_new_buffer(self) -> None:
+        # allocate new buffer
+        new_buffer = np.empty(self._buffer_size, dtype=np.float32)
+        left_to_copy = max(self._filled_buffer_len - self.start_idx, 0)
+
+        if left_to_copy > 0:
+            new_buffer[:left_to_copy] = self._buffer[
+                self.start_idx : self._filled_buffer_len
+            ]
+
+        del self._buffer
+        self._buffer = new_buffer
+
+        self._filled_buffer_len = left_to_copy
+        self._start = self._look_back
+        self._end = self._start + self._streaming_size
+
+    def write_audio(self, audio: np.ndarray) -> None:
+        put_end_idx = self._filled_buffer_len + len(audio)
+
+        if put_end_idx > self._buffer_size:
+            self._allocate_new_buffer()
+
+        self._buffer[self._filled_buffer_len : self._filled_buffer_len + len(audio)] = (
+            audio
+        )
+        self._filled_buffer_len += len(audio)
+
+    def read_audio(self) -> np.ndarray | None:
+        if not self.is_audio_complete:
+            return None
+
+        audio = self._buffer[self.start_idx : self.end_idx]
+        self._start = self._end
+        self._end += self._streaming_size
+
+        return audio
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     VoxtralRealtimeMultiModalProcessor,
     info=VoxtralProcessingInfo,
     dummy_inputs=VoxtralDummyInputsBuilder,
 )
 @support_torch_compile
-class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
+class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -143,7 +225,10 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
 
         assert (
             not vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ), "Voxtral realtime doesn't support full cudagraphs yet. Please use PIECEWISE."
+        ), (
+            "Voxtral streaming doesn't support full cudagraphs yet. "
+            "Please use PIECEWISE."
+        )
 
         self.time_embedding: TimeEmbedding = TimeEmbedding(
             dim=self.config.text_config.hidden_size
