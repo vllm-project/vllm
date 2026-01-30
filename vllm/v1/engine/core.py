@@ -395,7 +395,18 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+        # Cleanup tensors for finished requests
+        self._cleanup_finished_request_tensors(scheduler_output.finished_req_ids)
+
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _cleanup_finished_request_tensors(self, finished_req_ids: set[str]) -> None:
+        """Cleanup any orphaned tensors for finished requests.
+
+        This is a no-op in the base class but can be overridden in subclasses
+        to perform actual cleanup (e.g., for IPC tensor queues).
+        """
+        pass
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -496,6 +507,9 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+
+        # Cleanup tensors for finished requests
+        self._cleanup_finished_request_tensors(scheduler_output.finished_req_ids)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -1046,6 +1060,12 @@ class EngineCoreProc(EngineCore):
         # Then cleanup any orphaned tensors for these requests
         if self.tensor_decoder is not None:
             for request_id in request_ids:
+                self.tensor_decoder.cleanup_request_tensors(request_id)
+
+    def _cleanup_finished_request_tensors(self, finished_req_ids: set[str]) -> None:
+        """Cleanup any orphaned tensors for finished requests."""
+        if self.tensor_decoder is not None:
+            for request_id in finished_req_ids:
                 self.tensor_decoder.cleanup_request_tensors(request_id)
 
     def _handle_client_request(

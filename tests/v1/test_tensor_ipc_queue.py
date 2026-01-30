@@ -346,7 +346,7 @@ def mixed_tensor_encoder_process(
     """Process that encodes mixed CPU/CUDA tensors."""
     try:
         encoder = MsgpackEncoder(
-            tensor_queues=tensor_queues, multimodal_tensor_ipc="torch"
+            tensor_queues=tensor_queues, multimodal_tensor_ipc="torch_shm"
         )
         encoder.set_target_engine(0)
 
@@ -476,7 +476,7 @@ def cpu_tensor_ipc_encoder_process(
     try:
         # Create encoder with IPC enabled for all tensors
         encoder = MsgpackEncoder(
-            tensor_queues=tensor_queues, multimodal_tensor_ipc="torch"
+            tensor_queues=tensor_queues, multimodal_tensor_ipc="torch_shm"
         )
         encoder.set_target_engine(target_engine)
 
@@ -608,12 +608,12 @@ def test_cpu_tensor_ipc():
 
 
 def test_ipc_disabled_mode():
-    """Test that IPC is disabled when multimodal_tensor_ipc="msgspec"."""
+    """Test that IPC is disabled when multimodal_tensor_ipc="direct_rpc"."""
     tensor_queues = [torch_mp.Queue()]
 
     # Create encoder with IPC disabled
     encoder = MsgpackEncoder(
-        tensor_queues=tensor_queues, multimodal_tensor_ipc="msgspec"
+        tensor_queues=tensor_queues, multimodal_tensor_ipc="direct_rpc"
     )
     encoder.set_target_engine(0)
 
@@ -648,11 +648,13 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
     tensor_queues = [torch_mp.Queue()]
 
     # Create encoder with IPC enabled for all tensors
-    encoder = MsgpackEncoder(tensor_queues=tensor_queues, multimodal_tensor_ipc="torch")
+    encoder = MsgpackEncoder(
+        tensor_queues=tensor_queues, multimodal_tensor_ipc="torch_shm"
+    )
     encoder.set_target_engine(0)
 
     # Verify encoder configuration
-    assert encoder.multimodal_tensor_ipc == "torch", (
+    assert encoder.multimodal_tensor_ipc == "torch_shm", (
         "Torch queue-based IPC should be enabled"
     )
     assert encoder.tensor_queues is not None, "Tensor queues should be set"

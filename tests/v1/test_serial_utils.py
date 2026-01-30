@@ -306,7 +306,9 @@ def test_non_multimodal_tensor_with_ipc():
     tensor_queues = [torch_mp.Queue()]
 
     # Create encoder with IPC enabled
-    encoder = MsgpackEncoder(tensor_queues=tensor_queues, multimodal_tensor_ipc="torch")
+    encoder = MsgpackEncoder(
+        tensor_queues=tensor_queues, multimodal_tensor_ipc="torch_shm"
+    )
     encoder.set_target_engine(0)
     encoder.set_request_context("test_request_123")
 
@@ -344,7 +346,9 @@ def test_non_multimodal_tensor_with_ipc_none_value():
     tensor_queues = [torch_mp.Queue()]
 
     # Create encoder with IPC enabled
-    encoder = MsgpackEncoder(tensor_queues=tensor_queues, multimodal_tensor_ipc="torch")
+    encoder = MsgpackEncoder(
+        tensor_queues=tensor_queues, multimodal_tensor_ipc="torch_shm"
+    )
     encoder.set_target_engine(0)
     encoder.set_request_context("test_request_456")
 

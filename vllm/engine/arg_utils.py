@@ -476,7 +476,7 @@ class EngineArgs:
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
-    multimodal_tensor_ipc: Literal["msgspec", "torch"] = (
+    multimodal_tensor_ipc: Literal["direct_rpc", "torch_shm"] = (
         MultiModalConfig.multimodal_tensor_ipc
     )
     # LoRA fields
