@@ -73,7 +73,7 @@ class Sampler(nn.Module):
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
 
-        logprobs_mode: list[LogprobsMode] | LogprobsMode = self.logprobs_mode
+        logprobs_mode: list[LogprobsMode | None] | LogprobsMode | None = self.logprobs_mode
         if sampling_metadata.logprobs_mode_override is not None:
             logprobs_mode = sampling_metadata.logprobs_mode_override
             if isinstance(logprobs_mode, list):
@@ -178,7 +178,7 @@ class Sampler(nn.Module):
         may update the logits tensor in-place.
         """
 
-        logprobs_mode: list[LogprobsMode] | LogprobsMode = self.logprobs_mode
+        logprobs_mode: list[LogprobsMode | None] | LogprobsMode | None = self.logprobs_mode
         if sampling_metadata.logprobs_mode_override is not None:
             logprobs_mode = sampling_metadata.logprobs_mode_override
             if isinstance(logprobs_mode, list):

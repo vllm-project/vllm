@@ -224,7 +224,9 @@ class InputBatch:
 
         self.num_logprobs: dict[str, int] = {}
 
-        self.logprobs_mode: list[LogprobsMode | None] = [None for _ in range(max_num_reqs)]
+        self.logprobs_mode: list[LogprobsMode | None] = [
+            None for _ in range(max_num_reqs)
+        ]
         self.non_default_logprobs_mode: int = 0
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
@@ -1042,7 +1044,7 @@ class InputBatch:
         return len(self.has_allowed_token_ids) == 0
 
     @property
-    def logprobs_mode_override(self) -> LogprobsMode | list[LogprobsMode] | None:
+    def logprobs_mode_override(self) -> LogprobsMode | list[LogprobsMode | None] | None:
         if self.non_default_logprobs_mode == 0:
             return None
         logprobs_mode = self.logprobs_mode[: self.num_reqs]
