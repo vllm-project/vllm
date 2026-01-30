@@ -100,7 +100,7 @@ class DeepseekOCR2ProcessingInfo(BaseProcessingInfo):
 
         h2 = w2 = math.ceil((image_size // patch_size) / downsample_ratio)
 
-        global_views_tokens = h * (w)
+        global_views_tokens = h * w
         if num_width_tiles > 1 or num_height_tiles > 1:
             local_views_tokens = (num_height_tiles * h2) * (num_width_tiles * w2)
         else:
@@ -235,7 +235,6 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
             "model.layers.": "language_model.model.layers.",
             "model.norm.": "language_model.model.norm.",
             "lm_head.": "language_model.lm_head.",
-            "model.qwen2_model.": "vision_model.",
             # remove "model." prefix for other components
             "model.": "",
         }
@@ -260,7 +259,6 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         self.vision_config = config.vision_config
         self.projector_config = config.projector_config
         self.text_config = config.text_config
-
         model_config = vllm_config.model_config
         tokenizer = cached_tokenizer_from_config(model_config)
         self.image_token_id = tokenizer.vocab[_IMAGE_TOKEN]
@@ -281,7 +279,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
                 out_chans=256,
                 last_conv_output=896,
             )
-            self.vision_model = build_qwen2_decoder_as_encoder()
+            self.qwen2_model = build_qwen2_decoder_as_encoder()
 
             self.projector = MlpProjector(self.projector_config)
             self.tile_tag = config.tile_tag
@@ -332,7 +330,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
 
     def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
         global_features_1 = self.sam_model(image_tensor)
-        global_features_2 = self.vision_model(global_features_1)
+        global_features_2 = self.qwen2_model(global_features_1)
 
         features = self.projector(global_features_2)
 
@@ -345,7 +343,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
             return None
 
         local_features = self.sam_model(patches)
-        local_features = self.vision_model(local_features)
+        local_features = self.qwen2_model(local_features)
 
         features = self.projector(local_features)
 
@@ -442,5 +440,5 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="projector",
-            tower_model=["sam_model", "vision_model"],
+            tower_model=["sam_model", "qwen2_model"],
         )

@@ -441,7 +441,6 @@ def split_list_into_ranges(lst: torch.Tensor, interval: int) -> list[list[int]]:
         ranges[index].append(num)
     return ranges
 
-
 def _merge_multimodal_embeddings(
     inputs_embeds: torch.Tensor,
     multimodal_embeddings: NestedTensors,
@@ -467,6 +466,9 @@ def _merge_multimodal_embeddings(
 
         # NOTE: This can avoid D2H sync (#22105), but fails to
         # raise an error if is_multimodal.sum() < len(mm_embeds_flat)
+        logger.debug(f"inputs_embeds={inputs_embeds.shape}")
+        logger.debug("is_multimodal.shape = %d, len(mm_embeds_flat) = %d", is_multimodal.sum().item(), len(mm_embeds_flat))
+        logger.debug(f"is_multimodal:{is_multimodal[:10]}, {is_multimodal[-10:]}")
         inputs_embeds.masked_scatter_(
             is_multimodal.unsqueeze(-1), mm_embeds_flat.to(dtype=input_dtype)
         )
