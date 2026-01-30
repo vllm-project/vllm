@@ -162,10 +162,10 @@ class DefaultMoERunner(MoERunner):
     @property
     def use_dp_chunking(self) -> bool:
         return (
-            self.moe_config.use_pplx_kernels
-            or self.moe_config.use_deepep_ll_kernels
-            or self.moe_config.use_mori_kernels
-            or (self.moe_config.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
+            self.moe_parallel_config.use_pplx_kernels
+            or self.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe_parallel_config.use_mori_kernels
+            or self.moe_parallel_config.use_fi_all2allv_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     def _maybe_setup_shared_experts_stream(
@@ -208,6 +208,7 @@ class DefaultMoERunner(MoERunner):
 
         return use_shared_experts_stream, hidden_states_clone
 
+    # TODO(bnell): can this happen at init() time now?
     def ensure_dp_chunking_init(self):
         if not self.use_dp_chunking or self.batched_hidden_states is not None:
             return
@@ -452,7 +453,7 @@ class DefaultMoERunner(MoERunner):
         self.ensure_dp_chunking_init()
 
         has_separate_shared_experts = (
-            not isinstance(self.quant_method, FusedMoEModularMethod)
+            not self.quant_method.mk_owns_shared_expert
             and self.shared_experts is not None
         )
 
@@ -476,9 +477,10 @@ class DefaultMoERunner(MoERunner):
                 layer, hidden_states, router_logits, has_separate_shared_experts
             )
 
-        do_naive_dispatch_combine: bool = (
-            self.moe_config.dp_size > 1
-            and not isinstance(self.quant_method, FusedMoEModularMethod)
+        # NOTE(rob): once we finish migrating all the quant methods to use
+        # MKs, we can remove the naive dispatch/combine path from here.
+        do_naive_dispatch_combine = (
+            self.moe_config.dp_size > 1 and not self.quant_method.supports_internal_mk
         )
 
         ctx = get_forward_context()
@@ -506,7 +508,7 @@ class DefaultMoERunner(MoERunner):
                 else:
                     hidden_states_to_dispatch = hidden_states
 
-                dispatch_res = get_ep_group().dispatch(
+                dispatch_res = get_ep_group().dispatch_router_logits(
                     hidden_states_to_dispatch,
                     router_logits,
                     self.moe_config.is_sequence_parallel,
