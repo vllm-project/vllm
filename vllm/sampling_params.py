@@ -255,7 +255,7 @@ class SamplingParams(
 
     """Override logprobs_mode for this request.
     If set, this will override the logprobs_mode for this request.
-    If None, the logprobs_mode will be determined by in `ModelConfig`."""
+    If None, the logprobs_mode will be determined by the engine's configuration."""
     logprobs_mode_override: LogprobsMode | None = None
 
     @staticmethod
