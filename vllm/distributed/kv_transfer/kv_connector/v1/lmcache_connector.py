@@ -74,7 +74,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         extra_config = self._kv_transfer_config.kv_connector_extra_config
-        return bool(str(extra_config.get("enable_cross_layers_blocks", "False")))
+        val = extra_config.get("enable_cross_layers_blocks", False)
+        if isinstance(val, str):
+            return val.lower() in ("true", "1", "yes")
+        return bool(val)
 
     def __init__(
         self,
