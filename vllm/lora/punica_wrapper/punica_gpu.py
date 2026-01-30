@@ -380,7 +380,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
 
         Uses combined virtual expert indexing where expert_ids contains:
-            expert_id_lora = lora_id * num_experts + expert_id
+            virtual_expert_id = lora_id * num_experts + expert_id
         """
         fused_moe_lora(
             y,
