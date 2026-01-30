@@ -5,6 +5,7 @@ from abc import abstractmethod
 
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -26,6 +27,19 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         super().__init__()
         self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
+        self.moe_mk: mk.FusedMoEModularKernel | None = None
+
+    @property
+    def supports_internal_mk(self) -> bool:
+        # NOTE(rob): temporary attribute to indicate support for
+        # completed migration to the new internal MK interface.
+        return self.moe_mk is not None
+
+    @property
+    def mk_owns_shared_expert(self) -> bool:
+        # NOTE(rob): temporary attribute to indicate support for
+        # completed migration to the new internal MK interface.
+        return self.moe_mk is not None and self.moe_mk.shared_experts is not None
 
     @abstractmethod
     def create_weights(
@@ -91,6 +105,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.moe_mk is not None:
+            return self.moe_mk.prepare_finalize.topk_indices_dtype()
         return None
 
     @property

@@ -393,7 +393,7 @@ if __name__ == "__main__":
     with open(results_folder / md_file, "w") as f:
         results = read_markdown(
             "../.buildkite/performance-benchmarks/"
-            + "performance-benchmarks-descriptions.md"
+            "performance-benchmarks-descriptions.md"
         )
         results = results.format(
             latency_tests_markdown_table=latency_md_table,
