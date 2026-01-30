@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import signal
 import sys
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TextIO
@@ -119,6 +120,10 @@ def _maybe_force_spawn():
         return
 
     reasons = []
+    if threading.active_count() > 1:
+        reasons.append(
+            "Process is multi-threaded; fork() can cause deadlocks in the child"
+        )
     if is_in_ray_actor():
         # even if we choose to spawn, we need to pass the ray address
         # to the subprocess so that it knows how to connect to the ray cluster.

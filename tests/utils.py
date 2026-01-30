@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import contextlib
 import copy
 import functools
 import importlib
@@ -977,13 +976,15 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
                 signal.signal(signal.SIGTERM, old_signal_handler)
                 if _exitcode != 0:
                     # Try to read the exception from the child process
-                    exc_info = {}
-                    if os.path.exists(exc_file_path):
-                        with (
-                            contextlib.suppress(Exception),
-                            open(exc_file_path, "rb") as f,
-                        ):
-                            exc_info = cloudpickle.load(f)
+                    exc_info: dict[str, Any] = {}
+                    exc_file_existed = os.path.exists(exc_file_path)
+                    load_error: str | None = None
+                    if exc_file_existed:
+                        try:
+                            with open(exc_file_path, "rb") as f:
+                                exc_info = cloudpickle.load(f)
+                        except Exception as e:
+                            load_error = f"{type(e).__name__}: {e}"
 
                     if (
                         original_exception := exc_info.get("pickled_exception")
@@ -1001,11 +1002,19 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
                             f" (exit code: {_exitcode}):\n{original_tb}"
                         ) from None
 
-                    # Fallback to the original generic error
+                    # Fallback: no recoverable exception; include diagnostics
+                    diag = (
+                        f" exc_file_path={exc_file_path!r}"
+                        f" exc_file_existed={exc_file_existed}"
+                    )
+                    if load_error is not None:
+                        diag += f" load_error={load_error!r}"
                     raise AssertionError(
                         f"function {func.__name__} failed when called with"
                         f" args {args} and kwargs {kwargs}"
-                        f" (exit code: {_exitcode})"
+                        f" (exit code: {_exitcode});"
+                        f" exception could not be recovered from child"
+                        f"{diag}"
                     ) from None
 
     return wrapper
