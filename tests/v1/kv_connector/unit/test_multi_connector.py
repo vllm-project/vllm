@@ -71,6 +71,12 @@ class MockConnector(KVConnectorBase_V1):
         pass
 
 
+class MockCrossLayerConnector(MockConnector):
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        return True
+
+
 # Register the mock connector
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
 
@@ -706,6 +712,24 @@ class TestMultiConnectorStats:
         # One non-empty
         stats.data["NixlConnector"].data["transfer_duration"].append(1.0)
         assert not stats.is_empty()
+
+
+class TestMultiConnectorPreferCrossLayerBlocks:
+    def test_all_connectors_prefer_cross_layer_blocks(self):
+        mc = MultiConnector.__new__(MultiConnector)
+        mc._connectors = [
+            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
+            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
+        ]
+        assert mc.prefer_cross_layer_blocks is True
+
+    def test_mixed_connectors_do_not_prefer_cross_layer_blocks(self):
+        mc = MultiConnector.__new__(MultiConnector)
+        mc._connectors = [
+            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
+            MockConnector.__new__(MockConnector),  # default False
+        ]
+        assert mc.prefer_cross_layer_blocks is False
 
 
 def test_multi_connector_overrides_all_base_methods():
