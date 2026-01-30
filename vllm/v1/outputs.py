@@ -51,13 +51,17 @@ class LogprobsTensors(NamedTuple):
     logprobs: torch.Tensor
     # [num_reqs x num_generated_tokens]
     selected_token_ranks: torch.Tensor
+    # [num_reqs]
+    cu_num_generated_tokens: list[int] | None = None
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
         return LogprobsLists(
             self.logprob_token_ids.cpu().numpy(),
             self.logprobs.cpu().numpy(),
             self.selected_token_ranks.cpu().numpy(),
-            cu_num_generated_tokens,
+            cu_num_generated_tokens
+            if cu_num_generated_tokens is not None
+            else self.cu_num_generated_tokens,
         )
 
     def to_cpu_nonblocking(self) -> "LogprobsTensors":
@@ -67,6 +71,7 @@ class LogprobsTensors(NamedTuple):
             self.logprob_token_ids.to("cpu", non_blocking=True),
             self.logprobs.to("cpu", non_blocking=True),
             self.selected_token_ranks.to("cpu", non_blocking=True),
+            self.cu_num_generated_tokens,
         )
 
     def filter(self, mask: torch.Tensor) -> "LogprobsTensors":
