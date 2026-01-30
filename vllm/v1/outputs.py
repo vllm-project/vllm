@@ -76,6 +76,9 @@ class LogprobsTensors(NamedTuple):
 
     def filter(self, mask: torch.Tensor) -> "LogprobsTensors":
         """Filter the logprobs tensors with the given bool mask."""
+        assert self.cu_num_generated_tokens is None, (
+            "filter can't be used with cu_num_generated_tokens"
+        )
         return LogprobsTensors(
             self.logprob_token_ids[mask],
             self.logprobs[mask],
