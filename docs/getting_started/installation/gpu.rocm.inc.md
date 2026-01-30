@@ -235,8 +235,8 @@ To use the docker image as base for development, you can launch it in interactiv
 # --8<-- [end:use-custom-docker-image]
 # --8<-- [start:amd-prebuilt-images]
 
-The [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
-docker image designed for validating inference performance on the AMD Instinct MI300X accelerator.
+Prior to January 20th, 2026 when the official docker images are available on [upstream vllm docker hub](https://hub.docker.com/v2/repositories/vllm/vllm-openai-rocm/tags/), the [AMD Infinity hub for vLLM](https://hub.docker.com/r/rocm/vllm/tags) offers a prebuilt, optimized
+docker image designed for validating inference performance on the AMD Instinct MI300X™ accelerator.
 AMD also offers nightly prebuilt docker image from [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev), which has vLLM and all its dependencies installed. The entrypoint of this docker image is `/bin/bash` (different from the vLLM's Official Docker Image).
 
 ???+ console "Commands"
