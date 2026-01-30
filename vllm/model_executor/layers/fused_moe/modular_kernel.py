@@ -968,7 +968,7 @@ class FusedMoEKernel(torch.nn.Module):
         fused_experts: FusedMoEExperts,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
-    ) -> "FusedMoEKernel":
+    ) -> "FusedMoEMonolithicKernel" | "FusedMoEModularKernel":
         """
         Factory method to create a FusedMoEKernel instance.
         """

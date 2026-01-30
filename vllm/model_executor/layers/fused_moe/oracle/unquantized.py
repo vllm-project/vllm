@@ -137,7 +137,7 @@ def make_unquantized_moe_kernel(
             FlashInferExperts,
         )
 
-        kernel = mk.FusedMoEKernel.make_mk(
+        kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
                 moe_config=moe_config,
@@ -150,7 +150,7 @@ def make_unquantized_moe_kernel(
             AiterExperts,
         )
 
-        kernel = mk.FusedMoEKernel.make_mk(
+        kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             AiterExperts(
                 moe_config=moe_config,
