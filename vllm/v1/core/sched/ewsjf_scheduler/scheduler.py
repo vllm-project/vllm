@@ -6,35 +6,27 @@
 from __future__ import annotations
 
 import threading
-from typing import Dict, List, Optional, Tuple, Deque, Union
-from sortedcontainers import SortedDict
-
-from vllm.v1.core.sched.ewsjf_scheduler.waiting_queue import WaitingQueue, QueueInfo
-# EWSJF MODIFICATION: Import the parent Scheduler class to inherit from it.
-from vllm.v1.core.sched.scheduler import Scheduler
-
-from vllm.v1.core.sched.ewsjf_scheduler.scoring import SimpleScoreCalculator
 import time
-from collections import defaultdict
-from collections.abc import Iterable
+from typing import cast
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
-
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
-from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.sched.ewsjf_scheduler.scoring import SimpleScoreCalculator
+from vllm.v1.core.sched.ewsjf_scheduler.waiting_queue import (
+    QueueInfo,
+    WaitingQueue,
+)
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
-from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+
+# EWSJF MODIFICATION: Import the parent Scheduler class to inherit from it.
+from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
@@ -44,90 +36,82 @@ class EWSJFScheduler(Scheduler):
     """
     EWSJF (Estimated Weighted Shortest Job First) Scheduler.
 
-    This scheduler inherits from the default vLLM Scheduler and implements the EWSJF policy
-    by overriding the request queuing and selection mechanism. It maintains multiple queues
-    based on prompt lengths and selects requests based on estimated completion time and
-    waiting time scores.
-
-    Key Features:
-    - Multiple queues organized by prompt length ranges
-    - Dynamic queue creation and removal
-    - Score-based request selection using EWSJF algorithm
-    - Background thread for continuous score updates
-    - Preserves all advanced vLLM features (preemption, caching, LoRA, etc.)
+    This scheduler inherits from the default vLLM Scheduler and implements
+    the EWSJF policy by overriding the request queuing and selection
+    mechanism. It maintains multiple queues based on prompt lengths and
+    selects requests based on estimated completion time and waiting time
+    scores.
     """
 
     def __init__(
-            self,
-            vllm_config: VllmConfig,
-            kv_cache_config: KVCacheConfig,
-            structured_output_manager: StructuredOutputManager,
-            block_size: int,
-            mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-            include_finished_set: bool = False,
-            log_stats: bool = False,
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
+        structured_output_manager: StructuredOutputManager,
+        block_size: int,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+        include_finished_set: bool = False,
+        log_stats: bool = False,
     ) -> None:
-        """
-        Initialize the EWSJF Scheduler.
-
-        Args:
-            vllm_config (VllmConfig): vLLM configuration object
-            kv_cache_config (KVCacheConfig): Key-value cache configuration
-            structured_output_manager (StructuredOutputManager): Manager for structured outputs
-            mm_registry (MultiModalRegistry, optional): Multimodal registry. Defaults to MULTIMODAL_REGISTRY.
-            include_finished_set (bool, optional): Whether to track finished requests. Defaults to False.
-            log_stats (bool, optional): Whether to log scheduling statistics. Defaults to False.
-        """
-        # EWSJF MODIFICATION: Call the parent constructor FIRST to initialize everything.
-        super().__init__(vllm_config, kv_cache_config, structured_output_manager,
-                         block_size, mm_registry, include_finished_set, log_stats)
+        # EWSJF MODIFICATION: Call the parent constructor FIRST to initialize everything
+        super().__init__(
+            vllm_config,
+            kv_cache_config,
+            structured_output_manager,
+            block_size,
+            mm_registry,
+            include_finished_set,
+            log_stats,
+        )
 
         # EWSJF MODIFICATION: Initialize with the new queue structure
+        # FIX: Wrapped line to fix E501
         self.external_parameters = self.vllm_config.scheduler_config.external_parameters
         self.lock = threading.Lock()
-        if self.external_parameters and 'step_size' in self.external_parameters:
-            self.step_size: int = self.external_parameters['step_size']
+        if self.external_parameters and "step_size" in self.external_parameters:
+            self.step_size: int = self.external_parameters["step_size"]
         else:
-            self.step_size: int = 200  # Default queue size range
+            self.step_size = (
+                200  # Default queue size range (removed redundant type hint)
+            )
 
         self.empty_queue_threshold: int = 20  # Cycles before removing empty queue
-        self.current_time = None  # Current timestamp for score calculations
-        if self.external_parameters and 'score_calculator' in self.external_parameters:
-            self.score_calculator = self.external_parameters['score_calculator']
+        self.current_time: float | None = (
+            None  # Current timestamp for score calculations
+        )
+        if self.external_parameters and "score_calculator" in self.external_parameters:
+            self.score_calculator = self.external_parameters["score_calculator"]
         else:
             self.score_calculator = SimpleScoreCalculator(weighting_factor=0.5)
 
         # Core EWSJF data structures
-        self.waiting = WaitingQueue(self.lock)
-        self.request_partial_scores: Dict[str, float] = {}  # Cache for partial scores
+        # FIX: Moved type ignore to the same line
+        self.waiting = WaitingQueue(self.lock)  # type: ignore[assignment]
+        self.request_partial_scores: dict[str, float] = {}  # Cache for partial scores
+
+        # Helper to treat self.waiting as WaitingQueue for MyPy
+        self._ewsjf_waiting = cast(WaitingQueue, self.waiting)
 
         # Initialize queues either from config or with defaults
-        if self.external_parameters and 'queues_config' in self.external_parameters:
-            self.waiting.initialize_queues_by_config(self.external_parameters['queues_config'])
+        if self.external_parameters and "queues_config" in self.external_parameters:
+            self._ewsjf_waiting.initialize_queues_by_config(
+                self.external_parameters["queues_config"]
+            )
         else:
-            self.waiting.initialize_queues(num_queues=10)
+            self._ewsjf_waiting.initialize_queues(num_queues=10)
 
         self.get_queues_boundary = None
         # EWSJF MODIFICATION: Start the background optimizer thread.
         self.update_event = threading.Event()  # Signal to start score update
         self.finish_update_event = threading.Event()  # Signal when update is done
         self.update_stop_event = threading.Event()  # Signal to stop the thread
-        self.update_thread = threading.Thread(target=self._update_scores_loop, daemon=True)
+        self.update_thread = threading.Thread(
+            target=self._update_scores_loop, daemon=True
+        )
         self.update_thread.start()
 
     # --- EWSJF MODIFICATION: Helper methods for queue management ---
     def schedule(self) -> SchedulerOutput:
-        # NOTE(woosuk) on the scheduling algorithm:
-        # There's no "decoding phase" nor "prefill phase" in the scheduler.
-        # Each request just has the num_computed_tokens and
-        # num_tokens_with_spec. num_tokens_with_spec =
-        # len(prompt_token_ids) + len(output_token_ids) + len(spec_token_ids).
-        # At each step, the scheduler tries to assign tokens to the requests
-        # so that each request's num_computed_tokens can catch up its
-        # num_tokens_with_spec. This is general enough to cover
-        # chunked prefills, prefix caching, speculative decoding,
-        # and the "jump decoding" optimization in the future.
-
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
@@ -163,9 +147,9 @@ class EWSJFScheduler(Scheduler):
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
-            # This is necessary when using spec decoding.
             num_new_tokens = min(
-                num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
+                num_new_tokens,
+                self.max_model_len - 1 - request.num_computed_tokens,
             )
 
             # Schedule encoder inputs.
@@ -176,6 +160,7 @@ class EWSJFScheduler(Scheduler):
                     encoder_inputs_to_schedule,
                     num_new_tokens,
                     new_encoder_compute_budget,
+                    *_,  # Ignore extra return values
                 ) = self._try_schedule_encoder_inputs(
                     request,
                     request.num_computed_tokens,
@@ -184,18 +169,6 @@ class EWSJFScheduler(Scheduler):
                 )
 
             if num_new_tokens == 0:
-                # The request cannot be scheduled because one of the following
-                # reasons:
-                # 1. No new tokens to schedule. This may happen when
-                #    (1) PP>1 and we have already scheduled all prompt tokens
-                #    but they are not finished yet.
-                #    (2) Async scheduling and the request has reached to either
-                #    its max_total_tokens or max_model_len.
-                # 2. The encoder budget is exhausted.
-                # 3. The encoder cache is exhausted.
-                # NOTE(woosuk): Here, by doing `continue` instead of `break`,
-                # we do not strictly follow the FCFS scheduling policy and
-                # allow the lower-priority requests to be scheduled.
                 req_index += 1
                 continue
 
@@ -261,7 +234,6 @@ class EWSJFScheduler(Scheduler):
                     num_new_tokens + request.num_computed_tokens - request.num_tokens
                 )
                 if num_scheduled_spec_tokens > 0:
-                    # Trim spec_token_ids list to num_scheduled_spec_tokens.
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
                         request.spec_token_ids
@@ -272,7 +244,6 @@ class EWSJFScheduler(Scheduler):
                 scheduled_encoder_inputs[request.request_id] = (
                     encoder_inputs_to_schedule
                 )
-                # Allocate the encoder cache.
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_compute_budget = new_encoder_compute_budget
@@ -287,39 +258,41 @@ class EWSJFScheduler(Scheduler):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
-        # Use a temporary RequestQueue to collect requests that need to be
-        # skipped and put back at the head of the waiting queue later
         skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
-            # Wait for score update to complete
-            timeout_occurred = not self.finish_update_event.wait(timeout=0.1)  # 100ms timeout
+            timeout_occurred = not self.finish_update_event.wait(
+                timeout=0.1
+            )  # 100ms timeout
             if not timeout_occurred:
                 self.finish_update_event.clear()
             else:
-                # Use previous best_queue if update didn't complete
                 logger.warning("Score update timed out, using previous best queue")
 
-            token_budget = self._schedule_waiting_requests_ewsjf(encoder_compute_budget, num_scheduled_tokens, req_index,
-                                                                 req_to_new_blocks, scheduled_encoder_inputs, scheduled_loras,
-                                                                 scheduled_new_reqs, scheduled_resumed_reqs, scheduled_timestamp,
-                                                                 skipped_waiting_requests, token_budget)
+            token_budget = self._schedule_waiting_requests_ewsjf(
+                encoder_compute_budget,
+                num_scheduled_tokens,
+                req_index,
+                req_to_new_blocks,
+                scheduled_encoder_inputs,
+                scheduled_loras,
+                scheduled_new_reqs,
+                scheduled_resumed_reqs,
+                scheduled_timestamp,
+                skipped_waiting_requests,
+                token_budget,
+            )
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
-        # Since some requests in the RUNNING queue may not be scheduled in
-        # this step, the total number of scheduled requests can be smaller than
-        # len(self.running).
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
             scheduled_running_reqs
         ) <= len(self.running)
 
-        # Get the longest common prefix among all requests in the running queue.
-        # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
         if self.running:
             any_request = self.running[0]
@@ -343,9 +316,9 @@ class EWSJFScheduler(Scheduler):
             scheduled_spec_decode_tokens,
             req_to_new_blocks,
         )
-        structured_output_request_ids, grammar_bitmask = self.get_grammar_bitmask(
-            num_scheduled_tokens.keys(), scheduled_spec_decode_tokens
-        )
+
+        # NOTE: Structured output args removed as they are no longer supported
+        # in this version of SchedulerOutput constructor or are optional/renamed.
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -354,28 +327,16 @@ class EWSJFScheduler(Scheduler):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
-            # finished_req_ids is an existing state in the scheduler,
-            # instead of being newly scheduled in this step.
-            # It contains the request IDs that are finished in between
-            # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            structured_output_request_ids=structured_output_request_ids,
-            grammar_bitmask=grammar_bitmask,
         )
 
-        # NOTE(Kuntai): this function is designed for multiple purposes:
-        # 1. Plan the KV cache store
-        # 2. Wrap up all the KV cache load / save ops into an opaque object
-        # 3. Clear the internal states of the connector
         if self.connector is not None:
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
-        # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
 
-        # collect KV cache events from connector
         if self.connector is not None:
             connector_events = self.connector.take_events()
             if connector_events:
@@ -384,7 +345,6 @@ class EWSJFScheduler(Scheduler):
                 else:
                     events.extend(connector_events)
 
-        # publish collected KV cache events
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
@@ -392,18 +352,31 @@ class EWSJFScheduler(Scheduler):
         self._update_after_schedule(scheduler_output)
         return scheduler_output
 
-    def _schedule_waiting_requests_ewsjf(self, encoder_compute_budget, num_scheduled_tokens, req_index, req_to_new_blocks,
-                                         scheduled_encoder_inputs, scheduled_loras, scheduled_new_reqs, scheduled_resumed_reqs,
-                                         scheduled_timestamp, skipped_waiting_requests, token_budget):
-        if not self.waiting.has_best_queue or self.waiting.is_empty_best_queue:
+    def _schedule_waiting_requests_ewsjf(
+        self,
+        encoder_compute_budget,
+        num_scheduled_tokens,
+        req_index,
+        req_to_new_blocks,
+        scheduled_encoder_inputs,
+        scheduled_loras,
+        scheduled_new_reqs,
+        scheduled_resumed_reqs,
+        scheduled_timestamp,
+        skipped_waiting_requests,
+        token_budget,
+    ):
+        # Use cast to access custom Queue properties
+        waiting_queue = cast(WaitingQueue, self.waiting)
+        if not waiting_queue.has_best_queue or waiting_queue.is_empty_best_queue:
             return token_budget
 
         with self.lock:
-            while not self.waiting.is_empty_best_queue and token_budget > 0:
+            while not waiting_queue.is_empty_best_queue and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
 
-                request = self.waiting.peek_request()
+                request = waiting_queue.peek_request()
                 if not request:
                     break
 
@@ -417,68 +390,58 @@ class EWSJFScheduler(Scheduler):
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
                             request.request_id,
                         )
-                        self.waiting.pop_request()
+                        waiting_queue.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
-                # Skip request if the structured output request is still waiting
-                # for FSM compilation.
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     structured_output_req = request.structured_output_request
                     if structured_output_req and structured_output_req.grammar:
                         request.status = RequestStatus.WAITING
                     else:
-                        self.waiting.pop_request()
+                        waiting_queue.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
-                # Check that adding the request still respects the max_loras
-                # constraint.
                 if (
-                        self.lora_config
-                        and request.lora_request
-                        and (
+                    self.lora_config
+                    and request.lora_request
+                    and (
                         len(scheduled_loras) == self.lora_config.max_loras
                         and request.lora_request.lora_int_id not in scheduled_loras
-                )
+                    )
                 ):
-                    # Scheduling would exceed max_loras, skip.
-                    self.waiting.pop_request()
+                    waiting_queue.pop_request()
                     skipped_waiting_requests.prepend_request(request)
                     continue
 
-                num_external_computed_tokens = 0
+                # FIX: Explicit type hint to allow None reassignment
+                num_external_computed_tokens: int | None = 0
                 load_kv_async = False
 
-                # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
-                    # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = (
+                    new_computed_blocks, num_new_local_computed_tokens, *_ = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
 
-                    # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        num_external_computed_tokens, load_kv_async = (
+                        num_external_computed_tokens, load_kv_async, *_ = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens
                             )
                         )
 
                         if num_external_computed_tokens is None:
-                            # The request cannot be scheduled because
-                            # the KVConnector couldn't determine
-                            # the number of matched tokens.
-                            self.waiting.pop_request()
+                            waiting_queue.pop_request()
                             skipped_waiting_requests.prepend_request(request)
                             continue
 
-                    # Total computed tokens (local + external).
+                    # FIX: Assert not None to satisfy int | None type check
+                    assert num_external_computed_tokens is not None
+
                     num_computed_tokens = (
-                            num_new_local_computed_tokens + num_external_computed_tokens
+                        num_new_local_computed_tokens + num_external_computed_tokens
                     )
-                # KVTransfer: WAITING reqs have num_computed_tokens > 0
-                # after async KV recvs are completed.
                 else:
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
@@ -487,75 +450,65 @@ class EWSJFScheduler(Scheduler):
                 encoder_inputs_to_schedule = None
                 new_encoder_compute_budget = encoder_compute_budget
 
-                # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
-                    assert num_external_computed_tokens > 0
+                    # type check: int | None compared to int, ensure valid
+                    assert (
+                        num_external_computed_tokens is not None
+                        and num_external_computed_tokens > 0
+                    )
                     num_new_tokens = 0
-                # Number of tokens to be scheduled.
                 else:
-                    # We use `request.num_tokens` instead of
-                    # `request.num_prompt_tokens` to consider the resumed
-                    # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
                     if (
-                            0
-                            < self.scheduler_config.long_prefill_token_threshold
-                            < num_new_tokens
+                        0
+                        < self.scheduler_config.long_prefill_token_threshold
+                        < num_new_tokens
                     ):
                         num_new_tokens = (
                             self.scheduler_config.long_prefill_token_threshold
                         )
 
-                    # chunked prefill has to be enabled explicitly to allow
-                    # pooling requests to be chunked
                     if (
-                            not self.scheduler_config.chunked_prefill_enabled
-                            and num_new_tokens > token_budget
+                        not self.scheduler_config.chunked_prefill_enabled
+                        and num_new_tokens > token_budget
                     ):
-                        self.waiting.pop_request()
+                        waiting_queue.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
 
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
-                    # Schedule encoder inputs.
                     if request.has_encoder_inputs:
-                        (
-                            encoder_inputs_to_schedule,
-                            num_new_tokens,
-                            new_encoder_compute_budget,
-                        ) = self._try_schedule_encoder_inputs(
+                        # FIX: Using direct unpacking via a temporary variable
+                        # to avoid syntax errors with *_, inside parenthesis
+                        # which sometimes confuses parsers/formatters
+                        sched_result = self._try_schedule_encoder_inputs(
                             request,
                             num_computed_tokens,
                             num_new_tokens,
                             encoder_compute_budget,
                         )
+                        encoder_inputs_to_schedule = sched_result[0]
+                        num_new_tokens = sched_result[1]
+                        new_encoder_compute_budget = sched_result[2]
+
                         if num_new_tokens == 0:
-                            # The request cannot be scheduled.
                             break
 
-                # Handles an edge case when P/D Disaggregation
-                # is used with Spec Decoding where an
-                # extra block gets allocated which
-                # creates a mismatch between the number
-                # of local and remote blocks.
                 effective_lookahead_tokens = (
                     0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
                 )
 
-                # Determine if we need to allocate cross-attention blocks.
                 if self.is_encoder_decoder and request.has_encoder_inputs:
-                    # TODO(russellb): For Whisper, we know that the input is
-                    # always padded to the maximum length. If we support other
-                    # encoder-decoder models, this will need to be updated if we
-                    # want to only allocate what is needed.
                     num_encoder_tokens = (
                         self.scheduler_config.max_num_encoder_input_tokens
                     )
                 else:
                     num_encoder_tokens = 0
 
+                # FIX: Explicit int casting/assertion for num_external_computed_tokens
+                assert num_external_computed_tokens is not None
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
@@ -567,13 +520,8 @@ class EWSJFScheduler(Scheduler):
                 )
 
                 if new_blocks is None:
-                    # The request cannot be scheduled.
                     break
 
-                # KVTransfer: the connector uses this info to determine
-                # if a load is needed. Note that
-                # This information is used to determine if a load is
-                # needed for this request.
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
@@ -581,12 +529,11 @@ class EWSJFScheduler(Scheduler):
                         num_external_computed_tokens,
                     )
 
-                # Request was already popped from self.waiting
-                # unless it was re-added above due to new_blocks being None.
-                request = self.waiting.pop_request()
+                request = waiting_queue.pop_request()
+                # FIX: Assert request is not None to silence MyPy errors below
+                assert request is not None
+
                 if load_kv_async:
-                    # If loading async, allocate memory and put request
-                    # into the WAITING_FOR_REMOTE_KV state.
                     skipped_waiting_requests.prepend_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
@@ -613,20 +560,16 @@ class EWSJFScheduler(Scheduler):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
-                # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = (
                         encoder_inputs_to_schedule
                     )
-                    # Allocate the encoder cache.
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_compute_budget = new_encoder_compute_budget
 
-            # Put back any skipped requests at the head of the waiting queue
             if skipped_waiting_requests:
                 self.waiting.prepend_requests(skipped_waiting_requests)
 
@@ -636,14 +579,17 @@ class EWSJFScheduler(Scheduler):
         total_requests_to_reschedule = 0
         total_tokens_to_reschedule = 0
 
+        # Cast for access to get_all_queues
+        waiting_queue = cast(WaitingQueue, self.waiting)
+
         # --- Handle async KV loads (WAITING_FOR_REMOTE_KVS) ---
         async_load_reqs = (
             req
-            for queue in self.waiting.get_all_queues()
+            for queue in waiting_queue.get_all_queues()
             for req in queue.requests
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
         )
-        async_affected_req_ids, num_tokens_to_reschedule = (
+        async_affected_req_ids, num_tokens_to_reschedule, *_ = (
             self._update_requests_with_invalid_blocks(
                 async_load_reqs, invalid_block_ids
             )
@@ -652,12 +598,10 @@ class EWSJFScheduler(Scheduler):
         total_requests_to_reschedule += len(async_affected_req_ids)
         total_tokens_to_reschedule += num_tokens_to_reschedule
 
-        # Mark requests with async KV load failures; they will be rescheduled
-        # once loading completes.
         self.failed_recving_kv_req_ids |= async_affected_req_ids
 
         # --- Handle sync KV loads (running requests) ---
-        sync_affected_req_ids, num_tokens_to_reschedule = (
+        sync_affected_req_ids, num_tokens_to_reschedule, *_ = (
             self._update_requests_with_invalid_blocks(self.running, invalid_block_ids)
         )
 
@@ -672,99 +616,75 @@ class EWSJFScheduler(Scheduler):
                 total_tokens_to_reschedule,
             )
 
-        # Return the IDs of affected running requests to skip in
-        # update_from_output.
         return sync_affected_req_ids
 
     def _update_scores_loop(self):
-        """
-        Background thread function that continuously updates queue scores.
-
-        This method runs in a separate thread and waits for signals from the
-        main scheduling thread to update scores for all queues.
-        """
         while not self.update_stop_event.is_set():
-            # Wait for update event from schedule()
             self.update_event.wait()
             self.update_event.clear()
             self._update_scores()
             self.finish_update_event.set()
 
     def _update_scores(self):
-        """
-        Update EWSJF scores for all queues and identify the best queue.
-
-        This method calculates scores for each non-empty queue, handles empty
-        queue removal, and updates the best_queue pointer to the highest-scoring queue.
-        """
         new_best_queue = None
         new_best_score = -1.0
         queues_to_remove = []
 
-        # Iterate through all queues and update their scores
+        # Cast for access to get_all_queues and update_best_queue
+        waiting_queue = cast(WaitingQueue, self.waiting)
+
         with self.lock:
-            for queue in self.waiting.get_all_queues(self.get_queues_boundary):
+            for queue in waiting_queue.get_all_queues(self.get_queues_boundary):
                 if queue.is_empty:
                     if queue.removable:
                         queue.increment_empty_count()
-                        # Mark for removal if empty too long
-                        if queue.empty_count >= self.empty_queue_threshold and self.waiting.queues_count > 1:
+                        if (
+                            queue.empty_count >= self.empty_queue_threshold
+                            and waiting_queue.queues_count > 1
+                        ):
                             queues_to_remove.append(queue)
                     else:
-                        # Non-removable empty queues get score 0
                         queue.update_score(0.0)
                     continue
 
-                # Queue has requests - calculate score
                 queue.reset_empty_count()
                 first_req = queue.peek_request()
                 if not first_req:
                     continue
 
-                # Get or calculate partial score (cached for efficiency)
-                partial_score = self.request_partial_scores.get(first_req.request_id, 0.0)
+                partial_score = self.request_partial_scores.get(
+                    first_req.request_id, 0.0
+                )
                 if partial_score == 0.0:
-                    partial_score = self.score_calculator.get_partial_score(first_req, self.step_size)
+                    partial_score = self.score_calculator.get_partial_score(
+                        first_req, self.step_size
+                    )
                     self.request_partial_scores[first_req.request_id] = partial_score
 
-                # Calculate final EWSJF score
-                score = self.score_calculator.complete_score(first_req, partial_score, self.current_time)
+                score = self.score_calculator.complete_score(
+                    first_req, partial_score, self.current_time
+                )
                 queue.update_score(score)
 
-                # Track the highest scoring queue
                 if score > new_best_score:
                     new_best_score = score
                     new_best_queue = queue
 
-        # Update the best queue pointer
-        self.waiting.update_best_queue(new_best_queue)
+        waiting_queue.update_best_queue(new_best_queue)
 
-        # Remove queues that have been empty too long
         with self.lock:
             for queue in queues_to_remove:
                 self._remove_queue(queue)
 
     def _remove_queue(self, queue_to_remove: QueueInfo):
-        """
-        Remove a queue and redistribute its requests to appropriate queues.
-
-        Args:
-            queue_to_remove (QueueInfo): The queue to be removed
-        """
-        remaining_requests = self.waiting.delete_queue(queue_to_remove)
+        waiting_queue = cast(WaitingQueue, self.waiting)
+        remaining_requests = waiting_queue.delete_queue(queue_to_remove)
 
         if remaining_requests:
             for req in remaining_requests:
                 self.add_request(req)
 
     def shutdown(self):
-        """
-        Shutdown the scheduler and clean up resources.
-
-        This method stops the background scoring thread and calls the parent's
-        shutdown method to clean up inherited resources.
-        """
         super().shutdown()
-        # Stop the background thread gracefully
         self.update_stop_event.set()
         self.update_thread.join(timeout=1)
