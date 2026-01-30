@@ -9,6 +9,6 @@ tasks:
 limit: 1319
 num_fewshot: 5
 kv_cache_dtype: nvfp4
-attention_backend: CUTLASS_MLA
+attention_backend: FLASHINFER_MLA
 env_vars:
   VLLM_USE_FLASHINFER_MOE_FP4: "0"
