@@ -33,7 +33,7 @@ from grpc_reflection.v1alpha import reflection
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.utils import log_version_and_model
+from vllm.entrypoints.utils import cli_env_setup, log_version_and_model
 from vllm.grpc import vllm_engine_pb2, vllm_engine_pb2_grpc
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -560,6 +560,8 @@ async def serve_grpc(args: argparse.Namespace):
 
 def main():
     """Main entry point."""
+    cli_env_setup()
+
     parser = FlexibleArgumentParser(
         description="vLLM gRPC Server",
     )
