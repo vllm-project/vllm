@@ -10,11 +10,13 @@ import vllm.plugins
 from tests.compile.backend import TestBackend
 from tests.utils import TestBlockFP8Layer, TestFP8Layer
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
     FUSED_OPS,
     FusedRMSQuantKey,
     RMSNormQuantFusionPass,
+    rms_norm_nvfp4_quant_supported,
 )
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
@@ -48,6 +50,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kNvfp4Dynamic,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
@@ -58,6 +61,7 @@ from vllm.utils.deep_gemm import (
 )
 
 FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
@@ -439,3 +443,118 @@ def test_aiter_fusion_rmsnorm_quant(
         _run_fusion_test(
             model, fusion_pass, vllm_config, dtype, hidden_size, num_tokens
         )
+
+
+def is_nvfp4_supported():
+    return current_platform.has_device_capability(100)
+
+
+def quant_nvfp4_tensor(a: torch.Tensor):
+    from vllm.scalar_type import scalar_types
+
+    FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
+    FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+    a_global_scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.abs(a).max().to(
+        torch.float32
+    )
+    a_quant, a_block_scale = scaled_fp4_quant(a, a_global_scale)
+    return a_quant, a_block_scale, a_global_scale
+
+
+class TestRMSNormNvfp4QuantModel(torch.nn.Module):
+    def __init__(self, hidden_size: int, eps: float, x: torch.Tensor):
+        super().__init__()
+        self.norm = RMSNorm(hidden_size, eps)
+        self.enable_rms_norm_custom_op = self.norm.enabled()
+
+        w = torch.rand((hidden_size, hidden_size))
+        self.w, self.w_block_scale, self.w_global_scale = quant_nvfp4_tensor(w)
+
+        y = self.norm(x)
+        _, _, self.y_global_scale = quant_nvfp4_tensor(y)
+        self.alpha = 1.0 / (self.w_global_scale * self.y_global_scale)
+
+    def forward(self, x):
+        y = self.norm(x)
+        y_quant, y_block_scale = scaled_fp4_quant(y, self.y_global_scale)
+        out = cutlass_scaled_fp4_mm(
+            a=y_quant,
+            b=self.w,
+            block_scale_a=y_block_scale,
+            block_scale_b=self.w_block_scale,
+            alpha=self.alpha,
+            out_dtype=y.dtype,
+        )
+        return out
+
+    def ops_in_model_before(self):
+        return [
+            RMS_OP if self.enable_rms_norm_custom_op else torch.ops.aten.rsqrt,
+            QUANT_OPS[kNvfp4Dynamic],
+        ]
+
+    def ops_in_model_after(self):
+        return [FUSED_OPS[FusedRMSQuantKey(kNvfp4Dynamic, False)]]
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("hidden_size", [128, 256])
+@pytest.mark.parametrize("num_tokens", [32, 64])
+@pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test on CUDA")
+def test_fusion_rmsnorm_nvfp4_quant(
+    dtype: torch.dtype,
+    hidden_size: int,
+    num_tokens: int,
+    eps: float,
+    enable_rms_norm_custom_op: bool,
+):
+    if not is_nvfp4_supported():
+        pytest.skip("NVFP4 is not supported on this GPU.")
+
+    if not rms_norm_nvfp4_quant_supported:
+        pytest.skip("rms_norm_nvfp4_quant op is not available.")
+
+    torch.set_default_device("cuda")
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(42)
+
+    x = torch.rand(num_tokens, hidden_size)
+
+    custom_ops = ["none"]
+    if enable_rms_norm_custom_op:
+        custom_ops.append("+rms_norm")
+
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(dtype=dtype),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=custom_ops,
+            backend="eager",
+            pass_config=PassConfig(fuse_norm_quant=True, eliminate_noops=True),
+        ),
+    )
+
+    with vllm.config.set_current_vllm_config(vllm_config):
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        noop_pass = NoOpEliminationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)
+
+        model = TestRMSNormNvfp4QuantModel(hidden_size, eps, x)
+
+        torch._dynamo.mark_dynamic(x, 0)
+
+        result = model(x)
+
+        model2 = torch.compile(model, backend=backend)
+        result2 = model2(x)
+
+        atol, rtol = 1e-1, 1e-1
+        torch.testing.assert_close(result, result2, atol=atol, rtol=rtol)
+
+        assert fusion_pass.matched_count == 1
+        backend.check_before_ops(model.ops_in_model_before())
+        backend.check_after_ops(model.ops_in_model_after())
