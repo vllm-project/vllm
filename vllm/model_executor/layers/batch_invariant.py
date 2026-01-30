@@ -1005,7 +1005,9 @@ def override_envs_for_invariance(
 ):
     supported_backends = [
         AttentionBackendEnum.FLASH_ATTN,  # best supported backend
-        AttentionBackendEnum.FLASHINFER,
+        # FlashInfer temporarily disabled due to invariant CTA sizes.
+        # See FlashInfer issue #2424
+        # AttentionBackendEnum.FLASHINFER,
         AttentionBackendEnum.FLASH_ATTN_MLA,
         AttentionBackendEnum.TRITON_MLA,
         # Not yet supported MLA backends
