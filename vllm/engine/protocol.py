@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, StreamingInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
@@ -49,7 +49,7 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
