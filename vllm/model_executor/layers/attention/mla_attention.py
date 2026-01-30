@@ -1052,6 +1052,7 @@ class MLACommonPrefillMetadata:
     query_seq_lens: torch.Tensor | None = None
     workspace_buffer: torch.Tensor | None = None
     q_data_type: torch.dtype | None = None
+    output_dtype: torch.dtype | None = None
 
 
 @dataclass
@@ -1225,10 +1226,7 @@ def backend_supports_prefill_query_quantization() -> bool:
     - cuDNN Prefill
     - FlashAttention
     """
-    use_fp8_prefill = use_flashinfer_prefill() or use_trtllm_ragged_deepseek_prefill()
-    if use_fp8_prefill:
-        logger.info("Backend supports prefill query quantization")
-    return use_fp8_prefill
+    return use_flashinfer_prefill() or use_trtllm_ragged_deepseek_prefill()
 
 
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
@@ -1283,6 +1281,40 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         return chunked_prefill_workspace_size
 
+    @staticmethod
+    def determine_prefill_query_data_type(
+        vllm_config: VllmConfig,
+        model_dtype: torch.dtype,
+    ) -> torch.dtype:
+        """
+        Determine the query data type for prefill queries.
+        Return FP8 dtype if cache is FP8 and prefill query quantization
+        is enabled, else model dtype.
+        """
+        use_fp8 = (
+            vllm_config.cache_config.cache_dtype.startswith("fp8")
+            and vllm_config.attention_config.use_prefill_query_quantization
+            and backend_supports_prefill_query_quantization()
+        )
+
+        if use_fp8:
+            fp8_dtype = current_platform.fp8_dtype()
+            logger.info_once(
+                "FP8 prefill attention enabled: query data type is FP8", scope="local"
+            )
+            return fp8_dtype
+        elif vllm_config.attention_config.use_prefill_query_quantization:
+            logger.info_once(
+                "Unable to perform FP8 prefill attention when"
+                " use_prefill_query_quantization is enabled. Please"
+                " ensure that --kv-cache-dtype is set to fp8 and your prefill"
+                " backend is compatible with FP8 attention.",
+                scope="local",
+            )
+            return model_dtype
+
+        return model_dtype
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -1308,14 +1340,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.aot_schedule = current_platform.is_cuda()
 
         self.kv_cache_spec = kv_cache_spec
-        self.q_data_type = (
-            current_platform.fp8_dtype()
-            if (
-                vllm_config.cache_config.cache_dtype.startswith("fp8")
-                and vllm_config.attention_config.use_prefill_query_quantization
-                and backend_supports_prefill_query_quantization()
-            )
-            else self.model_config.dtype
+        self.q_data_type = self.determine_prefill_query_data_type(
+            vllm_config, self.model_config.dtype
         )
 
         try:
@@ -1744,6 +1770,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
+                output_dtype=self.model_config.dtype,
             )
 
             if self._use_cudnn_prefill:
@@ -2193,6 +2220,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             enable_pdl=False,
             is_causal=True,
             return_lse=return_softmax_lse,
+            out=out,
         )
 
         if isinstance(ret, tuple):
@@ -2210,7 +2238,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert prefill.chunked_context.seq_lens[chunk_idx] is not None
         assert prefill.workspace_buffer is not None
 
-        out = torch.zeros(
+        out = torch.empty(
             q.shape[0],
             q.shape[1],
             v.shape[2],
@@ -2354,7 +2382,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 output = output_tmp
                 output_lse = output_lse_tmp
 
-        return output, output_lse 
+        return output, output_lse
 
     def _context_parallel_compute_prefill_context(
         self,
@@ -2439,7 +2467,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 device=kv_c_normed.device,
             )
 
-            # kv_b_proj returns [k_nope, v] concatenated - split and write to correct positions
+            # kv_b_proj returns [k_nope, v] concatenated - split and write to
+            # correct positions
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
@@ -2515,7 +2544,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             device=kv_c_normed.device,
         )
 
-        # kv_b_proj returns [k_nope, v] concatenated - split and write to correct positions
+        # kv_b_proj returns [k_nope, v] concatenated - split and write to
+        # correct positions
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
