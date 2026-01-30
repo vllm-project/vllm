@@ -876,7 +876,7 @@ class GPUModelRunner(
             # prev_num_draft_len is used in async scheduling mode with
             # spec decode. it indicates if need to update num_computed_tokens
             # of the request. for example:
-            # fist step: num_computed_tokens = 0, spec_tokens = [],
+            # first step: num_computed_tokens = 0, spec_tokens = [],
             # prev_num_draft_len = 0.
             # second step: num_computed_tokens = 100(prompt lenth),
             # spec_tokens = [a,b], prev_num_draft_len = 0.
@@ -2598,7 +2598,6 @@ class GPUModelRunner(
             logits,
             sampling_metadata,
         )
-        self._update_states_after_model_execute(sampler_output.sampled_token_ids)
         return sampler_output
 
     def _bookkeeping_sync(
@@ -3354,6 +3353,8 @@ class GPUModelRunner(
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
+
+        self._update_states_after_model_execute(sampler_output.sampled_token_ids)
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()

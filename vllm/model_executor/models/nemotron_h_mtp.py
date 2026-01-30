@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -206,6 +207,7 @@ class NemotronHMTPMoEDecoderLayer(NemotronHMoEDecoderLayer):
         return hidden_states, residual
 
 
+@support_torch_compile
 class NemotronHMultiTokenPredictor(nn.Module):
     """MTP predictor with NemotronH layers."""
 
