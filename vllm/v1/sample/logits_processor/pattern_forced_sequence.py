@@ -86,6 +86,15 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
             if state == ForcingState.NORMAL:
                 # Check for trigger pattern (filter -1 placeholders)
                 real_tokens = [t for t in output_ids if t != -1]
+                # Log every 10 tokens to avoid spam
+                if len(real_tokens) > 0 and len(real_tokens) % 10 == 0:
+                    last6 = real_tokens[-min(6, len(real_tokens)) :]
+                    logger.info(
+                        "[PIPELINE] apply: index=%d, real_tokens=%d, last6=%s",
+                        index,
+                        len(real_tokens),
+                        last6,
+                    )
                 if len(real_tokens) >= len(TRIGGER_PATTERN):
                     tail = real_tokens[-len(TRIGGER_PATTERN) :]
                     if tail == TRIGGER_PATTERN:
