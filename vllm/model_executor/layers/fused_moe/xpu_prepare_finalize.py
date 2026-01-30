@@ -74,4 +74,4 @@ class XPUMoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        return None
+        output.copy_(fused_expert_output)
