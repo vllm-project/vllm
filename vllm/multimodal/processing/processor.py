@@ -999,10 +999,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         else:
             self.data_parser = self.info.get_data_parser()
 
-            self.data_parser = self._get_data_parser()  # type: ignore
-        else:
-            self.data_parser = self.info.get_data_parser()
-
     @property
     @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
     def supported_mm_limits(self):
@@ -1022,27 +1018,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         return self.apply(prompt, mm_data, hf_processor_mm_kwargs, mm_uuids=mm_uuids)
-
-    def validate_num_items(
-        self,
-        modality: str,
-        num_items: int,
-    ) -> None:
-        supported_limit = self.supported_mm_limits.get(modality, 0)
-        allowed_limit = self.allowed_mm_limits.get(modality, 0)
-
-        if supported_limit is None:
-            supported_limit = allowed_limit
-
-        limit = min(supported_limit, allowed_limit)
-
-        if num_items > limit:
-            msg = f"At most {limit} {modality}(s) may be provided in one prompt."
-
-            if num_items <= supported_limit:
-                msg += " Set `--limit-mm-per-prompt` to increase this limit."
-
-            raise ValueError(msg)
 
     def _to_mm_items(
         self,
@@ -1067,7 +1042,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     )
 
         for modality, items in mm_items.items():
-            self.validate_num_items(modality, len(items))
+            self.info.validate_num_items(modality, len(items))
 
         return mm_items
 

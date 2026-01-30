@@ -528,16 +528,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         else:
             num_items = len(self._items_by_modality[original_modality]) + 1
 
-        # If use_unified_vision_chunk_modality is enabled,
-        # map image/video to vision_chunk
-        if use_vision_chunk:
-            # To avoid validation fail
-            # because models with use_unified_vision_chunk_modality=True
-            # will only accept vision_chunk modality.
-            input_modality = "vision_chunk"
-            num_items = len(self._items_by_modality[input_modality]) + 1
-        else:
-            num_items = len(self._items_by_modality[original_modality]) + 1
+        self.mm_processor.info.validate_num_items(input_modality, num_items)
 
         # Track original modality for vision_chunk items
         if use_vision_chunk:
