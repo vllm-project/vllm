@@ -44,7 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFP8Dynamic128x128Sym,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 
@@ -137,11 +137,11 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
-            QUANT_OPS[kNvfp4Quant],
+            QUANT_OPS[kNvfp4Dynamic],
         ]
 
     def ops_in_model_after(self):
-        return [FUSED_OPS[kNvfp4Quant]]
+        return [FUSED_OPS[kNvfp4Dynamic]]
 
 
 class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
@@ -229,7 +229,7 @@ def test_fusion_silu_and_mul_quant(
     x = torch.rand(num_tokens, hidden_size * 2)
 
     # Reshape pass is needed for the fusion pass to work
-    custom_ops = []
+    custom_ops = ["none"]
     if enable_silu_mul_custom_op:
         custom_ops.append("+silu_and_mul")
     if enable_quant_fp8_custom_op:
@@ -238,6 +238,7 @@ def test_fusion_silu_and_mul_quant(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=custom_ops,
+            backend="eager",  # avoid compilation for SiluAndMul and QuantFP8
             pass_config=PassConfig(fuse_act_quant=True, eliminate_noops=True),
         ),
     )

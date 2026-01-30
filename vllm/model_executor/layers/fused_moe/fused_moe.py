@@ -19,12 +19,10 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     _get_config_dtype_str,
-)
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
-    _valid_deep_gemm,
-    deep_gemm_moe_fp8,
 )
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
@@ -44,10 +42,18 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
-from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -1401,11 +1407,6 @@ direct_register_custom_op(
     op_func=inplace_fused_experts,
     mutates_args=["hidden_states"],
     fake_impl=inplace_fused_experts_fake,
-    tags=(
-        ()
-        if is_torch_equal_or_newer("2.7.0")
-        else (torch.Tag.needs_fixed_stride_order,)
-    ),
 )
 
 
@@ -1496,11 +1497,6 @@ direct_register_custom_op(
     op_name="outplace_fused_experts",
     op_func=outplace_fused_experts,
     fake_impl=outplace_fused_experts_fake,
-    tags=(
-        ()
-        if is_torch_equal_or_newer("2.7.0")
-        else (torch.Tag.needs_fixed_stride_order,)
-    ),
 )
 
 
@@ -1534,66 +1530,36 @@ def fused_experts(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
-    allow_deep_gemm: bool = False,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    # For now, disable DeepGemm for small N (<= 512) until better
-    # permute/unpermute ops are available.
-    # However, on B200, we use DeepGemm for all cases because they only support
-    # E8M0 scale, which means we requantize the weight and input to the specific
-    # scale. Fallen back to cutlass or triton for some cases would cause
-    # accuracy issue.
-    if (
-        allow_deep_gemm
-        and quant_config.use_fp8_w8a8
-        and (is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2))
-    ):
-        assert quant_config is not None
-        return deep_gemm_moe_fp8(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=inplace,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=quant_config.w1_scale,
-            w2_scale=quant_config.w2_scale,
-            a1_scale=quant_config.a1_scale,
-            a2_scale=quant_config.a2_scale,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-        )
-    else:
-        return dispatch_fused_experts_func(inplace)(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            use_fp8_w8a8=quant_config.use_fp8_w8a8,
-            use_int8_w8a8=quant_config.use_int8_w8a8,
-            use_int8_w8a16=quant_config.use_int8_w8a16,
-            use_int4_w4a16=quant_config.use_int4_w4a16,
-            ocp_mx_scheme=quant_config.ocp_mx_scheme,
-            per_channel_quant=quant_config.per_act_token_quant,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            w1_scale=quant_config.w1_scale,
-            w2_scale=quant_config.w2_scale,
-            w1_zp=quant_config.w1_zp,
-            w2_zp=quant_config.w2_zp,
-            a1_scale=quant_config.a1_scale,
-            a2_scale=quant_config.a2_scale,
-            block_shape=quant_config.block_shape,
-            w1_bias=quant_config.w1_bias,
-            w2_bias=quant_config.w2_bias,
-        )
+    return dispatch_fused_experts_func(inplace)(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        activation=activation,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        use_fp8_w8a8=quant_config.use_fp8_w8a8,
+        use_int8_w8a8=quant_config.use_int8_w8a8,
+        use_int8_w8a16=quant_config.use_int8_w8a16,
+        use_int4_w4a16=quant_config.use_int4_w4a16,
+        ocp_mx_scheme=quant_config.ocp_mx_scheme,
+        per_channel_quant=quant_config.per_act_token_quant,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+        w1_scale=quant_config.w1_scale,
+        w2_scale=quant_config.w2_scale,
+        w1_zp=quant_config.w1_zp,
+        w2_zp=quant_config.w2_zp,
+        a1_scale=quant_config.a1_scale,
+        a2_scale=quant_config.a2_scale,
+        block_shape=quant_config.block_shape,
+        w1_bias=quant_config.w1_bias,
+        w2_bias=quant_config.w2_bias,
+    )
 
 
 def _get_config_quant_dtype(
@@ -1924,18 +1890,60 @@ def fused_experts_impl(
 class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(quant_config)
+        super().__init__(moe_config, quant_config)
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return current_platform.is_cuda_alike()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        p = current_platform
+        if p.is_rocm():
+            from vllm.platforms.rocm import on_gfx9
+
+            is_rocm_on_gfx9 = on_gfx9()
+        else:
+            is_rocm_on_gfx9 = False
+
+        device_supports_fp8 = is_rocm_on_gfx9 or (
+            p.is_cuda() and p.has_device_capability((8, 9))
         )
+
+        if not device_supports_fp8:
+            return (weight_key, activation_key) == (None, None)
+
+        SUPPORTED_W_A = [
+            (None, None),
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu", "gelu", "swigluoai"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return not moe_parallel_config.use_fi_all2allv_kernels
 
     def supports_chunking(self) -> bool:
         return True
@@ -2111,11 +2119,43 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class TritonWNA16Experts(TritonExperts):
-    def __init__(
-        self,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(quant_config)
+    @staticmethod
+    def _supports_current_device() -> bool:
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        raise NotImplementedError(
+            "TritonWNA16Experts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
 
     def apply(
         self,
@@ -2254,10 +2294,12 @@ class TritonWNA16Experts(TritonExperts):
 
 
 def modular_triton_fused_moe(
-    quant_config: FusedMoEQuantConfig, shared_experts: torch.nn.Module | None = None
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
+    shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        TritonExperts(quant_config),
+        TritonExperts(moe_config, quant_config),
         shared_experts,
     )
