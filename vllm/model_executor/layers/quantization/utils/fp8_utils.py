@@ -29,7 +29,7 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -1520,6 +1520,7 @@ def create_fp8_scale_parameter(
         raise ValueError(f"Unknown parameter type: {parameter_type}")
 
     scale[:] = torch.finfo(torch.float32).min
+    set_weight_attrs(scale, {"scale_type": "weight_scale"})
     return scale
 
 

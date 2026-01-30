@@ -400,7 +400,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 None,
                 weight_loader,
             )
-            set_weight_attrs(scale, {"scale_type": "weight_scale"})
             layer.register_parameter("weight_scale", scale)
         else:
             assert not self.act_q_static
@@ -412,7 +411,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 self.weight_block_size,
                 weight_loader,
             )
-            set_weight_attrs(scale, {"scale_type": "weight_scale"})
             # The weight_scale_inv name is intentional for deepseekv3
             layer.register_parameter("weight_scale_inv", scale)
 
