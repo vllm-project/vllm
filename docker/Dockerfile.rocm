@@ -3,6 +3,14 @@ ARG REMOTE_VLLM="0"
 ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 
+# Sccache configuration (only used in release pipeline)
+ARG USE_SCCACHE
+ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+ARG SCCACHE_REGION_NAME=us-west-2
+ARG SCCACHE_S3_NO_CREDENTIALS=0
+
 FROM ${BASE_IMAGE} AS base
 
 ARG ARG_PYTORCH_ROCM_ARCH
@@ -14,9 +22,14 @@ ENV RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl
-# Remove sccache
 RUN python3 -m pip install --upgrade pip
-RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
+# Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
+ARG USE_SCCACHE
+RUN if [ "$USE_SCCACHE" != "1" ]; then \
+        apt-get purge -y sccache || true; \
+        python3 -m pip uninstall -y sccache || true; \
+        rm -f "$(which sccache)" || true; \
+    fi
 
 # Install UV
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
@@ -27,6 +40,39 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
+
+# Install sccache if USE_SCCACHE is enabled (for release builds)
+ARG USE_SCCACHE
+ARG SCCACHE_DOWNLOAD_URL
+ARG SCCACHE_ENDPOINT
+ARG SCCACHE_BUCKET_NAME
+ARG SCCACHE_REGION_NAME
+ARG SCCACHE_S3_NO_CREDENTIALS
+RUN if [ "$USE_SCCACHE" = "1" ]; then \
+        if command -v sccache >/dev/null 2>&1; then \
+            echo "sccache already installed, skipping installation"; \
+            sccache --version; \
+        else \
+            echo "Installing sccache..." \
+            && SCCACHE_ARCH="x86_64" \
+            && SCCACHE_VERSION="v0.8.1" \
+            && SCCACHE_DL_URL="${SCCACHE_DOWNLOAD_URL:-https://github.com/mozilla/sccache/releases/download/${SCCACHE_VERSION}/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz}" \
+            && curl -L -o /tmp/sccache.tar.gz ${SCCACHE_DL_URL} \
+            && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+            && mv /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache /usr/bin/sccache \
+            && chmod +x /usr/bin/sccache \
+            && rm -rf /tmp/sccache.tar.gz /tmp/sccache-${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl \
+            && sccache --version; \
+        fi; \
+    fi
+
+# Set sccache environment variables only when USE_SCCACHE=1
+# This prevents S3 config from leaking into images when sccache is not used
+ARG USE_SCCACHE
+ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
+ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
+ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
+ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
@@ -39,6 +85,8 @@ ONBUILD COPY ./ vllm/
 FROM base AS fetch_vllm_1
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_BRANCH="main"
+ENV VLLM_REPO=${VLLM_REPO}
+ENV VLLM_BRANCH=${VLLM_BRANCH}
 ONBUILD RUN git clone ${VLLM_REPO} \
 	    && cd vllm \
 	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
@@ -51,7 +99,7 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
-# Build vLLM
+# Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
     && python3 -m pip install -r requirements/rocm.txt \
     && python3 setup.py clean --all  \
@@ -67,7 +115,6 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
-# -----------------------
 # RIXL/UCX build stages
 FROM base AS build_rixl
 ARG RIXL_BRANCH="f33a5599"
@@ -139,6 +186,107 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
         --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
         --nixl-plugins-dir ${RIXL_HOME}/lib/x86_64-linux-gnu/plugins
 
+
+# -----------------------
+# vLLM wheel release build stage (for building distributable wheels)
+# This stage pins dependencies to custom ROCm wheel versions and handles version detection
+FROM fetch_vllm AS build_vllm_wheel_release
+
+ARG COMMON_WORKDIR
+
+# Create /install directory for custom wheels
+RUN mkdir -p /install
+
+# Copy custom ROCm wheels from docker/context if they exist
+# COPY ensures Docker cache is invalidated when wheels change
+# .keep file ensures directory always exists for COPY to work
+COPY docker/context/base-wheels/ /tmp/base-wheels/
+# This is how we know if we are building for a wheel release or not.
+# If there are not wheels found there, we are not building for a wheel release. 
+# So we exit with an error. To skip this stage.
+RUN if [ -n "$(ls /tmp/base-wheels/*.whl 2>/dev/null)" ]; then \
+        echo "Found custom wheels - copying to /install"; \
+        cp /tmp/base-wheels/*.whl /install/ && \
+        echo "Copied custom wheels:"; \
+        ls -lh /install/; \
+    else \
+        echo "ERROR: No custom wheels found in docker/context/base-wheels/"; \
+        echo "Wheel releases require pre-built ROCm wheels."; \
+        exit 1; \
+    fi
+
+# GIT_REPO_CHECK: Verify repo is clean and tags are available (for release builds)
+# This matches CUDA's Dockerfile behavior for proper version detection via setuptools_scm
+ARG GIT_REPO_CHECK=0
+RUN if [ "$GIT_REPO_CHECK" != "0" ]; then \
+        echo "Running repository checks..."; \
+        cd vllm && bash tools/check_repo.sh; \
+    fi
+
+# Extract version from git BEFORE any modifications (pin_rocm_dependencies.py modifies requirements/rocm.txt)
+# This ensures setuptools_scm sees clean repo state for version detection
+RUN --mount=type=bind,source=.git,target=vllm/.git \
+    cd vllm \
+    && pip install setuptools_scm regex \
+    && VLLM_VERSION=$(python3 -c "import setuptools_scm; print(setuptools_scm.get_version())") \
+    && echo "Detected vLLM version: ${VLLM_VERSION}" \
+    && echo "${VLLM_VERSION}" > /tmp/vllm_version.txt
+
+# Fail if git-based package dependencies are found in requirements files
+# (uv doesn't handle git+ URLs well, and packages should be distributed on PyPI)
+# Extra notes: pip install is able to handle git+ URLs, but uv doesn't.
+RUN echo "Checking for git-based packages in requirements files..." \
+    && echo "Checking common.txt for git-based packages:" \
+    && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; then \
+         echo "ERROR: Git-based packages found in common.txt:"; \
+         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; \
+         echo "Please publish these packages to PyPI instead of using git dependencies."; \
+         exit 1; \
+       else \
+         echo "  ✓ No git-based packages found in common.txt"; \
+       fi \
+    && echo "Checking rocm.txt for git-based packages:" \
+    && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; then \
+         echo "ERROR: Git-based packages found in rocm.txt:"; \
+         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; \
+         echo "Please publish these packages to PyPI instead of using git dependencies."; \
+         exit 1; \
+       else \
+         echo "  ✓ No git-based packages found in rocm.txt"; \
+       fi \
+    && echo "All requirements files are clean - no git-based packages found"
+
+# Pin vLLM dependencies to exact versions of custom ROCm wheels
+# This ensures 'pip install vllm' automatically installs correct torch/triton/torchvision/amdsmi
+COPY tools/vllm-rocm/pin_rocm_dependencies.py /tmp/pin_rocm_dependencies.py
+RUN echo "Pinning vLLM dependencies to custom wheel versions..." \
+    && python3 /tmp/pin_rocm_dependencies.py /install ${COMMON_WORKDIR}/vllm/requirements/rocm.txt
+
+# Install dependencies using custom wheels from /install
+RUN cd vllm \
+    && echo "Building vLLM with custom wheels from /install" \
+    && python3 -m pip install --find-links /install -r requirements/rocm.txt \
+    && python3 setup.py clean --all
+
+# Build wheel using pre-extracted version to avoid dirty state from modified requirements/rocm.txt
+# (setup.py auto-detects sccache in PATH)
+RUN --mount=type=bind,source=.git,target=vllm/.git \
+    cd vllm \
+    && export SETUPTOOLS_SCM_PRETEND_VERSION=$(cat /tmp/vllm_version.txt) \
+    && echo "Building wheel with version: ${SETUPTOOLS_SCM_PRETEND_VERSION}" \
+    && python3 setup.py bdist_wheel --dist-dir=dist
+
+FROM scratch AS export_vllm_wheel_release
+ARG COMMON_WORKDIR
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/dist/*.whl /
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/requirements /requirements
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tests /tests
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/examples /examples
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
+
 # -----------------------
 # Test vLLM image
 FROM base AS test
@@ -194,6 +342,19 @@ RUN mkdir src && mv vllm src/vllm
 FROM base AS final
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
+
+# Clean up sccache from release image (not needed at runtime)
+# This removes the binary and wrappers that may have been installed during build
+RUN rm -f /usr/bin/sccache || true \
+    && rm -rf /opt/sccache-wrappers || true
+
+# Unset sccache environment variables for the release image
+# This prevents S3 bucket config from leaking into production images
+ENV SCCACHE_BUCKET=
+ENV SCCACHE_REGION=
+ENV SCCACHE_S3_NO_CREDENTIALS=
+ENV SCCACHE_IDLE_TIMEOUT=
+
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually remove it so that later steps of numpy upgrade can continue
 RUN case "$(which python3)" in \
@@ -237,5 +398,5 @@ RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt
 CMD ["/bin/bash"]
 
 #Set entrypoint for vllm-openai official images
-FROM final As vllm-openai
+FROM final AS vllm-openai
 ENTRYPOINT ["vllm", "serve"]

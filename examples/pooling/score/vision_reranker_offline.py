@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from vllm import LLM, EngineArgs
-from vllm.entrypoints.score_utils import ScoreMultiModalParam
+from vllm.entrypoints.pooling.score.utils import ScoreMultiModalParam
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 TEMPLATE_HOME = Path(__file__).parent / "template"
