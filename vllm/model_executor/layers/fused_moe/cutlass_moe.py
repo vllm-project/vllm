@@ -259,7 +259,7 @@ def run_cutlass_moe_fp8(
         )
 
 
-class CutlassExpertsFp8Base(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsFp8Base(mk.FusedMoEModularExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -650,7 +650,7 @@ def run_cutlass_moe_fp4(
     return
 
 
-class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsFp4(mk.FusedMoEModularExperts):
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
@@ -902,7 +902,7 @@ def run_cutlass_moe_w4a8_fp8(
     )
 
 
-class CutlassExpertsW4A8Fp8(mk.FusedMoEPermuteExpertsUnpermute):
+class CutlassExpertsW4A8Fp8(mk.FusedMoEModularExperts):
     def __init__(
         self,
         out_dtype: torch.dtype | None,

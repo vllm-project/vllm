@@ -119,7 +119,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # time. This setting is handled by post_init_setup.
         self.use_ue8m0_dispatch = False
 
-    def post_init_setup(self, fused_experts: mk.FusedMoEPermuteExpertsUnpermute):
+    def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
             return

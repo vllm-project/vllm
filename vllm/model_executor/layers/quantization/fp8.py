@@ -20,7 +20,7 @@ from vllm.model_executor.layers.batch_invariant import (
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEMethodBase,
-    FusedMoEPermuteExpertsUnpermute,
+    FusedMoEModularExperts,
     FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported,
 )
@@ -897,7 +897,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> FusedMoEPermuteExpertsUnpermute:
+    ) -> FusedMoEModularExperts:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."

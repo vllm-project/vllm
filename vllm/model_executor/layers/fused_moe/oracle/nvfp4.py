@@ -65,7 +65,7 @@ def is_global_sf_supported_for_nvfp4_backend(backend: NvFp4MoeBackend) -> bool:
 
 def backend_to_kernel_cls(
     backend: NvFp4MoeBackend,
-) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
+) -> type[mk.FusedMoEModularExperts]:
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_nvfp4_moe import (
             FlashInferTrtLlmNvFp4Experts,
@@ -108,7 +108,7 @@ def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
-) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
+) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEModularExperts] | None]:
     """
     Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
@@ -161,7 +161,7 @@ def select_nvfp4_moe_backend(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
+    ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEModularExperts]]:
         k_cls = backend_to_kernel_cls(backend)
         supported, reason = k_cls.is_supported_config(
             k_cls, config, weight_key, activation_key, activation_format
@@ -364,10 +364,10 @@ def make_nvfp4_moe_quant_config(
 def make_nvfp4_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-    experts_cls: type[mk.FusedMoEPermuteExpertsUnpermuteBase],
+    experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
-) -> mk.FusedMoEModularKernelBase:
+) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,

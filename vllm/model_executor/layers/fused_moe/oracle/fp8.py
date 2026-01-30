@@ -52,7 +52,7 @@ class Fp8MoeBackend(Enum):
 
 def backend_to_kernel_cls(
     backend: Fp8MoeBackend,
-) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
+) -> type[mk.FusedMoEModularExperts]:
     if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_fp8_moe import (
             FlashInferTrtLlmFp8Experts,
@@ -132,12 +132,12 @@ def select_fp8_moe_backend(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
     allow_vllm_cutlass: bool = False,
-) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
+) -> tuple[Fp8MoeBackend, type[mk.FusedMoEModularExperts] | None]:
     """
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    k_cls: type[mk.FusedMoEPermuteExpertsUnpermute] | None = None
+    k_cls: type[mk.FusedMoEModularExperts] | None = None
 
     if config.is_lora_enabled:
         return Fp8MoeBackend.TRITON, backend_to_kernel_cls(Fp8MoeBackend.TRITON)
@@ -190,7 +190,7 @@ def select_fp8_moe_backend(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
+    ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEModularExperts]]:
         k_cls = backend_to_kernel_cls(backend)
         supported, reason = k_cls.is_supported_config(
             k_cls, config, weight_key, activation_key, activation_format
@@ -429,11 +429,11 @@ def make_fp8_moe_quant_config(
 def make_fp8_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-    experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
+    experts_cls: type[mk.FusedMoEModularExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
-) -> tuple[mk.FusedMoEModularKernelBase, bool]:
+) -> tuple[mk.FusedMoEKernel, bool]:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -464,7 +464,7 @@ def make_fp8_moe_kernel(
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explict in
     # the new MoE runner class.
-    kernel = mk.FusedMoEModularKernelBase.make_mk(
+    kernel = mk.FusedMoEKernel.make_mk(
         prepare_finalize,
         experts,
         shared_experts=(

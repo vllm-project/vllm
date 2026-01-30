@@ -31,8 +31,8 @@ class TritonOrCutlassExperts(FallbackExperts):
 
     @staticmethod
     def get_clses() -> tuple[
-        type[mk.FusedMoEPermuteExpertsUnpermute],
-        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEModularExperts],
+        type[mk.FusedMoEModularExperts],
     ]:
         return (CutlassExpertsFp8, TritonExperts)
 
@@ -76,7 +76,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEModularExperts:
         # Small batch fallback for sm100.
         if self.is_sm100 and hidden_states.shape[0] <= 8:
             return self.fallback_experts

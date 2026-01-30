@@ -56,18 +56,18 @@ logger = init_logger(__name__)
 # * FusedMoEPrepareAndFinalize - an abstract base class for preparation of MoE
 #   inputs (e.g. quantization, distribution) and finalization of Moe outputs.
 #   The prepare method must take care of any needed quantization and the
-#   finalize method, informed by the FusedMoEPermuteExpertsUnpermute method,
+#   finalize method, informed by the FusedMoEModularExperts method,
 #   may apply weights and/or do the final reduction of the output.
-# * FusedMoEPermuteExpertsUnpermute - an abstract base class for the main fused
+# * FusedMoEModularExperts - an abstract base class for the main fused
 #   MoE operation, i.e matmul + act_mul + optionally quant + matmul.
-#   Some FusedMoEPermuteExpertsUnpermute implementations may choose to do
+#   Some FusedMoEModularExperts implementations may choose to do
 #   the weight application and/or reduction. The class communicates this
 #   to [Finalize] via a TopKWeightAndReduce object.
 # * FusedMoEModularKernel - an interface class that combines a
-#   FusedMoEPrepareAndFinalize and a FusedMoEPermuteExpertsUnpermute to
+#   FusedMoEPrepareAndFinalize and a FusedMoEModularExperts to
 #   provide the standard fused MoE kernel interface.
 # * TopKWeightAndReduce - A TopKWeightAndReduce implementation chosen
-#   by the FusedMoEPermuteExpertsUnpermute implementation that is passed
+#   by the FusedMoEModularExperts implementation that is passed
 #   on to [Finalize].
 #
 # [Quantize-Prepare] and [Finalize] functionality are bundled into a single
@@ -174,10 +174,10 @@ class FusedMoEPrepareAndFinalizeBase(ABC):
     and FusedMoEPrepareAndFinalizeMonolithic (Monolithic) implementations.
     """
 
-    def post_init_setup(self, fused_experts: "FusedMoEPermuteExpertsUnpermuteBase"):
+    def post_init_setup(self, fused_experts: "FusedMoEExperts"):
         """
         Initialize FusedMoEPrepareAndFinalize settings that depend on
-        FusedMoEPermuteExpertsUnpermute experts object.
+        FusedMoEModularExperts experts object.
         The FusedMoEPrepareAndFinalize implementations that have such
         dependencies may choose to override this function.
         """
@@ -257,7 +257,7 @@ class FusedMoEPrepareAndFinalize(FusedMoEPrepareAndFinalizeBase):
           activations, before quantization + dispatching.
         - quant_config: Quantization info provided by the fused experts.
         - defer_input_quant: Runtime parameter indicating whether or not to
-          defer input quantization to the FusedMoEPermuteExpertsUnpermute
+          defer input quantization to the FusedMoEModularExperts
           in cases where the compute kernel expects unquantized inputs
 
         Returns a tuple of:
@@ -304,7 +304,7 @@ class FusedMoEPrepareAndFinalize(FusedMoEPrepareAndFinalizeBase):
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
         - defer_input_quant: Runtime parameter indicating whether or not to
-          defer input quantization to the FusedMoEPermuteExpertsUnpermute
+          defer input quantization to the FusedMoEModularExperts
           in cases where the compute kernel expects unquantized inputs
 
         Returns a callback or a hook callback pair that when invoked waits for
@@ -415,13 +415,13 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalizeBase):
     ) -> PrepareMonolithicResultType:
         """
         Optional method for subclasses compatible with monolithic
-        FusedMoEPermuteExpertsUnpermute kernels.
+        FusedMoEModularExperts kernels.
 
         Perform any quantization (and/or) dispatching needed for this kernel.
         - a1: The (unquantized) input to the MoE layer.
         - quant_config: Quantization info provided by the fused experts.
         - defer_input_quant: Runtime parameter indicating whether or not to
-            defer input quantization to the FusedMoEPermuteExpertsUnpermute
+            defer input quantization to the FusedMoEModularExperts
 
         Returns a tuple of:
         - quantized + dispatched a.
@@ -434,7 +434,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalizeBase):
     def finalize_monolithic(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
         """
         Optional method for subclasses compatible with monolithic
-        FusedMoEPermuteExpertsUnpermute kernels.
+        FusedMoEModularExperts kernels.
 
         Perform any combine plus apply weights and perform a reduction on the
         fused experts output.
@@ -445,7 +445,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalizeBase):
 
 
 # TODO: add supported activations method (return string)
-class FusedMoEPermuteExpertsUnpermuteBase(ABC):
+class FusedMoEExperts(ABC):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -505,7 +505,7 @@ class FusedMoEPermuteExpertsUnpermuteBase(ABC):
 
     @staticmethod
     def is_supported_config(
-        cls: type["FusedMoEPermuteExpertsUnpermute"],
+        cls: type["FusedMoEModularExperts"],
         moe_config: FusedMoEConfig,
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -686,7 +686,7 @@ class FusedMoEPermuteExpertsUnpermuteBase(ABC):
         )
 
 
-class FusedMoEPermuteExpertsUnpermute(FusedMoEPermuteExpertsUnpermuteBase):
+class FusedMoEModularExperts(FusedMoEExperts):
     """
     An abstract base class for the [Permute-Experts-Unpermute] step described
         above.
@@ -869,7 +869,7 @@ class FusedMoEPermuteExpertsUnpermute(FusedMoEPermuteExpertsUnpermuteBase):
         raise NotImplementedError
 
 
-class FusedMoEPermuteExpertsUnpermuteMonolithic(FusedMoEPermuteExpertsUnpermuteBase):
+class FusedMoEMonolithicExperts(FusedMoEExperts):
     """
     An abstract base class for the [Permute-Experts-Unpermute] step described
         above, but with the monolithic interface (accepts router logits
@@ -912,11 +912,11 @@ def _slice_scales(
     return None
 
 
-class FusedMoEModularKernelBase(torch.nn.Module):
+class FusedMoEKernel(torch.nn.Module):
     def __init__(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeBase,
-        fused_experts: FusedMoEPermuteExpertsUnpermuteBase,
+        fused_experts: FusedMoEExperts,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
     ):
@@ -940,11 +940,11 @@ class FusedMoEModularKernelBase(torch.nn.Module):
         if not (
             (
                 isinstance(prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
-                and isinstance(fused_experts, FusedMoEPermuteExpertsUnpermuteMonolithic)
+                and isinstance(fused_experts, FusedMoEMonolithicExperts)
             )
             or (
                 isinstance(prepare_finalize, FusedMoEPrepareAndFinalize)
-                and isinstance(fused_experts, FusedMoEPermuteExpertsUnpermute)
+                and isinstance(fused_experts, FusedMoEModularExperts)
             )
         ):
             raise ValueError(
@@ -965,24 +965,24 @@ class FusedMoEModularKernelBase(torch.nn.Module):
     @staticmethod
     def make_mk(
         prepare_finalize: FusedMoEPrepareAndFinalizeBase,
-        fused_experts: FusedMoEPermuteExpertsUnpermuteBase,
+        fused_experts: FusedMoEExperts,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
-    ) -> "FusedMoEModularKernelBase":
+    ) -> "FusedMoEKernel":
         """
-        Factory method to create a FusedMoEModularKernelBase instance.
+        Factory method to create a FusedMoEKernel instance.
         """
         if isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
-        ) and isinstance(fused_experts, FusedMoEPermuteExpertsUnpermuteMonolithic):
-            return FusedMoEModularKernelMonolithic(
+        ) and isinstance(fused_experts, FusedMoEMonolithicExperts):
+            return FusedMoEMonolithicKernel(
                 prepare_finalize,
                 fused_experts,
                 shared_experts,
                 moe_parallel_config,
             )
         elif isinstance(prepare_finalize, FusedMoEPrepareAndFinalize) and isinstance(
-            fused_experts, FusedMoEPermuteExpertsUnpermute
+            fused_experts, FusedMoEModularExperts
         ):
             return FusedMoEModularKernel(
                 prepare_finalize,
@@ -1018,10 +1018,10 @@ class FusedMoEModularKernelBase(torch.nn.Module):
 
 
 @final
-class FusedMoEModularKernel(FusedMoEModularKernelBase):
+class FusedMoEModularKernel(FusedMoEKernel):
     """
     This class combines a FusedMoEPrepareAndFinalize instance and
-    a FusedMoEPermuteExpertsUnpermute to provide an interface that
+    a FusedMoEModularExperts to provide an interface that
     is compatible with the `fused_experts` function in fused_moe.py.
 
     It takes care of managing any required scratch space.
@@ -1034,7 +1034,7 @@ class FusedMoEModularKernel(FusedMoEModularKernelBase):
     def __init__(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
-        fused_experts: FusedMoEPermuteExpertsUnpermute,
+        fused_experts: FusedMoEModularExperts,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
     ):
@@ -1042,9 +1042,9 @@ class FusedMoEModularKernel(FusedMoEModularKernelBase):
             raise TypeError(
                 "prepare_finalize must be an instance of FusedMoEPrepareAndFinalize"
             )
-        if not isinstance(fused_experts, FusedMoEPermuteExpertsUnpermute):
+        if not isinstance(fused_experts, FusedMoEModularExperts):
             raise TypeError(
-                "fused_experts must be an instance of FusedMoEPermuteExpertsUnpermute"
+                "fused_experts must be an instance of FusedMoEModularExperts"
             )
 
         super().__init__(
@@ -1055,7 +1055,7 @@ class FusedMoEModularKernel(FusedMoEModularKernelBase):
         )
 
         self.prepare_finalize: FusedMoEPrepareAndFinalize = prepare_finalize
-        self.fused_experts: FusedMoEPermuteExpertsUnpermute = fused_experts
+        self.fused_experts: FusedMoEModularExperts = fused_experts
 
     def _chunk_info(self, M: int) -> tuple[int, int]:
         """
@@ -1099,7 +1099,7 @@ class FusedMoEModularKernel(FusedMoEModularKernelBase):
         See `workspace_shapes` for a description of the remainder of arguments.
         Returns a tuple of (workspace13, workspace2, output) tensors.
         """
-        assert isinstance(self.fused_experts, FusedMoEPermuteExpertsUnpermute)
+        assert isinstance(self.fused_experts, FusedMoEModularExperts)
         assert M_full > 0 and M_chunk > 0
 
         num_chunks, _ = self._chunk_info(M_full)
@@ -1342,7 +1342,7 @@ class FusedMoEModularKernel(FusedMoEModularKernelBase):
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
     ) -> torch.Tensor:
-        assert isinstance(self.fused_experts, FusedMoEPermuteExpertsUnpermuteBase)
+        assert isinstance(self.fused_experts, FusedMoEExperts)
 
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1575,11 +1575,11 @@ class FusedMoEModularKernel(FusedMoEModularKernelBase):
 
 
 @final
-class FusedMoEModularKernelMonolithic(FusedMoEModularKernelBase):
+class FusedMoEMonolithicKernel(FusedMoEKernel):
     def __init__(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeMonolithic,
-        fused_experts: FusedMoEPermuteExpertsUnpermuteMonolithic,
+        fused_experts: FusedMoEMonolithicExperts,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
     ):
@@ -1588,10 +1588,9 @@ class FusedMoEModularKernelMonolithic(FusedMoEModularKernelBase):
                 "prepare_finalize must be an instance of "
                 "FusedMoEPrepareAndFinalizeMonolithic"
             )
-        if not isinstance(fused_experts, FusedMoEPermuteExpertsUnpermuteMonolithic):
+        if not isinstance(fused_experts, FusedMoEMonolithicExperts):
             raise TypeError(
-                "fused_experts must be an instance of "
-                "FusedMoEPermuteExpertsUnpermuteMonolithic"
+                "fused_experts must be an instance of FusedMoEMonolithicExperts"
             )
 
         super().__init__(
@@ -1623,7 +1622,7 @@ class FusedMoEModularKernelMonolithic(FusedMoEModularKernelBase):
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
         assert isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
-        assert isinstance(self.fused_experts, FusedMoEPermuteExpertsUnpermuteMonolithic)
+        assert isinstance(self.fused_experts, FusedMoEMonolithicExperts)
 
         # TODO(rob): add inplace support.
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare_monolithic(

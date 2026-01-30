@@ -524,7 +524,7 @@ def batched_fused_marlin_moe(
     return output
 
 
-class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
+class MarlinExpertsBase(mk.FusedMoEModularExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,

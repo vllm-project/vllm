@@ -56,7 +56,7 @@ def is_valid_flashinfer_cutlass_fused_moe(
     return True
 
 
-class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class FlashInferExperts(mk.FusedMoEModularExperts):
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,

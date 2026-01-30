@@ -839,7 +839,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEModularExperts:
         if (
             prepare_finalize.activation_format
             == mk.FusedMoEActivationFormat.BatchedExperts

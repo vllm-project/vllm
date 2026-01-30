@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.v1.engine.utils import current_platform
 
 
-class FlashInferTrtLlmFp8Experts(mk.FusedMoEPermuteExpertsUnpermute):
+class FlashInferTrtLlmFp8Experts(mk.FusedMoEModularExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,

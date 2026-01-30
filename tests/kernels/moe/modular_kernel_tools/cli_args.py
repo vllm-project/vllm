@@ -23,7 +23,7 @@ def make_config_arg_parser(description: str):
                 return pf
         raise ValueError(f"Cannot find a PrepareFinalize type that matches {s}")
 
-    def to_experts_class_type(s: str) -> mk.FusedMoEPermuteExpertsUnpermute:
+    def to_experts_class_type(s: str) -> mk.FusedMoEModularExperts:
         for fe in MK_FUSED_EXPERT_TYPES:
             if fe.__name__ == s:
                 return fe

@@ -644,7 +644,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
 
-class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class NaiveBatchedExperts(mk.FusedMoEModularExperts):
     """
     A reference MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the pplx
@@ -876,7 +876,7 @@ def batched_moe_kernel_quantize_input(
         return A_q, A_q_scale
 
 
-class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class BatchedTritonExperts(mk.FusedMoEModularExperts):
     """
     A Triton based MoE expert class that operates on expert batched format,
     i.e. E x max_num_tokens x K.  This is the format that the pplx

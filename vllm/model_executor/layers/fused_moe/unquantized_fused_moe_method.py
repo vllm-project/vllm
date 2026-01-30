@@ -23,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
-    FusedMoEPermuteExpertsUnpermute,
+    FusedMoEModularExperts,
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
@@ -63,7 +63,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self.rocm_aiter_moe_enabled = (
             rocm_aiter_ops.is_fused_moe_enabled() and moe.is_act_and_mul
         )
-        self.kernel: mk.FusedMoEModularKernelBase | None = None
+        self.kernel: mk.FusedMoEKernel | None = None
         self._is_monolithic = current_platform.is_cpu() or current_platform.is_xpu()
 
     @property
@@ -91,7 +91,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> FusedMoEPermuteExpertsUnpermute:
+    ) -> FusedMoEModularExperts:
         assert self.moe_quant_config is not None
         if (
             prepare_finalize.activation_format

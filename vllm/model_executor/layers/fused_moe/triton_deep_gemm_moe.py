@@ -31,8 +31,8 @@ class TritonOrDeepGemmExperts(FallbackExperts):
 
     @staticmethod
     def get_clses() -> tuple[
-        type[mk.FusedMoEPermuteExpertsUnpermute],
-        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEModularExperts],
+        type[mk.FusedMoEModularExperts],
     ]:
         return (DeepGemmExperts, TritonExperts)
 
@@ -78,7 +78,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEModularExperts:
         if is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2):
             return self.experts
         else:

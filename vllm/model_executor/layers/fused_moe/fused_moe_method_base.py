@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEPermuteExpertsUnpermute,
+    FusedMoEModularExperts,
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.quantization.base_config import (
@@ -27,7 +27,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         super().__init__()
         self.moe: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
-        self.moe_mk: mk.FusedMoEModularKernelBase | None = None
+        self.moe_mk: mk.FusedMoEKernel | None = None
 
     @property
     def supports_internal_mk(self) -> bool:
@@ -77,7 +77,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> FusedMoEPermuteExpertsUnpermute:
+    ) -> FusedMoEModularExperts:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
         raise NotImplementedError(
