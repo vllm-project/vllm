@@ -17,8 +17,8 @@ from PIL.Image import Image
 from vllm import LLM, EngineArgs
 from vllm.multimodal.utils import fetch_image
 
-image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
-text = "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, as the dog offers its paw in a heartwarming display of companionship and trust."
+image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
+text = "A cat standing in the snow."
 multi_modal_data = {"image": fetch_image(image_url)}
 
 
