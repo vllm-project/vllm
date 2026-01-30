@@ -3,7 +3,7 @@
 
 from contextlib import suppress
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 from compressed_tensors.config import (
@@ -156,7 +156,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -640,7 +640,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     # note: input_quant will be present for converted models;
                     # will be ignored during inference post loading
                     return CompressedTensorsW8A16Fp8(
-                        strategy=weight_quant.strategy,
+                        weight_quant=weight_quant,
                         is_static_input_scheme=not input_quant.dynamic,
                     )
 
@@ -648,7 +648,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             if self._is_fp8_w8a16(weight_quant, input_quant):
                 is_static_input_scheme = input_quant and not input_quant.dynamic
                 return CompressedTensorsW8A16Fp8(
-                    strategy=weight_quant.strategy,
+                    weight_quant=weight_quant,
                     is_static_input_scheme=is_static_input_scheme,
                 )
 
@@ -680,7 +680,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def get_scheme(
         self, layer: torch.nn.Module, layer_name: str | None = None
-    ) -> Optional["CompressedTensorsScheme"]:
+    ) -> "CompressedTensorsScheme | None":
         """
         compressed-tensors supports non uniform in the following way:
 
