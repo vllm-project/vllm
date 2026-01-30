@@ -10,7 +10,6 @@ from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
-    ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
 from vllm.entrypoints.logger import RequestLogger
@@ -73,47 +72,62 @@ class ServingScores(OpenAIServing):
     def _convert_documents_to_multimodal(
         self,
         documents: list[str] | list[dict[str, Any]] | ScoreMultiModalParam,
-    ) -> list[str] | list[ScoreContentPartParam]:
+    ) -> list[str] | list[ScoreContentPartParam] | list[list[ScoreContentPartParam]]:
         """
         Convert documents in various formats to a standardized list format.
-        
+
         Args:
             documents: Can be:
                 - list[str]: Simple text documents
-                - list[dict[str, Any]]: Documents with {"text": "...", "image": "..."} format
+                - list[dict[str, Any]]: Documents with
+                  {"text": "...", "image": "..."} format
                 - ScoreMultiModalParam: Already in multimodal format
-        
+
         Returns:
-            list[str] or list[ScoreContentPartParam]: Standardized document list
+            list[str] or list[ScoreContentPartParam] or
+            list[list[ScoreContentPartParam]]: Standardized document
+            list. Returns list[list[ScoreContentPartParam]] when
+            documents contain multiple parts (text + image) to
+            preserve document boundaries.
         """
         if isinstance(documents, dict) and "content" in documents:
             # Already in ScoreMultiModalParam format
             return documents["content"]  # type: ignore[return-value]
-        
+
         if not isinstance(documents, list):
             return documents  # type: ignore[return-value]
-        
+
         # Check if it's a list of dicts with text/image keys
         if documents and isinstance(documents[0], dict):
-            converted_docs: list[ScoreContentPartParam] = []
+            converted_docs: list[list[ScoreContentPartParam]] = []
+            has_multi_part_docs = False
+
             for doc in documents:
                 if not isinstance(doc, dict):
-                    raise ValueError(f"Expected dict in documents list, got {type(doc)}")
-                
+                    raise ValueError(
+                        f"Expected dict in documents list, got {type(doc)}"
+                    )
+
                 doc_parts: list[ScoreContentPartParam] = []
-                
+
                 # Handle text field
                 if "text" in doc:
-                    from vllm.entrypoints.chat_utils import ChatCompletionContentPartTextParam
+                    from vllm.entrypoints.chat_utils import (
+                        ChatCompletionContentPartTextParam,
+                    )
+
                     doc_parts.append(
                         ChatCompletionContentPartTextParam(
                             type="text", text=doc["text"]
                         )
                     )
-                
+
                 # Handle image field
                 if "image" in doc:
-                    from vllm.entrypoints.chat_utils import ChatCompletionContentPartImageParam
+                    from vllm.entrypoints.chat_utils import (
+                        ChatCompletionContentPartImageParam,
+                    )
+
                     image_url = doc["image"]
                     doc_parts.append(
                         ChatCompletionContentPartImageParam(
@@ -121,28 +135,66 @@ class ServingScores(OpenAIServing):
                             image_url={"url": image_url},
                         )
                     )
-                
-                # If we have multiple parts for a single document, we need to handle them specially
-                # For now, we'll add each part as a separate content part
-                converted_docs.extend(doc_parts)
-            
-            return converted_docs
-        
+
+                # Track if any document has multiple parts
+                if len(doc_parts) > 1:
+                    has_multi_part_docs = True
+
+                # Keep document as a single unit (list of parts)
+                converted_docs.append(doc_parts)
+
+            # If we have multi-part documents, return nested structure
+            # Otherwise, flatten for backward compatibility with single-part documents
+            if has_multi_part_docs:
+                return converted_docs
+            else:
+                # Flatten single-part documents for backward compatibility
+                return [part for doc in converted_docs for part in doc]
+
         # It's a simple list of strings
         return documents  # type: ignore[return-value]
 
     async def _embedding_score(
         self,
         tokenizer: TokenizerLike,
-        data_1: list[str],
-        data_2: list[str],
+        data_1: list[str]
+        | list[ScoreContentPartParam]
+        | list[list[ScoreContentPartParam]],
+        data_2: list[str]
+        | list[ScoreContentPartParam]
+        | list[list[ScoreContentPartParam]],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         tokenization_kwargs: dict[str, Any] | None = None,
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
-        input_texts = data_1 + data_2
+        # Flatten nested documents if present (for multimodal inputs)
+        # Embedding scoring typically works with text, so we extract
+        # text from multimodal docs
+        def extract_text(
+            item: str | ScoreContentPartParam | list[ScoreContentPartParam],
+        ) -> str:
+            if isinstance(item, str):
+                return item
+            elif isinstance(item, list):
+                # Multi-part document: extract text parts
+                for part in item:
+                    if isinstance(part, ChatCompletionContentPartTextParam):
+                        return part.text
+                # If no text part, return empty string
+                return ""
+            elif isinstance(item, ChatCompletionContentPartTextParam):
+                return item.text
+            else:
+                # Other types (image, video) don't have text
+                return ""
+
+        # Convert to text for embedding scoring
+        text_data_1 = [extract_text(item) for item in data_1]
+        text_data_2 = [extract_text(item) for item in data_2]
+
+        input_texts = text_data_1 + text_data_2
 
         engine_prompts: list[TokensPrompt] = []
         tokenize_async = make_async(
@@ -250,8 +302,12 @@ class ServingScores(OpenAIServing):
     async def _cross_encoding_score(
         self,
         tokenizer: TokenizerLike,
-        data_1: list[str] | list[ScoreContentPartParam],
-        data_2: list[str] | list[ScoreContentPartParam],
+        data_1: list[str]
+        | list[ScoreContentPartParam]
+        | list[list[ScoreContentPartParam]],
+        data_2: list[str]
+        | list[ScoreContentPartParam]
+        | list[list[ScoreContentPartParam]],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -269,7 +325,31 @@ class ServingScores(OpenAIServing):
 
         tokenization_kwargs = tokenization_kwargs or {}
 
-        input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
+        # Flatten nested documents for scoring
+        # A nested document [text_part, image_part] becomes a single item for scoring
+        def flatten_if_nested(
+            item: str | ScoreContentPartParam | list[ScoreContentPartParam],
+        ) -> str | ScoreContentPartParam:
+            if isinstance(item, list):
+                # Multi-part document: merge into a single representation
+                # For now, we just return the first part as the representative
+                # This maintains the document as a single unit in the scoring pipeline
+                # TODO: Future enhancement could create a composite representation
+                if len(item) == 1:
+                    return item[0]
+                # For multi-part, we need to handle this specially
+                # For cross-encoding, we'll use the first text part if available
+                for part in item:
+                    if isinstance(part, ChatCompletionContentPartTextParam):
+                        return part
+                # If no text part, return first part
+                return item[0]
+            return item
+
+        flattened_data_1 = [flatten_if_nested(item) for item in data_1]
+        flattened_data_2 = [flatten_if_nested(item) for item in data_2]
+
+        input_pairs = [(t1, t2) for t1, t2 in zip(flattened_data_1, flattened_data_2)]
 
         preprocess_async = make_async(
             self._preprocess_score, executor=self._tokenizer_executor
@@ -559,6 +639,11 @@ class ServingScores(OpenAIServing):
         """
         results: list[RerankResult] = []
         num_prompt_tokens = 0
+
+        # Handle nested document structure (multi-part documents)
+        # We need to track if documents were converted to nested structure
+        converted_docs = self._convert_documents_to_multimodal(documents)
+
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
 
@@ -567,33 +652,58 @@ class ServingScores(OpenAIServing):
                 # ScoreMultiModalParam format
                 document = RerankDocument(multi_modal=documents["content"][idx])
             elif isinstance(documents, list):
-                if documents and isinstance(documents[0], dict) and ("text" in documents[0] or "image" in documents[0]):
-                    # list[dict[str, Any]] format with {"text": "...", "image": "..."}
+                if (
+                    documents
+                    and isinstance(documents[0], dict)
+                    and ("text" in documents[0] or "image" in documents[0])
+                ):
+                    # list[dict[str, Any]] format with
+                    # {"text": "...", "image": "..."}
                     doc_dict = documents[idx]
-                    # For now, we store the text part if available, otherwise indicate it's multimodal
-                    text_content = doc_dict.get("text", "")
-                    if "image" in doc_dict:
-                        # If there's an image, we should indicate it's multimodal
-                        # Convert to ScoreContentPartParam format for consistency
-                        doc_parts: list[ScoreContentPartParam] = []
-                        if text_content:
-                            from vllm.entrypoints.chat_utils import ChatCompletionContentPartTextParam
-                            doc_parts.append(
-                                ChatCompletionContentPartTextParam(
-                                    type="text", text=text_content
-                                )
+                    if isinstance(doc_dict, dict):
+                        text_content = doc_dict.get("text", "")
+                    else:
+                        text_content = ""
+
+                    # Build multi_modal parts list
+                    doc_parts: list[ScoreContentPartParam] = []
+                    if text_content:
+                        from vllm.entrypoints.chat_utils import (
+                            ChatCompletionContentPartTextParam,
+                        )
+
+                        doc_parts.append(
+                            ChatCompletionContentPartTextParam(
+                                type="text", text=text_content
                             )
-                        if "image" in doc_dict:
-                            from vllm.entrypoints.chat_utils import ChatCompletionContentPartImageParam
+                        )
+                    if "image" in doc_dict:
+                        from vllm.entrypoints.chat_utils import (
+                            ChatCompletionContentPartImageParam,
+                        )
+
+                        if isinstance(doc_dict, dict):
                             doc_parts.append(
                                 ChatCompletionContentPartImageParam(
                                     type="image_url",
                                     image_url={"url": doc_dict["image"]},
                                 )
                             )
-                        document = RerankDocument(text=text_content, multi_modal=doc_parts[0] if len(doc_parts) == 1 else None)
+
+                    # Store both text and multi_modal representation
+                    if len(doc_parts) > 1:
+                        # Multi-part document (text + image)
+                        document = RerankDocument(
+                            text=text_content, multi_modal=doc_parts
+                        )
+                    elif len(doc_parts) == 1:
+                        # Single part document
+                        if text_content:
+                            document = RerankDocument(text=text_content)
+                        else:
+                            document = RerankDocument(multi_modal=doc_parts[0])
                     else:
-                        document = RerankDocument(text=text_content)
+                        raise ValueError(f"Document at index {idx} has no content")
                 else:
                     # Simple list of strings
                     document = RerankDocument(text=documents[idx])

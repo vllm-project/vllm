@@ -92,7 +92,7 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
 
 class RerankDocument(BaseModel):
     text: str | None = None
-    multi_modal: ScoreContentPartParam | None = None
+    multi_modal: ScoreContentPartParam | list[ScoreContentPartParam] | None = None
 
 
 class RerankResult(BaseModel):

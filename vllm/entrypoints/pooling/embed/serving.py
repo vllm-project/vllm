@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final, cast
 import unicodedata
+from collections.abc import AsyncGenerator, Mapping
+from typing import Any, Final, TypeAlias, cast
+
 import torch
 from fastapi import Request
 from typing_extensions import assert_never
@@ -41,7 +42,7 @@ from vllm.utils.serial_utils import (
 logger = init_logger(__name__)
 
 
-EmbeddingServeContext = ServeContext[EmbeddingRequest]
+EmbeddingServeContext: TypeAlias = ServeContext[EmbeddingRequest]
 
 
 class OpenAIServingEmbedding(OpenAIServing):
@@ -83,39 +84,37 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def _normalize_instruction(self, instruction: str | None) -> str:
         """Normalize instruction text following Qwen3-VL-Embedding.
-        
+
         Ensures instruction ends with punctuation. If no instruction provided,
         uses default instruction.
-        
+
         Args:
             instruction: The instruction text or None
-            
+
         Returns:
             Normalized instruction text with punctuation
         """
         # Use default if no instruction provided
         if not instruction:
             return ""
-            
+
         # Strip whitespace
         instruction = instruction.strip()
         if not instruction:
             return ""
-            
+
         # Ensure instruction ends with punctuation
-        if not unicodedata.category(instruction[-1]).startswith('P'):
-            instruction = instruction + '.'
-            
+        if not unicodedata.category(instruction[-1]).startswith("P"):
+            instruction = instruction + "."
+
         return instruction
 
-    def _is_multimodal_input(
-        self, input_data: Any
-    ) -> bool:
+    def _is_multimodal_input(self, input_data: Any) -> bool:
         """Check if the input contains multimodal data.
-        
+
         Args:
             input_data: The input to check (can be single or list of inputs)
-            
+
         Returns:
             True if input contains MultimodalEmbeddingInput objects
         """
@@ -127,26 +126,26 @@ class OpenAIServingEmbedding(OpenAIServing):
 
     def _is_url(self, text: str) -> bool:
         """Check if a string is a URL.
-        
+
         Args:
             text: String to check
-            
+
         Returns:
             True if the string appears to be a URL
         """
         text_lower = text.lower()
         return (
-            text_lower.startswith('http://') or 
-            text_lower.startswith('https://') or
-            text_lower.startswith('data:image/')
+            text_lower.startswith("http://")
+            or text_lower.startswith("https://")
+            or text_lower.startswith("data:image/")
         )
 
     def _is_image_url(self, url: str) -> bool:
         """Check if a URL points to an image.
-        
+
         Args:
             url: URL to check
-            
+
         Returns:
             True if the URL appears to be an image
         """
@@ -154,78 +153,74 @@ class OpenAIServingEmbedding(OpenAIServing):
             return False
         url_lower = url.lower()
         # Check for data URLs
-        if url_lower.startswith('data:image/'):
+        if url_lower.startswith("data:image/"):
             return True
         # Check for common image extensions
-        image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg')
+        image_extensions = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg")
         return any(url_lower.endswith(ext) for ext in image_extensions)
 
     def _convert_mixed_list_to_multimodal(
         self, input_list: list[str]
     ) -> list[MultimodalEmbeddingInput]:
         """Convert a mixed list of text and URLs to MultimodalEmbeddingInput objects.
-        
+
         This method intelligently detects URLs in a string list and converts them
         to appropriate multimodal inputs. It groups consecutive non-URL strings as text
         and recognizes image URLs.
-        
+
         Args:
             input_list: List of strings (text and/or URLs)
-            
+
         Returns:
             List of MultimodalEmbeddingInput objects
-            
+
         Example:
             ["Follow the white rabbit.", "https://example.com/image.jpg"]
             -> [{"text": "Follow the white rabbit."}, {"image": "https://example.com/image.jpg"}]
         """
         result = []
-        current_text_parts = []
-        
+        current_text_parts: list[str] = []
+
         for item in input_list:
             if not isinstance(item, str):
                 # Skip non-string items
                 continue
-                
+
             if self._is_image_url(item):
                 # If we have accumulated text, create a text-only entry
                 if current_text_parts:
-                    result.append(MultimodalEmbeddingInput(
-                        text=" ".join(current_text_parts)
-                    ))
+                    result.append(
+                        MultimodalEmbeddingInput(text=" ".join(current_text_parts))
+                    )
                     current_text_parts = []
                 # Add image entry
                 result.append(MultimodalEmbeddingInput(image=item))
             else:
                 # Regular text - accumulate it
                 current_text_parts.append(item)
-        
+
         # Don't forget remaining text
         if current_text_parts:
-            result.append(MultimodalEmbeddingInput(
-                text=" ".join(current_text_parts)
-            ))
-        
+            result.append(MultimodalEmbeddingInput(text=" ".join(current_text_parts)))
+
         return result
 
-    def _should_convert_to_multimodal(
-        self, input_data: Any
-    ) -> bool:
+    def _should_convert_to_multimodal(self, input_data: Any) -> bool:
         """Check if input is a string list containing URLs that should be converted.
-        
+
         Args:
             input_data: The input to check
-            
+
         Returns:
             True if input is a list of strings containing at least one URL
         """
         if not isinstance(input_data, list) or len(input_data) == 0:
             return False
-        
+
         # Must be a list of strings
         if not all(isinstance(item, str) for item in input_data):
             return False
-        
+
         # Check if any item is a URL
         return any(self._is_url(item) for item in input_data)
 
@@ -233,55 +228,57 @@ class OpenAIServingEmbedding(OpenAIServing):
         self, input_data: MultimodalEmbeddingInput | list[MultimodalEmbeddingInput]
     ) -> list[list[ChatCompletionMessageParam]]:
         """Convert multimodal input to chat messages format.
-        
+
         Following Qwen3-VL-Embedding format:
         - System message contains instruction (normalized with punctuation)
         - User message contains content (text/image)
-        
+
         Args:
             input_data: Single or list of MultimodalEmbeddingInput objects
-            
+
         Returns:
             List of chat completion message lists, one for each input.
             Each inner list represents a separate conversation/request.
         """
         # Normalize to list
-        inputs = [input_data] if isinstance(input_data, MultimodalEmbeddingInput) else input_data
-        
+        inputs = (
+            [input_data]
+            if isinstance(input_data, MultimodalEmbeddingInput)
+            else input_data
+        )
+
         # Each MultimodalEmbeddingInput should produce a separate messages list
         all_messages = []
         for mm_input in inputs:
             content_parts: list[dict[str, Any]] = []
-            
+
             # Add text content if present
             if mm_input.text:
                 content_parts.append({"type": "text", "text": mm_input.text})
-            
+
             # Add image content if present
             if mm_input.image:
-                content_parts.append({
-                    "type": "image_url",
-                    "image_url": {"url": mm_input.image}
-                })
-            
+                content_parts.append(
+                    {"type": "image_url", "image_url": {"url": mm_input.image}}
+                )
+
             # Normalize instruction (with punctuation, or use default)
             instruction = self._normalize_instruction(mm_input.instruction)
-            
+
             # Create messages following Qwen3-VL-Embedding format
             messages = []
             if instruction:
-                messages.append({
-                    "role": "system",
-                    "content": [{"type": "text", "text": instruction}]
-                })
-            
-            messages.append({
-                "role": "user",
-                "content": content_parts
-            })
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": instruction}],
+                    }
+                )
+
+            messages.append({"role": "user", "content": content_parts})  # type: ignore[arg-type]
             all_messages.append(messages)
-        
-        return all_messages
+
+        return all_messages  # type: ignore[return-value]
 
     async def _preprocess(
         self,
@@ -312,16 +309,20 @@ class OpenAIServingEmbedding(OpenAIServing):
             elif isinstance(ctx.request, EmbeddingCompletionRequest):
                 # Check if input should be auto-converted from mixed string list
                 if self._should_convert_to_multimodal(ctx.request.input):
-                    # Auto-convert: ["text", "image_url"] -> [{"text": "text"}, {"image": "image_url"}]
+                    # Auto-convert: ["text", "image_url"] ->
+                    # [{"text": "text"}, {"image": "image_url"}]
                     logger.info(
-                        "Auto-converting mixed string list with URLs to multimodal format"
+                        "Auto-converting mixed string list with URLs "
+                        "to multimodal format"
                     )
                     converted_input = self._convert_mixed_list_to_multimodal(
                         ctx.request.input  # type: ignore
                     )
                     # Process as multimodal input
-                    all_messages_list = self._convert_multimodal_input_to_messages(converted_input)
-                    
+                    all_messages_list = self._convert_multimodal_input_to_messages(
+                        converted_input
+                    )
+
                     # Validate chat template for multimodal processing
                     error_check_ret = self._validate_chat_template(
                         request_chat_template=None,
@@ -330,7 +331,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     )
                     if error_check_ret is not None:
                         return error_check_ret
-                    
+
                     # Process each messages list separately
                     ctx.engine_prompts = []
                     for messages in all_messages_list:
@@ -349,8 +350,14 @@ class OpenAIServingEmbedding(OpenAIServing):
                 elif self._is_multimodal_input(ctx.request.input):
                     # Convert multimodal input to chat messages format
                     # Returns list[list[ChatCompletionMessageParam]]
-                    all_messages_list = self._convert_multimodal_input_to_messages(ctx.request.input)
-                    
+                    multimodal_input = ctx.request.input
+                    if isinstance(multimodal_input, (list, dict)):
+                        all_messages_list = self._convert_multimodal_input_to_messages(
+                            multimodal_input  # type: ignore[arg-type]
+                        )
+                    else:
+                        all_messages_list = []
+
                     # Validate chat template for multimodal processing
                     error_check_ret = self._validate_chat_template(
                         request_chat_template=None,
@@ -359,7 +366,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     )
                     if error_check_ret is not None:
                         return error_check_ret
-                    
+
                     # Process each messages list separately to get multiple prompts
                     ctx.engine_prompts = []
                     for messages in all_messages_list:

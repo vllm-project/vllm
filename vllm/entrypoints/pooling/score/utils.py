@@ -77,8 +77,8 @@ def _cosine_similarity(
 
 
 def _validate_score_input_lens(
-    data_1: list[str] | list[ScoreContentPartParam],
-    data_2: list[str] | list[ScoreContentPartParam],
+    data_1: list[str] | list[ScoreContentPartParam] | list[list[ScoreContentPartParam]],
+    data_2: list[str] | list[ScoreContentPartParam] | list[list[ScoreContentPartParam]],
 ):
     len_1 = len(data_1)
     len_2 = len(data_2)

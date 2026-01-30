@@ -16,10 +16,10 @@ from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 class MultimodalEmbeddingInput(BaseModel):
     """Input type for multimodal embeddings.
-    
+
     Supports text, image, and instruction inputs for embedding generation.
     At least one of text or image must be provided.
-    
+
     Examples:
         >>> # Text only
         >>> MultimodalEmbeddingInput(text="Hello world")
@@ -29,9 +29,10 @@ class MultimodalEmbeddingInput(BaseModel):
         >>> MultimodalEmbeddingInput(
         ...     instruction="Represent this image for retrieval",
         ...     text="A cat",
-        ...     image="https://example.com/cat.jpg"
+        ...     image="https://example.com/cat.jpg",
         ... )
     """
+
     instruction: str | None = None
     text: str | None = None
     image: str | None = None
