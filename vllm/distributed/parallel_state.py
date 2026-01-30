@@ -921,14 +921,10 @@ class GroupCoordinator:
             if tensor.is_cuda:
                 tensor.record_stream(torch.cuda.current_stream(tensor.device))
 
-            if tensor.is_cpu:
-                handle = torch.distributed.isend(
-                    tensor, dst=self.ranks[dst], group=metadata_group
-                )
-            else:
-                handle = torch.distributed.isend(
-                    tensor, dst=self.ranks[dst], group=group
-                )
+            comm_group = metadata_group if tensor.is_cpu else group
+            handle = torch.distributed.isend(
+                tensor, dst=self.ranks[dst], group=comm_group
+            )
             handles.append(handle)
 
         return handles
@@ -1083,14 +1079,10 @@ class GroupCoordinator:
                     slice_tensor = full_tensor.reshape(all_gather_size, -1)[
                         all_gather_rank
                     ]
-                    if slice_tensor.is_cpu:
-                        h = torch.distributed.irecv(
-                            slice_tensor, src=self.ranks[src], group=metadata_group
-                        )
-                    else:
-                        h = torch.distributed.irecv(
-                            slice_tensor, src=self.ranks[src], group=group
-                        )
+                    comm_group = metadata_group if slice_tensor.is_cpu else group
+                    h = torch.distributed.irecv(
+                        slice_tensor, src=self.ranks[src], group=comm_group
+                    )
                     handles.append(h)
 
                     def _postprocess(
@@ -1107,14 +1099,10 @@ class GroupCoordinator:
                     postprocess.append(_postprocess)
                     tensor_dict[key] = slice_tensor
                 else:
-                    if full_tensor.is_cpu:
-                        h = torch.distributed.irecv(
-                            full_tensor, src=self.ranks[src], group=metadata_group
-                        )
-                    else:
-                        h = torch.distributed.irecv(
-                            full_tensor, src=self.ranks[src], group=group
-                        )
+                    comm_group = metadata_group if full_tensor.is_cpu else group
+                    h = torch.distributed.irecv(
+                        full_tensor, src=self.ranks[src], group=comm_group
+                    )
                     handles.append(h)
                     tensor_dict[key] = full_tensor
             else:
