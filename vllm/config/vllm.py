@@ -362,13 +362,6 @@ class VllmConfig:
         ]
         return hash_str
 
-    def pad_for_cudagraph(self, batch_size: int) -> int:
-        # if batch_size > self.compilation_config.max_cudagraph_capture_size,
-        # it should raise an IndexError.
-        # the caller should make sure the batch_size is within the range,
-        # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
-        return self.compilation_config.bs_to_padded_graph_size[batch_size]
-
     @property
     def needs_dp_coordinator(self) -> bool:
         """

@@ -349,7 +349,7 @@ def _rocm_aiter_mla_decode_fwd_impl(
 ) -> None:
     from aiter.mla import mla_decode_fwd
 
-    kwargs = {
+    kwargs: dict[str, float | torch.Tensor | None] = {
         "sm_scale": sm_scale,
         "logit_cap": logit_cap,
     }
