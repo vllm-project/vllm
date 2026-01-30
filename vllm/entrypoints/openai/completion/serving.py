@@ -727,6 +727,7 @@ class OpenAIServingCompletion(OpenAIServing):
         max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
         return RenderConfig(
             max_length=max_input_tokens_len,
+            max_model_len=self.max_model_len,
             truncate_prompt_tokens=request.truncate_prompt_tokens,
             add_special_tokens=request.add_special_tokens,
             cache_salt=request.cache_salt,

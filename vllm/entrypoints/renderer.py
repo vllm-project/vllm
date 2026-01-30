@@ -27,6 +27,9 @@ class RenderConfig:
     """Maximum allowable total input token length. If provided,
     token inputs longer than this raise `ValueError`."""
 
+    max_model_len: int | None = None
+    """The model's actual maximum context length, used for error messages."""
+
     truncate_prompt_tokens: int | None = None
     """Number of tokens to keep. `None` means no truncation.
     `0` yields an empty list (and skips embeds).
@@ -293,6 +296,7 @@ class CompletionRenderer(BaseRenderer):
             return await self._create_prompt_from_token_ids(
                 prompt_token_ids,
                 config.max_length,
+                config.max_model_len,
                 truncate_prompt_tokens,
                 config.cache_salt,
                 config.needs_detokenization,
@@ -302,6 +306,7 @@ class CompletionRenderer(BaseRenderer):
             return await self._create_prompt_from_text(
                 prompt,
                 config.max_length,
+                config.max_model_len,
                 truncate_prompt_tokens,
                 config.add_special_tokens,
                 config.cache_salt,
@@ -314,6 +319,7 @@ class CompletionRenderer(BaseRenderer):
         self,
         text: str,
         max_length: int | None,
+        max_model_len: int | None,
         truncate_prompt_tokens: int | None,
         add_special_tokens: bool,
         cache_salt: str | None,
@@ -340,13 +346,14 @@ class CompletionRenderer(BaseRenderer):
             )
 
         return self._create_tokens_prompt(
-            encoded.input_ids, max_length, cache_salt, text
+            encoded.input_ids, max_length, max_model_len, cache_salt, text
         )
 
     async def _create_prompt_from_token_ids(
         self,
         token_ids: list[int],
         max_length: int | None,
+        max_model_len: int | None,
         truncate_prompt_tokens: int | None,
         cache_salt: str | None,
         needs_detokenization: bool | None = False,
@@ -362,6 +369,7 @@ class CompletionRenderer(BaseRenderer):
         return self._create_tokens_prompt(
             token_ids=token_ids,
             max_length=max_length,
+            max_model_len=max_model_len,
             cache_salt=cache_salt,
             prompt=prompt,
         )
@@ -390,13 +398,15 @@ class CompletionRenderer(BaseRenderer):
         self,
         token_ids: list[int],
         max_length: int | None = None,
+        max_model_len: int | None = None,
         cache_salt: str | None = None,
         prompt: str | None = None,
     ) -> TokensPrompt:
         """Create validated TokensPrompt."""
         if max_length is not None and len(token_ids) > max_length:
+            context_len = max_model_len if max_model_len is not None else max_length
             raise VLLMValidationError(
-                f"This model's maximum context length is {max_length} tokens. "
+                f"This model's maximum context length is {context_len} tokens. "
                 f"However, your request has {len(token_ids)} input tokens. "
                 "Please reduce the length of the input messages.",
                 parameter="input_tokens",
