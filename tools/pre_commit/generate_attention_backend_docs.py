@@ -332,6 +332,7 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
     info: dict[str, Any] = {
         "compute_capability": "Any",
         "requires_r1_dims": False,
+        "dtypes": "fp16, bf16",  # Default from base class
     }
 
     # Parse class variables
@@ -344,6 +345,21 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
                     and isinstance(item.value, ast.Constant)
                 ):
                     info["requires_r1_dims"] = item.value.value
+
+        # Parse supported_dtypes class variable
+        if (
+            isinstance(item, ast.AnnAssign)
+            and isinstance(item.target, ast.Name)
+            and item.target.id == "supported_dtypes"
+            and isinstance(item.value, ast.List)
+        ):
+            dtype_map = {"float16": "fp16", "bfloat16": "bf16", "float32": "fp32"}
+            dtypes = []
+            for elt in item.value.elts:
+                if isinstance(elt, ast.Attribute):
+                    dtypes.append(dtype_map.get(elt.attr, elt.attr))
+            if dtypes:
+                info["dtypes"] = ", ".join(dtypes)
 
     # Parse get_name static method
     get_name_method = find_method(class_node, "get_name")
@@ -434,6 +450,7 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
                 "name": display_name,
                 "marker": marker,
                 "description": metadata.get("description", ""),
+                "dtypes": backend_info.get("dtypes", "fp16, bf16"),
                 "compute_capability": backend_info.get("compute_capability", "Any"),
                 "notes": notes,
             }
@@ -1073,15 +1090,16 @@ def generate_mla_section(
         "Otherwise, the prefill backend is selected automatically at runtime based on",
         "hardware and configuration.",
         "",
-        "| Backend | Description | Compute Cap. | Notes |",
-        "|---------|-------------|--------------|-------|",
+        "| Backend | Description | Dtypes | Compute Cap. | Notes |",
+        "|---------|-------------|--------|--------------|-------|",
     ]
 
     for backend in prefill_backends:
-        row = "| `{}`{} | {} | {} | {} |".format(
+        row = "| `{}`{} | {} | {} | {} | {} |".format(
             backend["name"],
             backend.get("marker", ""),
             backend["description"],
+            backend.get("dtypes", "fp16, bf16"),
             backend["compute_capability"],
             backend.get("notes", ""),
         )
