@@ -52,6 +52,7 @@ def launch_lm_eval(eval_config, tp_size):
     backend = eval_config.get("backend", "vllm")
     enforce_eager = eval_config.get("enforce_eager", "true")
     kv_cache_dtype = eval_config.get("kv_cache_dtype", "auto")
+    attention_backend = eval_config.get("attention_backend")
     model_args = (
         f"pretrained={eval_config['model_name']},"
         f"tensor_parallel_size={tp_size},"
@@ -62,6 +63,8 @@ def launch_lm_eval(eval_config, tp_size):
         f"max_model_len={max_model_len},"
         "allow_deprecated_quantization=True,"
     )
+    if attention_backend:
+        model_args += f"attention_backend={attention_backend},"
 
     env_vars = eval_config.get("env_vars", None)
     with scoped_env_vars(env_vars):

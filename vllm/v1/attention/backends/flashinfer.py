@@ -565,9 +565,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                 self.cache_dtype
             )
-        elif self.cache_dtype == "nvfp4":
-            # NVFP4 cache is stored as uint8 with scales in the cache.
-            self.kv_cache_dtype = self.kv_cache_spec.dtype
         else:
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
