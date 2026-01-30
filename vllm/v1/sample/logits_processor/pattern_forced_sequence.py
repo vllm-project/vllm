@@ -113,10 +113,11 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
             ):
                 tail = real_tokens[-len(trigger_pattern) :]
                 if tail == trigger_pattern:
-                    self.req_states[index] = req_state._replace(
+                    req_state = req_state._replace(
                         state=ForcingState.FORCING,
                         forcing_pos=0,
                     )
+                    self.req_states[index] = req_state
                     state = ForcingState.FORCING
                     pos = 0
 
