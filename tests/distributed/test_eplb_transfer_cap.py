@@ -131,7 +131,6 @@ def test_apply_transfer_cap_maintains_permutation():
     new = torch.tensor([1, 0, 3, 2, 5, 4, 7, 6])
     apply_transfer_cap(old, new, max_transfers=5)
 
-    # Should have at most 6 transfers (3 swaps, rounded up)
     num_transfers = (old != new).sum().item()
     assert num_transfers == 4
     assert new.tolist() == [0, 1, 2, 3, 5, 4, 7, 6]

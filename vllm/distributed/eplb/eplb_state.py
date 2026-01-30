@@ -1251,6 +1251,8 @@ def find_cycles(old_expert_indices: torch.Tensor, new_expert_indices: torch.Tens
     visited = [False] * num_physical_experts
     cycles = []
 
+    old_logical_expert_indices = torch.argsort(old_expert_indices)
+
     for current_expert in range(num_physical_experts):
         if (
             visited[current_expert]
@@ -1265,7 +1267,7 @@ def find_cycles(old_expert_indices: torch.Tensor, new_expert_indices: torch.Tens
             visited[pos] = True
             cycle.append(pos)
             new_expert = new_expert_indices[pos].item()
-            next_pos = (old_expert_indices == new_expert).nonzero()[0].item()
+            next_pos = old_logical_expert_indices[new_expert].item()
             pos = next_pos
 
         if len(cycle) > 1:
