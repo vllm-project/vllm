@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningItem
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseReasoningItem,
+)
 from openai.types.responses.response_output_item import McpCall
 from openai_harmony import Author, Message, Role, TextContent
 
@@ -844,11 +848,12 @@ class TestParseChatOutput:
 class TestParseOutputMessage:
     """Tests for parse_output_message function."""
 
-    def test_commentary_with_no_recipient_creates_reasoning(self):
-        """Test that commentary with recipient=None (preambles) creates reasoning items.
+    def test_commentary_with_no_recipient_creates_message(self):
+        """Test that commentary with recipient=None (preambles) creates message items.
 
-        Per Harmony format, commentary channel can contain preambles to calling
-        multiple functions - explanatory text with no recipient.
+        Per Harmony format, preambles are intended to be shown to end-users,
+        unlike analysis channel content which is hidden reasoning.
+        See: https://cookbook.openai.com/articles/openai-harmony
         """
         message = Message.from_role_and_content(
             Role.ASSISTANT, "I will now search for the weather information."
@@ -859,13 +864,16 @@ class TestParseOutputMessage:
         output_items = parse_output_message(message)
 
         assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].type == "reasoning"
+        assert isinstance(output_items[0], ResponseOutputMessage)
+        assert output_items[0].type == "message"
+        assert output_items[0].role == "assistant"
+        assert output_items[0].status == "completed"
+        assert len(output_items[0].content) == 1
+        assert output_items[0].content[0].type == "output_text"
         assert (
             output_items[0].content[0].text
             == "I will now search for the weather information."
         )
-        assert output_items[0].content[0].type == "reasoning_text"
 
     def test_commentary_with_function_recipient_creates_function_call(self):
         """Test commentary with recipient='functions.X' creates function calls."""
@@ -944,7 +952,7 @@ class TestParseOutputMessage:
         output_items = parse_output_message(message)
 
         assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
+        assert isinstance(output_items[0], ResponseOutputMessage)
         assert output_items[0].content[0].text == ""
 
     def test_commentary_with_multiple_contents_and_no_recipient(self):
@@ -958,10 +966,13 @@ class TestParseOutputMessage:
 
         output_items = parse_output_message(message)
 
-        assert len(output_items) == 2
-        assert all(isinstance(item, ResponseReasoningItem) for item in output_items)
+        # _parse_final_message returns single ResponseOutputMessage with
+        # multiple contents
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseOutputMessage)
+        assert len(output_items[0].content) == 2
         assert output_items[0].content[0].text == "Step 1: Analyze the request"
-        assert output_items[1].content[0].text == "Step 2: Prepare to call functions"
+        assert output_items[0].content[1].text == "Step 2: Prepare to call functions"
 
     def test_commentary_with_multiple_function_calls(self):
         """Test multiple function calls in commentary channel."""
@@ -1133,7 +1144,7 @@ def test_parse_remaining_state_commentary_channel() -> None:
     assert mcp_items[0].status == "in_progress"
 
     # Test 3: Built-in tool (python)
-    # should NOT return MCP call, falls through to reasoning
+    # should NOT return MCP call, returns reasoning (internal tool interaction)
     parser_builtin = Mock()
     parser_builtin.current_content = "print('hello')"
     parser_builtin.current_role = Role.ASSISTANT
@@ -1142,10 +1153,25 @@ def test_parse_remaining_state_commentary_channel() -> None:
 
     builtin_items = parse_remaining_state(parser_builtin)
 
-    # Should fall through to reasoning logic
+    # Built-in tools explicitly return reasoning
     assert len(builtin_items) == 1
     assert not isinstance(builtin_items[0], McpCall)
     assert builtin_items[0].type == "reasoning"
+
+    # Test 4: No recipient (preamble) → should return message, not reasoning
+    parser_preamble = Mock()
+    parser_preamble.current_content = "I'll search for that information now."
+    parser_preamble.current_role = Role.ASSISTANT
+    parser_preamble.current_channel = "commentary"
+    parser_preamble.current_recipient = None
+
+    preamble_items = parse_remaining_state(parser_preamble)
+
+    assert len(preamble_items) == 1
+    assert isinstance(preamble_items[0], ResponseOutputMessage)
+    assert preamble_items[0].type == "message"
+    assert preamble_items[0].content[0].text == "I'll search for that information now."
+    assert preamble_items[0].status == "incomplete"  # streaming
 
 
 def test_parse_remaining_state_analysis_channel() -> None:

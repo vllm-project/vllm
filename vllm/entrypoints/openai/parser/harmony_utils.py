@@ -657,9 +657,10 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         output_items.extend(_parse_reasoning_content(message))
 
     elif message.channel == "commentary":
-        # Per Harmony format, commentary channel can contain preambles to calling
-        # multiple functions - explanatory text with no recipient
-        output_items.extend(_parse_reasoning_content(message))
+        # Per Harmony format, preambles (commentary with no recipient) are
+        # intended to be shown to end-users, unlike analysis channel content.
+        # See: https://cookbook.openai.com/articles/openai-harmony
+        output_items.append(_parse_final_message(message))
 
     elif message.channel == "final":
         output_items.append(_parse_final_message(message))
@@ -711,19 +712,38 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
                     status="in_progress",
                 )
             ]
+        else:
+            # Built-in tools explicitly return reasoning
+            return [
+                ResponseReasoningItem(
+                    id=f"rs_{random_uuid()}",
+                    summary=[],
+                    type="reasoning",
+                    content=[
+                        ResponseReasoningTextContent(
+                            text=parser.current_content, type="reasoning_text"
+                        )
+                    ],
+                    status=None,
+                )
+            ]
 
     if parser.current_channel == "commentary":
+        # Per Harmony format, preambles (commentary with no recipient) are
+        # intended to be shown to end-users, unlike analysis channel content.
+        output_text = ResponseOutputText(
+            text=parser.current_content,
+            annotations=[],
+            type="output_text",
+            logprobs=None,
+        )
         return [
-            ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
-                    )
-                ],
-                status=None,
+            ResponseOutputMessage(
+                id=f"msg_{random_uuid()}",
+                content=[output_text],
+                role="assistant",
+                status="incomplete",
+                type="message",
             )
         ]
 
@@ -796,17 +816,30 @@ def parse_chat_output(
     is_tool_call = False  # TODO: update this when tool call is supported
 
     # Get completed messages from the parser
+    # - analysis channel: hidden reasoning
+    # - commentary channel without recipient (preambles): visible to user
+    # - final channel: visible to user
+    # - commentary with recipient (tool calls): handled separately by tool parser
     reasoning_texts = [
         msg.content[0].text for msg in output_msgs if msg.channel == "analysis"
     ]
     final_texts = [
-        msg.content[0].text for msg in output_msgs if msg.channel != "analysis"
+        msg.content[0].text
+        for msg in output_msgs
+        if msg.channel == "final" or (msg.channel == "commentary" and not msg.recipient)
     ]
 
     # Extract partial messages from the parser
     if parser.current_channel == "analysis" and parser.current_content:
         reasoning_texts.append(parser.current_content)
-    elif parser.current_channel != "analysis" and parser.current_content:
+    elif parser.current_channel == "final" and parser.current_content:
+        final_texts.append(parser.current_content)
+    elif (
+        parser.current_channel == "commentary"
+        and not parser.current_recipient
+        and parser.current_content
+    ):
+        # Preambles (commentary without recipient) are visible to user
         final_texts.append(parser.current_content)
 
     # Flatten multiple messages into a single string
