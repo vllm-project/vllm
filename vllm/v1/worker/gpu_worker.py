@@ -992,13 +992,10 @@ class Worker(WorkerBase):
             # Weights are already in kernel format, copy directly
             def load_weights_direct(
                 weights: list[tuple[str, torch.Tensor]],
-            ) -> set[str]:
-                loaded = set()
+            ) -> None:
                 for name, weight in weights:
                     param = model.get_parameter(name)
                     param.copy_(weight)
-                    loaded.add(name)
-                return loaded
 
             self.weight_transfer_engine.receive_weights(
                 typed_update_info,
