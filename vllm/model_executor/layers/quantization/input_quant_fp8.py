@@ -157,6 +157,11 @@ class QuantFP8(CustomOp):
         if use_aiter_per_token_quant:
             return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
 
+        # Fallback to native implementation for group quantization.
+        if self.is_group_quant:
+            assert scale is None, "Dynamic group quantization does not use scale"
+            return self._quantize_group_native(x)
+
         # Fallback to CUDA implementation
         return self.forward_cuda(x, scale, scale_ub)
 
