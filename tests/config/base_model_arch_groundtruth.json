@@ -14,7 +14,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.float32"
+        "dtype": "torch.float32",
+        "max_model_len": 2048
     },
     "mistralai/Mamba-Codestral-7B-v0.1": {
         "architectures": [
@@ -31,7 +32,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 128000
     },
     "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11": {
         "architectures": [
@@ -48,7 +50,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": true,
-        "dtype": "torch.float32"
+        "dtype": "torch.float32",
+        "max_model_len": 2048
     },
     "tiiuae/falcon-mamba-7b-instruct": {
         "architectures": [
@@ -65,7 +68,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 2048
     },
     "Zyphra/Zamba2-7B-instruct": {
         "architectures": [
@@ -82,7 +86,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 4096
     },
     "mosaicml/mpt-7b": {
         "architectures": [
@@ -133,7 +138,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 2048
     },
     "tiiuae/falcon-40b": {
         "architectures": [
@@ -150,7 +156,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 2048
     },
     "luccafong/deepseek_mtp_main_random": {
         "architectures": [
@@ -167,7 +174,8 @@
         "num_experts": 72,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 163840
     },
     "luccafong/deepseek_mtp_draft_random": {
         "architectures": [
@@ -184,7 +192,8 @@
         "num_experts": 72,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 163840
     },
     "Qwen/Qwen3-Next-80B-A3B-Instruct": {
         "architectures": [
@@ -201,7 +210,8 @@
         "num_experts": 512,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 262144
     },
     "tiny-random/qwen3-next-moe": {
         "architectures": [
@@ -218,7 +228,8 @@
         "num_experts": 32,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 262144
     },
     "zai-org/GLM-4.5": {
         "architectures": [
@@ -235,7 +246,8 @@
         "num_experts": 160,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 131072
     },
     "baidu/ERNIE-4.5-21B-A3B-PT": {
         "architectures": [
@@ -252,7 +264,8 @@
         "num_experts": 64,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 131072
     },
     "lmsys/gpt-oss-20b-bf16": {
         "architectures": [
@@ -269,7 +282,8 @@
         "num_experts": 32,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 131072
     },
     "deepseek-ai/DeepSeek-V3.2-Exp": {
         "architectures": [
@@ -286,7 +300,8 @@
         "num_experts": 256,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 163840
     },
     "meta-llama/Llama-4-Scout-17B-16E-Instruct": {
         "architectures": [
@@ -303,7 +318,8 @@
         "num_experts": 16,
         "is_deepseek_mla": false,
         "is_multimodal_model": true,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 10485760
     },
     "nvidia/Llama-3_3-Nemotron-Super-49B-v1": {
         "architectures": [
@@ -320,7 +336,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 131072
     },
     "XiaomiMiMo/MiMo-7B-RL": {
         "architectures": [
@@ -337,7 +354,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 32768
     },
     "meituan-longcat/LongCat-Flash-Chat": {
         "architectures": [
@@ -354,6 +372,7 @@
         "num_experts": 512,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.float32"
+        "dtype": "torch.float32",
+        "max_model_len": 131072
     }
 }

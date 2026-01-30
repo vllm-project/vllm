@@ -14,7 +14,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "torch.float32"
+        "dtype": "torch.float32",
+        "max_model_len": 2048
     },
     "luccafong/deepseek_mtp_draft_random": {
         "architectures": [
@@ -31,7 +32,8 @@
         "num_experts": 72,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "torch.bfloat16"
+        "dtype": "torch.bfloat16",
+        "max_model_len": 163840
     },
     "eagle618/eagle-deepseek-v3-random": {
         "architectures": [
@@ -48,7 +50,8 @@
         "num_experts": 72,
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
-        "dtype": "bfloat16"
+        "dtype": "bfloat16",
+        "max_model_len": 163840
     },
     "yuhuili/EAGLE-LLaMA3-Instruct-8B": {
         "architectures": [
@@ -65,7 +68,8 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "float16"
+        "dtype": "float16",
+        "max_model_len": 2048
     },
     "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B": {
         "architectures": [
@@ -82,6 +86,7 @@
         "num_experts": 0,
         "is_deepseek_mla": false,
         "is_multimodal_model": false,
-        "dtype": "float16"
+        "dtype": "float16",
+        "max_model_len": 2048
     }
 }

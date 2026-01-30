@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, NamedTuple
 
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
@@ -8,6 +8,28 @@ from pydantic.dataclasses import dataclass
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+class MaxModelLenInfo(NamedTuple):
+    """Information about the maximum model length."""
+
+    derived: float
+    """Maximum supported sequence length after RoPE scaling.
+    Used for:
+    1. Validation - user-specified max_model_len cannot exceed this.
+    2. Default for non-LongRoPE models (with sliding_window/tokenizer caps)."""
+
+    derived_key: str | None
+    """The config key used to derive the max length (for error messages)."""
+
+    default: float | None
+    """For LongRoPE models only: original_max_position_embeddings.
+    Used as the default max_model_len to avoid performance degradation.
+    None for non-LongRoPE models (derived is used instead)."""
+
+    model_max_length: int | None
+    """The model_max_length from hf_config. Used as a fallback for validation
+    when user-specified max_model_len exceeds derived."""
 
 
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -53,5 +75,12 @@ class ModelArchitectureConfig:
     is_deepseek_mla: bool
     """Whether the model is a DeepSeek MLA model."""
 
-    derived_max_model_len_and_key: tuple[float, str | None]
-    """Derived maximum model length and key from the hf config."""
+    max_model_len_info: MaxModelLenInfo
+    """Derived maximum model length information including RoPE scaling."""
+
+    # RoPE-related fields
+    uses_mrope: bool
+    """Whether the model uses M-RoPE (multi-dimensional rotary position embedding)."""
+
+    uses_xdrope_dim: int
+    """Number of dimensions for XD-RoPE. 0 if not used."""

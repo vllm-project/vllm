@@ -91,11 +91,10 @@ def _assert_model_arch_config(
         assert model_arch_config.head_size == expected["head_size"]
 
 
-def _assert_model_config_methods(
-    model_config, expected: dict, check_head_size: bool = True
-):
-    """Assert model_config methods return expected values."""
+def _assert_model_config(model_config, expected: dict, check_head_size: bool = True):
+    """Assert model_config return expected values."""
     assert model_config.architectures == expected["architectures"]
+    assert model_config.max_model_len == expected["max_model_len"]
     assert model_config.get_vocab_size() == expected["vocab_size"]
     assert model_config.get_hidden_size() == expected["hidden_size"]
     assert model_config.get_total_num_kv_heads() == expected["total_num_kv_heads"]
@@ -120,7 +119,7 @@ def test_base_model_arch_config(model: str):
     )
 
     _assert_model_arch_config(model_config, expected)
-    _assert_model_config_methods(model_config, expected)
+    _assert_model_config(model_config, expected)
 
 
 @pytest.mark.parametrize(
@@ -147,6 +146,4 @@ def test_draft_model_arch_config(
     check_head_size = isinstance(expected["head_size"], int)
 
     _assert_model_arch_config(model_config, expected, check_head_size=check_head_size)
-    _assert_model_config_methods(
-        model_config, expected, check_head_size=check_head_size
-    )
+    _assert_model_config(model_config, expected, check_head_size=check_head_size)

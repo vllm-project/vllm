@@ -29,12 +29,9 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
-    is_rope_parameters_nested,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_tokenizer_config,
-    uses_mrope,
-    uses_xdrope_dim,
 )
 from vllm.transformers_utils.gguf_utils import (
     is_gguf,
@@ -1406,11 +1403,11 @@ class ModelConfig:
 
     @property
     def uses_mrope(self) -> bool:
-        return uses_mrope(self.hf_config)
+        return self.model_arch_config.uses_mrope
 
     @property
     def uses_xdrope_dim(self) -> int:
-        return uses_xdrope_dim(self.hf_config)
+        return self.model_arch_config.uses_xdrope_dim
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -1919,9 +1916,10 @@ def _get_and_verify_max_len(
     encoder_config: Any | None = None,
 ) -> int:
     """Get and verify the model's maximum length."""
-    (derived_max_model_len, max_len_key) = (
-        model_arch_config.derived_max_model_len_and_key
-    )
+    # Get pre-computed derived max model len info (includes RoPE scaling)
+    max_len_info = model_arch_config.max_model_len_info
+    derived_max_model_len = max_len_info.derived
+    max_len_key = max_len_info.derived_key
 
     # If sliding window is manually disabled, max_length should be less
     # than the sliding window length in the model config.
@@ -1961,31 +1959,6 @@ def _get_and_verify_max_len(
         )
         derived_max_model_len = default_max_len
 
-    # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
-    # To simplify the verification, we convert it to dict[str, TypedDict].
-    rope_parameters = getattr(hf_config, "rope_parameters", None)
-    if rope_parameters and not is_rope_parameters_nested(rope_parameters):
-        rope_parameters = {"": rope_parameters}
-
-    # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
-    # scaling, so we skip applying the scaling factor again.
-    if rope_parameters is not None and "gemma3" not in hf_config.model_type:
-        scaling_factor = 1.0
-        for rp in rope_parameters.values():
-            # No need to consider "type" key because of patch_rope_parameters when
-            # loading HF config
-            rope_type = rp["rope_type"]
-
-            if rope_type not in ("su", "longrope", "llama3"):
-                # NOTE: rope_type == "default" does not define factor https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
-                # NOTE: This assumes all layer types have the same scaling factor.
-                scaling_factor = rp.get("factor", scaling_factor)
-
-                if rope_type == "yarn":
-                    derived_max_model_len = rp["original_max_position_embeddings"]
-        # Do this outside loop since all layer types should have the same scaling
-        derived_max_model_len *= scaling_factor
-
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
@@ -1993,17 +1966,12 @@ def _get_and_verify_max_len(
     # then use that derived from the model config as a default value.
     # When -1 is specified, the engine will later auto-fit to available memory.
     if max_model_len is None or max_model_len == -1:
-        # For LongRoPE, default to original_max_position_embeddings to avoid
-        # performance degradation for shorter sequences
-        if rope_parameters is not None and any(
-            rp["rope_type"] == "longrope" for rp in rope_parameters.values()
-        ):
-            max_model_len = int(
-                getattr(
-                    hf_config, "original_max_position_embeddings", derived_max_model_len
-                )
-            )
+        if max_len_info.default is not None:
+            # For LongRoPE, default to original_max_position_embeddings to avoid
+            # performance degradation for shorter sequences
+            max_model_len = int(max_len_info.default)
         else:
+            # Non-LongRoPE: use derived_max_model_len with caps applied
             max_model_len = int(derived_max_model_len)
         max_model_len = current_platform.check_max_model_len(max_model_len)
 
@@ -2013,7 +1981,7 @@ def _get_and_verify_max_len(
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input
         # with model_max_length and allow this override when it's smaller.
-        model_max_length = getattr(hf_config, "model_max_length", None)
+        model_max_length = max_len_info.model_max_length
         if model_max_length is None or max_model_len > model_max_length:
             msg = (
                 f"User-specified max_model_len ({max_model_len}) is greater "
