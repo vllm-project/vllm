@@ -47,9 +47,11 @@ __all__ = [
 
 
 def _supports_current_device() -> bool:
-    """Supports only Blackwell-family GPUs."""
+    """Supports only Blackwell-family GPUs (SM10.x and SM12.x)."""
     p = current_platform
-    return p.is_cuda() and p.is_device_capability_family(100)
+    return p.is_cuda() and (
+        p.is_device_capability_family(100) or p.is_device_capability_family(120)
+    )  # RTX Blackwell
 
 
 def _supports_no_act_and_mul() -> bool:
@@ -138,7 +140,10 @@ def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
         envs.VLLM_USE_FLASHINFER_MOE_FP4
         and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
         and current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
+        and (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(120)
+        )  # RTX Blackwell
     )
 
 

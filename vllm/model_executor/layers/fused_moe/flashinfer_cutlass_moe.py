@@ -89,6 +89,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             and (
                 current_platform.is_device_capability((9, 0))
                 or current_platform.is_device_capability_family(100)
+                or current_platform.is_device_capability_family(120)  # RTX Blackwell
             )
             and has_flashinfer_cutlass_fused_moe()
         )
@@ -124,7 +125,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             )
             or (
                 (scheme == (kNvfp4Static, kNvfp4Dynamic))
-                and (p.is_device_capability_family(100))
+                and (
+                    p.is_device_capability_family(100)
+                    or p.is_device_capability_family(120)
+                )  # RTX Blackwell
             )
         )
 
