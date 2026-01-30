@@ -275,7 +275,6 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
             # whixtral tokenizer adds padding to the audio
             # so we need to update the audio arrays
             {**dummy_mm_data, "audio": [a.audio_array for a in res.audios]},
-            validate=False,
         )
 
         return ProcessorInputs(prompt=dummy_tokens, mm_items=dummy_mm_inputs)
