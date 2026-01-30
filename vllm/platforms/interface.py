@@ -7,7 +7,7 @@ import platform
 import random
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
@@ -243,7 +243,7 @@ class Platform:
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: Optional["AttentionBackendEnum"] = None,
+        backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         """
         Get the vision attention backend class of a device.

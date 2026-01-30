@@ -176,9 +176,7 @@ class LoRAModelManager:
         )
 
         mm_budget = MultiModalBudget(vllm_config, mm_registry)
-        limit_per_prompt: int = max(
-            self.mm_processor_info.get_allowed_mm_limits().values()
-        )
+        limit_per_prompt = max(self.mm_processor_info.allowed_mm_limits.values())
         num_encoder_tokens = self.model.get_num_mm_encoder_tokens(
             mm_budget.get_encoder_budget()
         )

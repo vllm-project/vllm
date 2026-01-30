@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.nn import Module
@@ -182,7 +182,7 @@ class Fp8Config(QuantizationConfig):
 
     def get_xpu_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         from vllm.model_executor.layers.quantization.ipex_quant import (
             XPUFp8LinearMethod,
             XPUFp8MoEMethod,
@@ -218,7 +218,7 @@ class Fp8Config(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if current_platform.is_xpu():
             return self.get_xpu_quant_method(layer, prefix)
         if isinstance(layer, LinearBase):
