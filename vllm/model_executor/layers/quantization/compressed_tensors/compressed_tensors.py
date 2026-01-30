@@ -211,18 +211,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         # because Attention quantization on its own is not supported by vLLM.
         # It is coupled with KV-cache quantization, and if scales are present in the
         # checkpoint, they will be used properly.
-        grps_without_attn_quant = {}
-        for k, v in config["config_groups"].items():
-            # e.g. LlamaAttention, Qwen3Attention, etc.
-            if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
-                logger.warning(
-                    "Skipping CompressedTensors config group for %s. Attention quant "
-                    "is coupled with KV-cache quantization in vLLM.",
-                    v["targets"][0],
-                )
-                continue
-            grps_without_attn_quant[k] = v
-        config["config_groups"] = grps_without_attn_quant
+        if "config_groups" in config:
+            grps_without_attn_quant = {}
+            for k, v in config["config_groups"].items():
+                # e.g. LlamaAttention, Qwen3Attention, etc.
+                if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
+                    logger.warning(
+                        "Skipping CompressedTensors config group for %s. Attention "
+                        "quant is coupled with KV-cache quantization in vLLM.",
+                        v["targets"][0],
+                    )
+                    continue
+                grps_without_attn_quant[k] = v
+            config["config_groups"] = grps_without_attn_quant
 
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
