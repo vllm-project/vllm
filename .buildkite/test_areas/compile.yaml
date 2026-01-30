@@ -93,3 +93,39 @@ steps:
     # Run just llama3 (fp8 & fp4) for all config combinations
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
+- label: Fusion E2E TP2 AsyncTP Quick (B200)
+  timeout_in_minutes: 20 # ~15 mins
+  working_dir: "/vllm-workspace/"
+  device: b200
+  num_devices: 2
+  source_file_dependencies:
+    - csrc/quantization/
+    - vllm/model_executor/
+    - vllm/v1/attention/
+    - vllm/compilation/
+    - tests/compile/fusions_e2e/
+  commands:
+    - nvidia-smi
+    # Run all models and attn backends but only Inductor partition and native custom ops
+    - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "True and not +rms_norm and not +quant_fp8"
+
+- label: Fusion E2E TP2 AsyncTP Config Sweep (B200)
+  timeout_in_minutes: 40 # ~30 mins
+  working_dir: "/vllm-workspace/"
+  device: b200
+  num_devices: 2
+  source_file_dependencies:
+    - csrc/quantization/
+    - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+    - vllm/v1/attention/backends/flashinfer.py
+    - vllm/compilation/
+    # can affect pattern matching
+    - vllm/model_executor/layers/layernorm.py
+    - vllm/model_executor/layers/activation.py
+    - vllm/model_executor/layers/quantization/input_quant_fp8.py
+    - tests/compile/fusions_e2e/
+  commands:
+    - nvidia-smi
+    # Run just llama3 (fp8 & bf16) for all config combinations
+    - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "llama-3"
+

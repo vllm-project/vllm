@@ -30,7 +30,7 @@ llama3_8b = ModelFusionInfo(
     matches=lambda n_layers: Matches(
         ar_rms_fusion=n_layers * 2 + 1,
         sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 2,
+        async_tp=n_layers * 4,
     ),
 )
 
@@ -42,7 +42,7 @@ llama3_8b_fp8 = ModelFusionInfo(
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
         sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 2,
+        async_tp=n_layers * 4,
     ),
 )
 
@@ -54,7 +54,7 @@ llama3_8b_fp4 = ModelFusionInfo(
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
         sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 2,
+        async_tp=n_layers * 4,
     ),
 )
 
@@ -71,7 +71,7 @@ llama4_scout_fp8 = ModelFusionInfo(
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2,
         sequence_parallel=n_layers * 2,
-        async_tp=n_layers - 1,
+        async_tp=n_layers * 2 - 1,
     ),
 )
 
@@ -90,7 +90,7 @@ llama4_scout_fp4 = ModelFusionInfo(
 qwen3_a3b = ModelFusionInfo(
     model_name="Qwen/Qwen3-30B-A3B",
     matches=lambda n_layers: Matches(
-        norm_rope_fusion=0,  # TODO broken #33295
+        norm_rope_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
         sequence_parallel=n_layers * 2 + 1,
         async_tp=n_layers * 2,
