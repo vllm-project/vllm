@@ -9,11 +9,14 @@ Start the vLLM server first:
 
 Then run this script:
 
-    python openai_realtime_microphone_client.py
+    python openai_realtime_microphone_client.py --host localhost --port 8000
+
+Use --share to create a public Gradio link.
 
 Requirements: websockets, numpy, gradio
 """
 
+import argparse
 import asyncio
 import base64
 import json
@@ -24,20 +27,20 @@ import gradio as gr
 import numpy as np
 import websockets
 
-WS_URL = "ws://localhost:8000/v1/realtime"
 SAMPLE_RATE = 16_000
 
 # Global state
 audio_queue: queue.Queue = queue.Queue()
 transcription_text = ""
 is_running = False
+ws_url = ""
 
 
 async def websocket_handler():
     """Connect to WebSocket and handle audio streaming + transcription."""
     global transcription_text, is_running
 
-    async with websockets.connect(WS_URL) as ws:
+    async with websockets.connect(ws_url) as ws:
         # Wait for session.created
         await ws.recv()
 
@@ -153,4 +156,17 @@ with gr.Blocks(title="Real-time Speech Transcription") as demo:
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    parser = argparse.ArgumentParser(
+        description="Realtime WebSocket Transcription with Gradio"
+    )
+    parser.add_argument(
+        "--host", type=str, default="localhost", help="vLLM server host"
+    )
+    parser.add_argument("--port", type=int, default=8000, help="vLLM server port")
+    parser.add_argument(
+        "--share", action="store_true", help="Create public Gradio link"
+    )
+    args = parser.parse_args()
+
+    ws_url = f"ws://{args.host}:{args.port}/v1/realtime"
+    demo.launch(share=args.share)
