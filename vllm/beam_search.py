@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
@@ -27,7 +27,7 @@ class BeamSearchSequence:
     text: str | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
-    multi_modal_data: Optional["MultiModalDataDict"] = None
+    multi_modal_data: "MultiModalDataDict | None" = None
     mm_processor_kwargs: dict[str, Any] | None = None
 
 

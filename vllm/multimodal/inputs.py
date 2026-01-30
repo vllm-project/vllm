@@ -11,7 +11,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Literal,
-    Optional,
     TypeAlias,
     TypedDict,
     Union,
@@ -186,7 +185,7 @@ class PlaceholderRange:
     length: int
     """The length of the placeholder."""
 
-    is_embed: Optional["torch.Tensor"] = None
+    is_embed: "torch.Tensor | None" = None
     """
     A boolean mask of shape `(length,)` indicating which positions
     between `offset` and `offset + length` to assign embeddings to.
@@ -341,7 +340,7 @@ class MultiModalFeatureSpec:
     `MultiModalFeatureSpec` per item.
     """
 
-    data: Optional["MultiModalKwargsItem"]
+    data: "MultiModalKwargsItem | None"
     """
     Represents multimodal data for this feature.
 

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import huggingface_hub
 from huggingface_hub.utils import HfHubHTTPError, HFValidationError
@@ -131,7 +131,7 @@ def replace_submodule(
 
 
 def parse_fine_tuned_lora_name(
-    name: str, weights_mapper: Optional["WeightsMapper"] = None
+    name: str, weights_mapper: "WeightsMapper | None" = None
 ) -> tuple[str, bool]:
     """Parse the name of lora weights.
 

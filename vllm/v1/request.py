@@ -7,7 +7,7 @@ from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -68,7 +68,7 @@ class Request:
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
-        lora_request: Optional["LoRARequest"] = None,
+        lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
