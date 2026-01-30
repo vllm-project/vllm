@@ -93,4 +93,4 @@ timm==1.0.17
 # Required for plugins test
 albumentations==1.4.6
 # Pin transformers version
-transformers==4.57.3
+transformers==5.0.0
