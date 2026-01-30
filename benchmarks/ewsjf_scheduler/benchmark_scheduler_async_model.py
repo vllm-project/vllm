@@ -292,11 +292,11 @@ if __name__ == "__main__":
     ]
 
     # dataset = load_dataset("ChayaLevi/data-100-2000")
-    # dataset = load_dataset("ChayaLevi/data-100-16000")
+    dataset = load_dataset("ChayaLevi/data-100-16000")
     # prompts = list(dataset['train']['input'])
 
     # dataset = pd.read_csv("/home/chaya/data_30000_100_2000_.csv")
-    dataset = pd.read_csv("/home/chaya/data_10000_1000_7500.csv")
+    # dataset = pd.read_csv("/home/chaya/data_10000_1000_7500.csv")
     prompts = list(dataset['input'])
 
     # prompt = prompts[:1000]
