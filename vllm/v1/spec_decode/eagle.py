@@ -704,7 +704,7 @@ class SpecDecodeBaseProposer:
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
     ) -> tuple[int, torch.Tensor, CommonAttentionMetadata]:
-        if self.net_num_new_slots_per_request == 0:
+        if not self.needs_extra_input_slots:
             # Default EAGLE pathway: no reshaping of input tensors needed.
             # Simply rotate the input ids and leave the positions unchanged,
             # Inserting the next token ids at the last slot in each request.
