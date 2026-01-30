@@ -1005,6 +1005,12 @@ class Worker(WorkerBase):
                 load_weights=load_weights_direct,
             )
 
+    def zero_weights(self) -> None:
+        """Zero out all model weights. Useful for demonstrating weight syncing."""
+        model = self.model_runner.model
+        for param in model.parameters():
+            param.data.zero_()
+
     def shutdown(self) -> None:
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:

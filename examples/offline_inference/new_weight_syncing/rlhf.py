@@ -11,12 +11,13 @@ A Hugging Face Transformer model occupies one GPU for training, whereas a
 
 The example performs the following steps:
 * Load the training model on one gpu (scheduled via ray)
-* Initialize the inference model with dummy weights across
+* Initialize the inference model with real weights across
   two gpus using vLLM's tensor parallelism and Ray placement groups.
-* Generate gibberish from a list of prompts using the randomly initialized
+* Zero out all inference model weights to demonstrate weight syncing.
+* Generate gibberish from a list of prompts using the zeroed
   inference engine.
-* Update the weights of the training model and broadcast the updated weights
-  to the inference engine by using a Ray collective RPC group.
+* Broadcast the real weights from the training model to the inference
+  engine using a Ray collective RPC group.
 * Generating from the list of prompts after weight sync should result
   in sensible outputs.
 
@@ -40,8 +41,8 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 )
 from vllm.utils.network_utils import get_ip, get_open_port
 
-# MODEL_NAME = "facebook/opt-125m"
-MODEL_NAME = "inference-optimization/Qwen3-0.6B-W4A16-G128"
+MODEL_NAME = "facebook/opt-125m"
+# MODEL_NAME = "inference-optimization/Qwen3-0.6B-W4A16-G128"
 
 
 class MyLLM(LLM):
@@ -50,6 +51,10 @@ class MyLLM(LLM):
     def __init__(self, *args, **kwargs):
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0,1"
         super().__init__(*args, **kwargs)
+
+    def zero_weights(self):
+        """Zero out all model weights to demonstrate weight syncing works."""
+        self.llm_engine.collective_rpc("zero_weights")
 
 
 @ray.remote(num_gpus=1)
@@ -60,6 +65,7 @@ class TrainModel:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
         ).to("cuda:0")
+
         self.port = get_open_port()
         self.master_address = get_ip()
 
@@ -130,8 +136,13 @@ llm = ray.remote(
     data_parallel_size=1,
     distributed_executor_backend="ray",
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
-    load_format="dummy",
+    quantization="fp8",
 )
+
+# Zero out all model weights to demonstrate that weight syncing works.
+# After zeroing, the model will generate garbage. After syncing, it will
+# generate sensible outputs.
+ray.get(llm.zero_weights.remote())
 
 # Generate text from the prompts.
 prompts = [
@@ -145,8 +156,8 @@ sampling_params = SamplingParams(temperature=0)
 
 outputs = ray.get(llm.generate.remote(prompts, sampling_params))
 
-# Generate text with the initial model. The output is expected to be nonsense
-# because the weights are randomly initialized.
+# Generate text with the zeroed model. The output is expected to be nonsense
+# because all weights have been zeroed out.
 print("-" * 50)
 for output in outputs:
     prompt = output.prompt
