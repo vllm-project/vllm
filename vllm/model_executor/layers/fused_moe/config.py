@@ -160,6 +160,10 @@ class FusedMoEQuantDesc:
     # Biases for GPT triton MoE
     bias: torch.Tensor | None = None
 
+    # Indices for activation reordering.
+    g_idx: torch.Tensor | None = None
+    g_idx_sort_idxs: torch.Tensor | None = None
+
 
 # TODO(bnell): have subclasses for specific moe methods?
 # e.g. for specific arguments bias, precision, etc.
@@ -714,6 +718,10 @@ def int4_w4a16_moe_quant_config(
     w2_scale: torch.Tensor,
     w1_zp: torch.Tensor | None,
     w2_zp: torch.Tensor | None,
+    w1_g_idx: torch.Tensor | None = None,
+    w2_g_idx: torch.Tensor | None = None,
+    w1_g_idx_sort_idxs: torch.Tensor | None = None,
+    w2_g_idx_sort_idxs: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -723,8 +731,22 @@ def int4_w4a16_moe_quant_config(
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape),
         _a2=FusedMoEQuantDesc(shape=group_shape),
-        _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp),
-        _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp),
+        _w1=FusedMoEQuantDesc(
+            dtype="int4",
+            shape=group_shape,
+            scale=w1_scale,
+            zp=w1_zp,
+            g_idx=w1_g_idx,
+            g_idx_sort_idxs=w1_g_idx_sort_idxs,
+        ),
+        _w2=FusedMoEQuantDesc(
+            dtype="int4",
+            shape=group_shape,
+            scale=w2_scale,
+            zp=w2_zp,
+            g_idx=w2_g_idx,
+            g_idx_sort_idxs=w2_g_idx_sort_idxs,
+        ),
     )
 
 
@@ -754,6 +776,10 @@ def int8_w8a16_moe_quant_config(
     w2_scale: torch.Tensor,
     w1_zp: torch.Tensor | None,
     w2_zp: torch.Tensor | None,
+    w1_g_idx: torch.Tensor | None = None,
+    w2_g_idx: torch.Tensor | None = None,
+    w1_g_idx_sort_idxs: torch.Tensor | None = None,
+    w2_g_idx_sort_idxs: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -763,8 +789,22 @@ def int8_w8a16_moe_quant_config(
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(shape=group_shape),
         _a2=FusedMoEQuantDesc(shape=group_shape),
-        _w1=FusedMoEQuantDesc(torch.int8, group_shape, w1_scale, None, w1_zp),
-        _w2=FusedMoEQuantDesc(torch.int8, group_shape, w2_scale, None, w2_zp),
+        _w1=FusedMoEQuantDesc(
+            dtype=torch.int8,
+            shape=group_shape,
+            scale=w1_scale,
+            zp=w1_zp,
+            g_idx=w1_g_idx,
+            g_idx_sort_idxs=w1_g_idx_sort_idxs,
+        ),
+        _w2=FusedMoEQuantDesc(
+            dtype=torch.int8,
+            shape=group_shape,
+            scale=w2_scale,
+            zp=w2_zp,
+            g_idx=w2_g_idx,
+            g_idx_sort_idxs=w2_g_idx_sort_idxs,
+        ),
     )
 
 

@@ -102,12 +102,14 @@ class QuantKey:
     scale: scale descriptor
     scale2: second-level scale descriptor
     symmetric: symmetric if True, asymmetric if False
+    actorder: activation reordering
     """
 
-    dtype: torch.dtype
+    dtype: torch.dtype | ScalarType
     scale: ScaleDesc
     scale2: ScaleDesc | None = None
     symmetric: bool = True
+    actorder: str | None = None
 
     def __str__(self):
         scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
