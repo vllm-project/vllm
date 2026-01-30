@@ -36,6 +36,21 @@ export UCX_NET_DEVICES=all  # or specify network devices like "mlx5_0:1,mlx5_1:1
 !!! tip
     When using UCX as the transport backend, NCCL environment variables (like `NCCL_IB_HCA`, `NCCL_SOCKET_IFNAME`) are not applicable to NixlConnector, so configure UCX-specific environment variables instead of NCCL variables.
 
+!!! warning
+    Do not set `UCX_PROTO_ENABLE` to `n`/`0`/`false` when using UCX with NixlConnector. Disabling the UCX new protocols can break GPU RMA and may crash. Unset it if it is set in your environment.
+
+!!! warning
+    Avoid mixing multiple UCX installations (for example, HPCX UCX in `/opt/hpcx/ucx` with the UCX bundled in `nixl-cu13`). UCX must load its core libraries and transport modules from the same build. Mixed environments can trigger `invalid ELF header` or `no memory domain supports registering cuda memory` in UCX logs and may crash. Ensure only one UCX installation is on your library path, or rebuild NIXL against your system UCX.
+
+### Performance and Stability Checklist
+
+- Build NIXL against the same UCX installation you load at runtime (core and transport modules must match).
+- Ensure UCX is built with CUDA and GDRCopy support for GPU transfers; otherwise set `UCX_TLS` to supported transports only.
+- Prefer explicit `UCX_NET_DEVICES` for the intended NIC(s) to avoid routing over unintended interfaces.
+- Keep `UCX_PROTO_ENABLE` unset or enabled; disabling new protocols can break GPU RMA.
+- If you pre-import NIXL in your process, set `UCX_MEM_MMAP_HOOK_MODE=none` before import to avoid mmap hook issues.
+- On Mellanox NICs, tune NIXL `num_threads` in extra_config if you see UAR exhaustion or poor throughput.
+
 ## Basic Usage (on the same host)
 
 ### Producer (Prefiller) Configuration
