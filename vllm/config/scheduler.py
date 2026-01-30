@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 import importlib
 import inspect
 import json
@@ -9,8 +8,11 @@ import os
 from collections.abc import Callable
 from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
+<<<<<<< HEAD
 from typing import TYPE_CHECKING, cast
 from typing import Any, Literal, Optional
+=======
+>>>>>>> 1df34f01a... Fix F821 undefined name and E501 line length errors
 
 from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
@@ -89,6 +91,10 @@ class SchedulerConfig:
     The default value here is mainly for convenience when testing.
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
+
+    num_lookahead_slots: int = 0
+    """The number of slots to allocate per sequence per step, beyond the known
+    token ids. Used in speculative decoding."""
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
@@ -258,17 +264,22 @@ class SchedulerConfig:
         self.verify_max_model_len(max_model_len)
 
         if self.async_scheduling:
-            if self.scheduler_cls == "vllm.v1.core.sched.ewsjf_scheduler.scheduler.EWSJFScheduler":
+            if (
+                self.scheduler_cls
+                == "vllm.v1.core.sched.ewsjf_scheduler.scheduler.EWSJFScheduler"
+            ):
+                # FIX: String split across lines to fix E501
                 self.scheduler_cls = (
-                    "vllm.v1.core.sched.ewsjf_scheduler.async_scheduler.AsyncEWSJFScheduler")
+                    "vllm.v1.core.sched.ewsjf_scheduler."
+                    "async_scheduler.AsyncEWSJFScheduler"
+                )
             else:
-                self.scheduler_cls = (
-                    "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
+                self.scheduler_cls = "vllm.v1.core.sched.async_scheduler.AsyncScheduler"
 
         if isinstance(self.scheduler_cls, str):
-            self.load_external_parameters()
+            self.load_external_parameters(max_model_len)
 
-    def load_external_parameters(self):
+    def load_external_parameters(self, max_model_len: int):
         module_name, class_name = self.scheduler_cls.rsplit(".", 1)
         module = importlib.import_module(module_name)
         cls = getattr(module, class_name)
@@ -279,9 +290,10 @@ class SchedulerConfig:
         config_path = os.path.join(module_dir, "config.json")
         # Load config.json only if no external parameters were provided
         if self.external_parameters is None and os.path.exists(config_path):
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 self.external_parameters = json.load(f)
 
+<<<<<<< HEAD
     @property
     @deprecated(
         "`SchedulerConfig.chunked_prefill_enabled` has been renamed to "
@@ -294,6 +306,9 @@ class SchedulerConfig:
     @chunked_prefill_enabled.setter
     def chunked_prefill_enabled(self, value: bool):
         self.enable_chunked_prefill = value
+=======
+        self.verify_max_model_len(max_model_len)
+>>>>>>> 1df34f01a... Fix F821 undefined name and E501 line length errors
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
         if (
