@@ -13,7 +13,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.parser.harmony_utils import parse_output_into_messages
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    parse_output_into_messages,
+)
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
@@ -97,6 +99,18 @@ class OpenAIToolParser(ToolParser):
             # commentary content is tool call preambles meant to be shown to the user
             content=final_content or commentary_content,
         )
+
+    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        """Adjust request for Harmony format tool_choice='required'."""
+        request = super().adjust_request(request)
+
+        if request.tool_choice == "required" and request.tools:
+            if request.extra_args is None:
+                request.extra_args = {}
+            request.extra_args["harmony_tool_required"] = True
+            request.structured_outputs = None
+
+        return request
 
     def extract_tool_calls_streaming(
         self,

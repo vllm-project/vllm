@@ -25,6 +25,9 @@ from vllm.v1.sample.logits_processor.interface import (
     LogitsProcessor,
     MoveDirectionality,
 )
+from vllm.v1.sample.logits_processor.pattern_forced_sequence import (
+    PatternForcedSequenceLogitsProcessor,
+)
 from vllm.v1.sample.logits_processor.state import BatchUpdateBuilder, LogitsProcessors
 
 if TYPE_CHECKING:
@@ -341,6 +344,7 @@ __all__ = [
     "LogitBiasLogitsProcessor",
     "MinPLogitsProcessor",
     "MinTokensLogitsProcessor",
+    "PatternForcedSequenceLogitsProcessor",
     "BatchUpdate",
     "BatchUpdateBuilder",
     "MoveDirectionality",
