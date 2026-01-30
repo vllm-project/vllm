@@ -218,7 +218,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             ),
         )
 
-        flashinfer_output = kernel.forward_monolithic(
+        flashinfer_output = kernel(
             hidden_states=td.hidden_states,
             w1=td.layer.w13_weight,
             w2=td.layer.w2_weight,

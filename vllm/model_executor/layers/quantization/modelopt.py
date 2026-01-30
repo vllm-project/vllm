@@ -858,7 +858,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
-        self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
+        self.moe_kernel, self.use_inplace = make_fp8_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             fp8_backend=self.fp8_backend,
@@ -926,8 +926,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
             )
-        assert self.moe_mk is not None
-        return self.moe_mk.forward_monolithic(
+        assert self.moe_kernel is not None
+        return self.moe_kernel.forward_monolithic(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -949,8 +949,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_mk is not None
-        return self.moe_mk(
+        assert self.moe_kernel is not None
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1525,7 +1525,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
-        self.moe_mk = make_nvfp4_moe_kernel(
+        self.moe_kernel = make_nvfp4_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
@@ -1565,8 +1565,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_mk is not None
-        return self.moe_mk.forward_monolithic(
+        assert self.moe_kernel is not None
+        return self.moe_kernel.forward_monolithic(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1588,8 +1588,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_mk is not None
-        return self.moe_mk(
+        assert self.moe_kernel is not None
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
