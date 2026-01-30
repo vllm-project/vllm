@@ -14,6 +14,8 @@ The class provides the following primitives:
             temporary buffer alloc by the CacheManager.
         update_connector_output() - update KVConnector state after
             output is received from worker-side connectors.
+        report_to_scheduler() - report back to scheduler on blocks
+            being transferred or finished transferring.
         request_finished() - called once when a request is finished,
             with the computed kv cache blocks for the request.
             Returns whether KV cache should be freed now or if the
@@ -41,6 +43,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 import torch
@@ -142,6 +145,24 @@ class KVConnectorMetadata(ABC):  # noqa: B024
     """
 
     pass
+
+
+@dataclass
+class KVConnectorSchedulerOutput:
+    """
+    Output of scheduler-side connector back to the core scheduler.
+    """
+
+    # list of block IDs to prevent evicting from the GPU KV cache
+    # repetitions allowed
+    block_ids_to_lock: list[int] | None = None
+    # list of previously locked block IDs to be released
+    # repetitions allowed
+    # denote by ref_cnt(block_id) =
+    #     # times block_id appeared in block_ids_to_lock
+    #   - # times block_id appeared in block_ids_to_unlock
+    # ref_cnt must be >= 0 and the block will not be freed unless ref_cnt == 0
+    block_ids_to_unlock: list[int] | None = None
 
 
 class KVConnectorBase_V1(ABC):
@@ -493,6 +514,17 @@ class KVConnectorBase_V1(ABC):
                 connectors output.
         """
         return
+
+    def report_to_scheduler(self) -> KVConnectorSchedulerOutput | None:
+        """
+        Update scheduler on transfers being made, so that the relevant
+        KV blocks can be protected from eviction or freed.
+
+        Returns:
+            An optional KVConnectorSchedulerOutput,
+            which can be used to hold / release specific GPU blocks.
+        """
+        return None
 
     def request_finished(
         self,

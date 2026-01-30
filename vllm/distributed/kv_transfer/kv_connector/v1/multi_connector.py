@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorSchedulerOutput,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
@@ -331,6 +332,34 @@ class MultiConnector(KVConnectorBase_V1):
     def update_connector_output(self, connector_output: KVConnectorOutput):
         for c in self._connectors:
             c.update_connector_output(connector_output)
+
+    def report_to_scheduler(self) -> KVConnectorSchedulerOutput | None:
+        block_ids_to_lock: list[int] | None = None
+        block_ids_to_unlock: list[int] | None = None
+        for c in self._connectors:
+            output = c.report_to_scheduler()
+            if output is None:
+                continue
+
+            if output.block_ids_to_lock:
+                if not block_ids_to_lock:
+                    block_ids_to_lock = output.block_ids_to_lock
+                else:
+                    block_ids_to_lock.extend(output.block_ids_to_lock)
+
+            if output.block_ids_to_unlock:
+                if not block_ids_to_unlock:
+                    block_ids_to_unlock = output.block_ids_to_unlock
+                else:
+                    block_ids_to_unlock.extend(output.block_ids_to_unlock)
+
+        if not block_ids_to_lock and not block_ids_to_unlock:
+            return None
+
+        return KVConnectorSchedulerOutput(
+            block_ids_to_lock=block_ids_to_lock,
+            block_ids_to_unlock=block_ids_to_unlock,
+        )
 
     def request_finished(
         self,

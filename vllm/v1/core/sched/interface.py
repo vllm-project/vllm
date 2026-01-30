@@ -162,10 +162,17 @@ class SchedulerInterface(ABC):
         """
         raise NotImplementedError
 
-    def has_requests(self) -> bool:
-        """Returns True if there are unfinished requests, or finished requests
-        not yet returned in SchedulerOutputs."""
-        return self.has_unfinished_requests() or self.has_finished_requests()
+    def has_work(self) -> bool:
+        """Returns True if one of the below exist:
+        1. Unfinished requests
+        2. Finished requests not yet returned in SchedulerOutputs
+        3. KV Connector work (e.g. KV blocks being transferred)
+        """
+        return (
+            self.has_unfinished_requests()
+            or self.has_finished_requests()
+            or self.has_kv_connector_work()
+        )
 
     @abstractmethod
     def reset_prefix_cache(
@@ -203,3 +210,9 @@ class SchedulerInterface(ABC):
 
     def get_kv_connector(self) -> Optional["KVConnectorBase_V1"]:
         return None
+
+    def has_kv_connector_work(self) -> bool:
+        """Returns True if there's KV Connector work
+        (e.g. KV blocks being transferred)
+        """
+        return False

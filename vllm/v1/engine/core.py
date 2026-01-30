@@ -373,9 +373,9 @@ class EngineCore:
         was executed.
         """
 
-        # Check for any requests remaining in the scheduler - unfinished,
-        # or finished and not yet removed from the batch.
-        if not self.scheduler.has_requests():
+        # Check for any work remaining in the scheduler - unfinished requests,
+        # finished requests and not yet removed from the batch, or KV connector work.
+        if not self.scheduler.has_work():
             return {}, False
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
@@ -433,7 +433,7 @@ class EngineCore:
 
         model_executed = False
         deferred_scheduler_output = None
-        if self.scheduler.has_requests():
+        if self.scheduler.has_work():
             scheduler_output = self.scheduler.schedule()
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
@@ -971,7 +971,7 @@ class EngineCoreProc(EngineCore):
         waited = False
         while (
             not self.engines_running
-            and not self.scheduler.has_requests()
+            and not self.scheduler.has_work()
             and not self.batch_queue
         ):
             if self.input_queue.empty():

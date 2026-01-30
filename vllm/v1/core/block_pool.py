@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -369,7 +369,7 @@ class BlockPool:
             )
         return True
 
-    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
+    def touch(self, blocks: Iterable[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -395,12 +395,13 @@ class BlockPool:
                 priority.
         """
         # Materialize the iterable to allow multiple passes.
-        blocks_list = list(ordered_blocks)
-        for block in blocks_list:
+        blocks_to_free = []
+        for block in ordered_blocks:
             block.ref_cnt -= 1
-        self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        )
+            assert block.ref_cnt >= 0
+            if block.ref_cnt == 0 and not block.is_null:
+                blocks_to_free.append(block)
+        self.free_block_queue.append_n(blocks_to_free)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

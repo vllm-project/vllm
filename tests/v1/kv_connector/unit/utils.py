@@ -24,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorSchedulerOutput,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # noqa
     ExampleConnector,
@@ -358,6 +359,7 @@ class MockKVConnector(KVConnectorBase_V1):
             matched_tokens=extra_config["matched_tokens"],
             is_async=extra_config["is_async"],
         )
+        self.kv_connector_scheduler_output: KVConnectorSchedulerOutput | None = None
 
     def get_num_new_matched_tokens(
         self,
@@ -401,6 +403,9 @@ class MockKVConnector(KVConnectorBase_V1):
 
     def wait_for_save(self):
         pass
+
+    def report_to_scheduler(self) -> KVConnectorSchedulerOutput | None:
+        return self.kv_connector_scheduler_output
 
 
 KVConnectorFactory.register_connector(
