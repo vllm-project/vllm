@@ -85,7 +85,7 @@ def get_mla_prefill_backend(
     if device_capability is None:
         # Fallback for non-CUDA platforms or during profiling
         logger.info_once(
-            "Device capability not available, using FlashAttention prefill"
+            "Device capability not available, using FlashAttention MLA prefill"
         )
         return MLAPrefillBackendEnum.FLASH_ATTN.get_class()
 
