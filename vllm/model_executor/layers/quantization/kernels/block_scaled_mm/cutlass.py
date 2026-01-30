@@ -115,8 +115,6 @@ class CutlassBlockScaledMMKernel(Fp8BlockScaledMMKernel):
         Bs: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        assert As is None
-
         if self.is_hopper:
             return torch.ops.vllm.padded_cutlass(
                 A,
