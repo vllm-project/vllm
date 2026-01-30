@@ -44,7 +44,7 @@ def with_retry(
             if attempt == max_retries - 1:
                 logger.error("%s: %s", log_msg, e)
                 raise
-            logger.error(
+            logger.warning(
                 "%s: %s, retrying %d of %d", log_msg, e, attempt + 1, max_retries
             )
             time.sleep(retry_delay)

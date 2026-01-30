@@ -16,6 +16,8 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     try_get_safetensors_metadata,
 )
+from vllm.transformers_utils.utils import parse_safetensors_file_metadata
+from pathlib import Path
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 logger = init_logger(__name__)
@@ -140,18 +142,37 @@ class ModelArchConfigConvertorBase:
 
         # Try to read the dtype of the weights if they are in safetensors format
         if config_dtype is None:
-            repo_mt = try_get_safetensors_metadata(model_id, revision=revision)
-
-            if repo_mt and (files_mt := repo_mt.files_metadata):
-                param_dtypes: set[torch.dtype] = {
-                    _SAFETENSORS_TO_TORCH_DTYPE[dtype_str]
-                    for file_mt in files_mt.values()
-                    for dtype_str in file_mt.parameter_count
-                    if dtype_str in _SAFETENSORS_TO_TORCH_DTYPE
-                }
-
+            model_path = Path(model_id)
+            if model_path.exists():
+                # Local path: read dtype from local safetensors files
+                param_dtypes: set[torch.dtype] = set()
+                for file_path in model_path.glob("*.safetensors"):
+                    if file_path.is_file():
+                        metadata = parse_safetensors_file_metadata(file_path)
+                        for key, value in metadata.items():
+                            if key != "__metadata__" and "dtype" in value:
+                                dtype_str = value["dtype"]
+                                if dtype_str in _SAFETENSORS_TO_TORCH_DTYPE:
+                                    param_dtypes.add(
+                                        _SAFETENSORS_TO_TORCH_DTYPE[dtype_str])
                 if param_dtypes:
-                    return common_broadcastable_dtype(param_dtypes)
+                    result = common_broadcastable_dtype(param_dtypes)
+                    logger.info("Detected dtype %s from local safetensors", result)
+                    return result
+            else:
+                # Remote repo: use HF metadata API
+                repo_mt = try_get_safetensors_metadata(model_id, revision=revision)
+
+                if repo_mt and (files_mt := repo_mt.files_metadata):
+                    param_dtypes = {
+                        _SAFETENSORS_TO_TORCH_DTYPE[dtype_str]
+                        for file_mt in files_mt.values()
+                        for dtype_str in file_mt.parameter_count
+                        if dtype_str in _SAFETENSORS_TO_TORCH_DTYPE
+                    }
+
+                    if param_dtypes:
+                        return common_broadcastable_dtype(param_dtypes)
 
         if config_dtype is None:
             config_dtype = torch.float32
