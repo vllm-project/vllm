@@ -11,8 +11,8 @@ from vllm.utils.platform_utils import get_cu_count
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
+    FP8W8A8LinearKernel,
 )
 
 
@@ -70,7 +70,7 @@ if current_platform.is_rocm():
     )
 
 
-class ROCmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class ROCmFP8ScaledMMLinearKernel(FP8W8A8LinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None

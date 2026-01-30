@@ -60,9 +60,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_tensor_strategy_moe,
     validate_fp8_block_shape,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    get_marlin_input_dtype,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
@@ -218,11 +215,9 @@ class Fp8Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             if not self.is_checkpoint_fp8_serialized:
                 online_method = Fp8OnlineLinearMethod(self)
-                online_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return online_method
             else:
                 offline_method = Fp8LinearMethod(self)
-                offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return offline_method
         elif isinstance(layer, FusedMoE):
             if is_layer_skipped(

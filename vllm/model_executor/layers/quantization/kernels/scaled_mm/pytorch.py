@@ -8,12 +8,12 @@ from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
+    FP8W8A8LinearKernel,
 )
 
 
-class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class TorchFP8ScaledMMLinearKernel(FP8W8A8LinearKernel):
     """
     Base class for FP8 linear kernels using Torch.
     Each subclass represents a kernel variant for

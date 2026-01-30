@@ -330,7 +330,7 @@ def get_and_maybe_dequant_weights(
     """Return layer's unquantized weights in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-    from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (
+    from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
         FP8W8A16LinearKernel,
     )
 
