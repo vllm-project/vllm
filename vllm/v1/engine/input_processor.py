@@ -591,7 +591,14 @@ class InputProcessor:
             pooling_params = params.clone()
             # Verify pooling params to set default values (e.g., use_activation=True)
             # This ensures consistent behavior between AsyncLLM and LLM
-            task: PoolingTask = pooling_params.task or "embed"
+            task = pooling_params.task
+            if task is None:
+                convert_type = self.model_config.convert_type
+                if convert_type in ("embed", "classify"):
+                    task = cast(PoolingTask, convert_type)
+                else:
+                    # Default to 'embed' for native pooling models ('none') and other cases.
+                    task = "embed"
             pooling_params.verify(task, self.model_config)
 
         # Multimodal related.
