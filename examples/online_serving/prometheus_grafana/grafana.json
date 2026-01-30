@@ -854,12 +854,176 @@
           "editorMode": "code",
           "expr": "vllm:kv_cache_usage_perc{model_name=\"$model_name\"}",
           "instant": false,
-          "legendFormat": "GPU Cache Usage",
+          "legendFormat": "Total KV Cache Usage",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "vllm:prefix_cache_usage_perc{model_name=\"$model_name\"}",
+          "instant": false,
+          "legendFormat": "Prefix Cache Usage",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "vllm:kv_cache_usage_perc{model_name=\"$model_name\"} - vllm:prefix_cache_usage_perc{model_name=\"$model_name\"}",
+          "instant": false,
+          "legendFormat": "Active KV Cache Usage",
+          "range": true,
+          "refId": "C"
         }
       ],
       "title": "Cache Utilization",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "KV cache block and token counts",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "vllm:num_kv_cache_total_blocks{model_name=\"$model_name\"}",
+          "instant": false,
+          "legendFormat": "Total Blocks",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "vllm:num_prefix_cached_blocks{model_name=\"$model_name\"}",
+          "instant": false,
+          "legendFormat": "Prefix Cached Blocks",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "vllm:num_kv_cache_total_blocks{model_name=\"$model_name\"} * (1 - vllm:kv_cache_usage_perc{model_name=\"$model_name\"})",
+          "instant": false,
+          "legendFormat": "Free Blocks",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "vllm:num_prefix_cached_tokens{model_name=\"$model_name\"}",
+          "instant": false,
+          "legendFormat": "Prefix Cached Tokens",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "vllm:num_kv_cache_total_blocks{model_name=\"$model_name\"} * (1 - vllm:kv_cache_usage_perc{model_name=\"$model_name\"}) * (vllm:num_prefix_cached_tokens{model_name=\"$model_name\"} / vllm:num_prefix_cached_blocks{model_name=\"$model_name\"})",
+          "instant": false,
+          "legendFormat": "Available Token Capacity",
+          "range": true,
+          "refId": "E"
+        }
+      ],
+      "title": "KV Cache Blocks & Tokens",
       "type": "timeseries"
     },
     {
