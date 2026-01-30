@@ -38,13 +38,13 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
 
 
 class ScoreDataRequest(ScoreRequestMixin):
-    data_1: list[str] | str | ScoreMultiModalParam
-    data_2: list[str] | str | ScoreMultiModalParam
+    data_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
+    data_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
 
 
 class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
-    queries: list[str] | str | ScoreMultiModalParam
-    documents: list[str] | str | ScoreMultiModalParam
+    queries: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
+    documents: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
 
     @property
     def data_1(self):
@@ -56,8 +56,8 @@ class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
 
 
 class ScoreTextRequest(ScoreRequestMixin):
-    text_1: list[str] | str | ScoreMultiModalParam
-    text_2: list[str] | str | ScoreMultiModalParam
+    text_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
+    text_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
 
     @property
     def data_1(self):
@@ -74,8 +74,8 @@ ScoreRequest: TypeAlias = (
 
 
 class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
-    query: str | ScoreMultiModalParam
-    documents: list[str] | ScoreMultiModalParam
+    query: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
+    documents: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
     top_n: int = Field(default_factory=lambda: 0)
 
     # --8<-- [start:rerank-extra-params]

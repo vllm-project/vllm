@@ -27,7 +27,6 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponseData,
 )
 from vllm.entrypoints.pooling.score.utils import (
-    ScoreContentPartParam,
     ScoreMultiModalParam,
     _cosine_similarity,
     _validate_score_input_lens,
@@ -66,11 +65,19 @@ class ServingScores(OpenAIServing):
 
         self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
 
+        self.is_cross_encoder = self.model_config.is_cross_encoder
+        self.is_multimodal_model = self.model_config.is_multimodal_model
+
+        if self.is_cross_encoder:
+            self._score_func = self._cross_encoding_score
+        else:
+            self._score_func = self._embedding_score
+
     async def _embedding_score(
         self,
         tokenizer: TokenizerLike,
-        data_1: list[str],
-        data_2: list[str],
+        data_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
+        data_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -158,35 +165,11 @@ class ServingScores(OpenAIServing):
 
         return final_res_batch
 
-    def _preprocess_score(
-        self,
-        request: RerankRequest | ScoreRequest,
-        tokenizer: TokenizerLike,
-        tokenization_kwargs: dict[str, Any],
-        data_1: str | ScoreContentPartParam,
-        data_2: str | ScoreContentPartParam,
-    ) -> tuple[str, TokensPrompt]:
-        model_config = self.model_config
-
-        full_prompt, engine_prompt = get_score_prompt(
-            model_config=model_config,
-            data_1=data_1,
-            data_2=data_2,
-            tokenizer=tokenizer,
-            tokenization_kwargs=tokenization_kwargs,
-            score_template=self.score_template,
-        )
-        self._validate_input(request, engine_prompt["prompt_token_ids"], full_prompt)
-        if request.mm_processor_kwargs is not None:
-            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
-
-        return full_prompt, engine_prompt
-
     async def _cross_encoding_score(
         self,
         tokenizer: TokenizerLike,
-        data_1: list[str] | list[ScoreContentPartParam],
-        data_2: list[str] | list[ScoreContentPartParam],
+        data_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
+        data_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -277,10 +260,34 @@ class ServingScores(OpenAIServing):
 
         return [out for out in final_res_batch if out is not None]
 
+    def _preprocess_score(
+        self,
+        request: RerankRequest | ScoreRequest,
+        tokenizer: TokenizerLike,
+        tokenization_kwargs: dict[str, Any],
+        data_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
+        data_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
+    ) -> tuple[str, TokensPrompt]:
+        model_config = self.model_config
+
+        full_prompt, engine_prompt = get_score_prompt(
+            model_config=model_config,
+            data_1=data_1,
+            data_2=data_2,
+            tokenizer=tokenizer,
+            tokenization_kwargs=tokenization_kwargs,
+            score_template=self.score_template,
+        )
+        self._validate_input(request, engine_prompt["prompt_token_ids"], full_prompt)
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+
+        return full_prompt, engine_prompt
+
     async def _run_scoring(
         self,
-        data_1: list[str] | str | ScoreMultiModalParam,
-        data_2: list[str] | str | ScoreMultiModalParam,
+        data_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
+        data_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
         request: ScoreRequest | RerankRequest,
         request_id: str,
         raw_request: Request | None = None,
