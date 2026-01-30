@@ -139,7 +139,6 @@ class QuantFP8(CustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         use_triton = kwargs.get("use_triton", False)
         if self.is_group_quant and use_triton:
-            torch._dynamo.comptime._Comptime.print("use_triton")
             assert scale is None, "Dynamic group quantization does not use scale"
 
             return torch.ops.vllm.triton_per_token_group_quant_fp8(x, self.group_size)
