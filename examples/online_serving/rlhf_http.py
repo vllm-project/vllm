@@ -103,13 +103,6 @@ def update_weights(
     response.raise_for_status()
 
 
-def finalize_weight_update(base_url: str) -> None:
-    """Finalize weight update via HTTP endpoint."""
-    url = f"{base_url}/finalize_weight_update"
-    response = requests.post(url, timeout=60)
-    response.raise_for_status()
-
-
 def pause_generation(base_url: str) -> None:
     """Pause generation via HTTP endpoint."""
     url = f"{base_url}/pause"
@@ -229,9 +222,6 @@ def main():
 
     # Wait for update_weights to complete
     update_thread.join()
-
-    # Finalize the weight update (processes weights for quantization/kernel format)
-    finalize_weight_update(BASE_URL)
 
     # Resume generation after weight sync
     resume_generation(BASE_URL)

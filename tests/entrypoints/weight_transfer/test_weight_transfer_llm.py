@@ -223,31 +223,8 @@ def test_update_weights_calls_engine():
 
 
 @create_new_process_for_each_test()
-def test_finalize_weight_update_runs():
-    """Test that finalize_weight_update completes without error."""
-    if torch.cuda.device_count() < 1:
-        pytest.skip("Need at least 1 GPU for this test")
-
-    with patch(
-        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
-        mock_create_engine,
-    ):
-        llm = LLM(
-            model=MODEL_NAME,
-            enforce_eager=True,
-            load_format="dummy",
-            tensor_parallel_size=1,
-            weight_transfer_config=WeightTransferConfig(backend="nccl"),
-        )
-
-        # finalize_weight_update should run without error
-        # (it calls process_weights_after_loading internally)
-        llm.finalize_weight_update()
-
-
-@create_new_process_for_each_test()
 def test_full_weight_transfer_flow():
-    """Test the complete weight transfer flow: init -> update -> finalize."""
+    """Test the complete weight transfer flow: init -> update."""
     if torch.cuda.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 
@@ -281,9 +258,6 @@ def test_full_weight_transfer_flow():
                 }
             )
         )
-
-        # Step 3: Finalize
-        llm.finalize_weight_update()
 
         # Verify the full flow completed
         def check_flow(self):

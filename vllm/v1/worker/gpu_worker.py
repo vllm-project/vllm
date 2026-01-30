@@ -1005,17 +1005,6 @@ class Worker(WorkerBase):
                 load_weights=load_weights_direct,
             )
 
-    def finalize_weight_update(self) -> None:
-        """
-        Finalize the weight update by processing weights for quantization/kernel format.
-        This should be called after all weight updates are complete.
-        """
-        from vllm.model_executor.model_loader.utils import process_weights_after_loading
-
-        process_weights_after_loading(
-            self.model_runner.model, self.model_config, self.device
-        )
-
     def shutdown(self) -> None:
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:

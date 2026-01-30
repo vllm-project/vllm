@@ -144,7 +144,6 @@ def test_openapi_stateless(case: schemathesis.Case):
     if case.operation.path in (
         "/init_weight_transfer_engine",
         "/update_weights",
-        "/finalize_weight_update",
     ):
         return
 

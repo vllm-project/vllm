@@ -10,7 +10,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
 )
-
 from vllm.inputs.data import PromptType, StreamingInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
@@ -205,8 +204,4 @@ class EngineClient(ABC):
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """Batched weight update for RL training."""
-        raise NotImplementedError
-
-    async def finalize_weight_update(self) -> None:
-        """Finalize the current weight update during RL training."""
         raise NotImplementedError

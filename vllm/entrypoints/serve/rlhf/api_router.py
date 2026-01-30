@@ -139,12 +139,6 @@ async def update_weights(raw_request: Request):
     return JSONResponse(content={"message": "Weights updated"})
 
 
-@router.post("/finalize_weight_update")
-async def finalize_weight_update(raw_request: Request):
-    await engine_client(raw_request).finalize_weight_update()
-    return JSONResponse(content={"message": "Weight update finalized"})
-
-
 @router.get("/get_world_size")
 async def get_world_size(
     raw_request: Request,

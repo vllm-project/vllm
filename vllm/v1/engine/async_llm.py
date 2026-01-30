@@ -1054,9 +1054,3 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc(
             "update_weights", kwargs={"update_info": update_info_dict}
         )
-
-    async def finalize_weight_update(self) -> None:
-        """
-        Finalize the current weight update during RL training.
-        """
-        await self.collective_rpc("finalize_weight_update")

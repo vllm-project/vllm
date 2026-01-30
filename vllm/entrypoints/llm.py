@@ -1754,13 +1754,6 @@ class LLM:
             "update_weights", kwargs={"update_info": update_info_dict}
         )
 
-    def finalize_weight_update(self) -> None:
-        """
-        Finalize the weight update by processing weights for quantization/kernel format.
-        This should be called after all weight updates are complete.
-        """
-        self.llm_engine.collective_rpc("finalize_weight_update")
-
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""
         # Cache the result to avoid repeated collective_rpc calls
