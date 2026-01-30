@@ -241,11 +241,9 @@ class Mamba2AttentionMetadataBuilder(
         ]
         if num_prefills > 0:
             query_start_loc_p = query_start_loc_p - num_decode_tokens
-        #     assert query_start_loc_p[0].item() == 0 # debug assertions
-        #     assert query_start_loc_p[-1].item() == num_prefill_tokens
-        # if num_decodes > 0:
-        #     assert decode_query_start_loc[0].item() == 0 # debug assertions
-        #     assert decode_query_start_loc[-1].item() == num_decode_tokens
+
+        # Sometimes the decode pathway can be used for small chunks of prefill
+        use_specdec = self.use_spec_decode and num_accepted_tokens is not None
 
         if num_accepted_tokens is not None:
             num_accepted_tokens = num_accepted_tokens[:num_decodes]
@@ -352,7 +350,7 @@ class Mamba2AttentionMetadataBuilder(
             decode_query_start_loc = self.decode_query_start_loc_buffer[: padded_bs + 1]
 
             # Copy and pad num_accepted_tokens
-            if self.use_spec_decode:
+            if use_specdec:
                 assert num_accepted_tokens is not None
                 self.decode_num_accepted_tokens_buffer[:num_decodes].copy_(
                     num_accepted_tokens, non_blocking=True
