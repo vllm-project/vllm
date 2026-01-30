@@ -131,7 +131,7 @@ def extract_reasoning_and_calls(chunks: list) -> tuple[str, list[str], list[str]
     Extract accumulated reasoning text and tool call arguments
     from streaming chunks.
     """
-    reasoning_content: str = ""
+    reasoning: str = ""
     tool_calls: dict[int, dict[str, str]] = {}
 
     for chunk in chunks:
@@ -139,8 +139,8 @@ def extract_reasoning_and_calls(chunks: list) -> tuple[str, list[str], list[str]
         if not choice:
             continue
 
-        if hasattr(choice, "reasoning_content") and choice.reasoning_content:
-            reasoning_content += choice.reasoning_content
+        if hasattr(choice, "reasoning") and choice.reasoning:
+            reasoning += choice.reasoning
 
         for tc in getattr(choice, "tool_calls", []) or []:
             idx = getattr(tc, "index", 0)
@@ -156,7 +156,7 @@ def extract_reasoning_and_calls(chunks: list) -> tuple[str, list[str], list[str]
     function_names: list[str] = [v["name"] for _, v in sorted(tool_calls.items())]
     arguments: list[str] = [v["arguments"] for _, v in sorted(tool_calls.items())]
 
-    return reasoning_content, arguments, function_names
+    return reasoning, arguments, function_names
 
 
 # ==========================================================
