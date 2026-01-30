@@ -69,7 +69,6 @@ class CustomQwen2Decoder(nn.Module):
     def _create_custom_model(self, Qwen2Model, config):
         """Qwen2Model"""
 
-
         class CustomQwen2ModelInner(Qwen2Model):
             def __init__(self, config):
                 super().__init__(config)
@@ -77,13 +76,16 @@ class CustomQwen2Decoder(nn.Module):
                 # New version uses create_causal_mask function and doesn't call _update_causal_mask
                 # Old version calls self._update_causal_mask in forward
                 import inspect
+
                 try:
                     source = inspect.getsource(Qwen2Model.forward)
                     # Check for new version patterns (uses create_causal_mask function)
-                    has_new_pattern = ('create_causal_mask' in source and
-                                      'causal_mask_mapping' in source)
+                    has_new_pattern = (
+                        "create_causal_mask" in source
+                        and "causal_mask_mapping" in source
+                    )
                     # Check for old version patterns (calls self._update_causal_mask)
-                    has_old_pattern = 'self._update_causal_mask' in source
+                    has_old_pattern = "self._update_causal_mask" in source
 
                     # New version: has new pattern and no old pattern
                     # Old version: has old pattern
@@ -115,12 +117,14 @@ class CustomQwen2Decoder(nn.Module):
                     if inputs_embeds is None:
                         inputs_embeds = self.embed_tokens(input_ids)
 
-                    custom_causal_mask = self._create_custom_causal_mask_for_new_version(
-                        attention_mask=attention_mask,
-                        inputs_embeds=inputs_embeds,
-                        cache_position=cache_position,
-                        past_key_values=past_key_values,
-                        token_type_ids=token_type_ids,
+                    custom_causal_mask = (
+                        self._create_custom_causal_mask_for_new_version(
+                            attention_mask=attention_mask,
+                            inputs_embeds=inputs_embeds,
+                            cache_position=cache_position,
+                            past_key_values=past_key_values,
+                            token_type_ids=token_type_ids,
+                        )
                     )
 
                     # Pass the custom mask as a dict to bypass the new version's mask creation
@@ -212,7 +216,7 @@ class CustomQwen2Decoder(nn.Module):
                 if isinstance(attention_mask, dict):
                     # Extract the actual mask from dict (new version behavior leaked into old version)
                     # Return the full_attention mask as fallback
-                    return attention_mask.get('full_attention', None)
+                    return attention_mask.get("full_attention", None)
 
                 token_type_ids = self._current_token_type_ids
                 return self._create_custom_causal_mask_for_new_version(
