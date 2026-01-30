@@ -12,6 +12,7 @@ from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    CopyBlocksOp,
     KVConnectorBase_V1,
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
@@ -273,11 +274,32 @@ class MultiConnector(KVConnectorBase_V1):
             agg_block_ids |= c.get_block_ids_with_load_errors()
         return agg_block_ids
 
-    # TODO: Add a generic implementation of 'get_kv_connector_kv_cache_events' method
-    # for the MultiConnector. It should be able to get events from multiple
-    # connectors, handling the case where only a subset of the requested connectors
-    # implements the 'get_kv_connector_kv_cache_events'
-    # Follow on PR from https://github.com/vllm-project/vllm/pull/28309#pullrequestreview-3566351082
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        """Set xPU-specific copy ops for all sub-connectors."""
+        for c in self._connectors:
+            c.set_host_xfer_buffer_ops(copy_operation)
+
+    def handle_preemptions(self, preempted_req_ids: set[str]):
+        """Handle preempted requests for all sub-connectors."""
+        for c in self._connectors:
+            c.handle_preemptions(preempted_req_ids)
+
+    def get_finished_count(self) -> int | None:
+        # TODO(https://github.com/vllm-project/vllm/issues/33400)
+        # Currently no connectors return non-None
+        return None
+
+    def get_kv_connector_kv_cache_events(self):
+        """Merge KV cache events from all sub-connectors."""
+        result = None
+        for c in self._connectors:
+            events = c.get_kv_connector_kv_cache_events()
+            if events is not None:
+                if result is None:
+                    result = events
+                else:
+                    result.add_events(events.get_all_events())
+        return result
 
     # ==============================
     # Scheduler-side methods

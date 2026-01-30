@@ -77,6 +77,30 @@ class MockCrossLayerConnector(MockConnector):
         return True
 
 
+class MockKVCacheEvents:
+    """Mock KVConnectorKVEvents for testing event merging."""
+
+    def __init__(self, events: list | None = None):
+        self._events = events or []
+
+    def add_events(self, events: list):
+        self._events.extend(events)
+
+    def get_all_events(self) -> list:
+        return self._events
+
+
+class MockConnectorWithKVCacheEvents(MockConnector):
+    """Mock connector for testing get_kv_connector_kv_cache_events."""
+
+    def __init__(self):
+        # Skip parent __init__ to avoid needing vllm_config
+        self._kv_cache_events = None
+
+    def get_kv_connector_kv_cache_events(self):
+        return self._kv_cache_events
+
+
 # Register the mock connector
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
 
@@ -294,6 +318,90 @@ def test_engine_id_conflict():
     assert ids[0] != ids[1], (
         f"Engine IDs should be different for different configs. Got {ids}"
     )
+
+
+def test_multi_connector_handle_preemptions_integration():
+    """
+    Integration test: verify MultiConnector delegates handle_preemptions
+    to all sub-connectors.
+
+    Uses TestExampleConnector which logs all method calls to temp files.
+    This test directly calls handle_preemptions on a MultiConnector with
+    TestExampleConnector sub-connectors and verifies the calls are logged.
+    """
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler,
+        create_vllm_config,
+    )
+
+    storage_path = Path(tempfile.mkdtemp())
+
+    try:
+        # Configure MultiConnector with two TestExampleConnectors
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "TestExampleConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "shared_storage_path": str(storage_path / "s1"),
+                            "name": "preempt1",
+                        },
+                        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                    },
+                    {
+                        "kv_connector": "TestExampleConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "shared_storage_path": str(storage_path / "s2"),
+                            "name": "preempt2",
+                        },
+                        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                    },
+                ]
+            },
+        )
+
+        vllm_config = create_vllm_config(
+            block_size=16,
+            max_num_batched_tokens=100,
+            kv_connector_extra_config=kv_transfer_config.kv_connector_extra_config,
+        )
+        vllm_config.kv_transfer_config = kv_transfer_config
+
+        # Create scheduler - this initializes the MultiConnector with SCHEDULER role
+        scheduler = create_scheduler(vllm_config, num_blocks=10)
+
+        # Clear any events from initialization
+        get_connector_events()
+
+        # Directly call handle_preemptions on the scheduler's connector
+        # Note: handle_preemptions is normally a worker-side method, but we're
+        # testing the delegation behavior of MultiConnector here.
+        # The connector attribute contains the KV connector.
+        assert scheduler.connector is not None, "Scheduler should have a connector"
+        preempted_req_ids = {"req-1", "req-2", "req-3"}
+        scheduler.connector.handle_preemptions(preempted_req_ids)
+
+        # Verify both connectors received the handle_preemptions call
+        events = get_connector_events()
+
+        # Both SCHEDULER-role connectors should have logged handle_preemptions
+        assert "handle_preemptions" in events.get("preempt1-SCHEDULER", []), (
+            f"preempt1-SCHEDULER should have handle_preemptions call. "
+            f"Got events: {events}"
+        )
+        assert "handle_preemptions" in events.get("preempt2-SCHEDULER", []), (
+            f"preempt2-SCHEDULER should have handle_preemptions call. "
+            f"Got events: {events}"
+        )
+
+    finally:
+        # Cleanup
+        shutil.rmtree(storage_path, ignore_errors=True)
 
 
 class TestMultiConnectorStats:
@@ -648,94 +756,97 @@ class TestMultiConnectorPreferCrossLayerBlocks:
         assert mc.prefer_cross_layer_blocks is False
 
 
+class TestMultiConnectorGetKVCacheEvents:
+    """Tests for get_kv_connector_kv_cache_events merge logic."""
+
+    def test_all_return_none(self):
+        mc = MultiConnector.__new__(MultiConnector)
+        conn1 = MockConnectorWithKVCacheEvents()
+        conn2 = MockConnectorWithKVCacheEvents()
+        conn1._kv_cache_events = None
+        conn2._kv_cache_events = None
+        mc._connectors = [conn1, conn2]
+
+        result = mc.get_kv_connector_kv_cache_events()
+
+        assert result is None
+
+    def test_single_connector_returns_events(self):
+        mc = MultiConnector.__new__(MultiConnector)
+        conn1 = MockConnectorWithKVCacheEvents()
+        conn2 = MockConnectorWithKVCacheEvents()
+        events1 = MockKVCacheEvents(["event1", "event2"])
+        conn1._kv_cache_events = events1
+        conn2._kv_cache_events = None
+        mc._connectors = [conn1, conn2]
+
+        result = mc.get_kv_connector_kv_cache_events()
+
+        assert result is events1
+        assert result.get_all_events() == ["event1", "event2"]
+
+    def test_merges_events_from_multiple_connectors(self):
+        mc = MultiConnector.__new__(MultiConnector)
+        conn1 = MockConnectorWithKVCacheEvents()
+        conn2 = MockConnectorWithKVCacheEvents()
+        conn3 = MockConnectorWithKVCacheEvents()
+        conn1._kv_cache_events = MockKVCacheEvents(["a", "b"])
+        conn2._kv_cache_events = MockKVCacheEvents(["c", "d"])
+        conn3._kv_cache_events = None  # Should be skipped
+        mc._connectors = [conn1, conn2, conn3]
+
+        result = mc.get_kv_connector_kv_cache_events()
+
+        # Events from conn1 and conn2 should be merged
+        assert result.get_all_events() == ["a", "b", "c", "d"]
+
+    def test_first_none_second_returns_value(self):
+        mc = MultiConnector.__new__(MultiConnector)
+        conn1 = MockConnectorWithKVCacheEvents()
+        conn2 = MockConnectorWithKVCacheEvents()
+        events2 = MockKVCacheEvents(["event"])
+        conn1._kv_cache_events = None
+        conn2._kv_cache_events = events2
+        mc._connectors = [conn1, conn2]
+
+        result = mc.get_kv_connector_kv_cache_events()
+
+        assert result is events2
+
+    def test_empty_connectors_list(self):
+        mc = MultiConnector.__new__(MultiConnector)
+        mc._connectors = []
+
+        result = mc.get_kv_connector_kv_cache_events()
+
+        assert result is None
+
+
 def test_multi_connector_overrides_all_base_methods():
     """
     Ensure MultiConnector overrides all public methods from KVConnectorBase_V1.
-
-    MultiConnector wraps other connectors, so it must delegate all methods.
-    If you're adding a new method to KVConnectorBase_V1, you must add a
-    corresponding override in MultiConnector that delegates to self._connectors.
     """
-    import inspect
+    # These are fine to inherit from KVConnectorBase_V1
+    INHERITED_OK = {"role", "has_connector_metadata"}
 
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
-    from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
-        MultiConnector,
-    )
+    base_members = {
+        name for name in dir(KVConnectorBase_V1) if not name.startswith("_")
+    } - KVConnectorBase_V1.__abstractmethods__
 
-    # Methods safe to inherit - they use instance state managed by overridden methods
-    INHERITED_OK = {
-        'role',                    # Property using self._role, set in __init__
-        'has_connector_metadata',  # Uses self._connector_metadata, managed by
-                                   # overridden bind/clear_connector_metadata
-    }
-
-    # Methods needing implementation but deferred - each should have tracking issue
-    PENDING_IMPLEMENTATION = {
-        # Needs aggregation logic (sum from all connectors)
-        'get_finished_count',
-        # TODO in code at line 275-279, see PR #28309
-        'get_kv_connector_kv_cache_events',
-        # Needs broadcast to all connectors
-        'handle_preemptions',
-        # Needs broadcast to all connectors
-        'set_host_xfer_buffer_ops',
-    }
-
-    # Collect all public non-abstract methods/properties from base class
-    base_members = {}
-    for name in dir(KVConnectorBase_V1):
-        if name.startswith('_'):
-            continue
-
-        attr = getattr(KVConnectorBase_V1, name, None)
-        if attr is None:
-            continue
-
-        # Skip abstract methods - Python/ABC handles these
-        if getattr(attr, '__isabstractmethod__', False):
-            continue
-
-        # Categorize member type
-        static_attr = inspect.getattr_static(KVConnectorBase_V1, name)
-        if isinstance(static_attr, property):
-            base_members[name] = ('property', static_attr)
-        elif isinstance(static_attr, classmethod):
-            base_members[name] = ('classmethod', static_attr)
-        elif callable(attr):
-            base_members[name] = ('method', attr)
-
-    # Check which methods are not overridden
-    missing = []
-    for name, (member_type, base_attr) in sorted(base_members.items()):
-        if name in INHERITED_OK or name in PENDING_IMPLEMENTATION:
-            continue
-
-        multi_attr = inspect.getattr_static(MultiConnector, name)
-
-        # Check if overridden based on member type
-        if member_type == 'property':
-            is_overridden = (isinstance(multi_attr, property) and
-                           base_attr.fget is not multi_attr.fget)
-        elif member_type == 'classmethod':
-            base_func = base_attr.__func__
-            multi_func = (multi_attr.__func__
-                         if isinstance(multi_attr, classmethod) else None)
-            is_overridden = base_func is not multi_func
-        else:
-            is_overridden = base_attr is not multi_attr
-
-        if not is_overridden:
-            missing.append(name)
+    missing = [
+        name
+        for name in sorted(base_members)
+        if name not in INHERITED_OK and name not in MultiConnector.__dict__
+    ]
 
     if missing:
-        pytest.fail(
-            f"MultiConnector does not override these KVConnectorBase_V1 methods: "
-            f"{missing}\n\n"
-            f"MultiConnector wraps other connectors and must delegate all methods.\n"
-            f"Please add overrides that delegate to self._connectors.\n\n"
-            f"Options:\n"
-            f"  1. Add delegation in MultiConnector (preferred)\n"
-            f"  2. Add to INHERITED_OK if the base implementation works correctly\n"
-            f"  3. Add to PENDING_IMPLEMENTATION with a GitHub issue (temporary)\n"
-        )
+        pytest.fail(f"""
+MultiConnector does not override these KVConnectorBase_V1 methods: {missing}
+
+MultiConnector wraps other connectors and must delegate all methods.
+Please add overrides that delegate to self._connectors.
+
+Options:
+  1. Add delegation in MultiConnector (preferred)
+  2. Add to INHERITED_OK if the base implementation works correctly
+""")
