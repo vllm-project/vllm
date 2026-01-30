@@ -162,7 +162,7 @@ class VoxtralRealtimeBuffer:
         return self._end + self._look_ahead
 
     @property
-    def is_chunk_complete(self) -> bool:
+    def is_audio_complete(self) -> bool:
         return self._filled_buffer_len >= self.end_idx
 
     def _get_len_in_samples(self, len_in_ms: float) -> int:
@@ -189,26 +189,26 @@ class VoxtralRealtimeBuffer:
         self._start = self._look_back
         self._end = self._start + self._streaming_size
 
-    def add_audio_chunk(self, audio_chunk: np.ndarray) -> None:
-        put_end_idx = self._filled_buffer_len + len(audio_chunk)
+    def write_audio(self, audio: np.ndarray) -> None:
+        put_end_idx = self._filled_buffer_len + len(audio)
 
         if put_end_idx > self._buffer_size:
             self._allocate_new_buffer()
 
-        self._buffer[
-            self._filled_buffer_len : self._filled_buffer_len + len(audio_chunk)
-        ] = audio_chunk
-        self._filled_buffer_len += len(audio_chunk)
+        self._buffer[self._filled_buffer_len : self._filled_buffer_len + len(audio)] = (
+            audio
+        )
+        self._filled_buffer_len += len(audio)
 
-    def get_audio_chunk(self) -> np.ndarray | None:
-        if not self.is_chunk_complete:
+    def read_audio(self) -> np.ndarray | None:
+        if not self.is_audio_complete:
             return None
 
-        audio_chunk = self._buffer[self.start_idx : self.end_idx]
+        audio = self._buffer[self.start_idx : self.end_idx]
         self._start = self._end
         self._end += self._streaming_size
 
-        return audio_chunk
+        return audio
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -253,9 +253,9 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
         is_first_yield = True
 
         async for audio in audio_stream:
-            buffer.add_audio_chunk(audio)
+            buffer.write_audio(audio)
 
-            while (new_audio := buffer.get_audio_chunk()) is not None:
+            while (new_audio := buffer.read_audio()) is not None:
                 if is_first_yield:
                     # make sure that input_stream is empty
                     assert input_stream.empty()
