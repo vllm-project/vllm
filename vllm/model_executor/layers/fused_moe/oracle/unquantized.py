@@ -20,9 +20,6 @@ from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
-from vllm.model_executor.layers.fused_moe.xpu_prepare_finalize import (
-    XPUMoEPrepareAndFinalizeNoEP,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
@@ -202,7 +199,7 @@ def make_unquantized_moe_kernel(
 
         # use_inplace = False
         kernel = mk.FusedMoEModularKernel(
-            XPUMoEPrepareAndFinalizeNoEP(),
+            MoEPrepareAndFinalizeNoEP(),
             XPUExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
