@@ -42,6 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kFP8Dynamic128x128Sym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
@@ -141,10 +142,8 @@ class TestModel(torch.nn.Module):
             self.fp8_linear_layers = [
                 TestBlockFP8Layer(
                     weight_shape=(hidden_size, hidden_size),
-                    group_shape=group_shape,
-                    cutlass_block_fp8_supported=cutlass_block_fp8_supported(),
-                    use_aiter_and_is_supported=use_aiter_quant,
-                    transpose_weights=use_aiter_fusion,
+                    weight_quant_key=kFP8Dynamic128x128Sym,
+                    activation_quant_key=self.activation_quant_key,
                 )
                 for _ in range(3)
             ]
