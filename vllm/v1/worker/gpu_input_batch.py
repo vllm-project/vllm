@@ -8,6 +8,7 @@ from typing import cast
 import numpy as np
 import torch
 
+from vllm.config.model import LogprobsMode
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -24,7 +25,6 @@ from vllm.v1.sample.logits_processor import (
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
-from vllm.config.model import LogprobsMode
 
 
 @dataclass
@@ -1043,8 +1043,7 @@ class InputBatch:
 
     @property
     def logprobs_mode_override(self) -> LogprobsMode | list[LogprobsMode] | None:
-        if self.non_default_logprobs_mode==0:
+        if self.non_default_logprobs_mode == 0:
             return None
-        logprobs_mode = self.logprobs_mode[:self.num_reqs]
-        return (logprobs_mode[0] if len(set(logprobs_mode))==1
-            else logprobs_mode)
+        logprobs_mode = self.logprobs_mode[: self.num_reqs]
+        return logprobs_mode[0] if len(set(logprobs_mode)) == 1 else logprobs_mode

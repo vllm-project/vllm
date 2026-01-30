@@ -99,9 +99,7 @@ class Sampler(nn.Module):
                 raw_logprobs = logits.clone()
 
                 raw_logprobs_indices = [
-                    i
-                    for i, mode in enumerate(logprobs_mode)
-                    if mode == "raw_logprobs"
+                    i for i, mode in enumerate(logprobs_mode) if mode == "raw_logprobs"
                 ]
                 if raw_logprobs_indices:
                     selected_logits = logits[raw_logprobs_indices]
@@ -109,9 +107,7 @@ class Sampler(nn.Module):
                     raw_logprobs[raw_logprobs_indices] = computed
                 
                 raw_indices = raw_logprobs_indices + [
-                    i
-                    for i, mode in enumerate(logprobs_mode)
-                    if mode == "raw_logits"
+                    i for i, mode in enumerate(logprobs_mode) if mode == "raw_logits"
                 ]
 
         logits = self.apply_logits_processors(

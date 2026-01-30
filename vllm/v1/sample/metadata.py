@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.config.model import LogprobsMode
+from vllm.v1.sample.logits_processor import LogitsProcessors
 
 
 @dataclass
