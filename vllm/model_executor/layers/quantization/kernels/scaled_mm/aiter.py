@@ -116,7 +116,6 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         return rocm_aiter_ops.gemm_a8w8(x_q, w_q.t(), x_s, w_s, bias, out_dtype)
 
 
-# aiter bpreshuffle Kernel
 class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
@@ -140,21 +139,19 @@ class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         )
         if not is_ptpc:
             return False, "This kernel only handles Per-Token/Per-Channel (PTPC)"
+
+        if not (c.N % 16 == 0 and c.K % 16 == 0):
+            return (
+                False,
+                f"requires N and K dimensions to be divisible by 16, recived "
+                f"N={c.N} and k={c.K}",
+            )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Perform weight shuffle immediately after model loading.
-        from aiter.ops.shuffle import shuffle_weight
-
-        weight = layer.weight.data
-        N, K = weight.shape[0], weight.shape[1]
-        if N % 16 == 0 and K % 16 == 0:
-            shuffled_w = shuffle_weight(weight, layout=(16, 16))
-            layer.weight = torch.nn.Parameter(shuffled_w, requires_grad=False)
-        else:
-            raise ValueError(
-                f"Weight shape ({N}, {K}) not supported by AITeR bpreshuffle"
-            )
+        layer.weight = torch.nn.Parameter(
+            rocm_aiter_ops.shuffle_weight(layer.weight.data), requires_grad=False
+        )
 
     def apply_scaled_mm(
         self,
@@ -170,7 +167,6 @@ class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return rocm_aiter_ops.gemm_a8w8_bpreshuffle(A, B.t(), As, Bs, bias, out_dtype)
 
 
-# aiter CK Kernel
 class AiterCKPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
@@ -182,7 +178,13 @@ class AiterCKPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        return AiterBpreshufflePerTokenFp8ScaledMMLinearKernel.can_implement(c)
+        is_ptpc = (
+            c.activation_quant_key.scale.group_shape.is_per_token()
+            and c.weight_quant_key.scale.group_shape.is_per_channel()
+        )
+        if not is_ptpc:
+            return False, "This kernel only handles Per-Token/Per-Channel (PTPC)"
+        return True, None
 
     def apply_scaled_mm(
         self,

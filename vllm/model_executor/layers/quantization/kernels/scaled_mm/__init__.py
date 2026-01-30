@@ -171,6 +171,8 @@ def init_fp8_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
     out_dtype: torch.dtype,
+    N: int,
+    K: int,
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel:
@@ -178,6 +180,8 @@ def init_fp8_linear_kernel(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
         out_dtype=out_dtype,
+        N=N,
+        K=K,
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(

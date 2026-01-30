@@ -1373,9 +1373,10 @@ class TestFP8Layer(torch.nn.Module):
         force_kernel: FP8ScaledMMLinearKernel | None = None,
     ):
         super().__init__()
+        N, K = weight_shape
         per_tensor_weights = weight_quant_key.scale.group_shape.is_per_tensor()
         is_static_activation_scale = activation_quant_key.scale.static
-        weight_scale_shape = (1,) if per_tensor_weights else (weight_shape[0], 1)
+        weight_scale_shape = (1,) if per_tensor_weights else (N, 1)
 
         self.weight_scale = torch.rand(
             weight_scale_shape, dtype=torch.float32, device=device
@@ -1394,6 +1395,8 @@ class TestFP8Layer(torch.nn.Module):
             activation_quant_key=activation_quant_key,
             weight_quant_key=weight_quant_key,
             out_dtype=out_dtype,
+            N=N,
+            K=K,
             force_kernel=force_kernel,
         )
 

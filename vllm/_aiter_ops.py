@@ -1670,7 +1670,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def shuffle_weight(
-        self, tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
+        tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> torch.Tensor:
         from aiter.ops.shuffle import shuffle_weight
 
