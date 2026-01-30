@@ -651,7 +651,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     # note: input_quant will be present for converted models;
                     # will be ignored during inference post loading
                     return CompressedTensorsW8A16Fp8(
-                        strategy=weight_quant.strategy,
+                        weight_quant=weight_quant,
                         is_static_input_scheme=not input_quant.dynamic,
                     )
 
@@ -659,7 +659,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             if self._is_fp8_w8a16(weight_quant, input_quant):
                 is_static_input_scheme = input_quant and not input_quant.dynamic
                 return CompressedTensorsW8A16Fp8(
-                    strategy=weight_quant.strategy,
+                    weight_quant=weight_quant,
                     is_static_input_scheme=is_static_input_scheme,
                 )
 
