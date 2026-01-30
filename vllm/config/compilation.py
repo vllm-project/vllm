@@ -813,6 +813,12 @@ class CompilationConfig:
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
         if self.pass_config.fuse_rope_kvcache:
+            if envs.VLLM_ROCM_USE_AITER_TRITON_ROPE:
+                logger.warning(
+                    "Cannot use VLLM_ROCM_USE_AITER_TRITON_ROPE with "
+                    "fuse_rope_kvcache. Disabling fuse_rope_kvcache."
+                )
+                self.pass_config.fuse_rope_kvcache = False
             # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")

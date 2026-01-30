@@ -21,12 +21,15 @@ from vllm.platforms import current_platform
 
 from .fusion import (
     FusedRMSQuantKey,
+    empty_bf16,
+    empty_i64,
 )
 from .inductor_pass import enable_fake_mode
 from .matcher_utils import (
     MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
     MatcherRMSNorm,
+    MatcherRotaryEmbedding,
     MatcherSiluAndMul,
 )
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -525,15 +528,45 @@ class RopeReshapeKVCachePattern:
         num_heads: int,
         num_kv_heads: int,
         is_neox: bool,
+        prefix: str = "",
     ) -> None:
-        raise NotImplementedError
+        self.head_dim = head_dim
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.is_neox = is_neox
+        self.layer_name = prefix
+
+        self.rope_matcher = MatcherRotaryEmbedding(
+            is_neox=self.is_neox,
+            head_size=self.head_dim,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+        )
 
     def get_inputs(self) -> list[torch.Tensor]:
-        raise NotImplementedError
+        # Sample inputs to help pattern tracing
+        T = 5
+        qkv = empty_bf16(T, self.q_size + 2 * self.kv_size)
+        positions = empty_i64(T)
+        cos_sin_cache = empty_bf16(4096, self.head_dim)
+        return [
+            qkv,
+            positions,
+            cos_sin_cache,
+        ]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern():
-            raise NotImplementedError
+        def pattern(
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
+            dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
+            return q, k, v, dummy
 
         def replacement():
             raise NotImplementedError

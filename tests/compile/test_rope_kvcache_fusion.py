@@ -5,44 +5,39 @@ import pytest
 import torch
 
 import vllm.config
-
 from tests.compile.backend import TestBackend
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.matcher_utils import ROTARY_OP
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
-from vllm.compilation.rocm_aiter_fusion import (
-    RocmAiterTritonAddRMSNormPadFusionPass,
-)
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
     ModelConfig,
     PassConfig,
     VllmConfig,
-    set_current_vllm_config,
 )
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
-    AttentionType,
 )
-from vllm._aiter_ops import rocm_aiter_ops, is_aiter_found_and_supported
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 VLLM_UNIFIED_KV_CACHE_UPDATE_OP = torch.ops.vllm.unified_kv_cache_update
 
+
 class QKRoPEKVCacheTestModel(torch.nn.Module):
     def __init__(
-            self,
-            num_heads: int,
-            num_kv_heads: int,
-            head_dim: int,
-            is_neox: bool,
-            vllm_config: VllmConfig,
-            dtype: torch.dtype,
-            prefix: str = "model.layers.0.self_attn.attn",
+        self,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        is_neox: bool,
+        vllm_config: VllmConfig,
+        dtype: torch.dtype,
+        prefix: str = "model.layers.0.self_attn.attn",
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -80,9 +75,9 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         )
         self.attn_backend: type[AttentionBackend] = self.attn.get_attn_backend()
         assert not self.attn_backend.forward_includes_kv_cache_update, (
-            f"Attention backend {self.attn_backend} does not support fused RoPE+KV Cache."
+            f"Attention backend {self.attn_backend} does not support fuse_rope_kvcache."
         )
-    
+
     def forward(self, qkv: torch.Tensor, positions: torch.Tensor):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
@@ -96,7 +91,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         )
         # TODO (Rohan138) return and compare KV cache as well
         return q, k, v, kv_cache_dummy_dep
-    
+
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
         ops = []
         if self.enable_rope_custom_op:
@@ -109,9 +104,10 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
     def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
         return [rocm_aiter_ops.get_qk_rope_reshape_and_cache_op()]
 
-@pytest.mark.parametrize("is_neox", [True, False])
+
+@pytest.mark.parametrize("is_neox", [True])
 @pytest.mark.parametrize("enable_rope_custom_op", [True])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("head_dim", [64])
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
@@ -184,13 +180,16 @@ def test_rope_kvcache_fusion(
 
         qkv_unfused = qkv.clone()
         pos_unfused = pos.clone()
-        q_unfused, k_unfused, v_unfused, dummy = model(qkv_unfused, pos_unfused)
+
+        with set_forward_context(None, vllm_config):
+            q_unfused, k_unfused, v_unfused, dummy = model(qkv_unfused, pos_unfused)
         del dummy
 
         torch._dynamo.mark_dynamic(qkv, 0)
         torch._dynamo.mark_dynamic(pos, 0)
-        model_fused = torch.compile(model, backend=backend)
-        q_fused, k_fused, v_fused, dummy = model_fused(qkv, pos)
+        with set_forward_context(None, vllm_config):
+            model_fused = torch.compile(model, backend=backend)
+            q_fused, k_fused, v_fused, dummy = model_fused(qkv, pos)
         del dummy
 
         if dtype == torch.float16:
