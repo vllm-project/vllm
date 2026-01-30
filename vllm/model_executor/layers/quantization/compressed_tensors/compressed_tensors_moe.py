@@ -63,9 +63,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     flashinfer_trtllm_fp4_moe,
     flashinfer_trtllm_fp4_routed_moe,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_fi_trtllm_fp8_per_tensor_moe,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (
     flashinfer_trtllm_mxint4_moe,
     is_flashinfer_mxint4_moe_available,
@@ -73,7 +70,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import 
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
