@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import inspect
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property, partial
@@ -20,7 +19,6 @@ from mistral_common.protocol.transcription.request import TranscriptionRequest
 from mistral_common.tokens.tokenizers.audio import (
     Audio,
     AudioEncoder,
-    TranscriptionFormat,
 )
 from transformers import BatchFeature, TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
@@ -163,19 +161,10 @@ class VoxtralProcessorAdapter:
             assert isinstance(audio, np.ndarray)
             assert audio.ndim == 1
 
-            # pad if necessary
-            # TODO(Patrick) - remove once mistral-common is bumped
-            if (
-                self._audio_processor.audio_config.transcription_format
-                != TranscriptionFormat.STREAMING
-            ):
-                sig = inspect.signature(self._audio_processor.pad)
-                if "is_online_streaming" in sig.parameters:
-                    audio = self._audio_processor.pad(
-                        audio, self.sampling_rate, is_online_streaming=False
-                    )
-                else:
-                    audio = self._audio_processor.pad(audio, self.sampling_rate)
+            if not self._audio_processor.audio_config.is_streaming:
+                audio = self._audio_processor.pad(
+                    audio, self.sampling_rate, is_online_streaming=False
+                )
 
             audio_tokens = [self.begin_audio_token_id] + [
                 self.audio_token_id
@@ -202,6 +191,12 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self) -> VoxtralProcessorAdapter:
         return VoxtralProcessorAdapter(self.get_tokenizer())
+
+    def get_data_parser(self):
+        return MultiModalDataParser(
+            target_sr=self.get_hf_processor().sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 5}  # Performance tends to degrade after 5
@@ -334,10 +329,6 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
 
         # NOTE: The tokens are already inserted by the chat template
         return prompt_ids, mm_info, True
-
-    def _get_data_parser(self) -> MultiModalDataParser:
-        sampling_rate = self.info.get_hf_processor().sampling_rate
-        return MultiModalDataParser(target_sr=sampling_rate)
 
 
 @MULTIMODAL_REGISTRY.register_processor(

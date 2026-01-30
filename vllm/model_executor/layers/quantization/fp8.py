@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.nn import Module
@@ -11,9 +11,9 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.attention.layer import Attention
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
@@ -33,7 +33,6 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
-    make_fp8_moe_kernel_for_mkm,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
@@ -53,7 +52,6 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
-    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -184,7 +182,7 @@ class Fp8Config(QuantizationConfig):
 
     def get_xpu_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         from vllm.model_executor.layers.quantization.ipex_quant import (
             XPUFp8LinearMethod,
             XPUFp8MoEMethod,
@@ -220,7 +218,7 @@ class Fp8Config(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if current_platform.is_xpu():
             return self.get_xpu_quant_method(layer, prefix)
         if isinstance(layer, LinearBase):
@@ -402,7 +400,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 None,
                 weight_loader,
             )
-            set_weight_attrs(scale, {"scale_type": "weight_scale"})
             layer.register_parameter("weight_scale", scale)
         else:
             assert not self.act_q_static
@@ -414,7 +411,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 self.weight_block_size,
                 weight_loader,
             )
-            set_weight_attrs(scale, {"scale_type": "weight_scale"})
             # The weight_scale_inv name is intentional for deepseekv3
             layer.register_parameter("weight_scale_inv", scale)
 
@@ -679,15 +675,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             allow_vllm_cutlass=False,
         )
 
-        # Delay creation of the kernel until after process-weights.
-        self.kernel: mk.FusedMoEModularKernel | None = None
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        if self.kernel is not None:
-            return self.kernel.prepare_finalize.topk_indices_dtype()
-        return None
-
     def create_weights(
         self,
         layer: Module,
@@ -813,7 +800,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(
         self,
-        layer: Module,
+        layer: FusedMoE,
         w13: torch.Tensor,
         w2: torch.Tensor,
         w13_scale: torch.Tensor,
@@ -845,16 +832,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
         # in both cases.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config and (
-            (not self.moe.moe_parallel_config.use_all2all_kernels)
-            or self.moe.moe_parallel_config.use_naive_all2all_kernels
-        ):
+        if self.moe_quant_config:
             assert self.experts_cls is not None
-            self.kernel, self.use_inplace = make_fp8_moe_kernel(
+            self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
             )
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -909,33 +895,19 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalize | None:
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            return None
-        elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
-            # For no-EP case, don't use the MKM framework.
-            if not self.moe.moe_parallel_config.use_all2all_kernels:
-                return None
-
-            prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-                self.moe,
-                use_deepseek_fp8_block_scale=self.block_quant,
-            )
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-        return super().maybe_make_prepare_finalize(routing_tables)
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
-        assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        return make_fp8_moe_kernel_for_mkm(
-            moe_config=self.moe,
-            quant_config=self.moe_quant_config,
-            experts_cls=self.experts_cls,
-            prepare_finalize=prepare_finalize,
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
         )
 
     def get_fused_moe_quant_config(
@@ -1037,9 +1009,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.kernel is not None
+        assert self.moe_mk is not None
         assert not self.is_monolithic
-        return self.kernel(
+        return self.moe_mk(
             x,
             layer.w13_weight,
             layer.w2_weight,

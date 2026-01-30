@@ -23,6 +23,7 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import parse_safetensors_file_metadata
 
 from .config_parser_base import ConfigParserBase
@@ -48,7 +49,6 @@ except ImportError:
     from transformers.configuration_utils import (
         ALLOWED_LAYER_TYPES as ALLOWED_ATTENTION_LAYER_TYPES,
     )
-
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -77,10 +77,12 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    funaudiochat="FunAudioChatConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
+    kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     jais="JAISConfig",
@@ -95,6 +97,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
+    qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
@@ -578,7 +581,11 @@ def get_config(
         try:
             # First check for Mistral to avoid defaulting to
             # Transformers implementation.
-            if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
+            if is_mistral_model_repo(
+                model_name_or_path=str(model), revision=revision
+            ) and file_or_path_exists(
+                model=model, config_name=MISTRAL_CONFIG_NAME, revision=revision
+            ):
                 config_format = "mistral"
             elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
                 model, HF_CONFIG_NAME, revision=revision
