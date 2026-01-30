@@ -130,6 +130,16 @@ class SchedulerConfig:
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
 
+    # FIX: Restored missing field causing KeyError in docs build
+    external_parameters: dict[str, Any] | None = Field(default=None)
+    """A dictionary of external parameters for custom scheduler implementations.
+    If a user-defined scheduler requires additional configuration values, they
+    can be provided here directly as a dict. Alternatively, a JSON file can be
+    placed in the directory of the class specified by ``scheduler_cls``; in that
+    case, the file will be automatically loaded and its contents stored in this
+    field.
+    """
+
     disable_hybrid_kv_cache_manager: bool | None = None
     """If set to True, KV cache manager will allocate the same size of KV cache
     for all attention layers even if there are multiple type of attention layers
@@ -254,7 +264,6 @@ class SchedulerConfig:
                 self.scheduler_cls
                 == "vllm.v1.core.sched.ewsjf_scheduler.scheduler.EWSJFScheduler"
             ):
-                # FIX: String split across lines to fix E501
                 self.scheduler_cls = (
                     "vllm.v1.core.sched.ewsjf_scheduler."
                     "async_scheduler.AsyncEWSJFScheduler"
