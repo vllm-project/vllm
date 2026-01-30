@@ -482,6 +482,51 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, engine_indexes, model_name
         )
 
+        gauge_prefix_cached_blocks = self._gauge_cls(
+            name="vllm:num_prefix_cached_blocks",
+            documentation=(
+                "Number of KV cache blocks currently stored in the prefix cache."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_prefix_cached_blocks = make_per_engine(
+            gauge_prefix_cached_blocks, engine_indexes, model_name
+        )
+
+        gauge_prefix_cached_tokens = self._gauge_cls(
+            name="vllm:num_prefix_cached_tokens",
+            documentation=("Number of tokens currently stored in the prefix cache."),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_prefix_cached_tokens = make_per_engine(
+            gauge_prefix_cached_tokens, engine_indexes, model_name
+        )
+
+        gauge_kv_cache_total_blocks = self._gauge_cls(
+            name="vllm:num_kv_cache_total_blocks",
+            documentation="Total number of KV cache blocks available.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_cache_total_blocks = make_per_engine(
+            gauge_kv_cache_total_blocks, engine_indexes, model_name
+        )
+
+        gauge_prefix_cache_usage = self._gauge_cls(
+            name="vllm:prefix_cache_usage_perc",
+            documentation=(
+                "Prefix cache usage as a fraction of total KV cache. "
+                "1 means 100 percent usage."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_prefix_cache_usage = make_per_engine(
+            gauge_prefix_cache_usage, engine_indexes, model_name
+        )
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
@@ -714,43 +759,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.histogram_time_to_first_token = make_per_engine(
             histogram_time_to_first_token, engine_indexes, model_name
         )
-
-        # Deprecated in 0.11 - Renamed as vllm:inter_token_latency_seconds
-        # With 0.12.x you can enable with --show-hidden-metrics-for-version=0.11
-        # TODO: remove in 0.13.0
-        if self.show_hidden_metrics:
-            histogram_time_per_output_token = self._histogram_cls(
-                name="vllm:time_per_output_token_seconds",
-                documentation=(
-                    "Histogram of time per output token in seconds."
-                    "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
-                ),
-                buckets=[
-                    0.01,
-                    0.025,
-                    0.05,
-                    0.075,
-                    0.1,
-                    0.15,
-                    0.2,
-                    0.3,
-                    0.4,
-                    0.5,
-                    0.75,
-                    1.0,
-                    2.5,
-                    5.0,
-                    7.5,
-                    10.0,
-                    20.0,
-                    40.0,
-                    80.0,
-                ],
-                labelnames=labelnames,
-            )
-            self.histogram_time_per_output_token = make_per_engine(
-                histogram_time_per_output_token, engine_indexes, model_name
-            )
 
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
@@ -1039,6 +1047,24 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            self.gauge_prefix_cached_blocks[engine_idx].set(
+                scheduler_stats.num_prefix_cached_blocks
+            )
+            self.gauge_prefix_cached_tokens[engine_idx].set(
+                scheduler_stats.num_prefix_cached_tokens
+            )
+            self.gauge_kv_cache_total_blocks[engine_idx].set(
+                scheduler_stats.num_kv_cache_total_blocks
+            )
+            # Calculate prefix cache usage as fraction of total blocks
+            if scheduler_stats.num_kv_cache_total_blocks > 0:
+                prefix_cache_usage = (
+                    scheduler_stats.num_prefix_cached_blocks
+                    / scheduler_stats.num_kv_cache_total_blocks
+                )
+            else:
+                prefix_cache_usage = 0.0
+            self.gauge_prefix_cache_usage[engine_idx].set(prefix_cache_usage)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
@@ -1124,8 +1150,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
-            if self.show_hidden_metrics:
-                self.histogram_time_per_output_token[engine_idx].observe(itl)
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason][

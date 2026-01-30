@@ -255,7 +255,8 @@ class BlockPool:
         )
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null blocks when enabling sparse attention like
-            # sliding window attention. We skip null blocks here.
+            # sliding window attention, or Mamba models with prefix-caching in
+            # align mode. We skip null blocks here.
             if blk.is_null:
                 continue
             assert blk.block_hash is None
@@ -462,6 +463,24 @@ class BlockPool:
             The number of free blocks.
         """
         return self.free_block_queue.num_free_blocks
+
+    def get_num_cached_blocks(self) -> int:
+        """Get the number of blocks currently in the prefix cache.
+
+        This counts actual blocks, not unique hashes. When multiple blocks
+        share the same hash, each block is counted separately.
+
+        Returns:
+            The number of prefix cached blocks.
+        """
+        count = 0
+        for blocks in self.cached_block_hash_to_block._cache.values():
+            if isinstance(blocks, KVCacheBlock):
+                count += 1
+            else:
+                # It's a dict of block_id -> KVCacheBlock
+                count += len(blocks)
+        return count
 
     def get_usage(self) -> float:
         """Get the KV cache usage.

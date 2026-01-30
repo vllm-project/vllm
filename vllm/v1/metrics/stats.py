@@ -174,6 +174,13 @@ class SchedulerStats:
 
     kv_cache_usage: float = 0.0
 
+    # Total number of KV cache blocks available.
+    num_kv_cache_total_blocks: int = 0
+    # Number of blocks currently stored in the prefix cache.
+    num_prefix_cached_blocks: int = 0
+    # Number of tokens currently stored in the prefix cache.
+    num_prefix_cached_tokens: int = 0
+
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
 
