@@ -888,6 +888,47 @@ def get_sentence_transformer_tokenizer_config(
     return None
 
 
+@cache
+def get_sentence_transformer_v6_config(
+    model: str | Path, revision: str | None = "main"
+) -> dict[str, Any]:
+    sentence_transformer_config_files = [
+        "config_sentence_transformers.json",
+    ]
+    config = None
+
+    for config_file in sentence_transformer_config_files:
+        if (
+            try_get_local_file(model=model, file_name=config_file, revision=revision)
+            is not None
+        ):
+            config = get_hf_file_to_dict(config_file, model, revision)
+            if config:
+                break
+
+    if not config and not Path(model).is_absolute():
+        try:
+            # If model is on HuggingfaceHub, get the repo files
+            repo_files = list_repo_files(
+                model, revision=revision, token=_get_hf_token()
+            )
+        except Exception:
+            repo_files = []
+
+        for config_name in sentence_transformer_config_files:
+            if config_name in repo_files:
+                encoder_dict = get_hf_file_to_dict(config_name, model, revision)
+                if encoder_dict:
+                    break
+
+    if not config:
+        return {}
+
+    logger.info("Found sentence-transformers v6 configuration.")
+
+    return config
+
+
 def maybe_register_config_serialize_by_value() -> None:
     """Try to register HF model configuration class to serialize by value
 

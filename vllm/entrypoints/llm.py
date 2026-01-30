@@ -71,6 +71,7 @@ from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingPa
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.transformers_utils.repo_utils import try_get_local_file
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
@@ -220,6 +221,7 @@ class LLM:
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
+        chat_template: str | None = None,
         **kwargs: Any,
     ) -> None:
         """LLM constructor."""
@@ -347,6 +349,21 @@ class LLM:
         self.input_processor = self.llm_engine.input_processor
         self.io_processor = self.llm_engine.io_processor
 
+        # FIXME: This should be in score render.
+        self.chat_template = chat_template
+        if self.chat_template is None:
+            chat_template_path = self.model_config.st_v6_config.get(
+                "chat_template_path", None
+            )
+            if chat_template_path is not None:
+                chat_template_file = try_get_local_file(
+                    model=self.model_config.model,
+                    revision=self.model_config.revision,
+                    file_name=chat_template_path,
+                )
+                if chat_template_file is not None:
+                    with open(chat_template_file) as f:
+                        self.chat_template = f.read()
         # Cache for __repr__ to avoid repeated collective_rpc calls
         self._cached_repr: str | None = None
 
@@ -793,6 +810,8 @@ class LLM:
             prompt after chat template interpolation, and the
             pre-processed multi-modal inputs.
         """
+
+        chat_template = chat_template or self.chat_template
         list_of_messages: list[list[ChatCompletionMessageParam]]
 
         # Handle multi and single conversations
@@ -1359,6 +1378,7 @@ class LLM:
         """
         model_config = self.model_config
         runner_type = model_config.runner_type
+        chat_template = chat_template or self.chat_template
         if runner_type != "pooling":
             raise ValueError(
                 "LLM.score() is only supported for pooling models. "

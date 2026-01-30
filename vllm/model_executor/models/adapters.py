@@ -308,14 +308,9 @@ def as_seq_cls_model(cls: _T) -> _T:
             return DispatchPooler.for_seq_cls(pooler_config, classifier=self.score)
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-            hf_config = self.config
-            text_config = hf_config.get_text_config()
-            tokens = getattr(
-                hf_config,
-                "classifier_from_token",
-                getattr(text_config, "classifier_from_token", None),
-            )
-            method = getattr(hf_config, "method", getattr(text_config, "method", None))
+            model_config = self.vllm_config.model_config
+            method = model_config.classifier_convert_method
+            tokens = model_config.classifier_from_token
 
             def auto_set_score_bias(weights):
                 for name, weight in weights:
@@ -346,17 +341,15 @@ def as_seq_cls_model(cls: _T) -> _T:
 class SequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        hf_config = vllm_config.model_config.hf_config
-        text_config = hf_config.get_text_config()
-        method = getattr(hf_config, "method", getattr(text_config, "method", None))
-        tokens = getattr(
-            hf_config,
-            "classifier_from_token",
-            getattr(text_config, "classifier_from_token", None),
-        )
+        model_config = vllm_config.model_config
+        method = model_config.classifier_convert_method
+        tokens = model_config.classifier_from_token
 
         if method is None:
             return
+
+        hf_config = vllm_config.model_config.hf_config
+        text_config = hf_config.get_text_config()
 
         assert tokens is not None
         assert method in SEQ_CLS_LOAD_METHODS, f"method {method} not supported"
@@ -451,17 +444,17 @@ def load_weights_using_from_2_way_softmax(
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-    model_config = model.vllm_config.model_config
     quant_config = model.vllm_config.quant_config
-    hf_config = model.config
+    model_config = model.vllm_config.model_config
+    method = model_config.classifier_convert_method
+    tokens = model_config.classifier_from_token
+
+    if method is None:
+        return
+
+    hf_config = model_config.hf_config
     text_config = hf_config.get_text_config()
 
-    tokens = getattr(
-        hf_config,
-        "classifier_from_token",
-        getattr(text_config, "classifier_from_token", []),
-    )
-    tokens = cast(list[int], tokens)
     assert len(tokens) == 2
 
     language_model = _get_language_model_for_seq_cls(model)
@@ -500,8 +493,20 @@ def load_weights_using_from_2_way_softmax(
         trust_remote_code=model_config.trust_remote_code,
     )
 
-    false_id = tokenizer.convert_tokens_to_ids(tokens[0])
-    true_id = tokenizer.convert_tokens_to_ids(tokens[1])
+    if isinstance(tokens[0], str):
+        false_id = tokenizer.convert_tokens_to_ids(tokens[0])
+    elif isinstance(tokens[0], int):
+        false_id = tokens[0]
+    else:
+        raise ValueError(f"{tokens[0]} must a str or int.")
+
+    if isinstance(tokens[1], str):
+        true_id = tokenizer.convert_tokens_to_ids(tokens[1])
+    elif isinstance(tokens[1], int):
+        true_id = tokens[1]
+    else:
+        raise ValueError(f"{tokens[1]} must a str or int.")
+
     lm_head_weight = language_model.lm_head.weight
     score_weight = lm_head_weight.data[[true_id]].to(
         torch.float32
