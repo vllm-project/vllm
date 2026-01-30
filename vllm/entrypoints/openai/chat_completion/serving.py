@@ -327,7 +327,7 @@ class OpenAIServingChat(OpenAIServing):
                     request, should_include_tools
                 )
                 # Apply tool_choice adjustments (e.g., tool_choice="required")
-                logger.debug(
+                logger.info(
                     "[PIPELINE] GPT-OSS path: tool_parser=%s, tokenizer=%s, "
                     "tool_choice=%s",
                     tool_parser,
@@ -336,7 +336,7 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if tool_parser is not None and tokenizer is not None:
                     request = tool_parser(tokenizer).adjust_request(request)
-                    logger.debug(
+                    logger.info(
                         "[PIPELINE] After adjust_request: vllm_xargs=%s",
                         request.vllm_xargs,
                     )
