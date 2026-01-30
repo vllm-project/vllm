@@ -2688,10 +2688,6 @@ class MTBenchDataset(HuggingFaceDataset):
         )
         return sampled_requests
 
-    def sample_prompts(self, n: int) -> Iterator[str]:
-        for item in self.data.take(n):
-            yield item["turns"][0]
-
 
 # -----------------------------------------------------------------------------
 # Blazedit Dataset Implementation

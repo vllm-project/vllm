@@ -12,7 +12,7 @@ from tests.utils import get_attn_backend_list_based_on_platform, large_gpu_mark
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
-from vllm.benchmarks.datasets import InstructCoderDataset, MTBenchDataset
+from vllm.benchmarks.datasets import InstructCoderDataset
 from vllm.config import VllmConfig
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import EngineArgs
@@ -91,12 +91,6 @@ def get_instruct_coder_messages(n: int) -> list[Messages]:
     dataset = InstructCoderDataset(
         dataset_path="likaixin/InstructCoder", dataset_split="train"
     )
-    prompts: Iterable[str] = dataset.sample_prompts(n=n)
-    return [[{"role": "user", "content": prompt}] for prompt in prompts]
-
-
-def get_mtbench_messages(n: int) -> list[Messages]:
-    dataset = MTBenchDataset(dataset_path="philschmid/mt-bench", dataset_split="train")
     prompts: Iterable[str] = dataset.sample_prompts(n=n)
     return [[{"role": "user", "content": prompt}] for prompt in prompts]
 
@@ -625,11 +619,11 @@ class ArgsTest:
     draft_model: str
     sampling_config: SamplingParams
     num_speculative_tokens: int
-    expected_acceptance_rate: float | None
+    expected_acceptance_rate: float
     expected_acceptance_len: float
     # Defaults
     enforce_eager: bool = True
-    parallel_draft: bool = False
+    parallel_drafting: bool = False
     target_tensor_parallel_size: int = 1
     draft_tensor_parallel_size: int = 1
     max_model_len: int = 1024
@@ -684,16 +678,16 @@ def test_draft_model_realistic_example():
 
 def test_draft_model_parallel_drafting():
     args = ArgsTest(
-        target_model="meta-llama/Llama-3.1-8B-Instruct",
-        draft_model="amd/PARD-Llama-3.2-1B",
-        dataset="philschmid/mt-bench",
-        num_speculative_tokens=8,
+        target_model="Qwen/Qwen3-1.7B",
+        draft_model="amd/PARD-Qwen3-0.6B",
+        dataset="likaixin/InstructCoder",
+        num_speculative_tokens=3,
         sampling_config=greedy_sampling(),
-        parallel_draft=True,
+        parallel_drafting=True,
         enforce_eager=False,
         # values below are collected from a stable run, with ~5% tolerance
-        expected_acceptance_len=4.5,
-        expected_acceptance_rate=None,
+        expected_acceptance_len=2.375,
+        expected_acceptance_rate=0.45,
     )
     assert_draft_model_correctness(args)
 
@@ -792,7 +786,7 @@ def assert_draft_model_correctness(args: ArgsTest):
             "enforce_eager": args.enforce_eager,
             "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
             "max_num_seqs": 100,  # limit cudagraph capture runtime
-            "parallel_draft": args.parallel_draft,
+            "parallel_drafting": args.parallel_drafting,
         },
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,
@@ -817,8 +811,7 @@ def assert_draft_model_correctness(args: ArgsTest):
         f"acceptance_len={acceptance_len:.2f}, "
     )
 
-    if args.expected_acceptance_rate is not None:
-        assert acceptance_rate >= args.expected_acceptance_rate
+    assert acceptance_rate >= args.expected_acceptance_rate
     assert acceptance_len >= args.expected_acceptance_len
 
 
@@ -827,8 +820,6 @@ def get_messages(dataset: str, n: int) -> list[Messages]:
         return get_test_prompts(mm_enabled=False, quiet=True, num_prompts=n)
     elif dataset == "likaixin/InstructCoder":
         return get_instruct_coder_messages(n=n)
-    elif dataset == "philschmid/mt-bench":
-        return get_mtbench_messages(n=n)
     else:
         raise NotImplementedError(f"Dataset '{dataset}' not implemented")
 

@@ -321,6 +321,11 @@ def test_prepare_inputs_padded():
     assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
 
 
+# parameterize_if_needed
+def test_set_inputs_first_pass():
+    pass
+
+
 @pytest.mark.parametrize("method", ["eagle", "eagle3"])
 @pytest.mark.parametrize("attn_backend", get_attn_backend_list_based_on_platform())
 @pytest.mark.parametrize("pp_size", [1, 2])
