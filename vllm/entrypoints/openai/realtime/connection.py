@@ -3,7 +3,6 @@
 
 import asyncio
 import base64
-import contextlib
 import json
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
@@ -282,6 +281,5 @@ class RealtimeConnection:
         # Cancel generation task if running
         if self.generation_task and not self.generation_task.done():
             self.generation_task.cancel()
-            contextlib.suppress(asyncio.CancelledError)
 
         logger.debug("Connection cleanup complete: %s", self.connection_id)
