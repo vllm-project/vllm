@@ -253,6 +253,41 @@ class PCPManager:
 
         return pcp_tokens[:num_reqs], local_token_indices.astype(np.int64)
 
+    def partition_inputs(
+        self,
+        positions_np: np.ndarray,
+        req_indices: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+        arange_np: np.ndarray,
+        reorder_batch_threshold: int | None,
+    ) -> tuple[int, np.ndarray, np.ndarray]:
+        """
+        Partition inputs for this PCP rank.
+
+        Gathers local positions and req_indices from global arrays.
+
+        Returns:
+            local_total: number of tokens for this rank
+            positions_np: gathered positions (modified slice of input)
+            req_indices: gathered req_indices (modified slice of input)
+        """
+        local_num_scheduled, local_indices = self.compute_rank_indices(
+            num_scheduled_tokens,
+            arange_np,
+            reorder_batch_threshold,
+        )
+        local_total = int(local_num_scheduled.sum())
+
+        # Gather local values from global
+        positions_np[:local_total] = positions_np[local_indices]
+        req_indices[:local_total] = req_indices[local_indices]
+
+        # Cache for query_start_loc computation
+        self.local_num_scheduled = local_num_scheduled
+        self.local_total = local_total
+
+        return local_total, positions_np[:local_total], req_indices[:local_total]
+
     def restore_hidden_states(
         self, hidden_states: torch.Tensor, num_tokens_unpadded: int
     ):

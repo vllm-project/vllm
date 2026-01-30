@@ -151,7 +151,6 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
@@ -187,6 +186,7 @@ from .utils import (
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
 logger = init_logger(__name__)
 
@@ -445,13 +445,15 @@ class GPUModelRunner(
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
             self.drafter: (
-                NgramProposer
+                NgramProposer  # noqa: F823
                 | SuffixDecodingProposer
                 | EagleProposer
                 | DraftModelProposer
                 | MedusaProposer
             )
             if self.speculative_config.method == "ngram":
+                from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.uses_draft_model():
                 self.drafter = DraftModelProposer(
@@ -1038,20 +1040,26 @@ class GPUModelRunner(
             req_state.num_computed_tokens = num_computed_tokens
 
             if not is_last_rank:
-                # When using PP, the scheduler sends the sampled tokens back,
-                # because there's no direct communication between the first-
-                # stage worker and the last-stage worker.
-                new_token_ids = req_data.new_token_ids[i]
-                # Add the sampled token(s) from the previous step (if any).
-                # This doesn't include "unverified" tokens like spec tokens.
-                num_new_tokens = (
-                    num_computed_tokens + len(new_token_ids) - req_state.num_tokens
-                )
-                if num_new_tokens == 1:
-                    # Avoid slicing list in most common case.
-                    req_state.output_token_ids.append(new_token_ids[-1])
-                elif num_new_tokens > 0:
-                    req_state.output_token_ids.extend(new_token_ids[-num_new_tokens:])
+                if not req_data.new_token_ids:
+                    # Async scheduled PP: Sampled tokens propagated via GPU broadcast.
+                    new_token_ids: list[int] = []
+                else:
+                    # Non-async scheduling with PP: The scheduler sends
+                    # sampled token ids back because there's no direct communication
+                    # between the first-stage worker and the last-stage worker.
+                    new_token_ids = req_data.new_token_ids[i]
+                    # Add the sampled token(s) from the previous step (if any).
+                    # This doesn't include "unverified" tokens like spec tokens.
+                    num_new_tokens = (
+                        num_computed_tokens + len(new_token_ids) - req_state.num_tokens
+                    )
+                    if num_new_tokens == 1:
+                        # Avoid slicing list in most common case.
+                        req_state.output_token_ids.append(new_token_ids[-1])
+                    elif num_new_tokens > 0:
+                        req_state.output_token_ids.extend(
+                            new_token_ids[-num_new_tokens:]
+                        )
             elif num_output_tokens < len(req_state.output_token_ids):
                 # Some output tokens were discarded due to a sync-KV-load
                 # failure. Align the cached state.
@@ -1239,11 +1247,11 @@ class GPUModelRunner(
         if not scheduler_output or not self.is_multimodal_raw_input_only_model:
             return {}
 
-        mm_kwargs = list[MultiModalKwargsItem]()
+        mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
         for req in scheduler_output.scheduled_new_reqs:
             for feature in req.mm_features:
                 if feature.data is not None:
-                    mm_kwargs.append(feature.data)
+                    mm_kwargs.append((feature.modality, feature.data))
 
         # Input all modalities at once
         mm_kwargs_combined: BatchedTensorInputs = {}
@@ -1289,7 +1297,7 @@ class GPUModelRunner(
     def _prepare_input_ids(
         self,
         scheduler_output: "SchedulerOutput",
-        local_total_num_tokens: int,
+        total_num_scheduled_tokens: int,
         cu_num_tokens: np.ndarray,
     ) -> None:
         """Prepare the input IDs for the current batch.
@@ -1300,10 +1308,10 @@ class GPUModelRunner(
 
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
-            self.input_ids.copy_to_gpu(local_total_num_tokens)
+            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
             if self.enable_prompt_embeds:
-                self.inputs_embeds.copy_to_gpu(local_total_num_tokens)
-                self.is_token_ids.copy_to_gpu(local_total_num_tokens)
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
 
         # Async scheduling case, where some decode requests from the previous
@@ -1346,14 +1354,14 @@ class GPUModelRunner(
                 indices_match &= prev_index == flattened_index
                 max_flattened_index = max(max_flattened_index, flattened_index)
         num_commmon_tokens = len(sample_flattened_indices)
-        total_without_spec = local_total_num_tokens - total_num_spec_tokens
+        total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
         if num_commmon_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
             # We need to copy the input_ids_cpu to the GPU first.
-            self.input_ids.copy_to_gpu(local_total_num_tokens)
+            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
             if self.enable_prompt_embeds:
-                self.inputs_embeds.copy_to_gpu(local_total_num_tokens)
-                self.is_token_ids.copy_to_gpu(local_total_num_tokens)
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+                self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_commmon_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids.cpu will have all the input ids.
@@ -1441,27 +1449,10 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
-    def _partition_for_pcp(
-        self,
-        num_scheduled_tokens_np: np.ndarray,
-        num_reqs: int,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        local_num_scheduled, local_token_indices = (
-            self.pcp_manager.compute_rank_indices(
-                num_scheduled_tokens_np[:num_reqs],
-                self.arange_np,
-                self.reorder_batch_threshold,
-            )
-        )
-        return local_num_scheduled, local_token_indices
-
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
-        local_num_scheduled_tokens: np.ndarray,
-        local_total_num_tokens: int,
-        local_token_indices: np.ndarray | None = None,
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
@@ -1471,7 +1462,9 @@ class GPUModelRunner(
             logits_indices, spec_decode_metadata,
         ]
         """
-        assert local_total_num_tokens > 0
+        total_num_tokens = scheduler_output.total_num_scheduled_tokens
+        self._num_tokens_for_forward = total_num_tokens  # May be updated by PCP
+        assert total_num_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
@@ -1487,10 +1480,8 @@ class GPUModelRunner(
         # arange: [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
 
-        global_total_num_tokens = scheduler_output.total_num_scheduled_tokens
-
         # Get positions.
-        positions_np = self.positions.np[:global_total_num_tokens]
+        positions_np = self.positions.np[:total_num_tokens]
         np.add(
             self.input_batch.num_computed_tokens_cpu[req_indices],
             arange,
@@ -1498,20 +1489,26 @@ class GPUModelRunner(
         )
 
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
-        self.input_batch.block_table.commit_slot_mapping(global_total_num_tokens)
+        self.input_batch.block_table.commit_slot_mapping(total_num_tokens)
 
         logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
             self.device, non_blocking=True
         )
 
-        # For PCP: gather positions and recompute local indices
-        if local_token_indices is not None:
-            cu_num_tokens, _ = self._get_cumsum_and_arange(local_num_scheduled_tokens)
-            positions_np[:local_total_num_tokens] = positions_np[local_token_indices]
-            req_indices[:local_total_num_tokens] = req_indices[local_token_indices]
-            # Slice to local length for subsequent use
-            positions_np = positions_np[:local_total_num_tokens]
-            req_indices = req_indices[:local_total_num_tokens]
+        # For PCP: partition to local tokens for this rank
+        if self.pcp_world_size > 1:
+            total_num_tokens, positions_np, req_indices = (
+                self.pcp_manager.partition_inputs(
+                    positions_np,
+                    req_indices,
+                    num_scheduled_tokens,
+                    self.arange_np,
+                    self.reorder_batch_threshold,
+                )
+            )
+            self._num_tokens_for_forward = total_num_tokens
+            # Use local cumsum for query_start_loc
+            cu_num_tokens = np.cumsum(self.pcp_manager.local_num_scheduled)
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1539,7 +1536,7 @@ class GPUModelRunner(
             self.input_batch.token_ids_cpu_tensor.flatten(),
             0,
             token_indices_tensor,
-            out=self.input_ids.cpu[:local_total_num_tokens],
+            out=self.input_ids.cpu[:total_num_tokens],
         )
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
@@ -1547,7 +1544,7 @@ class GPUModelRunner(
                 is_token_ids,
                 0,
                 token_indices_tensor,
-                out=self.is_token_ids.cpu[:local_total_num_tokens],
+                out=self.is_token_ids.cpu[:total_num_tokens],
             )
 
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
@@ -1556,7 +1553,7 @@ class GPUModelRunner(
         if self.input_batch.req_prompt_embeds:
             output_idx = 0
             for req_idx in range(num_reqs):
-                num_sched = local_num_scheduled_tokens[req_idx]
+                num_sched = num_scheduled_tokens[req_idx]
 
                 # Skip if this request doesn't have embeddings
                 if req_idx not in self.input_batch.req_prompt_embeds:
@@ -1616,25 +1613,25 @@ class GPUModelRunner(
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
             scheduler_output,
-            local_total_num_tokens,
+            total_num_tokens,
             cu_num_tokens,
         )
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            self.mrope_positions.gpu[:, :local_total_num_tokens].copy_(
-                self.mrope_positions.cpu[:, :local_total_num_tokens],
+            self.mrope_positions.gpu[:, :total_num_tokens].copy_(
+                self.mrope_positions.cpu[:, :total_num_tokens],
                 non_blocking=True,
             )
         elif self.uses_xdrope_dim > 0:
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :local_total_num_tokens].copy_(
-                self.xdrope_positions.cpu[:, :local_total_num_tokens],
+            self.xdrope_positions.gpu[:, :total_num_tokens].copy_(
+                self.xdrope_positions.cpu[:, :total_num_tokens],
                 non_blocking=True,
             )
         else:
             # Common case (1D positions)
-            self.positions.copy_to_gpu(local_total_num_tokens)
+            self.positions.copy_to_gpu(total_num_tokens)
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -1682,7 +1679,7 @@ class GPUModelRunner(
                 <= self.vllm_config.scheduler_config.max_num_batched_tokens
             )
             self.set_active_loras(
-                self.input_batch, local_num_scheduled_tokens, num_sampled_tokens
+                self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
 
         return (
@@ -3398,25 +3395,18 @@ class GPUModelRunner(
             num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            local_num_scheduled_tokens = num_scheduled_tokens_np
-            local_token_indices = None
-            local_total_num_tokens = scheduler_output.total_num_scheduled_tokens
-
-            if self.pcp_world_size > 1:
-                local_num_scheduled_tokens, local_token_indices = (
-                    self._partition_for_pcp(num_scheduled_tokens_np, num_reqs)
-                )
-                local_total_num_tokens = int(local_num_scheduled_tokens.sum())
-
-            max_num_scheduled_tokens = int(local_num_scheduled_tokens.max())
-
             logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
-                local_num_scheduled_tokens,
-                local_total_num_tokens,
-                local_token_indices,
+                scheduler_output, num_scheduled_tokens_np
             )
+            local_total_num_tokens = self._num_tokens_for_forward
+
+            # For PCP, use local counts; otherwise use global
+            if self.pcp_world_size > 1:
+                max_num_scheduled_tokens = int(
+                    self.pcp_manager.local_num_scheduled.max()
+                )
+            else:
+                max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
             cascade_attn_prefix_lens = None
             # Disable cascade attention when using microbatching (DBO)
@@ -3663,7 +3653,9 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         if self.execute_model_state is None:
-            # Nothing to do (PP non-final rank case), output isn't used.
+            # receive sampled token ids from the last PP rank.
+            if self.use_async_scheduling and get_pp_group().world_size > 1:
+                self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # type: ignore[return-value]
 
@@ -3704,6 +3696,12 @@ class GPUModelRunner(
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
         )
+        if self.use_async_scheduling:
+            pp = get_pp_group()
+            if pp.world_size > 1 and pp.is_last_rank:
+                self._pp_broadcast_prev_sampled_token_ids(
+                    sampler_output.sampled_token_ids
+                )
 
         self._draft_token_ids = None
         self._draft_token_req_ids = None
@@ -3839,6 +3837,45 @@ class GPUModelRunner(
 
         return async_output
 
+    def _pp_broadcast_prev_sampled_token_ids(
+        self, sampled_token_ids: torch.Tensor
+    ) -> None:
+        """Broadcast sampled token ids (GPU) from last PP stage"""
+        pp = get_pp_group()
+        assert pp.is_last_rank
+        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+        assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
+            "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
+        )
+        torch.distributed.broadcast(
+            sampled_token_ids, src=pp.rank, group=pp.device_group
+        )
+
+    def _pp_receive_prev_sampled_token_ids_to_input_batch(self) -> None:
+        """Receive sampled token ids broadcast from last PP stage"""
+        pp = get_pp_group()
+        assert not pp.is_last_rank
+        num_reqs = self.input_batch.num_reqs
+        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+        recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
+        torch.distributed.broadcast(recv, src=pp.last_rank, group=pp.device_group)
+        self.input_batch.prev_sampled_token_ids = recv
+
+        # construct `prev_req_id_to_index` here so `_prepare_input_ids`
+        # can map req_id -> previous batch row
+        discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[0]
+        discard_req_indices_set = set(discard_req_indices)
+        prev_req_id_to_index: dict[str, int] = {}
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            if i in discard_req_indices_set:
+                continue
+            prev_req_id_to_index[req_id] = i
+            # PP+async scheduling: advance per-request local cached output length by
+            # appending a placeholder (-1) token id.
+            if (req_state := self.requests.get(req_id)) is not None:
+                req_state.output_token_ids.append(-1)
+        self.input_batch.prev_req_id_to_index = prev_req_id_to_index
+
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:
             return None
@@ -3936,6 +3973,8 @@ class GPUModelRunner(
         spec_config = self.speculative_config
         assert spec_config is not None
         if spec_config.method == "ngram":
+            from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.drafter.propose(
@@ -4506,12 +4545,10 @@ class GPUModelRunner(
         # but not read from the cache
         assert dummy_mm_item is not None, "Item should not already be cached"
 
-        dummy_mm_items = [dummy_mm_item] * max_items_per_batch
-
         return next(
             mm_kwargs_group
             for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
-                dummy_mm_items,
+                [(modality, dummy_mm_item)] * max_items_per_batch,
                 device=self.device,
                 pin_memory=self.pin_memory,
             )
