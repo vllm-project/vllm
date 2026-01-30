@@ -166,15 +166,6 @@ class FP8W8A8LinearKernel(FP8ScaledMMLinearKernel):
         else:
             layer.input_scale = None
 
-    def _get_layer_params(self, layer) -> _FP8ParamsT:
-        w, w_s, x_s, x_s_ub = self.layer_param_names
-        return (
-            getattr(layer, w),
-            getattr(layer, w_s),
-            getattr(layer, x_s, None),
-            getattr(layer, x_s_ub, None),
-        )
-
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -236,17 +227,10 @@ class FP8W8A16LinearKernel(FP8ScaledMMLinearKernel):
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
-        act_scale_descriptor = c.activation_quant_key.scale
-        self.quant_fp8 = QuantFP8(
-            static=act_scale_descriptor.static,
-            group_shape=act_scale_descriptor.group_shape,
-            num_token_padding=self.get_output_padding(),
-        )
-        self.fp8_dtype = current_platform.fp8_dtype()
         super().__init__(c, layer_param_names)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
+        raise NotImplementedError
 
     def apply_weights(
         self,

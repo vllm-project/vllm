@@ -14,9 +14,6 @@ from torch import fx
 from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.utils.deep_gemm import (
-    is_deep_gemm_supported,
-)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.linear import LinearBase
@@ -330,9 +327,10 @@ def get_and_maybe_dequant_weights(
     """Return layer's unquantized weights in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
-    from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-        FP8W8A16LinearKernel,
+    from vllm.model_executor.layers.quantization.kernels.scaled_mm.marlin import (
+        MarlinFP8ScaledMMLinearKernel,
     )
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
 
@@ -348,7 +346,7 @@ def get_and_maybe_dequant_weights(
         # DeepGEMM transforms the scales using `transform_sf_into_required_layout` into
         # a layout that is not compatible with `scaled_dequantize`.
         and not is_deep_gemm_supported()
-        and not isinstance(layer.quant_method.kernel, FP8W8A16LinearKernel)
+        and not isinstance(layer.quant_method.kernel, MarlinFP8ScaledMMLinearKernel)
     ):
         weight_scales = get_attribute_fallback(
             layer, ["weight_scale", "weight_scale_inv"]

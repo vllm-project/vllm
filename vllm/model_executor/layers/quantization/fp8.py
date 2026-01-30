@@ -13,6 +13,9 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -44,6 +47,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.marlin import (
+    MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -291,6 +297,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
+        self.out_dtype = torch.get_default_dtype()
 
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
@@ -307,20 +314,25 @@ class Fp8LinearMethod(LinearMethodBase):
                 cutlass_block_fp8_supported=self.cutlass_block_fp8_supported,
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
+
+        # Use per-token quantization for better perf if dynamic and cutlass
+        if self.act_q_static:
+            activation_quant_key = kFp8StaticTensorSym
+        elif cutlass_fp8_supported():
+            activation_quant_key = kFp8DynamicTokenSym
         else:
-            # Use per-token quantization for better perf if dynamic and cutlass
-            if self.act_q_static:
-                activation_quant_key = kFp8StaticTensorSym
-            elif cutlass_fp8_supported():
-                activation_quant_key = kFp8DynamicTokenSym
-            else:
-                activation_quant_key = kFp8DynamicTensorSym
-            self.kernel = init_fp8_linear_kernel(
-                activation_quant_key=activation_quant_key,
-                weight_quant_key=kFp8StaticTensorSym,
-                out_dtype=torch.get_default_dtype(),
-                module_name=self.__class__.__name__,
-            )
+            activation_quant_key = kFp8DynamicTensorSym
+        if self.block_quant:
+            weight_quant_key = kFp8Static128BlockSym
+        else:
+            weight_quant_key = kFp8StaticTensorSym
+        self.kernel = init_fp8_linear_kernel(
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
+        )
+        self.use_marlin = isinstance(self.kernel, MarlinFP8ScaledMMLinearKernel)
 
     def create_weights(
         self,
@@ -390,7 +402,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # TODO(rob): refactor block quant into separate class.
-        if self.block_quant:
+        if self.block_quant and not self.use_marlin:
             assert not self.act_q_static
 
             weight, weight_scale_inv = process_fp8_weight_block_strategy(
@@ -403,6 +415,7 @@ class Fp8LinearMethod(LinearMethodBase):
             maybe_post_process_fp8_weight_block(layer)
         else:
             self.kernel.process_weights_after_loading(layer)
+        layer.input_scale = None
 
     def apply(
         self,
@@ -410,9 +423,47 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
+        # we will use BF16 dequant when DeepGEMM is not supported.
+        if vllm_is_batch_invariant():
+            if self.block_quant:
+                assert self.weight_block_size is not None
+                return self.w8a8_block_fp8_linear.apply(
+                    input=x,
+                    weight=layer.weight,
+                    weight_scale=layer.weight_scale_inv,
+                    input_scale=layer.input_scale,
+                    bias=bias,
+                )
+            else:
+                # per-tensor/channel: dequant to BF16 and run GEMM
+                weight_fp8 = layer.weight.to(torch.bfloat16)
+                weight_scale = layer.weight_scale.to(torch.bfloat16)
+                if weight_scale.numel() == 1:
+                    # Per-tensor: simple scalar multiplication
+                    weight_bf16 = weight_fp8 * weight_scale
+                else:
+                    # Multiple scales (fused modules like QKV)
+                    # Try to infer correct broadcasting
+                    # weight is [K, N], scale could be [num_logical_weights]
+                    # Need to figure out how to broadcast - for now just try
+                    # direct multiplication
+                    if (
+                        weight_scale.dim() == 1
+                        and weight_scale.shape[0] == weight_fp8.shape[0]
+                    ):
+                        # Per-row scaling
+                        weight_bf16 = weight_fp8 * weight_scale.unsqueeze(1)
+                    else:
+                        # Fallback
+                        weight_bf16 = weight_fp8 * weight_scale
+                return torch.nn.functional.linear(x, weight_bf16.t(), bias)
+
+        if self.use_marlin:
+            return self.kernel.apply_weights(layer, x, bias)
+
         if self.block_quant:
             assert self.weight_block_size is not None
-
             return self.w8a8_block_fp8_linear.apply(
                 input=x,
                 weight=layer.weight,
