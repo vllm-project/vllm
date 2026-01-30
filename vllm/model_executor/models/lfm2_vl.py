@@ -22,6 +22,8 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -583,6 +585,10 @@ class Lfm2VLForConditionalGeneration(
             intermediate_size=hf_language_config.hidden_size,
             conv_kernel=hf_language_config.conv_L_cache,
         )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.short_conv_state_copy_func()
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         super().__init__()
