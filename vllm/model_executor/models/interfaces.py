@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterable, Mapping, MutableSequence
+import asyncio
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, MutableSequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,

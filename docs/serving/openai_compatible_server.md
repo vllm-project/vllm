@@ -610,10 +610,54 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 | `transcription.done` | Final transcription with usage stats |
 | `error` | Error notification with message and optional code |
 
-#### Example Clients
+#### Python WebSocket Example
 
-- [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_client.py) - Upload and transcribe an audio file
-- [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
+??? code
+
+    ```python
+    import asyncio
+    import base64
+    import json
+    import websockets
+
+    async def realtime_transcribe():
+        uri = "ws://localhost:8000/v1/realtime"
+
+        async with websockets.connect(uri) as ws:
+            # Wait for session.created
+            response = await ws.recv()
+            print(f"Session: {response}")
+
+            # Commit buffer
+            await ws.send(json.dumps({
+                "type": "input_audio_buffer.commit"
+            }))
+
+            # Send audio chunks (example with file)
+            with open("audio.raw", "rb") as f:
+                while chunk := f.read(4096):
+                    await ws.send(json.dumps({
+                        "type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(chunk).decode()
+                    }))
+
+            # Signal all audio is sent
+            await ws.send(json.dumps({
+                "type": "input_audio_buffer.commit",
+                "final": True,
+            }))
+
+            # Receive transcription
+            while True:
+                response = json.loads(await ws.recv())
+                if response["type"] == "transcription.delta":
+                    print(response["delta"], end="", flush=True)
+                elif response["type"] == "transcription.done":
+                    print(f"\nFinal: {response['text']}")
+                    break
+
+    asyncio.run(realtime_transcribe())
+    ```
 
 ### Tokenizer API
 
