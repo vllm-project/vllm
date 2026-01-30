@@ -616,6 +616,7 @@ class GPUModelRunner(
             self.pcp_manager = PCPManager(
                 self.pcp_world_size,
                 self.pcp_rank,
+                self.max_num_reqs,
                 max_padded_num_tokens,
                 self.device,
                 self.pin_memory,
@@ -3298,6 +3299,9 @@ class GPUModelRunner(
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
             slot_mapping[num_tokens_unpadded:num_tokens_padded].fill_(-1)
+
+            if self.pcp_world_size > 1:
+                slot_mapping = self.pcp_manager.pad_slot_mapping(slot_mapping)
 
             return slot_mapping
 

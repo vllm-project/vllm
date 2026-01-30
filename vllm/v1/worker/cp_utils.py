@@ -27,6 +27,7 @@ class PCPManager:
         self,
         pcp_world_size: int,
         pcp_rank: int,
+        max_num_reqs: int,
         max_padded_num_tokens: int,
         device: torch.device,
         pin_memory: bool = False,
@@ -39,6 +40,20 @@ class PCPManager:
             dtype=torch.int64,
             device=device,
             pin_memory=pin_memory,
+        )
+
+        # Buffers for tracking padding (needed for logits_indices and slot_mapping)
+        # Create tensors first, then get numpy views to ensure they stay in sync
+        self.num_pcp_pads_cpu_tensor = torch.zeros(
+            max_num_reqs, device="cpu", dtype=torch.int64
+        )
+        self.num_pcp_pads_cpu = self.num_pcp_pads_cpu_tensor.numpy()
+        self.pcp_unpad_mask_cpu_tensor = torch.zeros(
+            max_padded_num_tokens, device="cpu", dtype=torch.bool
+        )
+        self.pcp_unpad_mask_cpu = self.pcp_unpad_mask_cpu_tensor.numpy()
+        self.pcp_padded_slot_mapping = torch.empty(
+            max_padded_num_tokens, dtype=torch.int64, device=device
         )
 
     def _get_cumsum_and_arange(
@@ -124,9 +139,22 @@ class PCPManager:
             num_scheduled_tokens[:num_decode_reqs] * self.pcp_world_size
         )
 
+        # Track padding per request (for logits_indices calculation)
+        self.num_pcp_pads_cpu[:num_reqs] = (
+            num_padded_scheduled_tokens - num_scheduled_tokens
+        )
+
         # cu_padded_tokens: cumulative sum of padded token counts
-        cu_padded_tokens, _ = self._get_cumsum_and_arange(
+        # pcp_padded_arange: per-request arange flattened for padded tokens
+        cu_padded_tokens, pcp_padded_arange = self._get_cumsum_and_arange(
             num_padded_scheduled_tokens, arange_np
+        )
+
+        # Build mask marking real (unpadded) tokens in the all-gather buffer
+        # (pcp_unpad_mask_cpu is a view of pcp_unpad_mask_cpu_tensor)
+        padded_total = pcp_padded_arange.shape[0]
+        self.pcp_unpad_mask_cpu[:padded_total] = pcp_padded_arange < np.repeat(
+            num_scheduled_tokens, num_padded_scheduled_tokens
         )
 
         # pcp_tokens: tokens per request for this rank after splitting
@@ -235,11 +263,31 @@ class PCPManager:
             0,
         )
         restore_idx = self.pcp_allgather_restore_idx.gpu[: hidden_states.shape[0]]
-        return torch.index_select(
+        hidden_states = torch.index_select(
             hidden_states,
             0,
             restore_idx,
         )
+        # Remove padding tokens so logits_indices can use normal calculation
+        unpad_mask = self.pcp_unpad_mask_cpu_tensor[: hidden_states.shape[0]]
+        return hidden_states[unpad_mask]
+
+    def pad_slot_mapping(self, slot_mapping: torch.Tensor) -> torch.Tensor:
+        """
+        Expand slot_mapping for the all-gathered KV cache.
+
+        After KV all-gather, slot_mapping needs to account for padding.
+        This places real slot values at unpadded positions and -1 at padding.
+        """
+        num_tokens = slot_mapping.shape[0]
+        padded_size = num_tokens * self.pcp_world_size
+        pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[:padded_size]
+        cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[:padded_size]
+        pcp_padded_slot_mapping.fill_(-1)
+        # During warmup, mask may not be set yet
+        if cp_unpad_mask.sum().item() > 0:
+            pcp_padded_slot_mapping[cp_unpad_mask] = slot_mapping
+        return pcp_padded_slot_mapping
 
 
 def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
