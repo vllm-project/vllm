@@ -7,7 +7,6 @@ import torch.nn.functional as F
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.quantization.utils import fp8_utils
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     get_fp8_min_max,
@@ -88,6 +87,8 @@ class QuantFP8(CustomOp):
         scale_ub: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.quantization.utils import fp8_utils
+
         if (
             self.is_group_quant
             and self.use_deep_gemm_supported
