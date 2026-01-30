@@ -231,11 +231,7 @@ EXPECTED_METRICS_MM = [
     "vllm:mm_cache_hits",
 ]
 
-HIDDEN_DEPRECATED_METRICS: list[str] = [
-    "vllm:gpu_cache_usage_perc",
-    "vllm:gpu_prefix_cache_queries",
-    "vllm:gpu_prefix_cache_hits",
-]
+HIDDEN_DEPRECATED_METRICS: list[str] = []
 
 
 @pytest.mark.asyncio
