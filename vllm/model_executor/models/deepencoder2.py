@@ -87,12 +87,12 @@ class CustomQwen2Decoder(nn.Module):
                 # token_type_ids
                 self._current_token_type_ids = token_type_ids
                 causal_mask_mapping = {
-                    "full_attention":self._update_causal_mask(
+                    "full_attention": self._update_causal_mask(
                         attention_mask,
                         inputs_embeds,
                         cache_position,
                         past_key_values,
-                        output_attentions
+                        output_attentions,
                     )
                 }
                 outputs = super().forward(
