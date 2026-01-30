@@ -4,10 +4,10 @@
 import pytest
 import torch
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.selector import _cached_get_attn_backend, get_attn_backend
 from vllm.config import AttentionConfig, VllmConfig, set_current_vllm_config
 from vllm.platforms.rocm import RocmPlatform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
 
 
 @pytest.fixture(autouse=True)
@@ -19,7 +19,7 @@ def clear_cache():
 @pytest.mark.skip(reason="Skipped for now. Should be revisited.")
 def test_selector(monkeypatch: pytest.MonkeyPatch):
     # Set the current platform to ROCm using monkeypatch
-    monkeypatch.setattr("vllm.attention.selector.current_platform", RocmPlatform())
+    monkeypatch.setattr("vllm.v1.attention.selector.current_platform", RocmPlatform())
 
     # Test standard ROCm attention
     attention_config = AttentionConfig(backend=AttentionBackendEnum.ROCM_ATTN)

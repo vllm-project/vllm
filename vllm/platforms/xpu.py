@@ -3,18 +3,18 @@
 
 import contextlib
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
 
@@ -52,10 +52,17 @@ class XPUPlatform(Platform):
             "only NHD layout is supported by XPU attention kernels."
         )
 
+        dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif dtype == torch.float32:
+            logger.warning_once(
+                "Flash Attention on XPU does not support float32 dtype. "
+                "Falling back to Triton Attention backend."
+            )
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend.")
@@ -81,7 +88,7 @@ class XPUPlatform(Platform):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: Optional["AttentionBackendEnum"] = None,
+        backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         if backend is not None:
             assert backend in cls.get_supported_vit_attn_backends(), (

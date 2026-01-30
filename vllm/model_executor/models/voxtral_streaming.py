@@ -1,14 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import math
-from collections.abc import Mapping
+from collections.abc import AsyncGenerator, Mapping
+from typing import Literal, cast
 
+import numpy as np
 import torch
+from mistral_common.protocol.instruct.chunk import RawAudio
+from mistral_common.protocol.transcription.request import (
+    StreamingMode,
+    TranscriptionRequest,
+)
+from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 
-from vllm.config.vllm import VllmConfig
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.envs import VLLM_ENGINE_ITERATION_TIMEOUT_S
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
 from vllm.model_executor.models.voxtral import (
     VoxtralDummyInputsBuilder,
     VoxtralForConditionalGeneration,
@@ -21,18 +33,21 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsOptionalItems,
 )
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.processor import (
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers import cached_tokenizer_from_config
 
 from .utils import (
     _flatten_embeddings,
 )
 
 logger = init_logger(__name__)
+
+_PRE_ALLOCATE_BUFFER_SIZE_IN_S = 30
 
 
 class VoxtralStreamingMultiModalProcessor(VoxtralMultiModalProcessor):
@@ -102,29 +117,176 @@ class TimeEmbedding(torch.nn.Module):
         return torch.cat((emb.cos(), emb.sin()), dim=-1)  # (B, D) or (B, T, D)
 
 
+def _expand_tensor(input_tensor: torch.Tensor, scaling: int) -> torch.Tensor:
+    # 1. Multiply by the scaling factor (e.g. 4)
+    base = input_tensor * scaling
+
+    # 2. Create the offsets, e.g. [0, 1, 2, 3]
+    offsets = torch.arange(scaling, device=input_tensor.device)
+
+    # 3. Use broadcasting, e.g. (N, 1) + (4,) results in (N, 4)
+    # Then flatten back to 1D
+    return (base.unsqueeze(1) + offsets).view(-1)
+
+
+class VoxtralRealtimeBuffer:
+    def __init__(self, config: AudioConfig) -> None:
+        self._config = config
+
+        self._look_ahead_in_ms = config.streaming_look_ahead_ms
+        self._look_back_in_ms = config.streaming_look_back_ms
+
+        self._sampling_rate = self._config.sampling_rate
+
+        self._look_ahead = self._get_len_in_samples(self._look_ahead_in_ms)
+        self._look_back = self._get_len_in_samples(self._look_back_in_ms)
+        self._streaming_size = self._get_len_in_samples(1000 / self._config.frame_rate)
+
+        # mutable objects
+        streaming_delay = self._get_len_in_samples(self._config.transcription_delay_ms)
+        self._start = 0
+        self._end = streaming_delay + self._streaming_size
+
+        # always pre-allocate 30 second buffers
+        self._buffer_size = _PRE_ALLOCATE_BUFFER_SIZE_IN_S * self._sampling_rate
+        self._buffer: np.ndarray = np.empty(self._buffer_size, dtype=np.float32)
+        self._filled_buffer_len = 0
+
+    @property
+    def start_idx(self):
+        return max(self._start - self._look_back, 0)
+
+    @property
+    def end_idx(self):
+        return self._end + self._look_ahead
+
+    @property
+    def is_audio_complete(self) -> bool:
+        return self._filled_buffer_len >= self.end_idx
+
+    def _get_len_in_samples(self, len_in_ms: float) -> int:
+        _len_in_s = self._sampling_rate * len_in_ms / 1000
+        assert _len_in_s.is_integer(), _len_in_s
+        len_in_s = int(_len_in_s)
+
+        return len_in_s
+
+    def _allocate_new_buffer(self) -> None:
+        # allocate new buffer
+        new_buffer = np.empty(self._buffer_size, dtype=np.float32)
+        left_to_copy = max(self._filled_buffer_len - self.start_idx, 0)
+
+        if left_to_copy > 0:
+            new_buffer[:left_to_copy] = self._buffer[
+                self.start_idx : self._filled_buffer_len
+            ]
+
+        del self._buffer
+        self._buffer = new_buffer
+
+        self._filled_buffer_len = left_to_copy
+        self._start = self._look_back
+        self._end = self._start + self._streaming_size
+
+    def write_audio(self, audio: np.ndarray) -> None:
+        put_end_idx = self._filled_buffer_len + len(audio)
+
+        if put_end_idx > self._buffer_size:
+            self._allocate_new_buffer()
+
+        self._buffer[self._filled_buffer_len : self._filled_buffer_len + len(audio)] = (
+            audio
+        )
+        self._filled_buffer_len += len(audio)
+
+    def read_audio(self) -> np.ndarray | None:
+        if not self.is_audio_complete:
+            return None
+
+        audio = self._buffer[self.start_idx : self.end_idx]
+        self._start = self._end
+        self._end += self._streaming_size
+
+        return audio
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     VoxtralStreamingMultiModalProcessor,
     info=VoxtralProcessingInfo,
     dummy_inputs=VoxtralDummyInputsBuilder,
 )
-class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
+@support_torch_compile
+class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        assert (
+            not vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ), (
+            "Voxtral streaming doesn't support full cudagraphs yet. "
+            "Please use PIECEWISE."
+        )
+
         self.time_embedding: TimeEmbedding = TimeEmbedding(
             dim=self.config.text_config.hidden_size
         )
 
         audio_config = self.tokenizer.instruct.audio_encoder.audio_config
-        _n_delay_tokens = (
-            audio_config.frame_rate * audio_config.transcription_delay_ms / 1000
-        )
-        assert _n_delay_tokens.is_integer(), (
-            f"n_delay_tokens must be integer, got {_n_delay_tokens}"
-        )
+        self.n_delay_tokens = audio_config.num_delay_tokens
 
-        self.n_delay_tokens = int(_n_delay_tokens)
+    # for realtime transcription
+    @classmethod
+    async def buffer_realtime_audio(
+        cls,
+        audio_stream: AsyncGenerator[np.ndarray, None],
+        input_stream: asyncio.Queue[list[int]],
+        model_config: ModelConfig,
+    ) -> AsyncGenerator[PromptType, None]:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio_encoder = tokenizer.instruct.audio_encoder
+        config = audio_encoder.audio_config
+
+        buffer = VoxtralRealtimeBuffer(config)
+        is_first_yield = True
+
+        async for audio in audio_stream:
+            buffer.write_audio(audio)
+
+            while (new_audio := buffer.read_audio()) is not None:
+                if is_first_yield:
+                    # make sure that input_stream is empty
+                    assert input_stream.empty()
+
+                    audio = Audio(new_audio, config.sampling_rate, format="wav")
+
+                    request = TranscriptionRequest(
+                        streaming=StreamingMode.ONLINE,
+                        audio=RawAudio.from_audio(audio),
+                        language=None,
+                    )
+                    # mistral tokenizer takes care
+                    # of preparing the first prompt inputs
+                    # and does some left-silence padding
+                    # for improved performance
+                    audio_enc = tokenizer.mistral.encode_transcription(request)
+
+                    token_ids = audio_enc.tokens
+                    new_audio = audio_enc.audios[0].audio_array
+
+                    is_first_yield = False
+                else:
+                    # pop last element from input_stream
+                    all_outputs = await asyncio.wait_for(
+                        input_stream.get(), timeout=VLLM_ENGINE_ITERATION_TIMEOUT_S
+                    )
+                    token_ids = all_outputs[-1:]
+
+                multi_modal_data = {"audio": (new_audio, None)}
+                yield TokensPrompt(
+                    prompt_token_ids=token_ids, multi_modal_data=multi_modal_data
+                )
 
     @property
     def audio_config(self):
@@ -151,7 +313,7 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -165,8 +327,9 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             inputs_embeds.shape[0] * pool_size, inputs_embeds.shape[1] // pool_size
         )
 
-        audio_hidden_states = self.whisper_encoder.whisper_encoder.forward_layers(
-            inputs_embeds
+        whisper_positions = _expand_tensor(positions, pool_size)
+        audio_hidden_states = self.whisper_encoder.whisper_encoder(
+            inputs_embeds, whisper_positions
         )
 
         num_tokens, audio_hidden_size = audio_hidden_states.shape
@@ -182,15 +345,20 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
         # sum pool text and audio embeddings
         inputs_embeds = audio_text_embeds + text_embeds
 
-        time_tensor = torch.tensor(
-            [self.n_delay_tokens],
+        time_tensor = torch.full(
+            (1,),
+            fill_value=self.n_delay_tokens,
             device=inputs_embeds.device,
             dtype=inputs_embeds.dtype,
         )
-        inputs_embeds = inputs_embeds + self.time_embedding(time_tensor)
+        t_cond = self.time_embedding(time_tensor)
 
         hidden_states = self.language_model.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds=inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            t_cond=t_cond,
         )
 
         return hidden_states
@@ -205,13 +373,17 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             "For streaming you must provide an audio input at every step."
         )
 
-        multiple_of = self.audio_config.raw_audio_length_per_tok
-        assert all(
-            (this_audio := audio.shape[0]) % multiple_of == 0 for audio in audio_inputs
-        ), (
-            f"Every input audio waveform has to be a multiple of {multiple_of}, but"
-            f" one is {this_audio} with {(this_audio / multiple_of)=}."
-        )
+        def _truncate_left(
+            sample: torch.Tensor, mult_of: int, pos: int
+        ) -> torch.Tensor:
+            assert pos in [0, 1], pos
+            if (ctx := sample.shape[pos] % mult_of) != 0:
+                sample = sample[ctx:] if pos == 0 else sample[:, ctx:]
+                assert sample.shape[pos] > 0, (
+                    f"Sample is empty after truncation with ctx {ctx}"
+                )
+
+            return sample
 
         mel_features = [
             self.whisper_encoder.compute_whisper_melspec(audio).to(
@@ -219,11 +391,16 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
             )
             for audio in audio_inputs
         ]
+
+        # we truncate the left most mel feature
+        # if the sequence length in impair
+        mel_features = [_truncate_left(mel, 2, 1) for mel in mel_features]
+
         seq_lens = [mel.shape[1] for mel in mel_features]
         # [total_num_20ms_frames, hidden_size]
         audio_embeddings = self.whisper_encoder.whisper_encoder.forward_conv(
             mel_features
-        )[0]
+        )
         conv_stride = self.whisper_encoder.whisper_encoder.total_stride
         audio_embeddings_per_sample = audio_embeddings.split(
             [s // conv_stride for s in seq_lens], dim=0
@@ -231,13 +408,55 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration):
 
         # audio_embeddings per sample need to be divisible by 4
         pool_size = self.config.audio_config.block_pool_size
-        assert all(
-            (this_shape := sample.shape[0]) % pool_size == 0
+
+        audio_embeddings_per_sample = [
+            _truncate_left(sample, pool_size, 0)
             for sample in audio_embeddings_per_sample
-        ), f"Every audio embedding has to be a multiple of 4, but one is {this_shape}."
+        ]
 
         audio_embeddings_per_sample = [
             e.view(e.shape[0] // pool_size, e.shape[1] * pool_size)
             for e in audio_embeddings_per_sample
         ]
         return audio_embeddings_per_sample
+
+    @classmethod
+    def get_speech_to_text_config(
+        cls, model_config: ModelConfig, task_type: str
+    ) -> SpeechToTextConfig:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio_config = tokenizer.instruct.audio_encoder.audio_config
+        sample_rate = audio_config.sampling_rate
+        return SpeechToTextConfig(
+            max_audio_clip_s=None,  # only limited by memory
+            sample_rate=sample_rate,
+            min_energy_split_window_size=None,
+        )
+
+    @classmethod
+    # for speech-to-text transcription
+    def get_generation_prompt(
+        cls,
+        audio: np.ndarray,
+        model_config: ModelConfig,
+        stt_config: SpeechToTextConfig,
+        language: str | None,
+        task_type: Literal["transcribe", "translate"],
+        request_prompt: str,
+        to_language: str | None,
+    ) -> PromptType:
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio = Audio(audio, int(stt_config.sample_rate), format="wav")  # lossless
+
+        req = TranscriptionRequest(
+            model=model_config.model,
+            audio=RawAudio.from_audio(audio),
+            language=language,
+            streaming=StreamingMode.OFFLINE,
+        )
+
+        tokenized = tokenizer.instruct.encode_transcription(req)
+        audio = (tokenized.audios[0].audio_array, stt_config.sample_rate)
+        prompts_dict = {"multi_modal_data": {"audio": audio}}
+        prompts_dict["prompt_token_ids"] = tokenized.tokens
+        return cast(PromptType, prompts_dict)

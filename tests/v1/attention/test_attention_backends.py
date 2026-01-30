@@ -13,15 +13,20 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_standard_kv_cache_spec,
     create_vllm_config,
+    try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer
+from vllm.utils.torch_utils import (
+    STR_DTYPE_TO_TORCH_DTYPE,
+    is_torch_equal_or_newer,
+    set_random_seed,
+)
+from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
     set_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -79,6 +84,13 @@ BATCH_SPECS = {
     ),
     "single_decode": BatchSpec(seq_lens=[1024], query_lens=[1]),
     "single_prefill": BatchSpec(seq_lens=[1024], query_lens=[64]),
+    # encoder-only
+    "small_encoder_prefill": BatchSpec(
+        seq_lens=[32, 64, 128, 256], query_lens=[32, 64, 128, 256]
+    ),
+    "medium_encoder_prefill": BatchSpec(
+        seq_lens=[256, 512, 1024, 2048], query_lens=[256, 512, 1024, 2048]
+    ),
 }
 
 
@@ -114,17 +126,17 @@ def create_and_prepopulate_kv_cache(
         Tuple of (kv_cache, updated_block_table)
     """
     batch_size = len(k_contexts)
-    seq_lens = common_attn_metadata.seq_lens_cpu
+    seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
         common_attn_metadata.query_start_loc_cpu[1:]
         - common_attn_metadata.query_start_loc_cpu[:-1]
     )
-    context_lens = common_attn_metadata.num_computed_tokens_cpu
+    context_lens = seq_lens - query_lens
     block_table = common_attn_metadata.block_table_tensor
     slot_mapping = common_attn_metadata.slot_mapping
 
     # Create KV cache
-    kv_cache = torch.empty(
+    kv_cache = torch.zeros(
         2, num_blocks, block_size, num_kv_heads, head_size, dtype=dtype, device=device
     )
     kv_cache_flat = kv_cache.view(2, -1, num_kv_heads, head_size)
@@ -205,6 +217,7 @@ def run_attention_backend(
     key: torch.Tensor,
     value: torch.Tensor,
     kv_cache: torch.Tensor,
+    attn_type: AttentionType = AttentionType.DECODER,
     sliding_window: int | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
@@ -272,6 +285,7 @@ def run_attention_backend(
         num_kv_heads=num_kv_heads,
         alibi_slopes=None,
         sliding_window=sliding_window,
+        attn_type=attn_type,
         kv_cache_dtype="auto",
     )
 
@@ -282,6 +296,10 @@ def run_attention_backend(
     # Run forward pass
     # NOTE: The query, key, and value are already shaped correctly
     # in the calling test function.
+    if not try_backend_includes_kv_cache_update(actual_backend):
+        impl.do_kv_cache_update(
+            mock_layer, key, value, kv_cache, attn_metadata.slot_mapping
+        )
     output = impl.forward(
         mock_layer, query, key, value, kv_cache, attn_metadata, output=output
     )
@@ -295,6 +313,7 @@ def _test_backend_correctness(
     backend_to_test: list[AttentionBackendEnum | str],
     mask_mod,
     *,
+    attn_type: AttentionType = AttentionType.DECODER,
     block_size: int = 16,
     atol: float = 1e-2,
     rtol: float = 1e-2,
@@ -320,7 +339,7 @@ def _test_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     hf_config_override = None
     if tensor_parallel_size > 1:
@@ -432,6 +451,9 @@ def _test_backend_correctness(
     common_attn_metadata = create_common_attn_metadata(
         batch_spec, vllm_config.cache_config.block_size, device
     )
+    if attn_type == AttentionType.ENCODER_ONLY:
+        # For encoder-only, all tokens are prefill tokens
+        common_attn_metadata.causal = False
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
     kv_cache = create_and_prepopulate_kv_cache(
@@ -487,6 +509,7 @@ def _test_backend_correctness(
                 value_vllm,
                 kv_cache_for_backend,
                 sliding_window=sliding_window,
+                attn_type=attn_type,
             )
         finally:
             if reset_kv_cache_layout:
@@ -537,7 +560,7 @@ def _test_backend_correctness(
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_causal_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
 ):
     """Test backend's correctness with causal attention."""
 
@@ -672,3 +695,45 @@ def test_sliding_window_backend_correctness(
             block_size=128,
             tensor_parallel_size=tensor_parallel_size,
         )
+
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    [
+        "small_encoder_prefill",
+        "medium_encoder_prefill",
+    ],
+)
+@pytest.mark.parametrize("model", ["google/embeddinggemma-300m"])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+def test_sliding_window_encoder_backend_correctness(
+    batch_spec_name: str, model: str, tensor_parallel_size: int
+):
+    """Test backend's correctness with sliding window attention."""
+
+    def bidi_sliding_window_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+        sliding_window: int,
+    ):
+        return torch.abs(q_idx + context_len - kv_idx) < sliding_window
+
+    batch_spec = BATCH_SPECS[batch_spec_name]
+    model_config = ModelConfig(model=model, max_model_len=max(batch_spec.seq_lens))
+    sliding_window = model_config.get_sliding_window()
+    sliding_window_mask_mod_fn = partial(
+        bidi_sliding_window_mask_mod, sliding_window=sliding_window
+    )
+
+    _test_backend_correctness(
+        batch_spec,
+        model,
+        SLIDING_WINDOW_BACKENDS_TO_TEST,
+        sliding_window_mask_mod_fn,
+        attn_type=AttentionType.ENCODER_ONLY,
+        tensor_parallel_size=tensor_parallel_size,
+    )

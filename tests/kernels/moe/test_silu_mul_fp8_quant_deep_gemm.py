@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT, has_deep_gemm
 from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.torch_utils import set_random_seed
 
 if current_platform.is_fp8_fnuz():
     pytest.skip(
@@ -201,7 +202,7 @@ def token_random(E, T, H2, tokens_per_expert):
 @torch.inference_mode()
 def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dtype):
     group_size = 128
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     tokens_per_expert = torch.randint(
         low=0,

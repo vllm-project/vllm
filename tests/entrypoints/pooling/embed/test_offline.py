@@ -53,7 +53,9 @@ def test_token_embed(llm: LLM):
 def test_pooling_params(llm: LLM):
     def get_outputs(normalize):
         outputs = llm.embed(
-            prompts, pooling_params=PoolingParams(normalize=normalize), use_tqdm=False
+            prompts,
+            pooling_params=PoolingParams(use_activation=normalize),
+            use_tqdm=False,
         )
         return torch.tensor([x.outputs.embedding for x in outputs])
 

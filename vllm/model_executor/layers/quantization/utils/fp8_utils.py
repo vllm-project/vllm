@@ -15,25 +15,36 @@ from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    get_fp8_min_max,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
+    all_close_1d,
+    per_tensor_dequantize,
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
     fp8_gemm_nt,
+    get_tma_aligned_size,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
     transform_sf_into_required_layout,
+)
+from vllm.utils.flashinfer import (
+    flashinfer_fp8_blockscale_gemm,
+    is_flashinfer_fp8_blockscale_gemm_supported,
+    should_use_flashinfer_for_blockscale_fp8_gemm,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -226,6 +237,112 @@ direct_register_custom_op(
 )
 
 
+def _flashinfer_fp8_blockscale_gemm_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_size: int,
+    use_deep_gemm_e8m0: bool,
+) -> torch.Tensor:
+    """
+    Conditional FlashInfer FP8 blockscale GEMM with batch-size-dependent selection.
+
+    This function switches between two optimized kernels based on the input batch size:
+    - For small batches (M < 32): Uses FlashInfer's DeepGEMM swapAB optimization.
+    - For larger batches (M >= 32): Uses the official DeepGEMM kernel.
+
+    The conditional logic must use torch.cond() instead of a simple if-else statement
+    to maintain compatibility with torch.compile graph compilation.
+
+    This batch-size-dependent selection is essential for maintaining model accuracy.
+    Benchmarks on GSM8K show a significant accuracy gap (88% vs 95%) for DeepSeek-V3.1
+    when using FlashInfer's DeepGEMM on M>=32. The M < 32 strategy fixes the accurracy
+    drop.
+
+    Args:
+        input: Input tensor of shape (batch_size, input_dim) in FP8 format
+        weight: Weight tensor of shape (output_dim, input_dim) in FP8 format
+        weight_scale: Scale factors for weight quantization (per-group)
+        group_size: Quantization group size for the weight tensor
+        use_deep_gemm_e8m0: Whether to use the E8M0 format in DeepGEMM quantization
+
+    Returns:
+        Output tensor of shape (batch_size, output_dim) in bfloat16 format
+    """
+
+    def run_flashinfer_deepgemm_swapAB(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return flashinfer_fp8_blockscale_gemm(
+            input=input,
+            weight=weight,
+            weight_scale=weight_scale,
+            out_dtype=torch.bfloat16,
+        )
+
+    def run_deepgemm(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        q_input, input_scale = per_token_group_quant_fp8(
+            input,
+            group_size=group_size,
+            column_major_scales=True,
+            use_ue8m0=use_deep_gemm_e8m0,
+        )
+        output = torch.empty(
+            (q_input.shape[0], weight.shape[0]),
+            dtype=torch.bfloat16,
+            device=q_input.device,
+        )
+        fp8_gemm_nt(
+            (q_input, input_scale),
+            (weight, weight_scale),
+            output,
+            is_deep_gemm_e8m0_used=use_deep_gemm_e8m0,
+        )
+        return output
+
+    condition = input.shape[0] < 32
+
+    # PyTorch's torch.compile cannot handle input-dependent control flow in standard
+    # Python conditionals. torch.cond() explicitly registers both code paths in the
+    # computation graph, allowing torch.compile to capture both branches.
+    # without torch.cond, the M < 32 condition won't be able to be captured by torch
+    # compile
+    return torch.cond(
+        condition,
+        run_flashinfer_deepgemm_swapAB,
+        run_deepgemm,
+        (input, weight, weight_scale),
+    )
+
+
+def _flashinfer_fp8_blockscale_gemm_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_size: int,
+    use_deep_gemm_e8m0: bool,
+) -> torch.Tensor:
+    """
+    Required fake/meta implementation for torch.compile graph tracing.
+    """
+    return torch.empty(
+        input.shape[0], weight.shape[0], dtype=torch.bfloat16, device=input.device
+    )
+
+
+direct_register_custom_op(
+    "flashinfer_fp8_blockscale_gemm",
+    _flashinfer_fp8_blockscale_gemm_impl,
+    fake_impl=_flashinfer_fp8_blockscale_gemm_fake,
+)
+
+
 # TODO fix ROCm->Triton custom path:
 #  https://github.com/vllm-project/vllm/issues/14397
 class W8A8BlockFp8LinearOp:
@@ -246,6 +363,7 @@ class W8A8BlockFp8LinearOp:
         self.is_deep_gemm_supported = is_deep_gemm_supported()
         self.is_hopper = current_platform.is_device_capability(90)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
+        self.is_flashinfer_supported = is_flashinfer_fp8_blockscale_gemm_supported()
 
         # Get the correct blockscale mul and input quant operations.
         # We can't use _dispatch_w8a8_blockscale_op to figure out if we want
@@ -261,6 +379,7 @@ class W8A8BlockFp8LinearOp:
                 False,
                 self.act_quant_group_shape,
                 column_major_scales=True,
+                tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
                 use_ue8m0=self.use_deep_gemm_e8m0,
             )
             if self.is_deep_gemm_supported
@@ -281,7 +400,14 @@ class W8A8BlockFp8LinearOp:
         output_shape = [*input.shape[:-1], weight.shape[0]]
         output_dtype = input.dtype
 
-        if should_use_deepgemm_for_fp8_linear(
+        if should_use_flashinfer_for_blockscale_fp8_gemm(
+            self.is_flashinfer_supported, output_dtype, input_2d, weight
+        ) and should_use_deepgemm_for_fp8_linear(
+            output_dtype, weight, self.is_deep_gemm_supported
+        ):
+            output = self._run_flashinfer(input_2d, weight, weight_scale)
+
+        elif should_use_deepgemm_for_fp8_linear(
             output_dtype, weight, self.is_deep_gemm_supported
         ):
             output = self._run_deepgemm(input_2d, weight, weight_scale)
@@ -408,6 +534,29 @@ class W8A8BlockFp8LinearOp:
             list(self.weight_group_shape),
             input_2d.dtype,
         )
+
+    def _run_flashinfer(
+        self,
+        input_2d: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Run FlashInfer FP8 block-scale GEMM.
+
+        This backend uses TensorRT-LLM's FP8 block-scale GEMM kernels
+        and supports FP8+FP8 (W8A8 full quantization) on SM90+ (Hopper).
+        """
+        # Now call FlashInfer with BF16 input + FP8 weight, input will be
+        # quantized with FlashInfer kernel (W8A8)
+        output = torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
+            input=input_2d,  # BF16 input
+            weight=weight,  # FP8 weight
+            weight_scale=weight_scale,  # Weight scales
+            group_size=self.act_quant_group_shape.col,
+            use_deep_gemm_e8m0=self.use_deep_gemm_e8m0,
+        )
+        return output
 
     def _dispatch_w8a8_blockscale_op(
         self,
@@ -721,6 +870,7 @@ def per_token_group_quant_fp8(
     eps: float = 1e-10,
     dtype: torch.dtype | None = None,
     column_major_scales: bool = False,
+    tma_aligned_scales: bool = False,
     out_q: torch.Tensor | None = None,
     use_ue8m0: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -731,9 +881,10 @@ def per_token_group_quant_fp8(
         x: The input tensor with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
-        dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn`
+        dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
         is supported for now.
         column_major_scales: Outputs scales in column major.
+        tma_aligned_scales: Outputs scales in TMA-aligned layout.
         out_q: Optional output tensor. If not provided, function will create.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
@@ -748,12 +899,7 @@ def per_token_group_quant_fp8(
     )
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
-    # Using the default value (240.0) from pytorch will cause accuracy
-    # issue on dynamic quantization models. Here use 224.0 for fnuz on ROCm
-    # platforms that use the torch.float8_e4mefnuz dtype.
-    finfo = torch.finfo(dtype)
-    fp8_min = -224.0 if current_platform.is_fp8_fnuz() else finfo.min
-    fp8_max = 224.0 if current_platform.is_fp8_fnuz() else finfo.max
+    fp8_min, fp8_max = get_fp8_min_max()
 
     assert out_q is None or out_q.shape == x.shape
     x_q = out_q
@@ -762,8 +908,24 @@ def per_token_group_quant_fp8(
 
     # Allocate the scale tensor in either row- or column-major format.
     if column_major_scales:
-        shape = (x.shape[-1] // group_size,) + x.shape[:-1]
-        x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(-1, -2)
+        if tma_aligned_scales:
+            m = x.shape[-2]
+            sf_k = x.shape[-1] // group_size
+            tma_aligned_m = get_tma_aligned_size(m, 4)
+            shape = x.shape[:-2] + (m, sf_k)
+            stride = (
+                (1, tma_aligned_m)
+                if x.dim() == 2
+                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
+            )
+            x_s = torch.empty_strided(
+                shape, stride, device=x.device, dtype=torch.float32
+            )
+        else:
+            shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
+            x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(
+                -1, -2
+            )
     else:
         shape = x.shape[:-1] + (x.shape[-1] // group_size,)
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
@@ -1210,6 +1372,29 @@ def deepgemm_post_process_fp8_weight_block(
     return wq, dg_ws
 
 
+def prepare_fp8_moe_layer_for_deepgemm(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    block_shape: tuple[int],
+):
+    w13, w13_scale = deepgemm_post_process_fp8_weight_block(
+        wq=w13,
+        ws=w13_scale,
+        quant_block_shape=block_shape,
+        use_e8m0=is_deep_gemm_e8m0_used(),
+    )
+    w2, w2_scale = deepgemm_post_process_fp8_weight_block(
+        wq=w2,
+        ws=w2_scale,
+        quant_block_shape=block_shape,
+        use_e8m0=is_deep_gemm_e8m0_used(),
+    )
+
+    return w13, w2, w13_scale, w2_scale
+
+
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     """Pad the weight tensor. This is an optimization on ROCm platform, which
     can benefit from tensors located far enough from one another in memory"""
@@ -1335,6 +1520,7 @@ def create_fp8_scale_parameter(
         raise ValueError(f"Unknown parameter type: {parameter_type}")
 
     scale[:] = torch.finfo(torch.float32).min
+    set_weight_attrs(scale, {"scale_type": "weight_scale"})
     return scale
 
 
@@ -1444,7 +1630,50 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
         replace_parameter(layer, scale_attr, dg_weight_scale)
 
 
-def expert_weight_is_col_major(x: torch.Tensor) -> bool:
-    assert x.dim() == 3
-    b, m, n = x.shape
-    return x.stride(0) == m * n and x.stride(1) == 1 and x.stride(2) == m
+def process_fp8_weight_tensor_strategy_moe(
+    weight: torch.Tensor,
+    weight_scales: torch.Tensor,
+    shard_size: int,
+    num_experts: int,
+    is_act_and_mul: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Process moe weights for tensor-wise quantization strategy."""
+    max_scales = weight_scales.max(dim=1).values
+
+    # For w1 case (i.e. not w13): there is already just one scale per expert.
+    if not is_act_and_mul:
+        assert weight_scales.shape[1] == 1
+        # One scale per expert
+        assert max_scales.shape == (num_experts,)
+        return weight, max_scales
+
+    # For w13 case (common): require single scale for w13 per expert, but
+    # on disk there is a scale for w1 and w3. Use the max to requantize.
+    for expert_id in range(num_experts):
+        start = 0
+        for shard_id in range(2):
+            dq_weight = per_tensor_dequantize(
+                weight[expert_id][start : start + shard_size, :],
+                weight_scales[expert_id][shard_id],
+            )
+            weight[expert_id][start : start + shard_size, :], _ = ops.scaled_fp8_quant(
+                dq_weight, max_scales[expert_id]
+            )
+            start += shard_size
+    return weight, max_scales
+
+
+def process_fp8_input_tensor_strategy_moe(
+    w13_input_scale: torch.Tensor,
+    w2_input_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Process moe input scales for tensor-wise quantization strategy."""
+
+    if not all_close_1d(w13_input_scale) or not all_close_1d(w2_input_scale):
+        logger.info_once(
+            "Found input_scales that are not equal for "
+            "fp8 MoE layer. Using the maximum across experts "
+            "for each layer."
+        )
+
+    return w13_input_scale.max(), w2_input_scale.max()

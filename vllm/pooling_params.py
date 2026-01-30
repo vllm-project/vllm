@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any
 
 import msgspec
 
@@ -26,9 +26,9 @@ class PoolingParams(
             Set to None to disable truncation.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
-        normalize: Whether to normalize the embeddings outputs.
-        softmax: softmax will be deprecated, please use use_activation instead.
-        activation: activation will be deprecated, please use use_activation instead.
+        normalize: Deprecated, please use use_activation instead.
+        softmax: Deprecated, please use use_activation instead.
+        activation: Deprecated, please use use_activation instead.
         use_activation: Whether to apply activation function to
             the classification outputs.
     """
@@ -38,17 +38,17 @@ class PoolingParams(
     # --8<-- [end:common-pooling-params]
 
     ## for embeddings models
-    # --8<-- [start:embedding-pooling-params]
+    # --8<-- [start:embed-pooling-params]
     dimensions: int | None = None
     normalize: bool | None = None
-    # --8<-- [end:embedding-pooling-params]
+    # --8<-- [end:embed-pooling-params]
 
     ## for classification, scoring and rerank
-    # --8<-- [start:classification-pooling-params]
+    # --8<-- [start:classify-pooling-params]
     softmax: bool | None = None
     activation: bool | None = None
     use_activation: bool | None = None
-    # --8<-- [end:classification-pooling-params]
+    # --8<-- [end:classify-pooling-params]
 
     ## for step pooling models
     step_tag_id: int | None = None
@@ -63,15 +63,15 @@ class PoolingParams(
 
     @property
     def all_parameters(self) -> list[str]:
-        return ["dimensions", "normalize", "use_activation"]
+        return ["dimensions", "use_activation"]
 
     @property
     def valid_parameters(self):
         return {
-            "embed": ["dimensions", "normalize"],
+            "embed": ["dimensions", "use_activation"],
             "classify": ["use_activation"],
             "score": ["use_activation"],
-            "token_embed": ["dimensions", "normalize"],
+            "token_embed": ["dimensions", "use_activation"],
             "token_classify": ["use_activation"],
         }
 
@@ -80,7 +80,7 @@ class PoolingParams(
         return deepcopy(self)
 
     def verify(
-        self, task: PoolingTask, model_config: Optional["ModelConfig"] = None
+        self, task: PoolingTask, model_config: "ModelConfig | None" = None
     ) -> None:
         if self.task is None:
             self.task = task
@@ -106,7 +106,7 @@ class PoolingParams(
         self._verify_valid_parameters()
 
     def _merge_default_parameters(
-        self, model_config: Optional["ModelConfig"] = None
+        self, model_config: "ModelConfig | None" = None
     ) -> None:
         if model_config is None:
             return
@@ -140,7 +140,7 @@ class PoolingParams(
         self, pooler_config: "PoolerConfig", valid_parameters: list[str]
     ):
         step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
-        if pooler_config.pooling_type != "STEP":
+        if pooler_config.tok_pooling_type != "STEP":
             invalid_parameters = []
             for k in step_pooling_parameters:
                 if getattr(self, k, None) is not None:
@@ -160,10 +160,10 @@ class PoolingParams(
                 if getattr(self, k, None) is None:
                     setattr(self, k, getattr(pooler_config, k))
 
-    def _set_default_parameters(self, model_config: Optional["ModelConfig"]):
+    def _set_default_parameters(self, model_config: "ModelConfig | None"):
         if self.task in ["embed", "token_embed"]:
-            if self.normalize is None:
-                self.normalize = True
+            if self.use_activation is None:
+                self.use_activation = True
 
             if self.dimensions is not None and model_config is not None:
                 if not model_config.is_matryoshka:
@@ -213,7 +213,6 @@ class PoolingParams(
         return (
             f"PoolingParams("
             f"task={self.task}, "
-            f"normalize={self.normalize}, "
             f"dimensions={self.dimensions}, "
             f"use_activation={self.use_activation}, "
             f"step_tag_id={self.step_tag_id}, "

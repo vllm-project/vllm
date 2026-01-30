@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -148,7 +148,7 @@ class AWQMarlinConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> Optional["QuantizationMethods"]:
+    ) -> "QuantizationMethods | None":
         can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
         is_valid_user_quant = (
             user_quant is None or user_quant == "marlin" or user_quant == "awq_marlin"
@@ -173,7 +173,7 @@ class AWQMarlinConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase) or (
             isinstance(layer, ParallelLMHead) and self.lm_head_quantized
         ):
@@ -738,6 +738,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             return BatchedMarlinExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=w13_g_idx,
                 w2_g_idx=w2_g_idx,
@@ -748,6 +749,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         else:
             # Standard Marlin experts for AWQ
             return MarlinExperts(
+                moe_config=self.moe,
                 quant_config=self.moe_quant_config,
                 w13_g_idx=w13_g_idx,
                 w2_g_idx=w2_g_idx,
@@ -760,15 +762,9 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         self,
         layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", "Only SiLU activation is supported."
-
-        topk_weights, topk_ids = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
         return fused_marlin_moe(
             x,
             layer.w13_qweight,
@@ -777,7 +773,6 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             getattr(layer, "w2_bias", None),
             layer.w13_scales,
             layer.w2_scales,
-            router_logits,
             topk_weights,
             topk_ids,
             input_global_scale1=getattr(layer, "w13_input_global_scale", None),

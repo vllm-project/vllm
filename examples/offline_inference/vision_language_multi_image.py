@@ -765,6 +765,32 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+# OpenPangu
+def load_openpangu_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "FreedomIntelligence/openPangu-VL-7B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "[unused18][unused19][unused20]" * len(image_urls)
+    prompt = (
+        f"<s>[unused9]系统：[unused10][unused9]用户：{question}{placeholders}"
+        "[unused10][unused9]助手："
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 # Ovis
 def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "AIDC-AI/Ovis2-1B"
@@ -1182,6 +1208,32 @@ def load_step3(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_step_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "stepfun-ai/Step3-VL-10B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_batched_tokens=4096,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        hf_overrides={"vision_config": {"enable_patch": False}},
+        trust_remote_code=True,
+        reasoning_parser="deepseek_r1",
+    )
+
+    prompt = (
+        "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
+        f"{'<im_patch>' * len(image_urls)}{question}<|EOT|><|BOT|>"
+        "assistant\n<think>\n"
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "omni-research/Tarsier-7b"
 
@@ -1301,6 +1353,43 @@ def load_glm4_5v_fp8(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_molmo2(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "allenai/Molmo2-8B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        dtype="bfloat16",
+        limit_mm_per_prompt={"image": len(image_urls)},
+        max_num_batched_tokens=36864,
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        },
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
@@ -1323,7 +1412,9 @@ model_example_map = {
     "llava-next": load_llava_next,
     "llava-onevision": load_llava_onevision,
     "mistral3": load_mistral3,
+    "molmo2": load_molmo2,
     "NVLM_D": load_nvlm_d,
+    "openpangu_vl": load_openpangu_vl,
     "ovis": load_ovis,
     "ovis2_5": load_ovis2_5,
     "paddleocr_vl": load_paddleocr_vl,
@@ -1336,6 +1427,7 @@ model_example_map = {
     "rvl": load_r_vl,
     "smolvlm": load_smolvlm,
     "step3": load_step3,
+    "stepvl": load_step_vl,
     "tarsier": load_tarsier,
     "tarsier2": load_tarsier2,
     "glm4_5v": load_glm4_5v,

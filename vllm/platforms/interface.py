@@ -7,23 +7,24 @@ import platform
 import random
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
+from typing_extensions import deprecated
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     FlexibleArgumentParser = object
 
@@ -242,7 +243,7 @@ class Platform:
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: Optional["AttentionBackendEnum"] = None,
+        backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         """
         Get the vision attention backend class of a device.
@@ -365,6 +366,10 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
+    @deprecated(
+        "`seed_everything` is deprecated. It will be removed in v0.15.0 or later. "
+        "Please use `vllm.utils.torch_utils.set_random_seed` instead."
+    )
     def seed_everything(cls, seed: int | None = None) -> None:
         """
         Set the seed of each random module.
@@ -584,14 +589,18 @@ class Platform:
     def __getattr__(self, key: str):
         device = getattr(torch, self.device_type, None)
         if device is not None and hasattr(device, key):
-            return getattr(device, key)
-        else:
-            logger.warning(
-                "Current platform %s does not have '%s' attribute.",
-                self.device_type,
-                key,
-            )
-            return None
+            attr = getattr(device, key)
+            # NOTE: `hasattr(device, key)=True` can only avoid AttributeError,
+            # but the value of this attr could be `None`.
+            if attr is not None:
+                return attr
+
+        logger.warning(
+            "Current platform %s does not have '%s' attribute.",
+            self.device_type,
+            key,
+        )
+        return None
 
     def get_global_graph_pool(self) -> Any:
         """
@@ -688,6 +697,13 @@ class Platform:
         Check max_model_len for the current platform.
         """
         return max_model_len
+
+    @classmethod
+    def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
+        """
+        Set some additional forward context for the current platform if needs.
+        """
+        return {}
 
 
 class UnspecifiedPlatform(Platform):

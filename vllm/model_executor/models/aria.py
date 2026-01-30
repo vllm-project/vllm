@@ -30,12 +30,12 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -127,11 +127,16 @@ class AriaProjectorMLP(nn.Module):
         in_features: int,
         hidden_features: int,
         output_dim: int,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
-        self.linear_in = ColumnParallelLinear(in_features, hidden_features, bias=False)
-        self.linear_out = RowParallelLinear(hidden_features, output_dim, bias=False)
+        self.linear_in = ColumnParallelLinear(
+            in_features, hidden_features, bias=False, prefix=f"{prefix}.linear_in"
+        )
+        self.linear_out = RowParallelLinear(
+            hidden_features, output_dim, bias=False, prefix=f"{prefix}.linear_out"
+        )
         self.act = get_act_fn("gelu_new")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -154,7 +159,7 @@ class AriaProjector(nn.Module):
         A tensor with the shape of (batch_size, query_number, output_dim)
     """
 
-    def __init__(self, config: AriaConfig) -> None:
+    def __init__(self, config: AriaConfig, prefix: str = "") -> None:
         super().__init__()
 
         self.patch_to_query_dict = config.projector_patch_to_query_dict
@@ -174,7 +179,10 @@ class AriaProjector(nn.Module):
 
         self.layer_norm = nn.LayerNorm(self.in_features)
         self.feed_forward = AriaProjectorMLP(
-            self.in_features, self.hidden_features, self.output_dim
+            self.in_features,
+            self.hidden_features,
+            self.output_dim,
+            prefix=f"{prefix}.feed_forward",
         )
 
     def forward(
@@ -531,28 +539,34 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        self.vision_tower = AriaVisionTransformer(
-            config.vision_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.vision_tower",
-        )
-        self.multi_modal_projector = AriaProjector(config)
-        self.vocab_size = config.text_config.vocab_size
-        self.language_model = AriaTextModel(
-            vllm_config=vllm_config.with_hf_config(config.text_config),
-            prefix=maybe_prefix(prefix, "language_model.model"),
-        )
-        self.pad_token_id = (
-            self.config.pad_token_id if self.config.pad_token_id is not None else -1
-        )
-        self.lm_head = ParallelLMHead(
-            self.vocab_size,
-            config.text_config.hidden_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(self.vocab_size, scale=logit_scale)
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = AriaVisionTransformer(
+                config.vision_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.vision_tower",
+            )
+            self.multi_modal_projector = AriaProjector(
+                config, prefix=maybe_prefix(prefix, "multi_modal_projector")
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = AriaTextModel(
+                vllm_config=vllm_config.with_hf_config(config.text_config),
+                prefix=maybe_prefix(prefix, "language_model.model"),
+            )
+
+            self.lm_head = ParallelLMHead(
+                config.text_config.vocab_size,
+                config.text_config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            self.logits_processor = LogitsProcessor(
+                config.text_config.vocab_size, scale=logit_scale
+            )
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -590,8 +604,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def _process_image_input(
         self, image_input: AriaImagePixelInputs
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.vision_tower is not None
-
         pixel_values = image_input["pixel_values"]
         pixel_mask = image_input["pixel_mask"]
 
@@ -608,9 +620,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return self.multi_modal_projector(image_outputs, image_attn_mask)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -620,20 +629,14 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        if inputs_embeds is None:
-            multimodal_embeddings = self.embed_multimodal(**kwargs)
-            inputs_embeds = self.embed_input_ids(
-                input_ids,
-                multimodal_embeddings,
-                is_multimodal=input_ids == self.config.image_token_index,
-            )
-            input_ids = None
+        if intermediate_tensors is not None:
+            inputs_embeds = None
 
         hidden_states = self.language_model(
             input_ids,
@@ -644,7 +647,10 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         return hidden_states
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

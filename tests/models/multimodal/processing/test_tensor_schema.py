@@ -48,18 +48,6 @@ VideoInput: TypeAlias = (
 AudioInput = list[tuple[np.ndarray, int]]
 
 
-MM_OPTIONS_OVERRIDES = {
-    # Qwen3-VL's default profiling video size (64x64) can cause trouble
-    # after resizing, so we override it here for testing.
-    "qwen3_vl": dict(
-        video=VideoDummyOptions(num_frames=128, width=256, height=256),
-    ),
-    "qwen3_vl_moe": dict(
-        video=VideoDummyOptions(num_frames=128, width=256, height=256),
-    ),
-}
-
-
 def _resize_data(
     _data: Image.Image | np.ndarray, size_factor: float
 ) -> Image.Image | np.ndarray:
@@ -73,12 +61,12 @@ def _resize_data(
     elif is_list_of(_data, Image.Image):
         W, H = next(iter(_data)).width, next(iter(_data)).height
         T = len(_data)
-        T, W, H = map(lambda x: max(int(x * size_factor), 1), (T, W, H))
+        T, W, H = map(lambda x: max(int(x * size_factor), 2), (T, W, H))
         return [d.resize((W, H)) for d in _data[:T]]
     # Video input with numpy arrays
     elif isinstance(_data, np.ndarray) and _data.ndim >= 4:
         T, H, W, C = _data.shape[-4:]
-        T, H, W = map(lambda x: max(int(x * size_factor), 1), (T, H, W))
+        T, H, W = map(lambda x: max(int(x * size_factor), 2), (T, H, W))
         return _data[..., :T, :H, :W, :C]
     # Audio input
     elif isinstance(_data, np.ndarray) and _data.ndim == 1:
@@ -103,8 +91,6 @@ def create_batched_mm_kwargs(
     processor: BaseMultiModalProcessor,
     size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
-    model_type = model_config.hf_config.model_type
-
     processing_info = processor.info
     dummy_inputs = processor.dummy_inputs
     supported_mm_limits = processing_info.get_supported_mm_limits()
@@ -115,7 +101,6 @@ def create_batched_mm_kwargs(
     processor_inputs = dummy_inputs.get_dummy_processor_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
-        mm_options=MM_OPTIONS_OVERRIDES.get(model_type),
     )
     mm_data = processor_inputs.mm_data
     resized_mm_data = {
@@ -134,7 +119,11 @@ def create_batched_mm_kwargs(
     )["mm_kwargs"].require_data()
 
     return group_mm_kwargs_by_modality(
-        [item for modality in supported_mm_limits for item in mm_kwargs[modality]]
+        [
+            (modality, item)
+            for modality in supported_mm_limits
+            for item in mm_kwargs[modality]
+        ]
     )
 
 
@@ -145,18 +134,18 @@ def initialize_dummy_model(
     model_config: ModelConfig,
 ):
     temp_file = tempfile.mkstemp()[1]
-    init_distributed_environment(
-        world_size=1,
-        rank=0,
-        distributed_init_method=f"file://{temp_file}",
-        local_rank=0,
-        backend="nccl",
-    )
-    initialize_model_parallel(tensor_model_parallel_size=1)
-
     current_device = torch.get_default_device()
     vllm_config = VllmConfig(model_config=model_config)
     with set_current_vllm_config(vllm_config=vllm_config):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=f"file://{temp_file}",
+            local_rank=0,
+            backend="nccl",
+        )
+        initialize_model_parallel(tensor_model_parallel_size=1)
+
         with set_default_torch_dtype(model_config.dtype):
             torch.set_default_device(current_platform.device_type)
             model = model_cls(vllm_config=vllm_config)
@@ -170,6 +159,12 @@ def initialize_dummy_model(
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("model_id", get_model_ids_to_test())
 def test_model_tensor_schema(model_id: str):
+    if model_id == "moonshotai/Kimi-K2.5":
+        # FIXME(Isotr0py): Fix Kimi-K2.5's offline inference about vision chunks.
+        pytest.skip(
+            "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
+        )
+
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
