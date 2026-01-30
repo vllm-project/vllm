@@ -72,9 +72,9 @@ class CustomQwen2Decoder(nn.Module):
         class CustomQwen2ModelInner(Qwen2Model):
             def __init__(self, config):
                 super().__init__(config)
-                # Detect transformers version by checking the forward method source
-                # New version uses create_causal_mask function and doesn't call _update_causal_mask
-                # Old version calls self._update_causal_mask in forward
+                # Detect transformers version by checking forward method
+                # New version: uses create_causal_mask function
+                # Old version: calls self._update_causal_mask in forward
                 import inspect
 
                 try:
@@ -111,9 +111,10 @@ class CustomQwen2Decoder(nn.Module):
                 # Save token_type_ids for custom mask creation
                 self._current_token_type_ids = token_type_ids
 
-                # Check if this is the new version by inspecting if the method will be called
+                # Check version to determine mask creation strategy
                 if self._is_new_version:
-                    # NEW VERSION: Create custom mask dict and pass it to bypass default mask creation
+                    # NEW VERSION: Create custom mask dict to bypass
+                    # default mask creation
                     if inputs_embeds is None:
                         inputs_embeds = self.embed_tokens(input_ids)
 
@@ -127,7 +128,7 @@ class CustomQwen2Decoder(nn.Module):
                         )
                     )
 
-                    # Pass the custom mask as a dict to bypass the new version's mask creation
+                    # Pass custom mask dict to bypass default creation
                     causal_mask_mapping = {
                         "full_attention": custom_causal_mask,
                         "sliding_attention": custom_causal_mask,
@@ -146,10 +147,11 @@ class CustomQwen2Decoder(nn.Module):
                         cache_position=cache_position,
                     )
                 else:
-                    # OLD VERSION: Pass original attention_mask, _update_causal_mask will be called
+                    # OLD VERSION: Pass original mask,
+                    # _update_causal_mask will be called
                     outputs = super().forward(
                         input_ids=input_ids,
-                        attention_mask=attention_mask,  # Pass original mask for old version
+                        attention_mask=attention_mask,  # Original mask
                         position_ids=position_ids,
                         past_key_values=past_key_values,
                         inputs_embeds=inputs_embeds,
@@ -190,12 +192,15 @@ class CustomQwen2Decoder(nn.Module):
                     token_type_ids=token_type_ids,
                 )
 
-                # Apply padding mask if provided (and if it's a tensor, not a dict)
-                if attention_mask is not None and not isinstance(attention_mask, dict):
-                    if attention_mask.dim() == 2:
-                        padding_mask = attention_mask[:, None, None, :].to(dtype=dtype)
-                        padding_mask = (1.0 - padding_mask) * min_dtype
-                        causal_mask = causal_mask + padding_mask
+                # Apply padding mask if provided (tensor, not dict)
+                if (
+                    attention_mask is not None
+                    and not isinstance(attention_mask, dict)
+                    and attention_mask.dim() == 2
+                ):
+                    padding_mask = attention_mask[:, None, None, :].to(dtype=dtype)
+                    padding_mask = (1.0 - padding_mask) * min_dtype
+                    causal_mask = causal_mask + padding_mask
 
                 return causal_mask
 
@@ -209,13 +214,13 @@ class CustomQwen2Decoder(nn.Module):
             ):
                 """
                 Legacy method for old transformers version compatibility.
-                Kept for backward compatibility with old transformers versions.
+                Kept for backward compatibility with old versions.
                 """
-                # Safety check: if attention_mask is a dict, we're in the wrong code path
-                # This shouldn't happen if version detection is correct, but just in case
+                # Safety check: if attention_mask is dict,
+                # we're in the wrong code path
                 if isinstance(attention_mask, dict):
-                    # Extract the actual mask from dict (new version behavior leaked into old version)
-                    # Return the full_attention mask as fallback
+                    # Extract mask from dict (new version behavior
+                    # leaked into old version)
                     return attention_mask.get("full_attention", None)
 
                 token_type_ids = self._current_token_type_ids
