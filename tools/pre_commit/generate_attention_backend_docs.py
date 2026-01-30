@@ -427,8 +427,9 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
         display_name = backend_info.get("name", backend_name)
 
         # Add marker for default Blackwell backend
+        marker = ""
         if backend_name == priority_order[0] and priorities.get("blackwell"):
-            display_name += "‡"
+            marker = "‡"
 
         notes = ""
         if backend_info.get("requires_r1_dims"):
@@ -439,6 +440,7 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
         prefill_backends.append(
             {
                 "name": display_name,
+                "marker": marker,
                 "description": metadata.get("description", ""),
                 "compute_capability": backend_info.get("compute_capability", "Any"),
                 "enable": metadata.get("enable", ""),
@@ -1084,8 +1086,9 @@ def generate_mla_section(
     ]
 
     for backend in prefill_backends:
-        row = "| `{}` | {} | {} | {} | {} | {} |".format(
+        row = "| `{}`{} | {} | {} | {} | {} | {} |".format(
             backend["name"],
+            backend.get("marker", ""),
             backend["description"],
             backend["compute_capability"],
             backend["enable"],
