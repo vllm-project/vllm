@@ -50,8 +50,8 @@ from vllm.multimodal.inputs import (
     VisionChunkImage,
     VisionChunkVideo,
 )
+from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
@@ -454,78 +454,6 @@ def _get_embeds_data(
     raise NotImplementedError(type(data_items))
 
 
-def rebuild_mm_uuids_from_mm_data(
-    mm_uuids: MultiModalUUIDDict,
-    mm_data: MultiModalDataDict,
-) -> MultiModalUUIDDict:
-    """Rebuild mm_uuids after vision_chunk processing.
-
-    When videos are split into chunks, the original UUIDs need to be updated
-    to reflect the new UUIDs generated for each chunk.
-
-    Args:
-        mm_uuids: Original UUIDs dictionary
-        mm_data: Processed multimodal data with vision_chunk items
-
-    Returns:
-        Updated UUIDs dictionary with chunk UUIDs
-    """
-    vision_chunks = mm_data.get("vision_chunk")
-    if vision_chunks is None:
-        return mm_uuids
-
-    new_uuids = dict(mm_uuids)
-    vision_chunk_uuids = []
-
-    for item in vision_chunks:
-        # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
-        assert isinstance(item, dict)
-        uuid_val = item.get("uuid")
-        if uuid_val is not None:
-            vision_chunk_uuids.append(uuid_val)
-
-    if vision_chunk_uuids:
-        new_uuids["vision_chunk"] = vision_chunk_uuids
-
-    return new_uuids
-
-
-def build_video_prompts_from_mm_data(
-    mm_data: MultiModalDataDict,
-) -> list[str]:
-    """Build video prompts from vision_chunk data.
-
-    Collects prompts from video chunks and groups them by video_idx.
-
-    Args:
-        mm_data: Processed multimodal data with vision_chunk items
-
-    Returns:
-        List of video prompts, one per video.
-    """
-    vision_chunks = mm_data.get("vision_chunk")
-    if vision_chunks is None:
-        return []
-
-    # Group chunks by video_idx
-    video_prompts_dict: dict[int, list[str]] = defaultdict(list)
-
-    for item in vision_chunks:
-        # vision_chunk items are always dicts (VisionChunkImage/VisionChunkVideo)
-        assert isinstance(item, dict)
-        if item.get("type") == "video_chunk":
-            video_idx = item.get("video_idx", 0)
-            prompt = item.get("prompt", "")
-            video_prompts_dict[video_idx].append(prompt)
-
-    # Build prompts in video order
-    video_prompts = []
-    for video_idx in sorted(video_prompts_dict.keys()):
-        video_prompts.append("".join(video_prompts_dict[video_idx]))
-
-    return video_prompts
-
-
 class BaseMultiModalItemTracker(ABC, Generic[_T]):
     """
     Tracks multi-modal items in a given request and ensures that the number
@@ -616,10 +544,72 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         raise NotImplementedError
 
 
+def _resolve_vision_chunk_items(
+    vision_chunk_items: list[tuple[object, str | None]],
+    mm_processor: BaseMultiModalProcessor,
+    vision_chunks_modality_order: list[str],
+):
+    # Process vision_chunk items - extract from (data, modality) tuples
+    # and convert to VisionChunk types with proper UUID handling
+    vision_chunks_uuids = [uuid for data, uuid in vision_chunk_items]
+
+    assert len(vision_chunk_items) == len(vision_chunks_modality_order), (
+        f"vision_chunk items ({len(vision_chunk_items)}) and "
+        f"modality_order ({len(vision_chunks_modality_order)}) must have same length"
+    )
+
+    processed_chunks: list[VisionChunk] = []
+    video_idx = 0
+    for inner_modality, (data, uuid) in zip(
+        vision_chunks_modality_order, vision_chunk_items
+    ):
+        if inner_modality == "image":
+            # Cast data to proper type for image
+            # Use .media (PIL.Image) directly to avoid redundant
+            # bytes→PIL conversion in media_processor
+            if hasattr(data, "media"):
+                image_data = data.media  # type: ignore[union-attr]
+                processed_chunks.append(
+                    VisionChunkImage(type="image", image=image_data, uuid=uuid)
+                )
+            else:
+                processed_chunks.append(data)  # type: ignore[arg-type]
+        elif inner_modality == "video":
+            # For video, we may need to split into chunks
+            # if processor supports it
+            # For now, just wrap as a video chunk placeholder
+            if hasattr(mm_processor, "split_video_chunks") and data is not None:
+                try:
+                    video_uuid = uuid or random_uuid()
+                    # video await result is (video_data, video_meta) tuple
+                    if isinstance(data, tuple) and len(data) >= 1:
+                        video_data = data[0]
+                    else:
+                        video_data = data
+                    video_chunks = mm_processor.split_video_chunks(video_data)
+                    for i, vc in enumerate(video_chunks):
+                        processed_chunks.append(
+                            VisionChunkVideo(
+                                type="video_chunk",
+                                video_chunk=vc["video_chunk"],
+                                uuid=f"{video_uuid}-{i}",
+                                video_idx=video_idx,
+                                prompt=vc["prompt"],
+                            )
+                        )
+                    video_idx += 1
+                except Exception as e:
+                    logger.warning("Failed to split video chunks: %s", e)
+                    processed_chunks.append(data)  # type: ignore[arg-type]
+            else:
+                processed_chunks.append(data)  # type: ignore[arg-type]
+    return processed_chunks, vision_chunks_uuids
+
+
 def _resolve_items(
     items_by_modality: dict[str, list[tuple[object, str | None]]],
     mm_processor: BaseMultiModalProcessor,
-    vision_chunk_modality_order: dict[str, list[str]],
+    modality_order: dict[str, list[str]],
 ) -> tuple[MultiModalDataDict, MultiModalUUIDDict]:
     if "image" in items_by_modality and "image_embeds" in items_by_modality:
         raise ValueError("Mixing raw image and embedding inputs is not allowed")
@@ -654,71 +644,13 @@ def _resolve_items(
     if "vision_chunk" in items_by_modality:
         # Process vision_chunk items - extract from (data, modality) tuples
         # and convert to VisionChunk types with proper UUID handling
-        vision_chunk_items = items_by_modality["vision_chunk"]
-        modality_order = vision_chunk_modality_order.get("vision_chunk", [])
-        mm_uuids["vision_chunk"] = [
-            uuid for data, uuid in items_by_modality["vision_chunk"]
-        ]
-
-        # Filter out None items (from asyncio.sleep(0) placeholders)
-        filtered_items = [
-            (idx, item)
-            for idx, item in enumerate(vision_chunk_items)
-            if item is not None
-        ]
-
-        assert len(filtered_items) == len(modality_order), (
-            f"vision_chunk items ({len(filtered_items)}) and "
-            f"modality_order ({len(modality_order)}) must have same length"
+        processed_chunks, vision_chunk_uuids = _resolve_vision_chunk_items(
+            items_by_modality["vision_chunk"],
+            mm_processor,
+            modality_order.get("vision_chunk", []),
         )
-
-        processed_chunks: list[VisionChunk] = []
-        video_idx = 0
-        for i, (idx, item) in enumerate(filtered_items):
-            inner_modality = modality_order[i]
-            data, uuid = item
-            uuid_val = uuid if idx < len(mm_uuids["vision_chunk"]) else None
-            if inner_modality == "image":
-                # Cast data to proper type for image
-                # Use .media (PIL.Image) directly to avoid redundant
-                # bytes→PIL conversion in media_processor
-                if hasattr(data, "media"):
-                    image_data = data.media  # type: ignore[union-attr]
-                    processed_chunks.append(
-                        VisionChunkImage(type="image", image=image_data, uuid=uuid_val)
-                    )
-                else:
-                    processed_chunks.append(data)  # type: ignore[arg-type]
-            elif inner_modality == "video":
-                # For video, we may need to split into chunks
-                # if processor supports it
-                # For now, just wrap as a video chunk placeholder
-                if hasattr(mm_processor, "split_video_chunks") and data is not None:
-                    try:
-                        video_uuid = uuid_val or random_uuid()
-                        # video await result is (video_data, video_meta) tuple
-                        if isinstance(data, tuple) and len(data) >= 1:
-                            video_data = data[0]
-                        else:
-                            video_data = data
-                        video_chunks = mm_processor.split_video_chunks(video_data)
-                        for i, vc in enumerate(video_chunks):
-                            processed_chunks.append(
-                                VisionChunkVideo(
-                                    type="video_chunk",
-                                    video_chunk=vc["video_chunk"],
-                                    uuid=f"{video_uuid}-{i}",
-                                    video_idx=video_idx,
-                                    prompt=vc["prompt"],
-                                )
-                            )
-                        video_idx += 1
-                    except Exception as e:
-                        logger.warning("Failed to split video chunks: %s", e)
-                        processed_chunks.append(data)  # type: ignore[arg-type]
-                else:
-                    processed_chunks.append(data)  # type: ignore[arg-type]
         mm_data["vision_chunk"] = processed_chunks
+        mm_uuids["vision_chunk"] = vision_chunk_uuids
 
     return mm_data, mm_uuids
 
