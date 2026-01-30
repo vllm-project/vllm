@@ -399,8 +399,8 @@ class CompletionRenderer(BaseRenderer):
             max_tokens = max_model_len - max_length
             raise VLLMValidationError(
                 f"This model's maximum context length is {max_model_len} tokens. "
-                f"However, your request has {max_tokens} 'max_tokens' plus "
-                f"{len(token_ids)} input tokens. Please reduce one or the other.",
+                f"However, your request has {len(token_ids)} input tokens plus "
+                f"{max_tokens} 'max_tokens'. Please reduce one or the other.",
                 parameter="input_tokens, max_tokens",
                 value=(len(token_ids), max_tokens),
             )
