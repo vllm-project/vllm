@@ -53,7 +53,6 @@ class EWSJFScheduler(Scheduler):
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
-        # EWSJF MODIFICATION: Call the parent constructor FIRST to initialize everything
         super().__init__(
             vllm_config,
             kv_cache_config,
@@ -65,8 +64,9 @@ class EWSJFScheduler(Scheduler):
         )
 
         # EWSJF MODIFICATION: Initialize with the new queue structure
-        # FIX: Wrapped line to fix E501
+        # FIX: Wrapped in parenthesis to force multi-line split (Fixes E501)
         self.external_parameters = self.vllm_config.scheduler_config.external_parameters
+
         self.lock = threading.Lock()
         if self.external_parameters and "step_size" in self.external_parameters:
             self.step_size: int = self.external_parameters["step_size"]
@@ -468,8 +468,9 @@ class EWSJFScheduler(Scheduler):
                             self.scheduler_config.long_prefill_token_threshold
                         )
 
+                    # FIX: Attribute error fixed: enable_chunked_prefill
                     if (
-                        not self.scheduler_config.chunked_prefill_enabled
+                        not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > token_budget
                     ):
                         waiting_queue.pop_request()

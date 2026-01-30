@@ -136,10 +136,13 @@ class SchedulerConfig:
     form "mod.custom_class"."""
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     external_parameters: Optional[dict] = None
     """ A dictionary of external parameters for custom scheduler implementations.
 =======
     # FIX: Restored missing field causing KeyError in docs build
+=======
+>>>>>>> f92b63ff1... merge
     external_parameters: dict[str, Any] | None = Field(default=None)
     """A dictionary of external parameters for custom scheduler implementations.
 >>>>>>> 8ece53002... merge
@@ -278,9 +281,10 @@ class SchedulerConfig:
                 self.scheduler_cls
                 == "vllm.v1.core.sched.ewsjf_scheduler.scheduler.EWSJFScheduler"
             ):
+                # FIX: Explicit string concatenation for shorter lines
                 self.scheduler_cls = (
-                    "vllm.v1.core.sched.ewsjf_scheduler."
-                    "async_scheduler.AsyncEWSJFScheduler"
+                    "vllm.v1.core.sched.ewsjf_scheduler.async_scheduler"
+                    ".AsyncEWSJFScheduler"
                 )
             else:
                 self.scheduler_cls = "vllm.v1.core.sched.async_scheduler.AsyncScheduler"
