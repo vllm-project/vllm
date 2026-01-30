@@ -29,7 +29,6 @@ causes unexpected behavior.
 import os
 
 import ray
-import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
@@ -41,7 +40,8 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 )
 from vllm.utils.network_utils import get_ip, get_open_port
 
-MODEL_NAME = "facebook/opt-125m"
+# MODEL_NAME = "facebook/opt-125m"
+MODEL_NAME = "inference-optimization/Qwen3-0.6B-W4A16-G128"
 
 
 class MyLLM(LLM):
@@ -58,7 +58,7 @@ class TrainModel:
 
     def __init__(self, model_name: str):
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, dtype=torch.bfloat16
+            model_name,
         ).to("cuda:0")
         self.port = get_open_port()
         self.master_address = get_ip()
@@ -196,7 +196,7 @@ train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
 
 # Finalize the weight update
-ray.get(llm.finalize_weight_update.remote())
+# ray.get(llm.finalize_weight_update.remote())
 
 # Generate text with the updated model. The output is expected to be normal
 # because the weights are updated.
