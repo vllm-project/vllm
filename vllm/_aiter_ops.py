@@ -825,6 +825,86 @@ def _rocm_aiter_triton_add_rmsnorm_pad_fake(
     return out, residual_out
 
 
+def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    pos: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    is_neox: bool,
+    flash_layout: bool,
+    apply_scale: bool = True,
+    offs: torch.Tensor = None,
+    q_out: torch.Tensor = None,
+    k_out: torch.Tensor = None,
+    output_zeros: bool = True,
+    zeros_out: torch.Tensor = None,
+) -> list[torch.Tensor]:
+    from aiter.ops.triton import qk_rope_reshape_and_cache
+
+    return qk_rope_reshape_and_cache(
+        q,
+        k,
+        v,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        pos,
+        cos,
+        sin,
+        k_scale,
+        v_scale,
+        is_neox,
+        flash_layout,
+        apply_scale=apply_scale,
+        offs=offs,
+        q_out=q_out,
+        k_out=k_out,
+        output_zeros=output_zeros,
+        zeros_out=zeros_out,
+    )
+
+
+def _rocm_aiter_triton_qk_rope_reshape_and_cache_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    pos: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    is_neox: bool,
+    flash_layout: bool,
+    apply_scale: bool = True,
+    offs: torch.Tensor = None,
+    q_out: torch.Tensor = None,
+    k_out: torch.Tensor = None,
+    output_zeros: bool = True,
+    zeros_out: torch.Tensor = None,
+) -> (
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+):
+    q_out = torch.empty_like(q)
+    k_out = torch.empty_like(k)
+    key_cache = torch.empty_like(key_cache)
+    value_cache = torch.empty_like(value_cache)
+    if zeros_out is not None:
+        zeros_out = torch.empty_like(zeros_out)
+        return q_out, k_out, key_cache, value_cache, zeros_out
+    return q_out, k_out, key_cache, value_cache
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -1144,6 +1224,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_triton_qk_rope_reshape_and_cache",
+                op_func=_rocm_aiter_triton_qk_rope_reshape_and_cache_impl,
+                fake_impl=_rocm_aiter_triton_qk_rope_reshape_and_cache_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_group_fp8_quant",
                 op_func=_rocm_aiter_group_fp8_quant_impl,
                 fake_impl=_rocm_aiter_group_fp8_quant_fake,
@@ -1213,6 +1299,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_triton_add_rmsnorm_pad_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_triton_add_rmsnorm_pad.default
+
+    @staticmethod
+    def get_qk_rope_reshape_and_cache_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_triton_qk_rope_reshape_and_cache.default
 
     @staticmethod
     def rms_norm(
