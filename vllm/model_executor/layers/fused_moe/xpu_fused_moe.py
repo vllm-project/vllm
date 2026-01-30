@@ -99,7 +99,7 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         apply_router_weight_on_input: bool,
     ):
         topk = topk_ids.size(-1)
-        return xpu_fused_moe(
+        tmp_out = xpu_fused_moe(
             hidden_states=hidden_states,
             w13=w1,
             w13_scales=a1q_scale,
@@ -115,3 +115,5 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
             ep_rank=self.moe_config.ep_rank,
             ep_size=self.moe_config.ep_size,
         )
+        output.copy_(tmp_out)
+        return
