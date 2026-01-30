@@ -9,6 +9,8 @@ tasks:
 limit: 1319
 num_fewshot: 5
 kv_cache_dtype: nvfp4
+env_vars:
+  VLLM_USE_FLASHINFER_MOE_FP4: "0"
 model_name: "nvidia/Qwen3-30B-A3B-NVFP4"
 tasks:
   - name: "gsm8k"
