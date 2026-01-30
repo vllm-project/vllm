@@ -219,8 +219,7 @@ class ResponsesRequest(OpenAIBaseModel):
         default=False,
         description=(
             "Dictates whether or not to return messages as part of the "
-            "response object. Currently only supported for"
-            "non-background and gpt-oss only. "
+            "response object. Currently only supported for non-background."
         ),
     )
     # similar to input_messages / output_messages in ResponsesResponse
