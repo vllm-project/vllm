@@ -135,7 +135,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def register_cross_layers_kv_cache(
         self,
         cross_layers_kv_cache: torch.Tensor,
-        cross_layers_attn_backend: "AttentionBackend",
+        cross_layers_attn_backend: type["AttentionBackend"],
     ):
         """
         Initialize with the KV caches. Useful for pre-registering the
@@ -148,7 +148,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             self._lmcache_engine.register_cross_layers_kv_cache(cross_layers_kv_cache)
         else:
             logger.warning(
-                "LMCache engine does not support register_kv_caches, "
+                "LMCache engine does not support register_cross_layers_kv_cache, "
                 "please check and use the latest version"
             )
 
