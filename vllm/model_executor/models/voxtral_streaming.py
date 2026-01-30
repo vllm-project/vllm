@@ -133,7 +133,6 @@ class VoxtralRealtimeBuffer:
     def __init__(self, config: AudioConfig) -> None:
         self._config = config
 
-        # TODO(Patrick) - move tokenizer config
         self._look_ahead_in_ms = config.streaming_look_ahead_ms
         self._look_back_in_ms = config.streaming_look_back_ms
 
