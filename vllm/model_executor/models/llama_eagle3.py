@@ -296,14 +296,18 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             requires_grad=False,
         )
 
-        self.register_buffer(
-            "mask_hidden",
-            torch.zeros(
-                1,
-                (3 if self.model.use_aux_hidden_state else 1) * self.config.hidden_size,
-            ),
-            persistent=False,
-        )
+        self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
+
+        if self.use_parallel_drafting:
+            self.register_buffer(
+                "mask_hidden",
+                torch.zeros(
+                    1,
+                    (3 if self.model.use_aux_hidden_state else 1)
+                    * self.config.hidden_size,
+                ),
+                persistent=False,
+            )
 
     def embed_input_ids(
         self,
@@ -359,6 +363,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+        includes_mask_hidden = False
         for name, loaded_weight in weights:
             if "t2d" in name:
                 continue
@@ -367,7 +372,15 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 includes_draft_id_mapping = True
             elif "mask_hidden" in name:
                 # Load mask_hidden directly into buffer
+                if not self.use_parallel_drafting:
+                    logger.warning(
+                        "mask_hidden found in weights but "
+                        "model is not configured for parallel drafting. "
+                        "Skipping loading mask_hidden."
+                    )
+                    continue
                 self.mask_hidden.copy_(loaded_weight.view(1, -1))
+                includes_mask_hidden = True
                 continue
             elif "lm_head" not in name:
                 name = "model." + name
@@ -375,6 +388,13 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
+
+        if not includes_mask_hidden and self.use_parallel_drafting:
+            raise ValueError(
+                "mask_hidden not found in weights but "
+                "model is configured for parallel drafting. "
+                "Please provide mask_hidden in the weights."
+            )
 
         skip_substrs = ["mask_hidden"]
         if not includes_draft_id_mapping:
