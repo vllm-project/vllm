@@ -780,9 +780,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # Clean up request tracker to prevent memory leak
         self._cleanup_request_tracker(request.request_id)
 
-        # Untrack request from scheduler-side tracking to prevent memory leak.
-        self.scheduler_adapter.untrack_request(request.request_id)
-
         return True, None
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
@@ -917,9 +914,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
     def _collect_new_req_ids(self, scheduler_output: SchedulerOutput) -> set[str]:
         """Collect newly scheduled request IDs for double-free prevention."""
-        for req in scheduler_output.scheduled_new_reqs:
-            self.scheduler_adapter.track_request(req.req_id)
-        return self.scheduler_adapter.pop_new_reqs_this_step()
+        return {req.req_id for req in scheduler_output.scheduled_new_reqs}
 
     def _get_request_tracker(self, request_id: str) -> LMCacheMPRequestTracker:
         assert request_id in self.request_trackers, (
