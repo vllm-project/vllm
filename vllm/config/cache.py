@@ -101,6 +101,11 @@ class CacheConfig:
     Note that this requires fast CPU-GPU interconnect, as part of the model is
     loaded from CPU memory to GPU memory on the fly in each model forward pass.
     """
+    cpu_offload_params: set[str] = Field(default_factory=set)
+    """The parameters to offload to CPU. Default is an empty set, which means
+    all parameters will be offloaded until reaching the limit set by
+    `cpu_offload_gb`.
+    """
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model

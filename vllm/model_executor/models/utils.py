@@ -613,12 +613,18 @@ class PPMissingLayer(torch.nn.Identity):
 
 _CPU_OFFLOAD_BYTES = 0
 _CPU_OFFLOAD_MAX_BYTES = 0
+_CPU_OFFLOAD_PARAMS = set()
 
 
 def set_cpu_offload_max_bytes(max_bytes: int) -> None:
     global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
     _CPU_OFFLOAD_BYTES = 0
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
+
+
+def set_cpu_offload_params(params: set[str]) -> None:
+    global _CPU_OFFLOAD_PARAMS
+    _CPU_OFFLOAD_PARAMS = params
 
 
 def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
@@ -634,11 +640,6 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
         return module
 
-    def is_moe_weights(name):
-        if "w13_weight" in name or "w2_weight" in name:
-            return True
-        return False
-
     pin_memory = (
         is_pin_memory_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
     )
@@ -653,13 +654,11 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
             # one module might have some parameters offloaded and some not
             break
 
-        logger.info(f"Offloading parameter {name} to CPU")
-
-        if not is_moe_weights(name):
-            logger.info(f"Parameter {name} is not MoE weights")
+        param_name_parts = name.split(".")
+        if _CPU_OFFLOAD_PARAMS and not any(
+            param in param_name_parts for param in _CPU_OFFLOAD_PARAMS
+        ):
             continue
-
-        logger.info(f"Parameter {name} is MoE weights")
 
         cpu_data = p.data.to(device="cpu")
         if pin_memory:
