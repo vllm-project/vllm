@@ -17,7 +17,7 @@ from typing import (
 
 import regex as re
 import torch
-from typing_extensions import TypeVar, assert_never
+from typing_extensions import TypeVar, assert_never, deprecated
 
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -1000,17 +1000,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         else:
             self.data_parser = self.info.get_data_parser()
 
-        # Avoid unnecessary recomputation
-        self._supported_mm_limits = self.info.get_supported_mm_limits()
-        self._allowed_mm_limits = self.info.get_allowed_mm_limits()
-
     @property
+    @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
     def supported_mm_limits(self):
-        return self._supported_mm_limits
+        return self.info.supported_mm_limits
 
     @property
+    @deprecated("Will be removed in v0.17. Use `info.allowed_mm_limits` instead.")
     def allowed_mm_limits(self):
-        return self._allowed_mm_limits
+        return self.info.allowed_mm_limits
 
     def __call__(
         self,
@@ -1021,27 +1019,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         return self.apply(prompt, mm_data, hf_processor_mm_kwargs, mm_uuids=mm_uuids)
-
-    def validate_num_items(
-        self,
-        modality: str,
-        num_items: int,
-    ) -> None:
-        supported_limit = self.supported_mm_limits.get(modality, 0)
-        allowed_limit = self.allowed_mm_limits.get(modality, 0)
-
-        if supported_limit is None:
-            supported_limit = allowed_limit
-
-        limit = min(supported_limit, allowed_limit)
-
-        if num_items > limit:
-            msg = f"At most {limit} {modality}(s) may be provided in one prompt."
-
-            if num_items <= supported_limit:
-                msg += " Set `--limit-mm-per-prompt` to increase this limit."
-
-            raise ValueError(msg)
 
     def _to_mm_items(
         self,
@@ -1066,7 +1043,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     )
 
         for modality, items in mm_items.items():
-            self.validate_num_items(modality, len(items))
+            self.info.validate_num_items(modality, len(items))
 
         return mm_items
 
