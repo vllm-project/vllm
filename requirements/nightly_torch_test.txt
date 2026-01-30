@@ -29,7 +29,7 @@ opencv-python-headless >= 4.13.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]>=0.4.10 # required for model evaluation test
 mteb>=1.38.11, <2 # required for mteb test
-transformers==5.0.0
+transformers @ git+https://github.com/huggingface/transformers.git@main
 tokenizers==0.22.2
 schemathesis>=3.39.15 # Required for openai schema test.
 # quantization

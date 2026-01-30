@@ -227,7 +227,6 @@ filelock==3.16.1
     #   huggingface-hub
     #   ray
     #   torch
-    #   transformers
     #   virtualenv
 fiona==1.10.1
     # via torchgeo
@@ -1220,7 +1219,7 @@ tqdm==4.66.6
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers==5.0.0
+transformers @ git+https://github.com/huggingface/transformers.git@6bc84bb3f9563ae3dfb5528f6a1f084812aa146d
     # via
     #   -r requirements/test.in
     #   genai-perf

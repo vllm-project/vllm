@@ -474,7 +474,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && uv pip compile requirements/test.in -o requirements/test.txt --index-strategy unsafe-best-match \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | xargs) --pre \
-        -r requirements/dev.txt \
+        -r requirements/dev.txt --pre \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing dev requirements..." \
