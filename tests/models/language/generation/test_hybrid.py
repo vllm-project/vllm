@@ -9,6 +9,7 @@ from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import multi_gpu_test
 from vllm.engine.arg_utils import EngineArgs
 from vllm.sampling_params import SamplingParams
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 from ...utils import check_logprobs_close, check_outputs_equal
 
@@ -172,7 +173,14 @@ def test_mamba_cache_cg_padding(
     tensor dimensions aren't compatible.
     """
     vllm_config = EngineArgs(model=model, trust_remote_code=True).create_engine_config()
-    while len(example_prompts) == vllm_config.pad_for_cudagraph(len(example_prompts)):
+    cudagraph_dispatcher = CudagraphDispatcher(vllm_config)
+    cudagraph_dispatcher.initialize_cudagraph_keys(
+        vllm_config.compilation_config.cudagraph_mode
+    )
+    while (
+        len(example_prompts)
+        == cudagraph_dispatcher.dispatch(len(example_prompts))[1].num_tokens
+    ):
         example_prompts.append(example_prompts[0])
 
     try:

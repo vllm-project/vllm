@@ -72,5 +72,35 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
+@router.post(
+    "/v1/completions/render",
+    dependencies=[Depends(validate_json_request)],
+    response_model=list,
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+async def render_completion(request: CompletionRequest, raw_request: Request):
+    """render completion request and return engine prompts without generating."""
+    handler = completion(raw_request)
+    if handler is None:
+        base_server = raw_request.app.state.openai_serving_tokenization
+        return base_server.create_error_response(
+            message="The model does not support Completions API"
+        )
+
+    try:
+        result = await handler.render_completion_request(request)
+    except Exception as e:
+        return handler.create_error_response(e)
+
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+
+    return JSONResponse(content=result)
+
+
 def attach_router(app: FastAPI):
     app.include_router(router)

@@ -242,6 +242,7 @@ def kernel_unified_attention_2d(
     HEAD_SIZE: tl.constexpr,  # int
     HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
     USE_ALIBI_SLOPES: tl.constexpr,  # bool
+    USE_ALIBI_SQRT: tl.constexpr,  # bool
     USE_QQ_BIAS: tl.constexpr,  # bool
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
@@ -536,7 +537,16 @@ def kernel_unified_attention_2d(
 
         if USE_ALIBI_SLOPES:
             # prescale w. RCP_LN2 for later exp2
-            S += alibi_slope[:, None] * (seq_offset - context_len) * RCP_LN2
+            if USE_ALIBI_SQRT:
+                relative_pos = seq_offset - (context_len + query_pos[:, None])
+                alibi_offset = tl.where(
+                    relative_pos <= 0,
+                    -tl.sqrt((-relative_pos).to(tl.float32)),
+                    0.0,
+                )
+            else:
+                alibi_offset = seq_offset - context_len
+            S += alibi_slope[:, None] * alibi_offset * RCP_LN2
 
         if USE_QQ_BIAS:
             # compute key positions relative to query section
@@ -634,6 +644,7 @@ def kernel_unified_attention_3d(
     HEAD_SIZE: tl.constexpr,  # int
     HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
     USE_ALIBI_SLOPES: tl.constexpr,  # bool
+    USE_ALIBI_SQRT: tl.constexpr,  # bool
     USE_QQ_BIAS: tl.constexpr,  # bool
     USE_SOFTCAP: tl.constexpr,  # bool
     USE_SINKS: tl.constexpr,  # bool
@@ -930,7 +941,16 @@ def kernel_unified_attention_3d(
 
         if USE_ALIBI_SLOPES:
             # prescale w. RCP_LN2 for later exp2
-            S += alibi_slope[:, None] * (seq_offset - context_len) * RCP_LN2
+            if USE_ALIBI_SQRT:
+                relative_pos = seq_offset - (context_len + query_pos[:, None])
+                alibi_offset = tl.where(
+                    relative_pos <= 0,
+                    -tl.sqrt((-relative_pos).to(tl.float32)),
+                    0.0,
+                )
+            else:
+                alibi_offset = seq_offset - context_len
+            S += alibi_slope[:, None] * alibi_offset * RCP_LN2
 
         if USE_QQ_BIAS:
             # compute key positions relative to query section
@@ -1154,6 +1174,7 @@ def unified_attention(
     sinks=None,
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
+    use_alibi_sqrt=False,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -1270,6 +1291,7 @@ def unified_attention(
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             USE_ALIBI_SLOPES=use_alibi_slopes,
+            USE_ALIBI_SQRT=use_alibi_sqrt,
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),
@@ -1329,6 +1351,7 @@ def unified_attention(
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             USE_ALIBI_SLOPES=use_alibi_slopes,
+            USE_ALIBI_SQRT=use_alibi_sqrt,
             USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
             USE_SINKS=(sinks is not None),

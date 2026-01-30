@@ -18,30 +18,32 @@ e.g.
 """
 
 import argparse
-import json
+import pprint
 
 import requests
 
-headers = {"accept": "application/json", "Content-Type": "application/json"}
+from vllm.multimodal.utils import encode_image_url, fetch_image
 
 query = "A woman playing with her dog on a beach at sunset."
-documents = {
-    "content": [
-        {
-            "type": "text",
-            "text": (
-                "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, "  # noqa: E501
-                "as the dog offers its paw in a heartwarming display of companionship and trust."  # noqa: E501
-            ),
-        },
-        {
-            "type": "image_url",
-            "image_url": {
-                "url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
-            },
-        },
-    ]
-}
+document = (
+    "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, "
+    "as the dog offers its paw in a heartwarming display of companionship and trust."
+)
+image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+documents = [
+    {
+        "type": "text",
+        "text": document,
+    },
+    {
+        "type": "image_url",
+        "image_url": {"url": image_url},
+    },
+    {
+        "type": "image_url",
+        "image_url": {"url": encode_image_url(fetch_image(image_url))},
+    },
+]
 
 
 def parse_args():
@@ -56,23 +58,36 @@ def main(args):
     models_url = base_url + "/v1/models"
     rerank_url = base_url + "/rerank"
 
-    response = requests.get(models_url, headers=headers)
+    response = requests.get(models_url)
     model = response.json()["data"][0]["id"]
 
-    data = {
+    print("Query: string & Document: list of string")
+    prompt = {"model": model, "query": query, "documents": [document]}
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: text")
+    prompt = {"model": model, "query": query, "documents": {"content": [documents[0]]}}
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: image url")
+    prompt = {
         "model": model,
         "query": query,
-        "documents": documents,
+        "documents": {"content": [documents[1]]},
     }
-    response = requests.post(rerank_url, headers=headers, json=data)
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
 
-    # Check the response
-    if response.status_code == 200:
-        print("Request successful!")
-        print(json.dumps(response.json(), indent=2))
-    else:
-        print(f"Request failed with status code: {response.status_code}")
-        print(response.text)
+    print("Query: string & Document: image base64")
+    prompt = {
+        "model": model,
+        "query": query,
+        "documents": {"content": [documents[2]]},
+    }
+    response = requests.post(rerank_url, json=prompt)
+    pprint.pprint(response.json())
 
 
 if __name__ == "__main__":

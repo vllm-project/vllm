@@ -1086,28 +1086,29 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         image_size = config.force_image_size or config.vision_config.image_size
         patch_size = config.vision_config.patch_size
         self.patch_size = patch_size
-        self.num_image_token = int(
-            (image_size // patch_size) ** 2 * (config.downsample_ratio**2)
-        )
+        self.patch_tokens = (image_size // patch_size) ** 2
+        self.num_image_token = int(self.patch_tokens * (config.downsample_ratio**2))
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version
 
-        self.llm_arch_name = config.text_config.architectures[0]
-        self.is_mono = self.llm_arch_name == "InternLM2VEForCausalLM"
-        self.vision_model = self._init_vision_model(
-            config,
-            quant_config=quant_config,
-            is_mono=self.is_mono,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        llm_arch_name = config.text_config.architectures[0]
+        self.is_mono = llm_arch_name == "InternLM2VEForCausalLM"
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision_model = self._init_vision_model(
+                config,
+                quant_config=quant_config,
+                is_mono=self.is_mono,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.mlp1 = self._init_mlp1(config)
 
-        self.mlp1 = self._init_mlp1(config)
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.img_context_token_id = None
         self.video_context_token_id = None
@@ -1152,7 +1153,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
                 quant_config=quant_config,
                 num_hidden_layers_override=num_hidden_layers,
                 prefix=prefix,
-                use_data_parallel=self.use_data_parallel,
             )
         else:
             return InternVisionPatchModel(config.vision_config)
@@ -1281,8 +1281,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         ):
             return image_input["data"]
 
-        assert self.vision_model is not None
-
         image_embeds = self.extract_feature(image_input["pixel_values_flat"])
 
         num_patches = image_input["num_patches"]
@@ -1324,9 +1322,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
             )
         else:
             self.visual_token_mask = None
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -1375,14 +1370,13 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
 
         forward_kwargs = {
@@ -1434,3 +1428,17 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
             connector="mlp1",
             tower_model="vision_model",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        if num_image_tokens <= 0 or self.num_image_token <= 0:
+            return 0
+
+        num_patches = num_image_tokens // self.num_image_token
+        return num_patches * (self.patch_tokens + 1)
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        if num_vision_tokens <= 0 or self.num_image_token <= 0:
+            return 0
+
+        num_patches = num_vision_tokens // (self.patch_tokens + 1)
+        return num_patches * self.num_image_token

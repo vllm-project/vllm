@@ -290,10 +290,8 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
 
         # HF processor pops the `num_crops` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", ImageProcessorItems)
+            parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
+                "image", ImageProcessorItems
             )
             image_sizes = [
                 parsed_images.get_image_size(i) for i in range(len(parsed_images))
@@ -522,24 +520,23 @@ class Gemma3ForConditionalGeneration(
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = SiglipVisionModel(
-            config.vision_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        self.multi_modal_projector = Gemma3MultiModalProjector(config)
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = SiglipVisionModel(
+                config.vision_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Gemma3ForCausalLM"],
-        )
-        logit_scale = getattr(config, "logit_scale", 1.0)
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Gemma3ForCausalLM"],
+            )
 
-        if hasattr(self.language_model, "logits_processor"):
-            # The logits processor can be unset if we're using
-            # automatic conversion to pooling model.
+            logit_scale = getattr(config, "logit_scale", 1.0)
             self.language_model.logits_processor.scale *= logit_scale
 
         self.make_empty_intermediate_tensors = (
@@ -579,8 +576,6 @@ class Gemma3ForConditionalGeneration(
         self,
         image_input: Gemma3ImageInputs,
     ) -> list[torch.Tensor]:
-        assert self.vision_tower is not None
-
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
 
@@ -591,9 +586,6 @@ class Gemma3ForConditionalGeneration(
         image_embeds = self.multi_modal_projector(image_features)
 
         return [e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())]
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -624,7 +616,7 @@ class Gemma3ForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -662,3 +654,41 @@ class Gemma3ForConditionalGeneration(
             connector="multi_modal_projector",
             tower_model="vision_tower",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        """
+        Calculate the number of tokens output by the vision encoder.
+
+        The vision encoder processes images into patch embeddings. For Gemma3,
+        the relationship between prompt placeholder tokens and actual vision
+        encoder output tokens depends on the patch grid size.
+
+        Args:
+            num_image_tokens: Number of image placeholder tokens in the prompt
+                              (typically mm_tokens_per_image per image)
+
+        Returns:
+            Number of tokens output by the vision encoder
+        """
+        # For Gemma3, the vision encoder outputs tokens_per_side x tokens_per_side
+        # tokens per image. Since num_image_tokens represents the number of
+        # connector output tokens (mm_tokens_per_image = 256), and tokens_per_side
+        # is sqrt(256) = 16, we need to account for the token expansion.
+        # Based on empirical testing, the multiplier of 16 works correctly.
+        return num_image_tokens * 16
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        """
+        Calculate the number of tokens output by the multimodal connector.
+
+        The connector applies projection and normalization but maintains the
+        token count for Gemma3.
+
+        Args:
+            num_vision_tokens: Number of tokens from vision encoder
+
+        Returns:
+            Number of tokens after connector processing
+        """
+        # The Gemma3 connector maintains a 1:1 token mapping
+        return num_vision_tokens

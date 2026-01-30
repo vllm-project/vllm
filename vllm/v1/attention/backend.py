@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
 
@@ -51,7 +51,10 @@ class AttentionBackend(ABC):
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto", "bfloat16"]
+
+    # Does attention's forward() include kv cache update?
+    forward_includes_kv_cache_update: bool = True
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -170,6 +173,10 @@ class AttentionBackend(ABC):
 
     @classmethod
     def supports_sink(cls) -> bool:
+        return False
+
+    @classmethod
+    def supports_alibi_sqrt(cls) -> bool:
         return False
 
     @classmethod
@@ -324,6 +331,16 @@ class CommonAttentionMetadata:
     _num_computed_tokens_cpu: torch.Tensor | None = None
 
     _num_computed_tokens_cache: torch.Tensor | None = None
+
+    def batch_size(self) -> int:
+        return self.seq_lens.shape[0]
+
+    def naive_query_lens(self) -> torch.Tensor:
+        """Naive because it assumes that query ends where the next query starts."""
+        return self.query_start_loc[1:] - self.query_start_loc[:-1]
+
+    def replace(self, **kwargs) -> "CommonAttentionMetadata":
+        return replace(self, **kwargs)
 
     @property
     @deprecated(
@@ -606,6 +623,7 @@ class AttentionImpl(ABC, Generic[T]):
     # TODO add support to more backends:
     # https://github.com/vllm-project/vllm/issues/25584
     supports_quant_query_input: bool = False
+    supports_per_head_quant_scales: bool = False
 
     dcp_world_size: int
     dcp_rank: int
@@ -733,7 +751,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
-    return kv_cache_dtype != "auto"
+    return kv_cache_dtype.startswith("fp8")
 
 
 def subclass_attention_backend(

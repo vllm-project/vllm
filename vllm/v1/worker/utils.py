@@ -7,9 +7,9 @@ from dataclasses import dataclass, field
 import torch
 from typing_extensions import deprecated
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.registry import MultiModalRegistry
@@ -40,7 +40,7 @@ class MultiModalBudget:
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
 
         max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
             model_config,
@@ -352,8 +352,8 @@ def bind_kv_cache(
                 pass
             else:
                 raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():

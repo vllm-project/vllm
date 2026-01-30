@@ -65,7 +65,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 "think start/end tokens in the tokenizer!"
             )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
         end_token_id = self.end_token_id
 
@@ -77,7 +77,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         return False
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
         end_token_id = self.end_token_id
         return end_token_id in delta_ids

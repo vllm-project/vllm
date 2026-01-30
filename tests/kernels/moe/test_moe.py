@@ -18,12 +18,15 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from tests.kernels.moe.utils import fused_moe
+from tests.kernels.moe.utils import fused_moe, make_dummy_moe_config
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import init_distributed_environment
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.layers.fused_moe import (
+    fused_topk,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     int4_w4a16_moe_quant_config,
@@ -34,11 +37,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     fused_marlin_moe,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk,
     modular_triton_fused_moe,
-)
-from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
-    fused_moe as iterative_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
@@ -60,6 +59,64 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
+
+
+def iterative_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    global_num_experts: int,
+    expert_map: torch.Tensor = None,
+    renormalize: bool = False,
+) -> torch.Tensor:
+    """
+    Baseline implementation of fused moe.
+
+    Args:
+        hidden_states: [*, hidden_size]
+        w1: [num_experts, intermediate_size * 2, hidden_size]
+        w2: [num_experts, hidden_size, intermediate_size]
+        gating_output: [*, num_experts]
+        expert_map: [num_experts]
+    """
+    orig_shape = hidden_states.shape
+    hidden_size = hidden_states.shape[-1]
+    num_tokens = hidden_states.shape[:-1].numel()
+    num_experts = w1.shape[0]
+    intermediate_size = w2.shape[-1]
+    dtype = hidden_states.dtype
+
+    hidden_states = hidden_states.view(num_tokens, hidden_size)
+    gating_output = gating_output.view(num_tokens, global_num_experts)
+    topk_weights = gating_output.softmax(dim=-1, dtype=torch.float)
+    topk_weights, selected_experts = topk_weights.topk(topk, dim=-1)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    topk_weights = topk_weights.to(dtype)
+
+    if expert_map is not None:
+        selected_experts = expert_map[selected_experts]
+
+    final_hidden_states = None
+    for expert_idx in range(num_experts):
+        expert_w1 = w1[expert_idx]
+        expert_w2 = w2[expert_idx]
+        expert_mask = selected_experts == expert_idx
+        expert_weights = (topk_weights * expert_mask).sum(dim=-1, keepdim=True)
+        x = F.linear(hidden_states, expert_w1)
+        gate = F.silu(x[:, :intermediate_size])
+        x = x[:, intermediate_size:] * gate
+        x = F.linear(x, expert_w2)
+        current_hidden_states = x * expert_weights
+        if final_hidden_states is None:
+            final_hidden_states = current_hidden_states
+        else:
+            final_hidden_states = final_hidden_states + current_hidden_states
+
+    return final_hidden_states.view(orig_shape)  # type: ignore
+
 
 NUM_EXPERTS = [8, 64, 192]
 NUM_EXPERTS_LARGE = [128, 256]
@@ -275,7 +332,7 @@ def test_fused_moe(
     #
     quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    m_fused_moe_fn = modular_triton_fused_moe(quant_config)
+    m_fused_moe_fn = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
 
     def m_fused_moe(
         a: torch.Tensor,
@@ -380,7 +437,7 @@ def test_naive_block_assignment_moe(
     #
     quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
-    m_fused_moe_fn = modular_triton_fused_moe(quant_config)
+    m_fused_moe_fn = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
 
     def m_fused_moe(
         a: torch.Tensor,
@@ -623,13 +680,21 @@ def test_mixtral_moe(
 
         # Load the weights
         vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
-        for i in range(config.num_local_experts):
-            weights = (
-                hf_moe.experts[i].w1.weight.data,
-                hf_moe.experts[i].w3.weight.data,
-            )
-            vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
-            vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
+        if isinstance(hf_moe.experts, torch.nn.ModuleList):
+            # Transformers v4
+            for i in range(config.num_local_experts):
+                weights = (
+                    hf_moe.experts[i].w1.weight.data,
+                    hf_moe.experts[i].w3.weight.data,
+                )
+                vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
+                vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
+        else:
+            # Transformers v5
+            vllm_moe.experts.w13_weight.data[:] = hf_moe.experts.gate_up_proj.data
+            vllm_moe.experts.w2_weight.data[:] = hf_moe.experts.down_proj.data
+            # TODO: remove this line after https://github.com/huggingface/transformers/pull/43622
+            hf_moe.experts.config._experts_implementation = "eager"
 
         # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
         hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
@@ -656,8 +721,15 @@ def test_mixtral_moe(
 
         vllm_moe.experts.quant_method.process_weights_after_loading(vllm_moe.experts)
 
+        # need to override the forward context for unittests, otherwise it assumes
+        # we're running the model forward pass (the model specified in vllm_config)
+        get_forward_context().all_moe_layers = None
+
         # Run forward passes for both MoE blocks
-        hf_states, _ = hf_moe.forward(hf_inputs)
+        hf_states = hf_moe.forward(hf_inputs)
+        if isinstance(hf_states, tuple):
+            # Transformers v4
+            hf_states = hf_states[0]
         vllm_states = vllm_moe.forward(vllm_inputs)
 
     mixtral_moe_tol = {
@@ -896,18 +968,18 @@ class MarlinMoEWeightData:
 )
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_fused_marlin_moe(
-    a_type,
-    b_type,
-    c_type,
-    group_blocks,
-    m,
-    n,
-    k,
-    e,
-    topk,
-    ep_size,
-    act_order,
-    is_k_full,
+    a_type: ScalarType,
+    b_type: ScalarType,
+    c_type: ScalarType,
+    group_blocks: int,
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    ep_size: int,
+    act_order: bool,
+    is_k_full: bool,
 ):
     torch.cuda.manual_seed(1)
     group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
@@ -983,7 +1055,6 @@ def test_fused_marlin_moe(
         None,
         w1_data.scales,
         w2_data.scales,
-        score,
         topk_weights,
         topk_ids,
         global_num_experts=e,
@@ -1059,7 +1130,6 @@ def test_fused_marlin_moe_with_bias(m):
         w2_data.marlin_bias,
         w1_data.scales,
         w2_data.scales,
-        score,
         topk_weights,
         topk_ids,
         global_num_experts=e,
@@ -1138,7 +1208,6 @@ def test_fused_marlin_moe_non_gated(m: int, n: int, k: int, e: int, topk: int):
         None,  # bias2
         w1_data.scales,
         w2_data.scales,
-        score,
         topk_weights,
         topk_ids,
         global_num_experts=e,
@@ -1253,6 +1322,7 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
     opcheck(torch.ops._moe_C.moe_sum, (input, actual))
 
 
+@pytest.mark.usefixtures("default_vllm_config")
 @pytest.mark.parametrize("m", [1, 33])
 @pytest.mark.parametrize("n,k", [(128, 128)])
 @pytest.mark.parametrize("e", [8])
@@ -1458,7 +1528,6 @@ def test_batched_fused_marlin_moe(
         "bias2": None,
         "w1_scale": w1_data.scales,
         "w2_scale": w2_data.scales,
-        "gating_output": score,
         "global_num_experts": e,
         "expert_map": None,
         "global_scale1": w1_data.global_scale,

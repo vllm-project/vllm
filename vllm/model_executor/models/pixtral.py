@@ -28,7 +28,7 @@ from transformers.models.pixtral.modeling_pixtral import (
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -70,10 +70,11 @@ from .interfaces import (
     SupportsPP,
 )
 from .module_mapping import MultiModelKeys
-from .utils import init_vllm_registered_model, maybe_prefix
+from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
     VisionFeatureSelectStrategy,
+    is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
 )
 
@@ -90,6 +91,10 @@ except ImportError:
     USE_XFORMERS_OPS = False
 
 PATCH_MERGE = "patch_merge"
+
+
+def _is_layer_none_or_staged(layer: nn.Module) -> bool:
+    return layer is None or isinstance(layer, StageMissingLayer)
 
 
 class PixtralImagePixelInputs(TensorSchema):
@@ -398,13 +403,14 @@ class PixtralForConditionalGeneration(
         self.vision_args = VisionEncoderArgs(**vision_args)
 
         # init MistralForCausalLM
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
-        if multimodal_config.get_limit_per_prompt("image"):
+        with self._mark_tower_model(vllm_config, "image"):
             self.vision_encoder = VisionTransformer(self.vision_args)
             self.pre_mm_projector_norm = (
                 RMSNorm(self.vision_args.hidden_size, eps=1e-5)
@@ -423,11 +429,6 @@ class PixtralForConditionalGeneration(
             self.vision_language_adapter = VisionLanguageAdapter(
                 self.vision_args, dim=config.text_config.hidden_size
             )
-        else:
-            self.vision_encoder = None
-            self.pre_mm_projector_norm = None
-            self.patch_merger = None
-            self.vision_language_adapter = None
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -449,10 +450,6 @@ class PixtralForConditionalGeneration(
         self,
         image_input: PixtralImagePixelInputs,
     ) -> tuple[torch.Tensor, ...]:
-        assert (
-            self.vision_encoder is not None and self.vision_language_adapter is not None
-        )
-
         images = image_input["images"]
         image_features = self.vision_encoder(images)
         feature_sizes = [image_feature.shape[0] for image_feature in image_features]
@@ -477,9 +474,6 @@ class PixtralForConditionalGeneration(
         image_embeds = torch.split(image_embeds, feature_sizes)
         return image_embeds
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -489,7 +483,7 @@ class PixtralForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -513,10 +507,12 @@ class PixtralForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
-            return weight[0].startswith("vision_encoder")
+            return weight[0].startswith(("vision_encoder", "vision_tower"))
 
         def is_vision_lang_adapter_weights(weight: tuple[str, torch.Tensor]):
-            return weight[0].startswith("vision_language_adapter")
+            return weight[0].startswith(
+                ("vision_language_adapter", "multi_modal_projector")
+            )
 
         def is_patch_merger(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("patch_merger")
@@ -550,15 +546,16 @@ class PixtralForConditionalGeneration(
             # Single pass over weights
             for name, w in weights:
                 if is_vision_encoder_weights((name, w)):
-                    if self.vision_encoder is None:
+                    if _is_layer_none_or_staged(self.vision_encoder):
                         continue
                     # Load vision encoder weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
-                    param = vision_encoder_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
+                    param = vision_encoder_dict.get(trimmed_name)
+                    if param is not None:
+                        with torch.no_grad():
+                            default_weight_loader(param, w)
                 elif is_patch_merger((name, w)):
-                    if self.patch_merger is None:
+                    if _is_layer_none_or_staged(self.patch_merger):
                         continue
                     # Load vision patch merger weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
@@ -566,7 +563,7 @@ class PixtralForConditionalGeneration(
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_pre_mm_projector_norm((name, w)):
-                    if self.pre_mm_projector_norm is None:
+                    if _is_layer_none_or_staged(self.pre_mm_projector_norm):
                         continue
                     # Load vision pre_mm_projector_norm weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
@@ -574,16 +571,19 @@ class PixtralForConditionalGeneration(
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_vision_lang_adapter_weights((name, w)):
-                    if self.vision_language_adapter is None:
+                    if _is_layer_none_or_staged(self.vision_language_adapter):
                         continue
                     # Load vision-language adapter weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
-                    param = vision_lang_adapter_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
+                    param = vision_lang_adapter_dict.get(trimmed_name)
+                    if param is not None:
+                        with torch.no_grad():
+                            default_weight_loader(param, w)
                 else:
                     # LLM weights: yield them to be loaded
                     # by language_model.load_weights
+                    # Strip "language_model." prefix if present (HF sharded format)
+                    name = name.removeprefix("language_model.")
                     yield (name, w)
 
         # Now we call the language model load with the generator
@@ -1070,17 +1070,12 @@ class PixtralHFMLP(nn.Module):
         self,
         config: PixtralVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
         super().__init__()
 
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
 
         assert config.intermediate_size is not None
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -1113,7 +1108,6 @@ class PixtralHFAttention(nn.Module):
         self,
         config: PixtralVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -1125,11 +1119,7 @@ class PixtralHFAttention(nn.Module):
         self.head_dim = config.hidden_size // config.num_attention_heads
         assert self.total_num_heads * self.head_dim == config.hidden_size
 
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.qkv_proj = QKVParallelLinear(
             hidden_size=config.hidden_size,
             head_size=self.head_dim,
@@ -1194,7 +1184,6 @@ class PixtralHFTransformerBlock(nn.Module):
         self,
         config: PixtralVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -1204,13 +1193,11 @@ class PixtralHFTransformerBlock(nn.Module):
         self.attention = PixtralHFAttention(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attention",
         )
         self.feed_forward = PixtralHFMLP(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.feed_forward",
         )
         self.ffn_norm = RMSNorm(config.hidden_size, eps=1e-5)
@@ -1237,7 +1224,6 @@ class PixtralHFTransformer(nn.Module):
         self,
         config: PixtralVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         prefix: str = "",
@@ -1254,7 +1240,6 @@ class PixtralHFTransformer(nn.Module):
                 PixtralHFTransformerBlock(
                     config=config,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(num_hidden_layers)
@@ -1286,7 +1271,6 @@ class PixtralHFVisionModel(nn.Module):
         self,
         config: PixtralVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -1307,7 +1291,6 @@ class PixtralHFVisionModel(nn.Module):
         self.transformer = PixtralHFTransformer(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.transformer",
         )

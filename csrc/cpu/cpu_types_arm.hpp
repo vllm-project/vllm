@@ -80,8 +80,10 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
     reg.val[1] = vld1q_f16(reinterpret_cast<const __fp16*>(ptr) + 8);
   }
 
-  explicit FP16Vec16(const FP32Vec16& vec);
+  // ASIMD does not support non-temporal loads
+  explicit FP16Vec16(bool, const void* ptr) : FP16Vec16(ptr) {}
 
+  explicit FP16Vec16(const FP32Vec16& vec);
   void save(void* ptr) const {
     vst1q_f16(reinterpret_cast<__fp16*>(ptr), reg.val[0]);
     vst1q_f16(reinterpret_cast<__fp16*>(ptr) + 8, reg.val[1]);
@@ -189,6 +191,9 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
 
   explicit BF16Vec16(const void* ptr)
       : reg(*reinterpret_cast<const bfloat16x8x2_t*>(ptr)) {};
+
+  // ASIMD does not support non-temporal loads
+  explicit BF16Vec16(bool, const void* ptr) : BF16Vec16(ptr) {}
 
   explicit BF16Vec16(bfloat16x8x2_t data) : reg(data) {};
 
@@ -474,6 +479,9 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
       : reg({vld1q_f32(ptr), vld1q_f32(ptr + 4), vld1q_f32(ptr + 8),
              vld1q_f32(ptr + 12)}) {}
 
+  // ASIMD does not support non-temporal loads
+  explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {}
+
   explicit FP32Vec16(float32x4x4_t data) : reg(data) {}
 
   explicit FP32Vec16(const FP32Vec8& data) {
@@ -755,6 +763,96 @@ struct INT8Vec16 : public Vec<INT8Vec16> {
     }
   };
 };
+
+struct INT8Vec64 : public Vec<INT8Vec64> {
+  constexpr static int VEC_ELEM_NUM = 64;
+  union AliasReg {
+    int8x16x4_t reg;
+    int8_t values[VEC_ELEM_NUM];
+  };
+  int8x16x4_t reg;
+
+  explicit INT8Vec64(const int8_t* ptr) { reg = vld1q_s8_x4(ptr); }
+
+  // ASIMD does not support non-temporal loads
+  explicit INT8Vec64(bool, const int8_t* ptr) : INT8Vec64(ptr) {}
+
+  void save(int8_t* ptr) const { vst1q_s8_x4(ptr, reg); }
+
+  // masked store
+  void save(int8_t* p, int elem_num) const {
+    TORCH_CHECK(elem_num <= VEC_ELEM_NUM && elem_num > 0);
+
+    if (elem_num == VEC_ELEM_NUM) {
+      vst1q_s8_x4(p, reg);
+      return;
+    }
+
+    const int full_quadwords = elem_num / 16;
+    const int remaining_bytes = elem_num % 16;
+
+    for (int i = 0; i < full_quadwords; ++i) {
+      vst1q_s8(p + 16 * i, reg.val[i]);
+    }
+
+    if (remaining_bytes) {
+      const int8x16_t v = reg.val[full_quadwords];
+      int8_t* tail = p + 16 * full_quadwords;
+      switch (remaining_bytes) {
+        case 15:
+          tail[14] = vgetq_lane_s8(v, 14);
+          [[fallthrough]];
+        case 14:
+          tail[13] = vgetq_lane_s8(v, 13);
+          [[fallthrough]];
+        case 13:
+          tail[12] = vgetq_lane_s8(v, 12);
+          [[fallthrough]];
+        case 12:
+          tail[11] = vgetq_lane_s8(v, 11);
+          [[fallthrough]];
+        case 11:
+          tail[10] = vgetq_lane_s8(v, 10);
+          [[fallthrough]];
+        case 10:
+          tail[9] = vgetq_lane_s8(v, 9);
+          [[fallthrough]];
+        case 9:
+          tail[8] = vgetq_lane_s8(v, 8);
+          [[fallthrough]];
+        case 8:
+          tail[7] = vgetq_lane_s8(v, 7);
+          [[fallthrough]];
+        case 7:
+          tail[6] = vgetq_lane_s8(v, 6);
+          [[fallthrough]];
+        case 6:
+          tail[5] = vgetq_lane_s8(v, 5);
+          [[fallthrough]];
+        case 5:
+          tail[4] = vgetq_lane_s8(v, 4);
+          [[fallthrough]];
+        case 4:
+          tail[3] = vgetq_lane_s8(v, 3);
+          [[fallthrough]];
+        case 3:
+          tail[2] = vgetq_lane_s8(v, 2);
+          [[fallthrough]];
+        case 2:
+          tail[1] = vgetq_lane_s8(v, 1);
+          [[fallthrough]];
+        case 1:
+          tail[0] = vgetq_lane_s8(v, 0);
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  // ASIMD does not support non-temporal stores
+  void nt_save(int8_t* ptr) const { save(ptr); }
+};  // INT8Vec64
 
 template <typename T>
 struct VecType {

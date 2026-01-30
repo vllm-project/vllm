@@ -10,6 +10,7 @@ equals N (not N // 2 like gated activations).
 import pytest
 import torch
 
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
 )
@@ -78,7 +79,10 @@ def test_triton_experts_no_mul_activation(
         m, n, k, NUM_EXPERTS, topk
     )
 
-    experts = TritonExperts(FUSED_MOE_UNQUANTIZED_CONFIG)
+    experts = TritonExperts(
+        moe_config=make_dummy_moe_config(),
+        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
 
     ws1_shape, ws2_shape, out_shape = experts.workspace_shapes(
         M=m,
@@ -151,7 +155,10 @@ def test_workspace_shapes_no_mul_vs_gated():
 
     M, N, K, topk = 64, 256, 128, 2
 
-    experts = TritonExperts(FUSED_MOE_UNQUANTIZED_CONFIG)
+    experts = TritonExperts(
+        moe_config=make_dummy_moe_config(),
+        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
 
     ws1_no_mul, _, out_no_mul = experts.workspace_shapes(
         M, N, K, topk, 8, 8, None, SILU_NO_MUL
@@ -187,7 +194,10 @@ def test_adjust_n_for_activation():
     """Test the adjust_N_for_activation method."""
     from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 
-    experts = TritonExperts(FUSED_MOE_UNQUANTIZED_CONFIG)
+    experts = TritonExperts(
+        moe_config=make_dummy_moe_config(),
+        quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
+    )
 
     N = 256
 

@@ -78,7 +78,7 @@ class GptOssReasoningParser(ReasoningParser):
         self.reasoning_end_token_ids_suffix = self.model_tokenizer.encode("<|message|>")
         self.reasoning_max_num_between_tokens = 20
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         end_token_ids_prefix = self.reasoning_end_token_ids_prefix
         end_token_ids_suffix = self.reasoning_end_token_ids_suffix
         assert len(end_token_ids_prefix) > 0, "reasoning_end_token_ids_prefix is empty"

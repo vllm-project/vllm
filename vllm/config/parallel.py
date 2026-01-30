@@ -3,6 +3,7 @@
 
 import os
 from collections.abc import Callable
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -42,6 +43,7 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
+    "mori",
     "allgather_reducescatter",
     "flashinfer_all2allv",
 ]
@@ -157,6 +159,7 @@ class ParallelConfig:
     - "pplx": Use pplx kernels\n
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
+    - "mori": Use mori kernels\n
     - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
 
     max_parallel_loading_workers: int | None = None
@@ -345,6 +348,17 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
+        # Note(hc): In the current implementation of decode context
+        # parallel(DCP), tp_size needs to be divisible by dcp_size,
+        # because the world size does not change by dcp, it simply
+        # reuses the GPUs of TP group, and split one TP group into
+        # tp_size//dcp_size DCP groups.
+        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+            raise ValueError(
+                f"tp_size={self.tensor_parallel_size} must be divisible by"
+                f"dcp_size={self.decode_context_parallel_size}."
+            )
+
         return self
 
     @property
@@ -442,6 +456,7 @@ class ParallelConfig:
                 "naive",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "mori",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
@@ -709,3 +724,6 @@ class ParallelConfig:
             )
 
         return self
+
+    def replace(self, **kwargs) -> Self:
+        return replace(self, **kwargs)

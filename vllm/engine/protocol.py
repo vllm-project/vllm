@@ -6,14 +6,14 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, StreamingInput
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import RendererLike
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -25,6 +25,10 @@ class EngineClient(ABC):
     model_config: ModelConfig
     input_processor: InputProcessor
     io_processor: IOProcessor | None
+
+    @property
+    @abstractmethod
+    def renderer(self) -> RendererLike: ...
 
     @property
     @abstractmethod
@@ -45,7 +49,7 @@ class EngineClient(ABC):
     @abstractmethod
     def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest | PromptType | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
@@ -86,11 +90,6 @@ class EngineClient(ABC):
             request_id: The unique id of the request,
                         or an iterable of such ids.
         """
-        ...
-
-    @abstractmethod
-    async def get_tokenizer(self) -> TokenizerLike:
-        """Get the tokenizer"""
         ...
 
     @abstractmethod

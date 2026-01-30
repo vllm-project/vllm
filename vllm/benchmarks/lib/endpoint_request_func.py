@@ -160,7 +160,6 @@ async def async_request_openai_completions(
         if request_func_input.model_name
         else request_func_input.model,
         "prompt": request_func_input.prompt,
-        "temperature": 0.0,
         "repetition_penalty": 1.0,
         "max_tokens": request_func_input.output_len,
         "logprobs": request_func_input.logprobs,
@@ -294,7 +293,6 @@ async def async_request_openai_chat_completions(
         "messages": [
             {"role": "user", "content": content},
         ],
-        "temperature": 0.0,
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
         "stream_options": {
@@ -389,7 +387,6 @@ async def async_request_openai_audio(
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "temperature": 0.0,
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
         "language": "en",

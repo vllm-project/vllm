@@ -9,6 +9,7 @@ import json
 import httpx
 import librosa
 import numpy as np
+import openai
 import pytest
 import pytest_asyncio
 import soundfile as sf
@@ -52,12 +53,11 @@ async def test_non_asr_model(foscolo, rocm_aiter_fa_attention):
         model_name, _get_server_args(rocm_aiter_fa_attention)
     ) as remote_server:
         client = remote_server.get_async_client()
-        res = await client.audio.translations.create(
-            model=model_name, file=foscolo, temperature=0.0
-        )
-        err = res.error
-        assert err["code"] == 400 and not res.text
-        assert err["message"] == "The model does not support Translations API"
+
+        with pytest.raises(openai.NotFoundError):
+            await client.audio.translations.create(
+                model=model_name, file=foscolo, temperature=0.0
+            )
 
 
 @pytest.mark.asyncio
@@ -267,12 +267,16 @@ async def test_audio_with_max_tokens(mary_had_lamb, client_and_model):
     out_tokens = tok(out_text, add_special_tokens=False)["input_ids"]
     assert len(out_tokens) == 1
     # max_completion_tokens > max_model_len
+    # max_model_len=32768 for Gemma-3n-E2B-it
     transcription = await client.audio.transcriptions.create(
         model=model_name,
         file=mary_had_lamb,
         response_format="text",
         temperature=0.0,
-        extra_body={"max_completion_tokens": int(1e6)},
+        extra_body={
+            "max_completion_tokens": int(1e6),
+            "repetition_penalty": 1.3,
+        },
     )
     out = json.loads(transcription)
     out_text = out["text"]

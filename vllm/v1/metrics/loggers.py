@@ -715,43 +715,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_time_to_first_token, engine_indexes, model_name
         )
 
-        # Deprecated in 0.11 - Renamed as vllm:inter_token_latency_seconds
-        # With 0.12.x you can enable with --show-hidden-metrics-for-version=0.11
-        # TODO: remove in 0.13.0
-        if self.show_hidden_metrics:
-            histogram_time_per_output_token = self._histogram_cls(
-                name="vllm:time_per_output_token_seconds",
-                documentation=(
-                    "Histogram of time per output token in seconds."
-                    "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
-                ),
-                buckets=[
-                    0.01,
-                    0.025,
-                    0.05,
-                    0.075,
-                    0.1,
-                    0.15,
-                    0.2,
-                    0.3,
-                    0.4,
-                    0.5,
-                    0.75,
-                    1.0,
-                    2.5,
-                    5.0,
-                    7.5,
-                    10.0,
-                    20.0,
-                    40.0,
-                    80.0,
-                ],
-                labelnames=labelnames,
-            )
-            self.histogram_time_per_output_token = make_per_engine(
-                histogram_time_per_output_token, engine_indexes, model_name
-            )
-
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
             documentation="Histogram of inter-token latency in seconds.",
@@ -1124,8 +1087,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
-            if self.show_hidden_metrics:
-                self.histogram_time_per_output_token[engine_idx].observe(itl)
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason][

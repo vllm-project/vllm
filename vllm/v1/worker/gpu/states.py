@@ -1,16 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass, field
-
 import numpy as np
 import torch
 
-from vllm.lora.request import LoRARequest
-from vllm.sampling_params import SamplingParams
-from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
-
-NO_LORA_ID = 0
 
 
 class RequestState:
@@ -33,7 +26,6 @@ class RequestState:
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}
         self.free_indices = list(range(max_num_reqs))
-        self.extra_data: dict[str, ExtraData] = {}
 
         self.prompt_len = np.zeros(self.max_num_reqs, dtype=np.int32)
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
@@ -72,12 +64,6 @@ class RequestState:
             self.max_num_reqs, dtype=torch.int32, device=device
         )
 
-        # LoRA.
-        self.lora_ids = np.zeros(self.max_num_reqs, dtype=np.int32)
-        self.lora_ids.fill(NO_LORA_ID)
-
-        self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
-
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
@@ -88,14 +74,11 @@ class RequestState:
         prompt_len: int,
         prefill_token_ids: list[int],
         num_computed_tokens: int,
-        sampling_params: SamplingParams,
-        lora_request: LoRARequest | None,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
         req_idx = self.free_indices.pop()
         self.req_id_to_index[req_id] = req_idx
         self.index_to_req_id[req_idx] = req_id
-        self.extra_data[req_id] = ExtraData(lora_request)
 
         self.prompt_len[req_idx] = prompt_len
         prefill_len = len(prefill_token_ids)
@@ -107,48 +90,15 @@ class RequestState:
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
-        if lora_request is not None:
-            self.lora_ids[req_idx] = lora_request.lora_int_id
-        else:
-            self.lora_ids[req_idx] = NO_LORA_ID
-
-        # For now, only support prompt logprobs for the prompt tokens.
-        needs_prompt_logprobs = sampling_params.prompt_logprobs is not None
-        self.needs_prompt_logprobs[req_idx] = needs_prompt_logprobs
-
     def apply_staged_writes(self) -> None:
         self.prefill_len.copy_to_uva()
         self.prefill_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
 
     def remove_request(self, req_id: str) -> None:
-        self.extra_data.pop(req_id, None)
         req_idx = self.req_id_to_index.pop(req_id, None)
         if req_idx is None:
             # Request not found.
             return
         self.index_to_req_id.pop(req_idx, None)
         self.free_indices.append(req_idx)
-
-    def make_lora_inputs(
-        self,
-        req_ids: list[str],
-        idx_mapping: np.ndarray,
-        num_scheduled_tokens: np.ndarray,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
-        lora_ids = self.lora_ids[idx_mapping]
-        prompt_lora_mapping = tuple(lora_ids)
-        token_lora_mapping = tuple(lora_ids.repeat(num_scheduled_tokens))
-
-        active_lora_requests: set[LoRARequest] = set()
-        for req_id in req_ids:
-            lora_request = self.extra_data[req_id].lora_request
-            if lora_request is not None:
-                active_lora_requests.add(lora_request)
-        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
-
-
-@dataclass
-class ExtraData:
-    lora_request: LoRARequest | None
-    in_progress_prompt_logprobs: list[LogprobsTensors] = field(default_factory=list)
