@@ -105,7 +105,6 @@ def w8a8_triton_block_scaled_mm(
     As: torch.Tensor,
     Bs: torch.Tensor,
     block_size: list[int],
-    config: dict,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise
