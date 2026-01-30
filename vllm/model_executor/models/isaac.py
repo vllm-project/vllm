@@ -20,7 +20,7 @@ from vllm.config import VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -1450,7 +1450,7 @@ class IsaacForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

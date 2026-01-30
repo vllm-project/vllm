@@ -640,8 +640,9 @@ steps:
   # grade: Blocking
   source_file_dependencies:
   - csrc/attention/
-  - vllm/attention
   - vllm/v1/attention
+    # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
+  - vllm/model_executor/layers/attention
   - tests/kernels/attention
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -1131,7 +1132,7 @@ steps:
   - csrc/quantization/cutlass_w8a8/moe/
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
-  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
+  - vllm/model_executor/layers/fused_moe/flashinfer_a2a_prepare_finalize.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/v1/attention/backends/mla/cutlass_mla.py
@@ -1277,7 +1278,7 @@ steps:
 
 - label: 2 Node Tests (4 GPUs in total) # 16min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdmultinode]
   agent_pool: mi325_4
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
@@ -1291,15 +1292,15 @@ steps:
   - tests/distributed/
   - tests/examples/offline_inference/data_parallel.py
   commands:
-  - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
-    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
+  - # the following commands are for the first node, with ip 192.168.10.10 (ray environment already set up)  | grep 'Same node test passed'   | grep 'Node count test passed'
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py 
+    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py 
     - python3 ../examples/offline_inference/data_parallel.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=0 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_multi_node_assignment.py
     - VLLM_MULTI_NODE=1 pytest -v -s distributed/test_pipeline_parallel.py
   - # the following commands are for the second node, with ip 192.168.10.11 (ray environment already set up)
-    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py | grep 'Same node test passed'
-    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py | grep 'Node count test passed'
+    - VLLM_TEST_SAME_HOST=0 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_same_node.py 
+    - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py 
     - python3 ../examples/offline_inference/data_parallel.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code
 
 - label: Distributed Tests (2 GPUs) # 68min
@@ -1508,6 +1509,9 @@ steps:
   source_file_dependencies:
   - vllm/
   commands:
+  # Work around HIP bug tracked here: https://github.com/ROCm/hip/issues/3876
+  # TODO: Remove when the bug is fixed in a future ROCm release
+  - export TORCH_NCCL_BLOCKING_WAIT=1
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
