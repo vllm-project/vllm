@@ -5,7 +5,7 @@
 import torch
 import torch.nn as nn
 
-from vllm.config.model import LogprobsMode
+from vllm.config.model import LogprobsList, LogprobsMode
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -73,9 +73,7 @@ class Sampler(nn.Module):
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
 
-        logprobs_mode: (
-            list[LogprobsMode | None] | LogprobsMode | None
-        ) = self.logprobs_mode
+        logprobs_mode: LogprobsList | LogprobsMode | None = self.logprobs_mode
         if sampling_metadata.logprobs_mode_override is not None:
             logprobs_mode = sampling_metadata.logprobs_mode_override
             if isinstance(logprobs_mode, list):
@@ -179,9 +177,7 @@ class Sampler(nn.Module):
         may update the logits tensor in-place.
         """
 
-        logprobs_mode: (
-            list[LogprobsMode | None] | LogprobsMode | None
-        ) = self.logprobs_mode
+        logprobs_mode: LogprobsList | LogprobsMode | None = self.logprobs_mode
         if sampling_metadata.logprobs_mode_override is not None:
             logprobs_mode = sampling_metadata.logprobs_mode_override
             if isinstance(logprobs_mode, list):

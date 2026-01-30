@@ -8,7 +8,7 @@ from typing import cast
 import numpy as np
 import torch
 
-from vllm.config.model import LogprobsMode
+from vllm.config.model import LogprobsList, LogprobsMode
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
@@ -224,9 +224,7 @@ class InputBatch:
 
         self.num_logprobs: dict[str, int] = {}
 
-        self.logprobs_mode: list[LogprobsMode | None] = [
-            None for _ in range(max_num_reqs)
-        ]
+        self.logprobs_mode: LogprobsList = [None for _ in range(max_num_reqs)]
         self.non_default_logprobs_mode: int = 0
 
         # To accumulate prompt logprobs tensor chunks across prefill steps.
@@ -1044,7 +1042,7 @@ class InputBatch:
         return len(self.has_allowed_token_ids) == 0
 
     @property
-    def logprobs_mode_override(self) -> LogprobsMode | list[LogprobsMode | None] | None:
+    def logprobs_mode_override(self) -> LogprobsMode | LogprobsList | None:
         if self.non_default_logprobs_mode == 0:
             return None
         logprobs_mode = self.logprobs_mode[: self.num_reqs]
