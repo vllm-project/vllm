@@ -24,7 +24,6 @@ import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -33,7 +32,8 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.chunked_local_attention import (
+from vllm.model_executor.layers.attention import (
+    Attention,
     ChunkedLocalAttention,
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE

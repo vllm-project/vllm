@@ -15,7 +15,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import get_act_and_mul_fn, get_act_fn
-from vllm.model_executor.layers.attention.encoder_only_attention import (
+from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.fused_moe import activation_without_mul, fused_topk

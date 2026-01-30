@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from contextlib import contextmanager
 
 import numpy as np
 import torch
@@ -28,33 +27,27 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.copy_stream = copy_stream
         self.copy_event = copy_event
 
         default_stream = torch.cuda.current_stream()
-        with torch.cuda.stream(self.copy_stream):
-            self.copy_stream.wait_stream(default_stream)
+        with torch.cuda.stream(copy_stream):
+            copy_stream.wait_stream(default_stream)
 
             self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
+            self.logprobs_tensors: LogprobsTensors | None = None
             if sampler_output.logprobs_tensors is not None:
-                self.logprobs_tensors: LogprobsTensors | None = (
+                self.logprobs_tensors = (
                     sampler_output.logprobs_tensors.to_cpu_nonblocking()
                 )
-            else:
-                self.logprobs_tensors = None
+            self.num_nans: np.ndarray | None = None
             if sampler_output.num_nans is not None:
                 self.num_nans = async_copy_to_np(sampler_output.num_nans)
-            else:
-                self.num_nans = None
             self.num_sampled_tokens_np = async_copy_to_np(num_sampled_tokens)
-            self.prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
-            if self.model_runner_output.prompt_logprobs_dict:
-                for k, v in self.model_runner_output.prompt_logprobs_dict.items():
-                    if v is not None:
-                        self.prompt_logprobs_dict[k] = v.to_cpu_nonblocking()
-                    else:
-                        self.prompt_logprobs_dict[k] = None
-            self.copy_event.record(self.copy_stream)
+            self.prompt_logprobs_dict = {
+                k: v.to_cpu_nonblocking() if v is not None else None
+                for k, v in self.model_runner_output.prompt_logprobs_dict.items()
+            }
+            self.copy_event.record(copy_stream)
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
@@ -64,34 +57,20 @@ class AsyncOutput(AsyncModelRunnerOutput):
         # Going forward, we should keep the data structures as NumPy arrays
         # rather than Python lists.
         sampled_token_ids: list[list[int]] = self.sampled_token_ids.tolist()
-        num_reqs = len(sampled_token_ids)
-        num_sampled_tokens = self.num_sampled_tokens_np.tolist()
-        for i in range(num_reqs):
-            del sampled_token_ids[i][num_sampled_tokens[i] :]
+        num_sampled_tokens: list[int] = self.num_sampled_tokens_np.tolist()
+        for token_ids, num_tokens in zip(sampled_token_ids, num_sampled_tokens):
+            del token_ids[num_tokens:]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
         if self.num_nans is not None:
-            num_nans = self.num_nans.tolist()
-            self.model_runner_output.num_nans_in_logits = {
-                req_id: num_nans[i]
-                for i, req_id in enumerate(self.model_runner_output.req_ids)
-            }
+            self.model_runner_output.num_nans_in_logits = dict(
+                zip(self.model_runner_output.req_ids, self.num_nans.tolist())
+            )
 
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
         return self.model_runner_output
-
-
-@contextmanager
-def async_barrier(event: torch.cuda.Event | None):
-    if event is not None:
-        event.synchronize()
-    try:
-        yield
-    finally:
-        if event is not None:
-            event.record()
 
 
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:

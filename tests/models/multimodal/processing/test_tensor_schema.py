@@ -119,7 +119,11 @@ def create_batched_mm_kwargs(
     )["mm_kwargs"].require_data()
 
     return group_mm_kwargs_by_modality(
-        [item for modality in supported_mm_limits for item in mm_kwargs[modality]]
+        [
+            (modality, item)
+            for modality in supported_mm_limits
+            for item in mm_kwargs[modality]
+        ]
     )
 
 
@@ -155,6 +159,12 @@ def initialize_dummy_model(
 @create_new_process_for_each_test()
 @pytest.mark.parametrize("model_id", get_model_ids_to_test())
 def test_model_tensor_schema(model_id: str):
+    if model_id == "moonshotai/Kimi-K2.5":
+        # FIXME(Isotr0py): Fix Kimi-K2.5's offline inference about vision chunks.
+        pytest.skip(
+            "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
+        )
+
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(

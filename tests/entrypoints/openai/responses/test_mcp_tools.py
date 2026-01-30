@@ -221,7 +221,7 @@ class TestMCPEnabled:
                 "server_label": "code_interpreter",
             }
         ]
-        input_text = "What is 13 * 24? Use python to calculate the result."
+        input_text = "What is 123 * 456? Use python to calculate the result."
 
         stream_response = await mcp_enabled_client.responses.create(
             model=model_name,

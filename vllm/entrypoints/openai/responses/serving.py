@@ -63,6 +63,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    make_tool_call_id,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -115,6 +116,7 @@ from vllm.entrypoints.openai.responses.utils import (
     extract_tool_types,
     should_continue_final_message,
 )
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
@@ -250,6 +252,17 @@ class OpenAIServingResponses(OpenAIServing):
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions()
             )
+
+        # Handle tool call ID type for Kimi K2 (supporting test mocking via overrides)
+        hf_overrides = getattr(self.model_config, "hf_overrides", None)
+        if self.model_config.hf_text_config.model_type == "kimi_k2" or (
+            isinstance(hf_overrides, dict)
+            and hf_overrides.get("model_type") == "kimi_k2"
+        ):
+            self.tool_call_id_type = "kimi_k2"
+        else:
+            self.tool_call_id_type = "random"
+
         self.enable_auto_tools = enable_auto_tools
         # set up tool use
         self.tool_parser = self._get_tool_parser(
@@ -423,8 +436,11 @@ class OpenAIServingResponses(OpenAIServing):
                 if maybe_error is not None:
                     return maybe_error
 
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"]
+                default_max_tokens = get_max_tokens(
+                    self.max_model_len,
+                    request,
+                    engine_prompt,
+                    self.default_sampling_params,
                 )
 
                 sampling_params = request.to_sampling_params(
@@ -677,7 +693,7 @@ class OpenAIServingResponses(OpenAIServing):
             except ValueError as e:
                 return self.create_error_response(e)
 
-        # NOTE: Implementation of stauts is still WIP, but for now
+        # NOTE: Implementation of status is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
@@ -820,10 +836,11 @@ class OpenAIServingResponses(OpenAIServing):
         for i, (token_id, _logprob) in enumerate(logprobs.items()):
             if i >= top_logprobs:
                 break
-            text = (
-                _logprob.decoded_token
-                if _logprob.decoded_token is not None
-                else tokenizer.decode([token_id])
+            text = self._get_decoded_token(
+                logprob=_logprob,
+                token_id=token_id,
+                tokenizer=tokenizer,
+                return_as_token_id=self.return_tokens_as_token_ids,
             )
             out.append(
                 LogprobTopLogprob(
@@ -849,10 +866,11 @@ class OpenAIServingResponses(OpenAIServing):
         for i, token_id in enumerate(token_ids):
             logprob = logprobs[i]
             token_logprob = logprob[token_id]
-            text = (
-                token_logprob.decoded_token
-                if token_logprob.decoded_token is not None
-                else tokenizer.decode([token_id])
+            text = self._get_decoded_token(
+                logprob=token_logprob,
+                token_id=token_id,
+                tokenizer=tokenizer,
+                return_as_token_id=self.return_tokens_as_token_ids,
             )
             out.append(
                 Logprob(
@@ -954,25 +972,28 @@ class OpenAIServingResponses(OpenAIServing):
             enable_auto_tools=self.enable_auto_tools,
             tool_parser_cls=self.tool_parser,
         )
-        if content:
-            output_text = ResponseOutputText(
-                text=content,
-                annotations=[],  # TODO
-                type="output_text",
-                logprobs=(
-                    self._create_response_logprobs(
-                        token_ids=final_output.token_ids,
-                        logprobs=final_output.logprobs,
-                        tokenizer=tokenizer,
-                        top_logprobs=request.top_logprobs,
-                    )
-                    if request.is_include_output_logprobs()
-                    else None
-                ),
-            )
+
+        if content or (self.use_harmony and tool_calls):
+            res_text_part = None
+            if content:
+                res_text_part = ResponseOutputText(
+                    text=content,
+                    annotations=[],  # TODO
+                    type="output_text",
+                    logprobs=(
+                        self._create_response_logprobs(
+                            token_ids=final_output.token_ids,
+                            logprobs=final_output.logprobs,
+                            tokenizer=tokenizer,
+                            top_logprobs=request.top_logprobs,
+                        )
+                        if request.is_include_output_logprobs()
+                        else None
+                    ),
+                )
             message_item = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
-                content=[output_text],
+                content=[res_text_part] if res_text_part else [],
                 role="assistant",
                 status="completed",
                 type="message",
@@ -984,17 +1005,28 @@ class OpenAIServingResponses(OpenAIServing):
         if message_item:
             outputs.append(message_item)
         if tool_calls:
-            tool_call_items = [
-                ResponseFunctionToolCall(
-                    id=f"fc_{random_uuid()}",
-                    call_id=f"call_{random_uuid()}",
-                    type="function_call",
-                    status="completed",
-                    name=tool_call.name,
-                    arguments=tool_call.arguments,
+            # We use a simple counter for history_tool_call_count because
+            # we don't track the history of tool calls in the Responses API yet.
+            # This means that the tool call index will start from 0 for each
+            # request.
+            tool_call_items = []
+            for history_tool_call_cnt, tool_call in enumerate(tool_calls):
+                tool_call_items.append(
+                    ResponseFunctionToolCall(
+                        id=f"fc_{random_uuid()}",
+                        call_id=tool_call.id
+                        if tool_call.id
+                        else make_tool_call_id(
+                            id_type=self.tool_call_id_type,
+                            func_name=tool_call.name,
+                            idx=history_tool_call_cnt,
+                        ),
+                        type="function_call",
+                        status="completed",
+                        name=tool_call.name,
+                        arguments=tool_call.arguments,
+                    )
                 )
-                for tool_call in tool_calls
-            ]
             outputs.extend(tool_call_items)
         return outputs
 

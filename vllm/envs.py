@@ -778,6 +778,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Backend for Video IO
     # - "opencv": Default backend that uses OpenCV stream buffered backend.
+    # - "identity": Returns raw video bytes for model processor to handle.
     #
     # Custom backend implementations can be registered
     # via `@VIDEO_LOADER_REGISTRY.register("my_custom_video_loader")` and
@@ -1679,6 +1680,7 @@ def disable_envs_cache() -> None:
     global __getattr__
     # If __getattr__ is wrapped by functions.cache, unwrap the caching layer.
     if _is_envs_cache_enabled():
+        assert hasattr(__getattr__, "__wrapped__")
         __getattr__ = __getattr__.__wrapped__
 
 

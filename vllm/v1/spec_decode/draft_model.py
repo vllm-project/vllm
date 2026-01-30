@@ -4,10 +4,10 @@ from typing import Any
 
 import torch
 
-from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.speculative import SpeculativeConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import (

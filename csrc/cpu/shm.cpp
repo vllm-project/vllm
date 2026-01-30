@@ -237,10 +237,10 @@ struct ThreadSHMContext {
 class SHMManager {
  public:
   explicit SHMManager(const std::string& name, const int rank,
-                      const int group_size)
+                      const int group_size, const int thread_num)
       : _rank(rank),
         _group_size(group_size),
-        _thread_num(omp_get_max_threads()),
+        _thread_num(thread_num),
         _shm_names({""}),
         _shared_mem_ptrs({nullptr}),
         _shm_ctx(nullptr) {
@@ -282,11 +282,11 @@ class SHMManager {
   }
 
   static int64_t create_singleton_instance(const std::string& name,
-                                           const int group_size,
-                                           const int rank) {
+                                           const int group_size, const int rank,
+                                           const int thread_num) {
     std::lock_guard<std::mutex> guard(SingletonInstancesLock);
     SingletonInstances.emplace_back(
-        std::make_unique<SHMManager>(name, rank, group_size));
+        std::make_unique<SHMManager>(name, rank, group_size, thread_num));
     return static_cast<int64_t>(SingletonInstances.size() - 1);
   }
 
@@ -854,8 +854,9 @@ std::vector<torch::Tensor> shm_recv_tensor_list(int64_t handle, int64_t src) {
 }
 
 int64_t init_shm_manager(const std::string& name, const int64_t group_size,
-                         const int64_t rank) {
-  return SHMManager::create_singleton_instance(name, group_size, rank);
+                         const int64_t rank, const int64_t thread_num) {
+  return SHMManager::create_singleton_instance(name, group_size, rank,
+                                               thread_num);
 }
 
 std::string join_shm_manager(int64_t handle, const std::string& name) {
