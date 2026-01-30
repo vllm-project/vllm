@@ -24,10 +24,7 @@ from vllm.distributed import (
     init_distributed_environment,
     initialize_model_parallel,
 )
-from vllm.model_executor.models.interfaces import (
-    SupportsMultiModal,
-    supports_multimodal,
-)
+from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -86,7 +83,6 @@ def resize_mm_data(
 
 
 def create_batched_mm_kwargs(
-    model_cls: type[SupportsMultiModal],
     model_config: ModelConfig,
     processor: BaseMultiModalProcessor,
     size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
@@ -102,10 +98,10 @@ def create_batched_mm_kwargs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
     )
-    mm_data = processor_inputs.mm_data
+    mm_items = processor_inputs.mm_items
     resized_mm_data = {
-        modality: resize_mm_data(data, size_factors)
-        for modality, data in mm_data.items()
+        modality: resize_mm_data(items.data, size_factors)
+        for modality, items in mm_items.items()
     }
 
     # video metadata will be added back to the resized video data here.
@@ -246,9 +242,7 @@ def test_model_tensor_schema(model_id: str):
     processor = factories.build_processor(ctx, cache=None)
 
     with initialize_dummy_model(model_cls, model_config) as model:
-        for modality, _, mm_kwargs in create_batched_mm_kwargs(
-            model_cls, model_config, processor
-        ):
+        for modality, _, mm_kwargs in create_batched_mm_kwargs(model_config, processor):
             for method_name in inputs_parse_methods:
                 print(
                     f"Testing `{method_name}` with modality={modality} "
