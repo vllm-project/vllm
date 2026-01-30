@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from typing import Any
 
 import torch
@@ -100,7 +102,7 @@ class IPEXConfig(QuantizationConfig):
         ]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "IPEXConfig":
+    def from_config(cls, config: dict[str, Any]) -> IPEXConfig:
         method = cls.get_from_keys(config, ["quant_method"]).lower()
         if method == "awq":
             weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
@@ -144,7 +146,7 @@ class IPEXConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> "LinearMethodBase | None":
+    ) -> LinearMethodBase | None:
         if isinstance(layer, LinearBase):
             if self.method == "awq":
                 if is_layer_skipped(

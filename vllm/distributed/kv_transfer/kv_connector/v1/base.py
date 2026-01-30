@@ -38,6 +38,8 @@ The class provides the following primitives:
             ids of requests that have completed async sending/recving.
 """
 
+from __future__ import annotations
+
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
@@ -89,7 +91,7 @@ class SupportsHMA(ABC):
     @abstractmethod
     def request_finished_all_groups(
         self,
-        request: "Request",
+        request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """
@@ -159,9 +161,9 @@ class KVConnectorBase_V1(ABC):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
@@ -242,7 +244,7 @@ class KVConnectorBase_V1(ABC):
         return
 
     def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
     ):
         """
         Initialize with a single KV cache tensor used by all layers.
@@ -273,7 +275,7 @@ class KVConnectorBase_V1(ABC):
         return
 
     @abstractmethod
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -309,7 +311,7 @@ class KVConnectorBase_V1(ABC):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
         """
@@ -383,13 +385,13 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
-    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
         Get the KV connector stats collected during the last interval.
         """
         return None
 
-    def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":
+    def get_kv_connector_kv_cache_events(self) -> KVConnectorKVEvents | None:
         """
         Get the KV connector kv cache events collected during the last interval.
         This function should be called by the model runner every time after the
@@ -416,7 +418,7 @@ class KVConnectorBase_V1(ABC):
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: Request,
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
         """
@@ -450,7 +452,7 @@ class KVConnectorBase_V1(ABC):
 
     @abstractmethod
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         """
         Update KVConnector state after block allocation.
@@ -496,7 +498,7 @@ class KVConnectorBase_V1(ABC):
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """
@@ -515,7 +517,7 @@ class KVConnectorBase_V1(ABC):
         """
         return False, None
 
-    def take_events(self) -> Iterable["KVCacheEvent"]:
+    def take_events(self) -> Iterable[KVCacheEvent]:
         """
         Take the KV cache events from the connector.
 
@@ -525,7 +527,7 @@ class KVConnectorBase_V1(ABC):
         return ()
 
     @classmethod
-    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
         """
         Get the required KV cache layout for this connector.
         Args:
@@ -558,7 +560,7 @@ class KVConnectorBase_V1(ABC):
     @classmethod
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
-    ) -> "KVConnectorStats | None":
+    ) -> KVConnectorStats | None:
         """
         KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
@@ -580,11 +582,11 @@ class KVConnectorBase_V1(ABC):
     @classmethod
     def build_prom_metrics(
         cls,
-        vllm_config: "VllmConfig",
-        metric_types: dict[type["PromMetric"], type["PromMetricT"]],
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
-    ) -> "KVConnectorPromMetrics | None":
+    ) -> KVConnectorPromMetrics | None:
         """
         Create a KVConnectorPromMetrics subclass which should register
         per-connector Prometheus metrics and implement observe() to

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from typing import Any
 
 import torch
@@ -69,7 +71,7 @@ class CPUAWQConfig(QuantizationConfig):
         )
 
     @classmethod
-    def get_name(cls) -> "QuantizationMethods":
+    def get_name(cls) -> QuantizationMethods:
         return "cpu_awq"
 
     @classmethod
@@ -85,7 +87,7 @@ class CPUAWQConfig(QuantizationConfig):
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "CPUAWQConfig":
+    def from_config(cls, config: dict[str, Any]) -> CPUAWQConfig:
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         zero_point = cls.get_from_keys(config, ["zero_point"])
@@ -105,7 +107,7 @@ class CPUAWQConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> "QuantizationMethods | None":
+    ) -> QuantizationMethods | None:
         quant_method = hf_quant_cfg.get("quant_method", "").lower()
         if current_platform.is_cpu() and (quant_method == "awq"):
             return cls.get_name()
@@ -113,7 +115,7 @@ class CPUAWQConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> "QuantizeMethodBase | None":
+    ) -> QuantizeMethodBase | None:
         if isinstance(layer, LinearBase) or (
             isinstance(layer, ParallelLMHead) and self.lm_head_quantized
         ):
@@ -127,7 +129,7 @@ class CPUAWQConfig(QuantizationConfig):
             return CPUAWQLinearMethod(self)
         return None
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         if self.modules_to_not_convert:
             self.modules_to_not_convert = hf_to_vllm_mapper.apply_list(
                 self.modules_to_not_convert

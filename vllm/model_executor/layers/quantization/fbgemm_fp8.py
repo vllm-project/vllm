@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from typing import Any
 
 import torch
@@ -71,14 +73,14 @@ class FBGEMMFp8Config(QuantizationConfig):
         return []
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "FBGEMMFp8Config":
+    def from_config(cls, config: dict[str, Any]) -> FBGEMMFp8Config:
         ignore_list = cls.get_from_keys(config, ["modules_to_not_convert"])
         input_scale_ub = cls.get_from_keys(config, ["activation_scale_ub"])
         return cls(ignore_list=ignore_list, input_scale_ub=input_scale_ub)
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> "QuantizeMethodBase | None":
+    ) -> QuantizeMethodBase | None:
         if isinstance(layer, LinearBase):
             if is_layer_skipped(
                 prefix=prefix,

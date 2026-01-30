@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from contextlib import suppress
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -110,7 +112,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         else:
             self.transform_config = None
 
-    def get_linear_method(self) -> "CompressedTensorsLinearMethod":
+    def get_linear_method(self) -> CompressedTensorsLinearMethod:
         return CompressedTensorsLinearMethod(self)
 
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
@@ -123,7 +125,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     def get_name(self) -> QuantizationMethods:
         return "compressed-tensors"
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         """
         Transform layer paths in config targets to match vLLM's naming.
 
@@ -160,7 +162,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
-    ) -> "QuantizeMethodBase | None":
+    ) -> QuantizeMethodBase | None:
         if isinstance(layer, LinearBase):
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -206,7 +208,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
+    def from_config(cls, config: dict[str, Any]) -> CompressedTensorsConfig:
         # We keep only config groups which are not doing Attention quantization
         # because Attention quantization on its own is not supported by vLLM.
         # It is coupled with KV-cache quantization, and if scales are present in the
@@ -588,7 +590,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         input_quant: QuantizationArgs,
         format: str | None = None,
         layer_name: str | None = None,
-    ) -> "CompressedTensorsScheme":
+    ) -> CompressedTensorsScheme:
         # use the per-layer format if defined, otherwise, use global format
         format = format if format is not None else self.quant_format
 
@@ -691,7 +693,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def get_scheme(
         self, layer: torch.nn.Module, layer_name: str | None = None
-    ) -> "CompressedTensorsScheme | None":
+    ) -> CompressedTensorsScheme | None:
         """
         compressed-tensors supports non uniform in the following way:
 

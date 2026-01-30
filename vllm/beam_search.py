@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +29,7 @@ class BeamSearchSequence:
     text: str | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
-    multi_modal_data: "MultiModalDataDict | None" = None
+    multi_modal_data: MultiModalDataDict | None = None
     mm_processor_kwargs: dict[str, Any] | None = None
 
 

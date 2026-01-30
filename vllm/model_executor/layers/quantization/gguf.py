@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
@@ -72,12 +74,12 @@ class GGUFConfig(QuantizationConfig):
         return []  # no extra configs.
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "GGUFConfig":
+    def from_config(cls, config: dict[str, Any]) -> GGUFConfig:
         return cls()
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> "QuantizeMethodBase | None":
+    ) -> QuantizeMethodBase | None:
         if isinstance(layer, LinearBase):
             if is_layer_skipped_gguf(
                 prefix, self.unquantized_modules, self.packed_modules_mapping
@@ -95,7 +97,7 @@ class GGUFConfig(QuantizationConfig):
             return GGUFMoEMethod(self, layer.moe_config)
         return None
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         """
         Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure

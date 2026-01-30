@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import asyncio
 import threading
 import time
@@ -115,7 +117,7 @@ class MooncakeConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
@@ -137,7 +139,7 @@ class MooncakeConnector(KVConnectorBase_V1):
     ############################################################
 
     def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
@@ -145,7 +147,7 @@ class MooncakeConnector(KVConnectorBase_V1):
         )
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
@@ -161,7 +163,7 @@ class MooncakeConnector(KVConnectorBase_V1):
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
@@ -181,7 +183,7 @@ class MooncakeConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
@@ -224,7 +226,7 @@ class MooncakeConnectorScheduler:
         self._reqs_need_send: dict[ReqId, list[int]] = {}
 
     def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
@@ -260,7 +262,7 @@ class MooncakeConnectorScheduler:
         return 0, False
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         params = request.kv_transfer_params
         logger.debug(
@@ -328,7 +330,7 @@ class MooncakeConnectorScheduler:
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """

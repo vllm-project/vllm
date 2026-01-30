@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -45,7 +47,7 @@ class ReqMeta:
         block_size: int,
         is_store: bool,
         mm_hashes: list[str],
-    ) -> "ReqMeta":
+    ) -> ReqMeta:
         valid_num_tokens = align_to_block_size(len(token_ids), block_size)
         token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
         block_ids_tensor = torch.tensor(block_ids)
@@ -89,9 +91,9 @@ class ExampleConnector(KVConnectorBase_V1):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
         super().__init__(
             vllm_config=vllm_config,
@@ -106,7 +108,7 @@ class ExampleConnector(KVConnectorBase_V1):
         logger.info(self._kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
@@ -256,7 +258,7 @@ class ExampleConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: Request,
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
         """
@@ -292,7 +294,7 @@ class ExampleConnector(KVConnectorBase_V1):
         return num_tokens_to_check - num_computed_tokens, False
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         """
         Update KVConnector state after block allocation.
@@ -385,7 +387,7 @@ class ExampleConnector(KVConnectorBase_V1):
 
     def _found_match_for_request(
         self,
-        request: "Request",
+        request: Request,
     ) -> bool:
         """Check if the cache is hit for the request."""
         return self._found_match_for_prompt(
