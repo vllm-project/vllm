@@ -183,9 +183,6 @@ class Step3p5MTP(nn.Module):
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        vllm_config = self.vllm_config
-        config = vllm_config.model_config.hf_config
-
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -266,7 +263,7 @@ class Step3p5MTP(nn.Module):
                     ):
                         continue
 
-                    if f"{config.num_hidden_layers}.transformer." in name:
+                    if spec_layer is not None and ".transformer." in name:
                         name = name.replace(".transformer.", ".")
                     if "shared_head" in name:
                         name = name.replace("shared_head.output", "shared_head.head")

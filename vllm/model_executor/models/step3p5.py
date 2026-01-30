@@ -767,6 +767,13 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
+            # Skip any layers beyond the main model's depth (e.g., MTP layers)
+            if name.startswith("model.layers."):
+                parts = name.split(".")
+                if len(parts) > 2 and parts[2].isdigit():
+                    layer_idx = int(parts[2])
+                    if layer_idx >= config.num_hidden_layers:
+                        continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
