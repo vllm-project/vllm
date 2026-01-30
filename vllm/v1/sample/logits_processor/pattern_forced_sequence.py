@@ -79,49 +79,43 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
     def update_state(self, batch_update: BatchUpdate | None):
         process_dict_updates(self.req_states, batch_update, self._add_request)
 
-        for index, (state, pos, output_ids) in list(self.req_states.items()):
-            # Log current state for debugging
-            if len(output_ids) > 0:
-                last_tokens = output_ids[-min(6, len(output_ids)) :]
-                logger.info(
-                    "[PIPELINE] update_state: index=%d, state=%s, len(output_ids)=%d, "
-                    "last_tokens=%s",
-                    index,
-                    state.name,
-                    len(output_ids),
-                    last_tokens,
-                )
-
-            if state == ForcingState.NORMAL:
-                if len(output_ids) >= len(TRIGGER_PATTERN):
-                    tail = output_ids[-len(TRIGGER_PATTERN) :]
-                    matches = tail == TRIGGER_PATTERN
-                    logger.info(
-                        "[PIPELINE] Pattern check: tail=%s, pattern=%s, matches=%s",
-                        tail,
-                        TRIGGER_PATTERN,
-                        matches,
-                    )
-                    if matches:
-                        logger.info("[PIPELINE] Trigger detected! -> FORCING")
-                        self.req_states[index] = (ForcingState.FORCING, 0, output_ids)
-            elif state == ForcingState.FORCING and pos >= len(FORCED_SEQUENCE):
-                logger.info("[PIPELINE] Forced sequence complete, returning to NORMAL")
-                self.req_states[index] = (ForcingState.NORMAL, 0, output_ids)
-
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        # Pattern detection happens here (after update_async_output_token_ids)
+        # so output_ids contains real tokens, not -1 placeholders
         for index, (state, pos, output_ids) in list(self.req_states.items()):
-            if state == ForcingState.FORCING and pos < len(FORCED_SEQUENCE):
-                allowed = FORCED_SEQUENCE[pos]
-                logger.info(
-                    "[PIPELINE] FORCING: masking logits, allowing only token %d "
-                    "(pos=%d/%d)",
-                    allowed,
-                    pos,
-                    len(FORCED_SEQUENCE),
-                )
-                original = logits[index, allowed].clone()
-                logits[index] = self.neg_inf
-                logits[index, allowed] = original
-                self.req_states[index] = (state, pos + 1, output_ids)
+            if state == ForcingState.NORMAL:
+                # Check for trigger pattern (filter -1 placeholders)
+                real_tokens = [t for t in output_ids if t != -1]
+                if len(real_tokens) >= len(TRIGGER_PATTERN):
+                    tail = real_tokens[-len(TRIGGER_PATTERN) :]
+                    if tail == TRIGGER_PATTERN:
+                        logger.info(
+                            "[PIPELINE] Trigger detected! tail=%s -> FORCING",
+                            tail,
+                        )
+                        self.req_states[index] = (
+                            ForcingState.FORCING,
+                            0,
+                            output_ids,
+                        )
+                        state = ForcingState.FORCING
+                        pos = 0
+
+            if state == ForcingState.FORCING:
+                if pos < len(FORCED_SEQUENCE):
+                    allowed = FORCED_SEQUENCE[pos]
+                    logger.info(
+                        "[PIPELINE] FORCING: allowing only token %d (pos=%d/%d)",
+                        allowed,
+                        pos,
+                        len(FORCED_SEQUENCE),
+                    )
+                    original = logits[index, allowed].clone()
+                    logits[index] = self.neg_inf
+                    logits[index, allowed] = original
+                    self.req_states[index] = (state, pos + 1, output_ids)
+                else:
+                    logger.info("[PIPELINE] Forced sequence complete -> NORMAL")
+                    self.req_states[index] = (ForcingState.NORMAL, 0, output_ids)
+
         return logits
