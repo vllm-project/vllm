@@ -1,0 +1,49 @@
+{%- for message in messages %}
+  {%- if message['role'] == 'system' %}
+{{- '<|im_start|>system\n' }}
+    {%- if message['content'] is string %}
+{{- message['content'] }}
+    {%- else %}
+      {%- for part in message['content'] %}
+        {%- if part['type'] == 'text' %}
+{{- part['text'] }}
+        {%- elif part['type'] == 'audio' or part['type'] == 'audio_url' %}
+{{- '<|AUDIO|>' }}
+        {%- endif %}
+      {%- endfor %}
+    {%- endif %}
+{{- '<|im_end|>\n' }}
+  {%- elif message['role'] == 'user' %}
+{{- '<|im_start|>user\n' }}
+    {%- if message['content'] is string %}
+{{- message['content'] }}
+    {%- else %}
+      {%- for part in message['content'] %}
+        {%- if part['type'] == 'text' %}
+{{- part['text'] }}
+        {%- elif part['type'] == 'audio' or part['type'] == 'audio_url' %}
+{{- '<|AUDIO|>' }}
+        {%- endif %}
+      {%- endfor %}
+    {%- endif %}
+{{- '<|im_end|>\n' }}
+  {%- elif message['role'] == 'assistant' %}
+{{- '<|im_start|>assistant\n' }}
+    {%- if message['content'] is string %}
+{{- message['content'] }}
+    {%- else %}
+      {%- for part in message['content'] %}
+        {%- if part['type'] == 'text' %}
+{{- part['text'] }}
+        {%- elif part['type'] == 'audio' or part['type'] == 'audio_url' %}
+{{- '<|AUDIO|>' }}
+        {%- endif %}
+      {%- endfor %}
+    {%- endif %}
+{{- '<|im_end|>\n' }}
+  {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+{{- '<|im_start|>assistant\n' }}
+{%- endif %}
+

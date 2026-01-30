@@ -316,6 +316,7 @@ _MULTIMODAL_MODELS = {
         "funaudiochat",
         "FunAudioChatForConditionalGeneration",
     ),
+    "VibeVoiceForASRTraining": ("vibevoice_asr", "VibeVoiceForASRTraining"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
     "Gemma3ForConditionalGeneration": ("gemma3_mm", "Gemma3ForConditionalGeneration"),  # noqa: E501
     "Gemma3nForConditionalGeneration": (

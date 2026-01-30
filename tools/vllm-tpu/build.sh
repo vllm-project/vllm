@@ -38,7 +38,7 @@ if ! grep -q "name = \"vllm-tpu\"" "$PYPROJECT_FILE"; then
     cp "$PYPROJECT_FILE" "${PYPROJECT_FILE}.bak"
     sed -i '0,/^name = "vllm"/s//name = "vllm-tpu"/' "$PYPROJECT_FILE"
 
-    echo "Patching ${CHANGE_FILE_LIST[@]} vllm to vllm-tpu..."
+    echo "Patching" "${CHANGE_FILE_LIST[@]}" "vllm to vllm-tpu..."
     # patching
     #   importlib.metadata.version('vllm') -> importlib.metadata.version('vllm-tpu')
     #   importlib.metadata.version("vllm") -> importlib.metadata.version("vllm-tpu")
