@@ -1,4 +1,4 @@
-model_name: "nvidia/DeepSeek-R1-0528-FP4-v2"
+model_name: "nvidia/DeepSeek-R1-NVFP4"
 tasks:
   - name: "gsm8k"
     metrics:
