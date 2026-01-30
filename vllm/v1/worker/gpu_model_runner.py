@@ -4200,6 +4200,7 @@ class GPUModelRunner(
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                 for_cudagraph_capture=is_graph_capturing,
+                use_spec_decode=max_query_len > 1,
             )
 
         with self.maybe_dummy_run_with_lora(

@@ -132,24 +132,11 @@ class Mamba2AttentionMetadata:
     token_chunk_offset_ptr: torch.Tensor | None = None
 
     # Speculative decoding support
-    num_spec_decodes: int = 0
-    num_spec_decode_tokens: int = 0
-
-    spec_token_indx: torch.Tensor | None = None
-    non_spec_token_indx: torch.Tensor | None = None
-
-    # Token-level state indices for speculative decode
-    spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch, num_spec+1]
-    non_spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch]
-
-    # Which sequences are doing speculative decode
-    spec_sequence_masks: torch.Tensor | None = None  # shape: [batch,]
-
-    # Query locations split by spec vs non-spec
-    spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
-    non_spec_query_start_loc: torch.Tensor | None = (
-        None  # shape: [batch - num_spec_decodes + 1,]
+    prefill_state_indices_tensor: torch.Tensor | None = None  # shape: [batch,]
+    decode_state_indices_tensor: torch.Tensor | None = (
+        None  # shape: [batch, num_spec+1] or [batch, 1]
     )
+    query_start_loc_d: torch.Tensor | None = None  # shape: [num_decodes + 1,]
 
     # Number of accepted tokens for each spec sequence (for loading correct checkpoint)
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
@@ -159,7 +146,7 @@ class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
 ):
     # _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-    supports_update_block_table: bool = False  # TODO smor- fix this
+    supports_update_block_table: bool = False  # TODO(ben) fix this
 
     def __init__(
         self,
@@ -174,77 +161,23 @@ class Mamba2AttentionMetadataBuilder(
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
 
-        # Enable speculative decoding support
-        self.speculative_config = vllm_config.speculative_config
-        self.compilation_config = vllm_config.compilation_config
-        self.num_spec: int = 0
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.num_speculative_tokens is not None
-        ):
-            self.use_spec_decode = True
-            self.num_spec = self.speculative_config.num_speculative_tokens
-        else:
-            self.use_spec_decode = False
-
-        # Pre-allocate tensors for CUDA graph support (similar to GDN)
-        self.decode_cudagraph_max_bs = min(
-            self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1),
-            self.compilation_config.max_cudagraph_capture_size,
+        self.decode_state_indices_tensor_buffer = torch.empty(
+            (self.decode_cudagraph_max_bs + 1, 1 + self.num_spec_tokens),
+            dtype=torch.int32,
+            device=device,
+        )
+        self.decode_query_start_loc_buffer = torch.empty(
+            (self.decode_cudagraph_max_bs + 2,),
+            dtype=torch.int32,
+            device=device,
+        )
+        self.decode_num_accepted_tokens_buffer = torch.empty(
+            (self.decode_cudagraph_max_bs + 1,),  # todo: check for OOB
+            dtype=torch.int32,
+            device=device,
         )
 
-        if self.use_spec_decode:
-            # Spec decode state indices: [batch, num_spec+1]
-            self.spec_state_indices_tensor_buffer = torch.empty(
-                (self.decode_cudagraph_max_bs, self.num_spec + 1),
-                dtype=torch.int32,
-                device=device,
-            )
-            # Non-spec state indices: [batch]
-            self.non_spec_state_indices_tensor_buffer = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
-            # Spec sequence masks: [batch]
-            self.spec_sequence_masks_buffer = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.bool,
-                device=device,
-            )
-            # Spec query start locations: [batch+1]
-            self.spec_query_start_loc_buffer = torch.empty(
-                (self.decode_cudagraph_max_bs + 1,),
-                dtype=torch.int32,
-                device=device,
-            )
-            # Non-spec query start locations: [batch+1]
-            self.non_spec_query_start_loc_buffer = torch.empty(
-                (self.decode_cudagraph_max_bs + 1,),
-                dtype=torch.int32,
-                device=device,
-            )
-            # Number of accepted tokens: [batch]
-            self.num_accepted_tokens_buffer = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.spec_token_indx = torch.empty(
-                (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.non_spec_token_indx = torch.empty(
-                (self.decode_cudagraph_max_bs * (self.num_spec + 1),),
-                dtype=torch.int32,
-                device=device,
-            )
-
-    def stable_boolean_sort(self, mask: torch.Tensor):
-        idx = torch.arange(mask.numel(), device=mask.device)
-        key = mask.to(torch.int32) * (mask.numel() + 1) + idx
-        return torch.argsort(key, stable=True)
+        self._init_reorder_batch_threshold(1, True)
 
     def build(
         self,
@@ -267,18 +200,13 @@ class Mamba2AttentionMetadataBuilder(
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
-        num_computed_tokens = None
         num_computed_tokens_p = None
-        block_idx_first_scheduled_token = None
         block_idx_first_scheduled_token_p = None
 
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
             # Additional cache-related varaiables:
             mamba_block_size = self.kv_cache_spec.block_size
-            num_computed_tokens = common_attn_metadata.num_computed_tokens_cpu.to(
-                self.device
-            )
             (
                 block_idx_last_computed_token,
                 block_idx_first_scheduled_token,
@@ -291,252 +219,49 @@ class Mamba2AttentionMetadataBuilder(
             block_idx_last_scheduled_token = None
             block_idx_last_computed_token = None
 
-        # Initialize spec decode variables
-        spec_state_indices_tensor = None
-        non_spec_state_indices_tensor = None
-        spec_sequence_masks = None
-        spec_query_start_loc = None
-        non_spec_query_start_loc = None
-        num_spec_decodes = 0
-        num_spec_decode_tokens = 0
-        num_accepted_tokens_filtered = None
-
-        # Check if we have spec decode sequences
-        if (
-            not self.use_spec_decode
-            or num_decode_draft_tokens_cpu is None
-            or num_decode_draft_tokens_cpu[num_decode_draft_tokens_cpu >= 0]
-            .sum()
-            .item()
-            == 0
-        ):
-            # No spec decode sequences
-            spec_sequence_masks = None
-            num_spec_decodes = 0
-        else:
-            # We have spec decode sequences
-            spec_sequence_masks = num_decode_draft_tokens_cpu >= 0
-            num_spec_decodes = spec_sequence_masks.sum().item()
-            if num_spec_decodes == 0:
-                spec_sequence_masks = None
-            else:
-                spec_sequence_masks = spec_sequence_masks.to(
-                    common_attn_metadata.query_start_loc.device, non_blocking=True
-                )
-
         # Compute decode/prefill split
-        if spec_sequence_masks is None:
-            # No spec decode - use standard split
-            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-                split_decodes_and_prefills(
-                    common_attn_metadata, decode_threshold=self.reorder_batch_threshold
-                )
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
             )
-            num_spec_decode_tokens = 0
-            if self.vllm_config.cache_config.enable_prefix_caching:
-                non_spec_state_indices_tensor = common_attn_metadata.block_table_tensor
-            else:
-                non_spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
-                    :, 0
-                ]
-            non_spec_query_start_loc = common_attn_metadata.query_start_loc
-            spec_token_indx = None
-            non_spec_token_indx = None
-        else:
-            # Have spec decode - compute counts EXCLUDING spec sequences
-            query_lens = (
-                common_attn_metadata.query_start_loc[1:]
-                - common_attn_metadata.query_start_loc[:-1]
-            )
+        )
+        assert not self.vllm_config.cache_config.enable_prefix_caching
+        decode_state_indices_tensor = common_attn_metadata.block_table_tensor[
+            :num_decodes, : 1 + self.num_spec_tokens
+        ]  # for decode
+        state_indices_tensor = common_attn_metadata.block_table_tensor[
+            num_decodes : num_decodes + num_prefills, 0
+        ]  # for prefill
+        decode_query_start_loc = common_attn_metadata.query_start_loc[: num_decodes + 1]
+        query_start_loc_p = common_attn_metadata.query_start_loc[
+            num_decodes : num_decodes + num_prefills + 1
+        ]
+        query_start_loc_p_cpu = common_attn_metadata.query_start_loc_cpu[
+            num_decodes : num_decodes + num_prefills + 1
+        ]
+        if num_prefills > 0:
+            query_start_loc_p = query_start_loc_p - num_decode_tokens
+        #     assert query_start_loc_p[0].item() == 0 # debug assertions
+        #     assert query_start_loc_p[-1].item() == num_prefill_tokens
+        # if num_decodes > 0:
+        #     assert decode_query_start_loc[0].item() == 0 # debug assertions
+        #     assert decode_query_start_loc[-1].item() == num_decode_tokens
 
-            non_spec_query_lens = query_lens[~spec_sequence_masks]
-            num_decodes = (non_spec_query_lens == 1).sum().item()
-            num_prefills = non_spec_query_lens.size(0) - num_decodes
-            num_decode_tokens = num_decodes
-            num_prefill_tokens = non_spec_query_lens.sum().item() - num_decode_tokens
-            num_spec_decode_tokens = (
-                query_lens.sum().item() - num_prefill_tokens - num_decode_tokens
-            )
-
-            if num_prefills == 0 and num_decodes == 0:
-                spec_token_size = min(
-                    num_spec_decodes * (self.num_spec + 1),
-                    common_attn_metadata.query_start_loc[-1].item(),
-                )
-                spec_token_indx = torch.arange(
-                    spec_token_size,
-                    dtype=torch.int32,
-                    device=common_attn_metadata.query_start_loc.device,
-                )
-                non_spec_token_indx = torch.empty(
-                    0,
-                    dtype=torch.int32,
-                    device=common_attn_metadata.query_start_loc.device,
-                )
-
-                if self.vllm_config.cache_config.enable_prefix_caching:
-                    num_cacheable_blocks = num_computed_tokens // mamba_block_size
-                    block_indices = num_cacheable_blocks.unsqueeze(1) + torch.arange(
-                        self.num_spec + 1, device=self.device
-                    ).unsqueeze(0)
-                    batch_indices = torch.arange(
-                        common_attn_metadata.block_table_tensor.size(0),
-                        device=self.device,
-                    ).unsqueeze(1)
-                    spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
-                        batch_indices, block_indices
-                    ]
-                else:
-                    spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
-                        :, : self.num_spec + 1
-                    ]
-                non_spec_state_indices_tensor = None
-                spec_query_start_loc = common_attn_metadata.query_start_loc
-                non_spec_query_start_loc = None
-            else:
-                if self.vllm_config.cache_config.enable_prefix_caching:
-                    assert block_idx_first_scheduled_token is not None
-                    block_idx_first_scheduled_token = block_idx_first_scheduled_token[
-                        ~spec_sequence_masks
-                    ]
-                    block_idx_last_scheduled_token = block_idx_last_scheduled_token[
-                        ~spec_sequence_masks
-                    ]
-                    block_idx_last_computed_token = block_idx_last_computed_token[
-                        ~spec_sequence_masks
-                    ]
-                spec_token_masks = torch.repeat_interleave(
-                    spec_sequence_masks, query_lens
-                )
-                # index = torch.argsort(spec_token_masks)
-                index = self.stable_boolean_sort(spec_token_masks)
-                num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
-                non_spec_token_indx = index[:num_non_spec_tokens]
-                spec_token_indx = index[num_non_spec_tokens:]
-
-                if self.vllm_config.cache_config.enable_prefix_caching:
-                    num_cacheable_blocks = num_computed_tokens // mamba_block_size
-                    block_indices = num_cacheable_blocks[spec_sequence_masks].unsqueeze(
-                        1
-                    ) + torch.arange(self.num_spec + 1, device=self.device).unsqueeze(0)
-                    batch_indices = torch.arange(
-                        spec_sequence_masks.sum().item(), device=self.device
-                    ).unsqueeze(1)
-                    spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
-                        spec_sequence_masks
-                    ][batch_indices, block_indices]
-                    non_spec_state_indices_tensor = (
-                        common_attn_metadata.block_table_tensor[~spec_sequence_masks]
-                    )
-                else:
-                    spec_state_indices_tensor = common_attn_metadata.block_table_tensor[
-                        spec_sequence_masks, : self.num_spec + 1
-                    ]
-                    non_spec_state_indices_tensor = (
-                        common_attn_metadata.block_table_tensor[~spec_sequence_masks, 0]
-                    )
-
-                spec_query_start_loc = torch.zeros(
-                    num_spec_decodes + 1,
-                    dtype=torch.int32,
-                    device=common_attn_metadata.query_start_loc.device,
-                )
-                torch.cumsum(
-                    query_lens[spec_sequence_masks], dim=0, out=spec_query_start_loc[1:]
-                )
-                non_spec_query_start_loc = torch.zeros(
-                    query_lens.size(0) - num_spec_decodes + 1,
-                    dtype=torch.int32,
-                    device=common_attn_metadata.query_start_loc.device,
-                )
-                torch.cumsum(
-                    query_lens[~spec_sequence_masks],
-                    dim=0,
-                    out=non_spec_query_start_loc[1:],
-                )
-
-            # Filter num_accepted_tokens to only spec sequences
-            if num_accepted_tokens is not None:
-                num_accepted_tokens_filtered = num_accepted_tokens[spec_sequence_masks]
+        if num_accepted_tokens is not None:
+            num_accepted_tokens = num_accepted_tokens[:num_decodes]
 
         # Compute seq_idx for prefill only
         if num_prefills > 0:
-            # [batch,]
-            if spec_sequence_masks is not None:
-                assert num_decode_draft_tokens_cpu is not None
-                num_computed_tokens_cpu_non_spec = (
-                    common_attn_metadata.num_computed_tokens_cpu[
-                        ~(num_decode_draft_tokens_cpu >= 0)
-                    ]
-                )
-            else:
-                num_computed_tokens_cpu_non_spec = (
-                    common_attn_metadata.num_computed_tokens_cpu
-                )
-            has_initial_states_cpu = num_computed_tokens_cpu_non_spec[num_decodes:] > 0
+            assert common_attn_metadata.num_computed_tokens_cpu is not None
+            prefill_num_computed_tokens_cpu = (
+                common_attn_metadata.num_computed_tokens_cpu[num_decodes:]
+            )
+
+            has_initial_states_cpu = prefill_num_computed_tokens_cpu > 0
             prep_initial_states = torch.any(has_initial_states_cpu).item()
             has_initial_states_p = has_initial_states_cpu.to(
                 common_attn_metadata.query_start_loc.device
             )
-
-            # Subtract ALL decode tokens (spec + non-spec)
-            # to get prefill-only coordinates
-            total_decode_tokens = num_decode_tokens + num_spec_decode_tokens
-
-            if spec_sequence_masks is not None:
-                query_lens_all = (
-                    common_attn_metadata.query_start_loc[1:]
-                    - common_attn_metadata.query_start_loc[:-1]
-                )
-                query_lens_non_spec = query_lens_all[~spec_sequence_masks]
-                query_lens_prefills = query_lens_non_spec[num_decodes:]
-                query_start_loc_p = torch.zeros(
-                    num_prefills + 1,
-                    dtype=common_attn_metadata.query_start_loc.dtype,
-                    device=common_attn_metadata.query_start_loc.device,
-                )
-                torch.cumsum(query_lens_prefills, dim=0, out=query_start_loc_p[1:])
-
-                query_lens_cpu_all = (
-                    common_attn_metadata.query_start_loc_cpu[1:]
-                    - common_attn_metadata.query_start_loc_cpu[:-1]
-                )
-                assert num_decode_draft_tokens_cpu is not None
-                query_lens_cpu_non_spec = query_lens_cpu_all[
-                    ~(num_decode_draft_tokens_cpu >= 0)
-                ]
-                query_lens_cpu_prefills = query_lens_cpu_non_spec[num_decodes:]
-                query_start_loc_p_cpu = torch.zeros(
-                    num_prefills + 1,
-                    dtype=common_attn_metadata.query_start_loc_cpu.dtype,
-                )
-                torch.cumsum(
-                    query_lens_cpu_prefills, dim=0, out=query_start_loc_p_cpu[1:]
-                )
-            else:
-                query_start_loc_p = (
-                    common_attn_metadata.query_start_loc[-num_prefills - 1 :]
-                    - total_decode_tokens
-                )
-                query_start_loc_p_cpu = (
-                    common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-                    - total_decode_tokens
-                )
-
-            if self.vllm_config.cache_config.enable_prefix_caching:
-                assert num_computed_tokens is not None
-                if spec_sequence_masks is not None:
-                    num_computed_tokens_non_spec = num_computed_tokens[
-                        ~spec_sequence_masks
-                    ]
-                else:
-                    num_computed_tokens_non_spec = num_computed_tokens
-                num_computed_tokens_p = num_computed_tokens_non_spec[num_decodes:]
-                assert block_idx_first_scheduled_token is not None
-                block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
-                    num_decodes:
-                ]
-            num_computed_tokens_p_cpu = num_computed_tokens_cpu_non_spec[num_decodes:]
 
             # The code below carefully constructs the chunks such that:
             # 1. Chunks contain tokens from a *single* sequence only.
@@ -553,7 +278,7 @@ class Mamba2AttentionMetadataBuilder(
             last_chunk_indices = []
             seqlen_pos = 0
             for req_idx in range(num_prefills):
-                this_num_computed = num_computed_tokens_p_cpu[req_idx].item()
+                this_num_computed = prefill_num_computed_tokens_cpu[req_idx].item()
                 this_new_tokens = (
                     query_start_loc_p_cpu[req_idx + 1].item()
                     - query_start_loc_p_cpu[req_idx].item()
@@ -600,88 +325,40 @@ class Mamba2AttentionMetadataBuilder(
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(query_start_loc_p)
             )
-
-        # CUDA graph padding for spec decode
-        elif (
-            self.use_spec_decode
-            and spec_sequence_masks is not None
-            and num_prefills == 0
-            and num_decodes == 0
-            and num_spec_decodes <= self.decode_cudagraph_max_bs
-            and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
-            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
-            # Pad for CUDA graph (pure spec decode batch)
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_spec_decode_tokens
-            )
-            batch_size = min(self.decode_cudagraph_max_bs, num_input_tokens)
-
-            # Copy and pad spec_state_indices_tensor
-            self.spec_state_indices_tensor_buffer[:num_spec_decodes].copy_(
-                spec_state_indices_tensor, non_blocking=True
-            )
-            spec_state_indices_tensor = self.spec_state_indices_tensor_buffer[
-                :batch_size
-            ]
-            spec_state_indices_tensor[num_spec_decodes:].fill_(PAD_SLOT_ID)
-
-            # Copy and pad spec_sequence_masks
-            self.spec_sequence_masks_buffer[:num_spec_decodes].copy_(
-                spec_sequence_masks, non_blocking=True
-            )
-            spec_sequence_masks = self.spec_sequence_masks_buffer[:batch_size]
-            spec_sequence_masks[num_spec_decodes:].fill_(False)
-
-            # Copy and pad spec_query_start_loc
-            assert spec_query_start_loc is not None
-            self.spec_query_start_loc_buffer[: num_spec_decodes + 1].copy_(
-                spec_query_start_loc, non_blocking=True
-            )
-            spec_num_query_tokens = spec_query_start_loc[-1]
-            spec_query_start_loc = self.spec_query_start_loc_buffer[: batch_size + 1]
-            spec_query_start_loc[num_spec_decodes + 1 :].fill_(spec_num_query_tokens)
-
-            # Copy and pad num_accepted_tokens
-            if num_accepted_tokens_filtered is not None:
-                self.num_accepted_tokens_buffer[:num_spec_decodes].copy_(
-                    num_accepted_tokens_filtered, non_blocking=True
-                )
-                num_accepted_tokens_filtered = self.num_accepted_tokens_buffer[
-                    :batch_size
-                ]
-                num_accepted_tokens_filtered[num_spec_decodes:].fill_(1)
-
-        # CUDA graph padding for non-spec decode
+        # CUDA graph padding for decodes
         elif (
             0 < num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
-            # Pad state tensor for CUDA graph (regular decode only)
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
-            self.state_indices_tensor[:num_decodes].copy_(
-                non_spec_state_indices_tensor, non_blocking=True
+            # Pad for CUDA graph (pure spec decode batch)
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decode_tokens)
+            assert num_input_tokens % (1 + self.num_spec_tokens) == 0
+            padded_bs = num_input_tokens // (1 + self.num_spec_tokens)
+            self.decode_state_indices_tensor_buffer[:num_decodes].copy_(
+                decode_state_indices_tensor, non_blocking=True
             )
-            non_spec_state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
-            non_spec_state_indices_tensor[num_decodes:] = PAD_SLOT_ID
+            self.decode_state_indices_tensor_buffer[num_decodes:padded_bs].fill_(
+                PAD_SLOT_ID
+            )
+            decode_state_indices_tensor = self.decode_state_indices_tensor_buffer[
+                :padded_bs
+            ]
+            self.decode_query_start_loc_buffer[: num_decodes + 1].copy_(
+                decode_query_start_loc, non_blocking=True
+            )
+            self.decode_query_start_loc_buffer[num_decodes + 1 : padded_bs + 1].fill_(
+                num_decode_tokens
+            )
+            decode_query_start_loc = self.decode_query_start_loc_buffer[: padded_bs + 1]
 
-            if self.vllm_config.cache_config.enable_prefix_caching:
-                assert block_idx_last_scheduled_token is not None
-                assert block_idx_last_computed_token is not None
-                self.block_idx_last_scheduled_token[:num_decodes].copy_(
-                    block_idx_last_scheduled_token, non_blocking=True
+            # Copy and pad num_accepted_tokens
+            if self.use_spec_decode:
+                assert num_accepted_tokens is not None
+                self.decode_num_accepted_tokens_buffer[:num_decodes].copy_(
+                    num_accepted_tokens, non_blocking=True
                 )
-                block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                    :num_decode_tokens
-                ]
-                block_idx_last_scheduled_token[num_decodes:] = 0
-
-                self.block_idx_last_computed_token[:num_decodes].copy_(
-                    block_idx_last_computed_token, non_blocking=True
-                )
-                block_idx_last_computed_token = self.block_idx_last_computed_token[
-                    :num_decode_tokens
-                ]
+                self.decode_num_accepted_tokens_buffer[num_decodes:padded_bs].fill_(1)
+                num_accepted_tokens = self.decode_num_accepted_tokens_buffer[:padded_bs]
 
         attn_metadata = Mamba2AttentionMetadata(
             num_prefills=num_prefills,
@@ -703,17 +380,10 @@ class Mamba2AttentionMetadataBuilder(
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
             block_idx_last_computed_token=block_idx_last_computed_token,
             num_computed_tokens_p=num_computed_tokens_p,
-            # Speculative decode fields
-            num_spec_decodes=num_spec_decodes,
-            num_spec_decode_tokens=num_spec_decode_tokens,
-            spec_state_indices_tensor=spec_state_indices_tensor,
-            non_spec_state_indices_tensor=non_spec_state_indices_tensor,
-            spec_sequence_masks=spec_sequence_masks,
-            spec_query_start_loc=spec_query_start_loc,
-            non_spec_query_start_loc=non_spec_query_start_loc,
-            spec_token_indx=spec_token_indx,
-            non_spec_token_indx=non_spec_token_indx,
-            num_accepted_tokens=num_accepted_tokens_filtered,
+            prefill_state_indices_tensor=state_indices_tensor,
+            decode_state_indices_tensor=decode_state_indices_tensor,
+            query_start_loc_d=decode_query_start_loc,
+            num_accepted_tokens=num_accepted_tokens,
         )
 
         return attn_metadata
@@ -750,6 +420,7 @@ class Mamba2AttentionMetadataBuilder(
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> Mamba2AttentionMetadata:
+        raise NotImplementedError("Mamba2 does not support block table update.")
         new_metadata = copy.copy(metadata)
         prefix_caching = self.vllm_config.cache_config.enable_prefix_caching
         state_indices_t = blk_table if prefix_caching else blk_table[:, 0]
@@ -765,6 +436,6 @@ class Mamba2AttentionMetadataBuilder(
             persistent_state_indices_t.copy_(state_indices_t, non_blocking=True)
             state_indices_t = persistent_state_indices_t
 
-        new_metadata.non_spec_state_indices_tensor = state_indices_t
+        new_metadata.prefill_state_indices_tensor = state_indices_t
 
         return new_metadata

@@ -20,9 +20,7 @@ M = TypeVar("M")
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     reorder_batch_threshold: int = 1
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
         self,
@@ -34,16 +32,38 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         assert isinstance(kv_cache_spec, MambaSpec)
+
+        # Enable speculative decoding support
+        self.speculative_config = vllm_config.speculative_config
+        self.compilation_config = vllm_config.compilation_config
+        self.num_spec_tokens: int = (
+            self.speculative_config.num_speculative_tokens
+            if self.speculative_config is not None
+            else 0
+        )
+        if self.num_spec_tokens is None:
+            self.num_spec_tokens = 0
+        self.use_spec_decode = self.num_spec_tokens > 0
+
+        # Pre-allocate tensors for CUDA graph support (similar to GDN)
         self.compilation_config = vllm_config.compilation_config
         self.decode_cudagraph_max_bs = min(
             self.vllm_config.scheduler_config.max_num_seqs,
             self.compilation_config.max_cudagraph_capture_size,
         )
+        self.decode_cudagraph_max_tokens = min(
+            self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec_tokens + 1),
+            self.compilation_config.max_cudagraph_capture_size,
+        )
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+            + self.num_spec_tokens * vllm_config.scheduler_config.max_num_seqs
+        )
 
         if self.vllm_config.cache_config.enable_prefix_caching:
             self.state_indices_tensor = torch.empty(
                 (
-                    self.decode_cudagraph_max_bs,
+                    self.decode_cudagraph_max_tokens,  # todo: can this be reduced?
                     cdiv(
                         self.vllm_config.model_config.max_model_len,
                         self.kv_cache_spec.block_size,
@@ -53,18 +73,18 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=device,
             )
             self.block_idx_last_scheduled_token = torch.empty(
-                (self.decode_cudagraph_max_bs,),
+                (self.decode_cudagraph_max_tokens,),
                 dtype=torch.int32,
                 device=device,
             )
             self.block_idx_last_computed_token = torch.empty(
-                (self.decode_cudagraph_max_bs,),
+                (self.decode_cudagraph_max_tokens,),
                 dtype=torch.int32,
                 device=device,
             )
         else:
             self.state_indices_tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
+                (self.decode_cudagraph_max_tokens,),  # todo: can this be reduced?
                 dtype=torch.int32,
                 device=device,
             )
