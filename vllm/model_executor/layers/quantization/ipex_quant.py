@@ -315,6 +315,9 @@ class XPUFp8LinearMethod(Fp8LinearMethod):
             replace_parameter(layer, "weight_scale", weight_scale.data)
             layer.input_scale = None
 
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -375,6 +378,9 @@ class XPUFp8MoEMethod(Fp8OnlineMoEMethod):
             use_prepack=True,
             experts_start_id=ep_rank_start,
         )
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

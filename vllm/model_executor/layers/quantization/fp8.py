@@ -632,6 +632,9 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             )
             # Activations not quantized for marlin.
 
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
+
 
 class Fp8MoEMethod(FusedMoEMethodBase):
     """MoE method for FP8.
@@ -890,6 +893,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self._setup_kernel(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
 
     def maybe_make_prepare_finalize(
         self,
@@ -1163,6 +1169,9 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             layer.w13_input_scale,
             layer.w2_input_scale,
         )
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

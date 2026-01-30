@@ -11,13 +11,12 @@ A Hugging Face Transformer model occupies one GPU for training, whereas a
 
 The example performs the following steps:
 * Load the training model on one gpu (scheduled via ray)
-* Initialize the inference model with real weights across
+* Initialize the inference model with dummy weights across
   two gpus using vLLM's tensor parallelism and Ray placement groups.
-* Zero out all inference model weights to demonstrate weight syncing.
-* Generate gibberish from a list of prompts using the zeroed
+* Generate gibberish from a list of prompts using the randomly initialized
   inference engine.
-* Broadcast the real weights from the training model to the inference
-  engine using a Ray collective RPC group.
+* Update the weights of the training model and broadcast the updated weights
+  to the inference engine by using a Ray collective RPC group.
 * Generating from the list of prompts after weight sync should result
   in sensible outputs.
 
@@ -51,10 +50,6 @@ class MyLLM(LLM):
     def __init__(self, *args, **kwargs):
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0,1"
         super().__init__(*args, **kwargs)
-
-    def zero_weights(self):
-        """Zero out all model weights to demonstrate weight syncing works."""
-        self.llm_engine.collective_rpc("zero_weights")
 
 
 @ray.remote(num_gpus=1)
@@ -136,13 +131,9 @@ llm = ray.remote(
     data_parallel_size=1,
     distributed_executor_backend="ray",
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
+    load_format="dummy",
     quantization="fp8",
 )
-
-# Zero out all model weights to demonstrate that weight syncing works.
-# After zeroing, the model will generate garbage. After syncing, it will
-# generate sensible outputs.
-ray.get(llm.zero_weights.remote())
 
 # Generate text from the prompts.
 prompts = [
@@ -156,8 +147,8 @@ sampling_params = SamplingParams(temperature=0)
 
 outputs = ray.get(llm.generate.remote(prompts, sampling_params))
 
-# Generate text with the zeroed model. The output is expected to be nonsense
-# because all weights have been zeroed out.
+# Generate text with the initial model. The output is expected to be nonsense
+# because the weights are randomly initialized.
 print("-" * 50)
 for output in outputs:
     prompt = output.prompt
