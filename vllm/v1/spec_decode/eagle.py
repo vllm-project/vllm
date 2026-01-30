@@ -1363,8 +1363,7 @@ class SpecDecodeBaseProposer:
 
         # share embed_tokens with the target model if needed
         # omit for draft models or when using pipeline parallelism
-        is_draft_model = not self.pass_hidden_states_to_model
-        if get_pp_group().world_size == 1 and not is_draft_model:
+        if get_pp_group().world_size == 1 and not self.is_draft_model:
             if hasattr(target_language_model.model, "embed_tokens"):
                 target_embed_tokens = target_language_model.model.embed_tokens
             elif hasattr(target_language_model.model, "embedding"):
@@ -1425,7 +1424,7 @@ class SpecDecodeBaseProposer:
 
         # share lm_head with the target model if needed
         share_lm_head = False
-        if hasattr(self.model, "has_own_lm_head") and not is_draft_model:
+        if hasattr(self.model, "has_own_lm_head") and not self.is_draft_model:
             # EAGLE model
             if not self.model.has_own_lm_head:
                 share_lm_head = True
@@ -1454,7 +1453,7 @@ class SpecDecodeBaseProposer:
                     "Detected EAGLE model with distinct lm_head weights. "
                     "Keeping separate lm_head weights from the target model."
                 )
-        elif not is_draft_model:
+        elif not self.is_draft_model:
             # MTP model
             share_lm_head = True
             logger.info(
