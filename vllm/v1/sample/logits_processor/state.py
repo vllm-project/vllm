@@ -166,7 +166,18 @@ class LogitsProcessors:
 
     def any_needs_output_token_ids(self) -> bool:
         """Check if any logits processor needs output token IDs."""
-        return any(
-            lp.needs_output_token_ids()
-            for lp in chain(self.argmax_invariant, self.non_argmax_invariant)
-        )
+        from vllm.logger import init_logger
+
+        logger = init_logger(__name__)
+        result = False
+        for lp in chain(self.argmax_invariant, self.non_argmax_invariant):
+            needs = lp.needs_output_token_ids()
+            logger.info(
+                "[FORCE] any_needs_output_token_ids: %s -> %s",
+                type(lp).__name__,
+                needs,
+            )
+            if needs:
+                result = True
+        logger.info("[FORCE] any_needs_output_token_ids final result: %s", result)
+        return result
