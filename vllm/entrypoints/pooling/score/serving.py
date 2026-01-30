@@ -27,6 +27,9 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponseData,
 )
 from vllm.entrypoints.pooling.score.utils import (
+    ScoreContentPartParam,
+    ScoreData,
+    ScoreInputs,
     ScoreMultiModalParam,
     _cosine_similarity,
     _validate_score_input_lens,
@@ -76,8 +79,8 @@ class ServingScores(OpenAIServing):
     async def _embedding_score(
         self,
         tokenizer: TokenizerLike,
-        data_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
-        data_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -168,8 +171,8 @@ class ServingScores(OpenAIServing):
     async def _cross_encoding_score(
         self,
         tokenizer: TokenizerLike,
-        data_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
-        data_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -265,8 +268,8 @@ class ServingScores(OpenAIServing):
         request: RerankRequest | ScoreRequest,
         tokenizer: TokenizerLike,
         tokenization_kwargs: dict[str, Any],
-        data_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
-        data_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
     ) -> tuple[str, TokensPrompt]:
         model_config = self.model_config
 
@@ -286,8 +289,8 @@ class ServingScores(OpenAIServing):
 
     async def _run_scoring(
         self,
-        data_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
-        data_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam],
+        data_1: ScoreInputs,
+        data_2: ScoreInputs,
         request: ScoreRequest | RerankRequest,
         request_id: str,
         raw_request: Request | None = None,
@@ -308,48 +311,42 @@ class ServingScores(OpenAIServing):
             else await self._get_trace_headers(raw_request.headers)
         )
 
-        if not self.model_config.is_multimodal_model and (
-            isinstance(data_1, dict) or isinstance(data_2, dict)
-        ):
-            raise ValueError(
-                f"MultiModalParam is not supported for {self.model_config.architecture}"  # noqa: E501
-            )
-
-        if isinstance(data_1, str):
+        if not isinstance(data_1, list):
             data_1 = [data_1]
-        elif isinstance(data_1, dict):
-            data_1 = data_1.get("content")  # type: ignore[assignment]
 
-        if isinstance(data_2, str):
+        if not isinstance(data_2, list):
             data_2 = [data_2]
-        elif isinstance(data_2, dict):
-            data_2 = data_2.get("content")  # type: ignore[assignment]
 
+        def _validate_mm_score_input(
+            data: list[str | ScoreMultiModalParam],
+        ) -> list[str | list[ScoreContentPartParam]]:
+            out = []
+            for d in data:
+                if isinstance(d, str):
+                    out.append(d)
+                else:
+                    if not self.is_multimodal_model:
+                        raise ValueError(
+                            f"MultiModalParam is not supported for "
+                            f"{self.model_config.architecture}"
+                        )
+                    out.append(d.get("content"))
+            return out
+
+        data_1 = _validate_mm_score_input(data_1)
+        data_2 = _validate_mm_score_input(data_2)
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
-        if self.model_config.is_cross_encoder:
-            return await self._cross_encoding_score(
-                tokenizer=tokenizer,
-                data_1=data_1,  # type: ignore[arg-type]
-                data_2=data_2,  # type: ignore[arg-type]
-                request=request,
-                request_id=request_id,
-                tokenization_kwargs=tokenization_kwargs,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-            )
-
-        else:
-            return await self._embedding_score(
-                tokenizer=tokenizer,
-                data_1=data_1,  # type: ignore[arg-type]
-                data_2=data_2,  # type: ignore[arg-type]
-                request=request,
-                request_id=request_id,
-                tokenization_kwargs=tokenization_kwargs,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-            )
+        return await self._score_func(
+            tokenizer=tokenizer,
+            data_1=data_1,  # type: ignore[arg-type]
+            data_2=data_2,  # type: ignore[arg-type]
+            request=request,
+            request_id=request_id,
+            tokenization_kwargs=tokenization_kwargs,
+            lora_request=lora_request,
+            trace_headers=trace_headers,
+        )
 
     async def create_score(
         self,

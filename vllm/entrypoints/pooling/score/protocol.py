@@ -17,7 +17,7 @@ from vllm.entrypoints.pooling.base.protocol import (
 )
 from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
-    ScoreMultiModalParam,
+    ScoreInputs,
 )
 from vllm.utils import random_uuid
 
@@ -38,13 +38,13 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
 
 
 class ScoreDataRequest(ScoreRequestMixin):
-    data_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
-    data_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
+    data_1: ScoreInputs
+    data_2: ScoreInputs
 
 
 class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
-    queries: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
-    documents: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
+    queries: ScoreInputs
+    documents: ScoreInputs
 
     @property
     def data_1(self):
@@ -55,9 +55,22 @@ class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
         return self.documents
 
 
+class ScoreQueriesItemsRequest(ScoreRequestMixin):
+    queries: ScoreInputs
+    items: ScoreInputs
+
+    @property
+    def data_1(self):
+        return self.queries
+
+    @property
+    def data_2(self):
+        return self.items
+
+
 class ScoreTextRequest(ScoreRequestMixin):
-    text_1: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
-    text_2: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
+    text_1: ScoreInputs
+    text_2: ScoreInputs
 
     @property
     def data_1(self):
@@ -69,13 +82,16 @@ class ScoreTextRequest(ScoreRequestMixin):
 
 
 ScoreRequest: TypeAlias = (
-    ScoreQueriesDocumentsRequest | ScoreDataRequest | ScoreTextRequest
+    ScoreQueriesDocumentsRequest
+    | ScoreQueriesItemsRequest
+    | ScoreDataRequest
+    | ScoreTextRequest
 )
 
 
 class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
-    query: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
-    documents: str | list[str] | ScoreMultiModalParam | list[ScoreMultiModalParam]
+    query: ScoreInputs
+    documents: ScoreInputs
     top_n: int = Field(default_factory=lambda: 0)
 
     # --8<-- [start:rerank-extra-params]

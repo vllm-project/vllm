@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterable
 from typing import Any, TypeAlias, cast
 
 from torch.nn import CosineSimilarity
@@ -10,12 +11,13 @@ from vllm.entrypoints.chat_utils import (
     BaseMultiModalItemTracker,
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,
+    ChatCompletionContentPartParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionContentPartVideoParam,
     ChatTemplateResolutionError,
+    ConversationMessage,
     MultiModalItemTracker,
-    _ContentPart,
-    _parse_chat_message_content_part,
+    _parse_chat_message_content_parts,
 )
 from vllm.inputs import TokensPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
@@ -44,6 +46,12 @@ class ScoreMultiModalParam(TypedDict, total=False):
 
     content: Required[list[ScoreContentPartParam]]
     """The multimodal contents"""
+
+
+# without content
+ScoreData = str | list[ScoreContentPartParam]
+# with content in ScoreMultiModalParam
+ScoreInputs = str | ScoreMultiModalParam | list[str | ScoreMultiModalParam]
 
 
 def _cosine_similarity(
@@ -77,8 +85,8 @@ def _cosine_similarity(
 
 
 def _validate_score_input_lens(
-    data_1: list[str] | list[ScoreContentPartParam],
-    data_2: list[str] | list[ScoreContentPartParam],
+    data_1: list[ScoreData],
+    data_2: list[ScoreData],
 ):
     len_1 = len(data_1)
     len_2 = len(data_2)
@@ -92,18 +100,20 @@ def _validate_score_input_lens(
 
 
 def parse_score_data(
-    data_1: str | ScoreContentPartParam,
-    data_2: str | ScoreContentPartParam,
+    data_1: ScoreData,
+    data_2: ScoreData,
     model_config: ModelConfig,
 ) -> tuple[str, str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
     mm_tracker = MultiModalItemTracker(model_config)
 
-    content_1 = _parse_score_content(data_1, mm_tracker)
-    content_2 = _parse_score_content(data_2, mm_tracker)
+    content_1 = _parse_score_content("query", data_1, mm_tracker)
+    content_2 = _parse_score_content("document", data_2, mm_tracker)
 
-    def ensure_str(content: _ContentPart | None) -> str:
-        if content is not None and isinstance(content, str):
-            return cast(str, content)
+    def ensure_str(content: list[ConversationMessage]) -> str:
+        assert len(content) == 1
+        prompt = content[0]["content"]
+        if prompt is not None and isinstance(prompt, str):
+            return cast(str, prompt)
         else:
             raise ValueError(f"Only string content is supported, but got {content}.")
 
@@ -115,19 +125,22 @@ def parse_score_data(
 
 
 def _parse_score_content(
+    role: str,
     data: str | ScoreContentPartParam,
     mm_tracker: BaseMultiModalItemTracker,
-) -> _ContentPart | None:
+) -> list[ConversationMessage]:
+    parts: Iterable[ChatCompletionContentPartParam]
     if isinstance(data, str):
-        part = ChatCompletionContentPartTextParam(type="text", text=data)
+        parts = [ChatCompletionContentPartTextParam(type="text", text=data)]
     else:
-        part = data
+        parts = cast(Iterable[ChatCompletionContentPartParam], data)
 
     mm_parser = mm_tracker.create_parser()
 
-    parse_res = _parse_chat_message_content_part(
-        part,
-        mm_parser,
+    parse_res = _parse_chat_message_content_parts(
+        role=role,
+        parts=parts,
+        mm_tracker=mm_tracker,
         wrap_dicts=False,
         interleave_strings=False,
     )
