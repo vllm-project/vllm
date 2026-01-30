@@ -111,6 +111,109 @@ def awq_dequantize_kernel(
 
 
 @triton.jit
+def awq_dequantize_kernel_transposed(
+    qweight_ptr,  # quantized matrix
+    scales_ptr,  # scales, per group
+    zeros_ptr,  # zeros, per group
+    group_size,  # Should always be one of the supported group sizes
+    result_ptr,  # Output matrix in TRANSPOSED layout [N, K]
+    num_cols,  # input num cols in qweight (N // 8)
+    num_rows,  # input num rows in qweight (K)
+    BLOCK_SIZE_X: tl.constexpr,  # N dimension (unpacked) tile size
+    BLOCK_SIZE_Y: tl.constexpr,  # K dimension tile size
+):
+    """Dequantize AWQ weights to transposed layout [N, K] for TN GEMM.
+
+    Memory access pattern optimized for coalescing:
+    - Loads: coalesced in N dimension (packed qweight columns)
+    - Stores: coalesced in K dimension after transpose
+
+    The kernel processes tiles of [BLOCK_SIZE_Y, BLOCK_SIZE_X] = [K_block, N_block]
+    and writes them transposed as [N_block, K_block] with coalesced K writes.
+    """
+    # pid_x covers N dimension (in units of BLOCK_SIZE_X unpacked elements)
+    # pid_y covers K dimension (in units of BLOCK_SIZE_Y elements)
+    pid_x = tl.program_id(axis=0)
+    pid_y = tl.program_id(axis=1)
+
+    # BLOCK_SIZE_X is the unpacked N tile size, so packed size is BLOCK_SIZE_X // 8
+    PACKED_X: tl.constexpr = BLOCK_SIZE_X // 8
+
+    # Compute offsets for loading qweight [K, N//8]
+    # Load a tile of [BLOCK_SIZE_Y, PACKED_X] packed values
+    offsets_k = pid_y * BLOCK_SIZE_Y + tl.arange(0, BLOCK_SIZE_Y)
+    offsets_n_packed = pid_x * PACKED_X + tl.arange(0, PACKED_X)
+    qweight_offsets = num_cols * offsets_k[:, None] + offsets_n_packed[None, :]
+
+    masks_k = offsets_k < num_rows
+    masks_n_packed = offsets_n_packed < num_cols
+    qweight_masks = masks_k[:, None] & masks_n_packed[None, :]
+
+    # Load packed weights: [BLOCK_SIZE_Y, PACKED_X]
+    iweights = tl.load(qweight_ptr + qweight_offsets, qweight_masks, 0)
+
+    # Unpack 8 x 4-bit values per int32
+    # Result shape: [BLOCK_SIZE_Y, BLOCK_SIZE_X] = [K_block, N_block]
+    iweights = tl.interleave(iweights, iweights)
+    iweights = tl.interleave(iweights, iweights)
+    iweights = tl.interleave(iweights, iweights)
+
+    # AWQ bit reordering: [0, 4, 1, 5, 2, 6, 3, 7]
+    reverse_awq_order = (
+        (tl.arange(0, 2) * 4)[None, :] + tl.arange(0, 4)[:, None]
+    ).reshape(8)
+    shifts = reverse_awq_order * 4
+    shifts = tl.broadcast_to(shifts[None, :], (BLOCK_SIZE_Y * PACKED_X, 8))
+    shifts = tl.reshape(shifts, (BLOCK_SIZE_Y, BLOCK_SIZE_X))
+
+    iweights = (iweights >> shifts) & 0xF
+
+    # Load zeros [num_groups, N//8] - one row per group
+    group_idx = pid_y * BLOCK_SIZE_Y // group_size
+    zero_offsets = num_cols * group_idx + offsets_n_packed
+    zero_masks = (group_idx < num_rows // group_size) & masks_n_packed
+
+    zeros = tl.load(zeros_ptr + zero_offsets, zero_masks, 0)
+    zeros = tl.interleave(zeros, zeros)
+    zeros = tl.interleave(zeros, zeros)
+    zeros = tl.interleave(zeros, zeros)
+    zeros = tl.broadcast_to(zeros[None, :], (BLOCK_SIZE_Y, BLOCK_SIZE_X))
+    zeros = (zeros >> shifts) & 0xF
+
+    # Load scales [num_groups, N] - one row per group
+    offsets_n = pid_x * BLOCK_SIZE_X + tl.arange(0, BLOCK_SIZE_X)
+    scale_offsets = (num_cols * 8) * group_idx + offsets_n
+    scale_masks = (group_idx < num_rows // group_size) & (offsets_n < num_cols * 8)
+
+    scales = tl.load(scales_ptr + scale_offsets, scale_masks, 0.0)
+    scales = tl.broadcast_to(scales[None, :], (BLOCK_SIZE_Y, BLOCK_SIZE_X))
+
+    # Dequantize: [BLOCK_SIZE_Y, BLOCK_SIZE_X] = [K_block, N_block]
+    iweights = (iweights - zeros) * scales
+    iweights = iweights.to(result_ptr.type.element_ty)
+
+    # Transpose in registers: [K_block, N_block] -> [N_block, K_block]
+    # This enables coalesced writes in K dimension
+    iweights_t = tl.trans(iweights)
+
+    # Compute output offsets for transposed layout [N, K]
+    # Output tile at [pid_x * BLOCK_SIZE_X : ..., pid_y * BLOCK_SIZE_Y : ...]
+    out_offsets_n = pid_x * BLOCK_SIZE_X + tl.arange(0, BLOCK_SIZE_X)  # rows
+    out_offsets_k = pid_y * BLOCK_SIZE_Y + tl.arange(0, BLOCK_SIZE_Y)  # cols
+
+    # result[n, k] at address n * num_rows + k (row-major [N, K])
+    # Write [BLOCK_SIZE_X, BLOCK_SIZE_Y] tile with K as inner dimension (coalesced)
+    result_offsets = num_rows * out_offsets_n[:, None] + out_offsets_k[None, :]
+
+    result_masks_n = out_offsets_n < num_cols * 8
+    result_masks_k = out_offsets_k < num_rows
+    result_masks = result_masks_n[:, None] & result_masks_k[None, :]
+
+    # Store transposed tile with coalesced K writes
+    tl.store(result_ptr + result_offsets, iweights_t, result_masks)
+
+
+@triton.jit
 def awq_gemm_kernel(
     a_ptr,
     b_ptr,
@@ -572,39 +675,39 @@ def awq_dequantize_triton(
     zeros: torch.Tensor,
     block_size_x: int = 128,
     block_size_y: int = 32,
+    output_k: int | None = None,  # Optional: output only first output_k rows
 ) -> torch.Tensor:
-    K = qweight.shape[0]
+    K_weight = qweight.shape[0]  # May be padded
     M = scales.shape[1]
     group_size = qweight.shape[0] // scales.shape[0]
 
-    assert K > 0 and M > 0
-    assert scales.shape[0] == K // group_size and scales.shape[1] == M
-    assert zeros.shape[0] == K // group_size and zeros.shape[1] == M // 8
-    assert group_size <= K
-    assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
+    # Use output_k if provided, otherwise use full K
+    K_output = output_k if output_k is not None else K_weight
 
-    # Result tensor:
-    # number of rows = same as input tensor
-    # number of cols = 8 x input tensor num cols
+    assert K_weight > 0 and M > 0 and K_output > 0
+    assert K_output <= K_weight, (
+        f"output_k ({K_output}) must be <= qweight K ({K_weight})"
+    )
+    assert scales.shape[0] == K_weight // group_size and scales.shape[1] == M
+    assert zeros.shape[0] == K_weight // group_size and zeros.shape[1] == M // 8
+    assert group_size <= K_weight
+    assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K_weight
+
+    # Result tensor: [K_output, N]
     result = torch.empty(
-        qweight.shape[0],
+        K_output,
         qweight.shape[1] * 8,
         device=qweight.device,
         dtype=scales.dtype,
     )
 
-    Y = qweight.shape[0]  # num rows
-    X = qweight.shape[1]  # num cols
+    Y = K_output  # num rows to output
+    X = qweight.shape[1]  # num cols (packed N)
 
     grid = lambda META: (
         triton.cdiv(X, META["BLOCK_SIZE_X"]),
         triton.cdiv(Y, META["BLOCK_SIZE_Y"]),
     )
-
-    # print(f"qweight shape:",qweight.shape)
-    # print(f"scale shape:",scales.shape)
-    # print(f"zeros shape:",zeros.shape)
-    # print(f"grid shape:{grid}")
 
     awq_dequantize_kernel[grid](
         qweight,
@@ -613,9 +716,89 @@ def awq_dequantize_triton(
         group_size,
         result,
         X,
-        Y,
+        Y,  # Only process K_output rows
         BLOCK_SIZE_X=block_size_x,
         BLOCK_SIZE_Y=block_size_y,
+    )
+
+    return result
+
+
+# qweights - [K     , M // 8], int32
+# scales   - [K // G, M     ], float16
+# zeros    - [K // G, M // 8], int32
+# Returns:  [M, K] (transposed layout for TN GEMM)
+def awq_dequantize_triton_transposed(
+    qweight: torch.Tensor,
+    scales: torch.Tensor,
+    zeros: torch.Tensor,
+    block_size_n: int = 64,  # N dimension tile (must be divisible by 8)
+    block_size_k: int = 64,  # K dimension tile
+    output_k: int | None = None,  # Optional: output only first output_k values in K dim
+) -> torch.Tensor:
+    """Dequantize AWQ weights to transposed layout [N, K] for TN GEMM.
+
+    This produces the transposed weight matrix suitable for hipBLASLt TN format,
+    which is significantly faster than rocBLAS NN on ROCm gfx1151.
+
+    The kernel uses tiled processing with in-register transpose for coalesced
+    memory accesses in both load (N dimension) and store (K dimension).
+
+    Args:
+        qweight: Packed quantized weights [K, N//8] (K may be padded)
+        scales: Per-group scales [num_groups, N]
+        zeros: Per-group zeros [num_groups, N//8]
+        block_size_n: N dimension tile size (unpacked), must be divisible by 8
+        block_size_k: K dimension tile size
+        output_k: If provided, output only [N, output_k] (for padded weights)
+
+    Returns:
+        Dequantized weights in transposed layout [N, K] or [N, output_k]
+    """
+    assert block_size_n % 8 == 0, "block_size_n must be divisible by 8"
+
+    K_weight = qweight.shape[0]  # May be padded
+    N = scales.shape[1]
+    group_size = qweight.shape[0] // scales.shape[0]
+
+    # Use output_k if provided, otherwise use full K
+    K_output = output_k if output_k is not None else K_weight
+
+    assert K_weight > 0 and N > 0 and K_output > 0
+    assert K_output <= K_weight, (
+        f"output_k ({K_output}) must be <= qweight K ({K_weight})"
+    )
+    assert scales.shape[0] == K_weight // group_size and scales.shape[1] == N
+    assert zeros.shape[0] == K_weight // group_size and zeros.shape[1] == N // 8
+    assert group_size <= K_weight
+    assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K_weight
+
+    # Result tensor in TRANSPOSED layout: [N, K_output]
+    result = torch.empty(
+        N,  # N dimension
+        K_output,  # K dimension (may be smaller than qweight K)
+        device=qweight.device,
+        dtype=scales.dtype,
+    )
+
+    num_cols_packed = qweight.shape[1]  # N // 8
+
+    # Grid covers [N, K_output] in tiles of [block_size_n, block_size_k]
+    grid = lambda META: (
+        triton.cdiv(N, META["BLOCK_SIZE_X"]),
+        triton.cdiv(K_output, META["BLOCK_SIZE_Y"]),
+    )
+
+    awq_dequantize_kernel_transposed[grid](
+        qweight,
+        scales,
+        zeros,
+        group_size,
+        result,
+        num_cols_packed,  # N // 8
+        K_output,  # Output K dimension (may be < qweight K)
+        BLOCK_SIZE_X=block_size_n,  # N tile (unpacked)
+        BLOCK_SIZE_Y=block_size_k,  # K tile
     )
 
     return result

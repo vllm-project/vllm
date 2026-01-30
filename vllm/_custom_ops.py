@@ -489,14 +489,21 @@ def awq_dequantize(
     split_k_iters: int,
     thx: int,
     thy: int,
+    output_k: int | None = None,  # Optional: output only first output_k rows
 ) -> torch.Tensor:
     if envs.VLLM_USE_TRITON_AWQ:
         from vllm.model_executor.layers.quantization.awq_triton import (
             awq_dequantize_triton,
         )
 
-        return awq_dequantize_triton(qweight, scales, zeros)
-    return torch.ops._C.awq_dequantize(qweight, scales, zeros, split_k_iters, thx, thy)
+        return awq_dequantize_triton(qweight, scales, zeros, output_k=output_k)
+    # Native kernel doesn't support output_k, so slice afterwards if needed
+    result = torch.ops._C.awq_dequantize(
+        qweight, scales, zeros, split_k_iters, thx, thy
+    )
+    if output_k is not None and result.shape[0] > output_k:
+        result = result[:output_k, :].contiguous()
+    return result
 
 
 def _awq_gemm(
@@ -510,11 +517,31 @@ def _awq_gemm(
     FP16_MATMUL_HEURISTIC_CONDITION = input.shape[0] >= 64
 
     if FP16_MATMUL_HEURISTIC_CONDITION:
-        out = awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
-        # Handle padded weights: slice to match input K dimension
+        from vllm.platforms import current_platform
+
+        # Experimental: Use TN path on ROCm for hipBLASLt TN format
+        # Currently DISABLED by default as it's slower due to:
+        # 1. Transposed dequantize kernel is 2-3x slower than NN dequantize
+        # 2. torch.compile/inductor inserts contiguous() calls for transposed views
+        # The ~5% GEMM speedup from hipBLASLt TN does not compensate for these overheads.
+        if current_platform.is_rocm() and envs.VLLM_AWQ_USE_TN_GEMM:
+            from vllm.model_executor.layers.quantization.awq_triton import (
+                awq_dequantize_triton_transposed,
+            )
+
+            # Get actual K dimension (may be less than qweight K if padded)
+            K = input.shape[-1]
+            # Pass output_k to avoid allocating/computing padded values
+            weight_t = awq_dequantize_triton_transposed(
+                qweight, scales, qzeros, output_k=K
+            )
+            # TN GEMM: input[M,K] @ weight_t[N,K].T → output[M,N]
+            return torch.mm(input, weight_t.T)
+
+        # NN path (default for non-ROCm or when TN disabled)
+        # Pass output_k to avoid computing padded rows
         K = input.shape[-1]
-        if out.shape[0] > K:
-            out = out[:K, :].contiguous()  # rocBLAS requires contiguous
+        out = awq_dequantize(qweight, scales, qzeros, 0, 0, 0, output_k=K)
         return torch.matmul(input, out)
 
     if envs.VLLM_USE_TRITON_AWQ:

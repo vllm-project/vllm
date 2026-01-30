@@ -109,6 +109,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_USE_TRITON_AWQ_GEMV: bool = True
     VLLM_ALLOW_UNFUSED_AWQ_GEMM: bool = True
+    VLLM_AWQ_USE_TN_GEMM: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
@@ -931,6 +932,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_UNFUSED_AWQ_GEMM": lambda: bool(
         os.getenv("VLLM_ALLOW_UNFUSED_AWQ_GEMM", "1").lower() in ("true", "1")
     ),
+    # If set, use TN GEMM path (transposed dequant + hipBLASLt) for AWQ prefill.
+    # Currently disabled by default due to .T contiguity overhead.
+    # TODO: Optimize to avoid the transpose copy overhead.
+    "VLLM_AWQ_USE_TN_GEMM": lambda: bool(int(os.getenv("VLLM_AWQ_USE_TN_GEMM", "0"))),
     # If set, allow loading or unloading lora adapters in runtime,
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING": lambda: (
         os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower()
