@@ -7,11 +7,8 @@ from abc import abstractmethod
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    overload,
-)
+from functools import cached_property
+from typing import TYPE_CHECKING, Any, overload
 
 import torch
 from typing_extensions import TypeVar
@@ -615,13 +612,18 @@ class BaseProcessingInfo:
         """
         raise NotImplementedError
 
-    def get_allowed_mm_limits(self) -> Mapping[str, int]:
-        """Return the maximum allowed number of items for each modality."""
-        supported_mm_limits = self.get_supported_mm_limits()
+    @cached_property
+    def supported_mm_limits(self) -> Mapping[str, int | None]:
+        """The maximum supported number of items for each modality."""
+        return self.get_supported_mm_limits()
+
+    @cached_property
+    def allowed_mm_limits(self) -> Mapping[str, int]:
+        """The maximum allowed number of items for each modality."""
         mm_config = self.ctx.get_mm_config()
 
         allowed_limits = dict[str, int]()
-        for modality, supported_limit in supported_mm_limits.items():
+        for modality, supported_limit in self.supported_mm_limits.items():
             user_limit = mm_config.get_limit_per_prompt(modality)
 
             allowed_limits[modality] = (
@@ -631,6 +633,27 @@ class BaseProcessingInfo:
             )
 
         return allowed_limits
+
+    def validate_num_items(self, modality: str, num_items: int) -> None:
+        """
+        Raise `ValueError` if the number of input items for the given modality
+        is invalid.
+        """
+        supported_limit = self.supported_mm_limits.get(modality, 0)
+        allowed_limit = self.allowed_mm_limits.get(modality, 0)
+
+        if supported_limit is None:
+            supported_limit = allowed_limit
+
+        limit = min(supported_limit, allowed_limit)
+
+        if num_items > limit:
+            msg = f"At most {limit} {modality}(s) may be provided in one prompt."
+
+            if num_items <= supported_limit:
+                msg += " Set `--limit-mm-per-prompt` to increase this limit."
+
+            raise ValueError(msg)
 
     def get_mm_max_tokens_per_item(
         self,
