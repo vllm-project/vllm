@@ -6,11 +6,11 @@
 #include "cutlass_extensions/common.hpp"
 
 bool cutlass_sparse_scaled_mm_supported(int64_t cuda_device_capability) {
-  // sparse CUTLASS kernels need at least
+  // sparse CUTLASS kernels need exactly hopper and are not forward compatible
   //   CUDA 12.2 and SM90 (Hopper)
 
 #if defined CUDA_VERSION
-  return CUDA_VERSION >= 12020 && cuda_device_capability >= 90;
+  return CUDA_VERSION >= 12020 && cuda_device_capability == 90;
 #endif
 
   return false;
