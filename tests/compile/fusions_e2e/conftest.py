@@ -3,6 +3,7 @@
 import logging
 
 import pytest
+import regex as re
 
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 
@@ -43,21 +44,49 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         with caplog_mp_spawn(logging.DEBUG) as log_holder:
             run_model(full_compilation_config, model_name, **model_kwargs)
 
-        print("Fusion results:")
-        for match_name in matches_check:
-            pattern = FUSION_LOG_PATTERNS[match_name]
-            log_matches = list(pattern.findall(log_holder.text))
+        num_compile_ranges = len(full_compilation_config.get_compile_ranges())
+        assert num_compile_ranges in [1, 2]
 
-            assert len(log_matches) == tp_size, (
-                f"Could not find {match_name} in \n: {log_holder.text}"
+        print(f"Compile ranges: {full_compilation_config.get_compile_ranges()}")
+        print("Fusion results:")
+
+        # Iterate through all so printing happens before asserting
+        log_matches_dict = {}
+        for match_name, pattern in FUSION_LOG_PATTERNS.items():
+            log_matches_dict[match_name] = list(pattern.findall(log_holder.text))
+            print(f"- {match_name}={','.join(log_matches_dict[match_name])}")
+
+        # Now check the matches
+        for match_name in matches_check:
+            # ar-rms-norm only activates in one range
+            num_ranges_activated = (
+                1 if match_name == "ar_rms_fusion" else num_compile_ranges
+            )
+            n_expected = tp_size * num_ranges_activated
+
+            log_matches = log_matches_dict[match_name]
+            assert len(log_matches) == n_expected, (
+                f"Could not find {n_expected} {match_name} "
+                f"(found {len(log_matches)}) in:\n {log_holder.text}"
             )
 
-            print(f"- {match_name}={','.join(log_matches)}")
-
+            expected_matches = getattr(matches, match_name)
             for i, m in enumerate(log_matches):
-                expected_matches = getattr(matches, match_name)
                 assert int(m) == expected_matches, (
                     f"{match_name}[{i}] expected: {expected_matches}, found: {int(m)}"
+                )
+
+            if match_name == "ar_rms_fusion":
+                log_matches = re.findall(
+                    r"pass_manager.py:\d+] Skipping "
+                    r".*AllReduceFusionPass.* with compile range",
+                    log_holder.text,
+                )
+
+                n_expected = 2 * (num_compile_ranges - num_ranges_activated)
+                assert len(log_matches) == n_expected, (
+                    f'Could not find {n_expected} "Skipping AllReduceFusionPass" '
+                    f"(found {len(log_matches)}) in:\n {log_holder.text}"
                 )
 
     return run

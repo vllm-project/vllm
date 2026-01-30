@@ -90,7 +90,7 @@ FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
     "attn_quant_fusion": re.compile(
         r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes"
     ),
-    "ar_rms_fusion": re.compile(r": Replaced (\d+) patterns"),
+    "ar_rms_fusion": re.compile(r"collective_fusion.py:\d+] Replaced (\d+) patterns"),
     "sequence_parallel": re.compile(
         r"sequence_parallelism.py:\d+] Replaced (\d+) patterns"
     ),

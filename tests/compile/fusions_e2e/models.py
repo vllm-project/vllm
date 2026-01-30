@@ -81,9 +81,9 @@ llama4_scout_fp4 = ModelFusionInfo(
     matches=lambda n_layers: Matches(
         rms_quant_fusion=0,
         attn_quant_fusion=n_layers,
-        ar_rms_fusion=n_layers * 2 + 1,
-        sequence_parallel=n_layers * 2 + 1,
-        async_tp=n_layers * 2,
+        ar_rms_fusion=n_layers * 2,
+        sequence_parallel=n_layers * 2,
+        async_tp=n_layers * 2 - 1,
     ),
 )
 
