@@ -84,6 +84,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "step3_reasoning_parser",
         "Step3ReasoningParser",
     ),
+    "pangu": (
+        "pangu_reasoning_parser",
+        "PanguReasoningParser",
+    ),
 }
 
 
