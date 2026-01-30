@@ -151,23 +151,23 @@ class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if N % 16 == 0 and K % 16 == 0:
             shuffled_w = shuffle_weight(weight, layout=(16, 16))
             layer.weight = torch.nn.Parameter(shuffled_w, requires_grad=False)
-            layer.weight_layout = "NK_SHUFFLED"
         else:
             raise ValueError(
                 f"Weight shape ({N}, {K}) not supported by AITeR bpreshuffle"
             )
 
-    def apply_weights(
-        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
     ) -> torch.Tensor:
-        w_q, w_s, x_s, x_s_ub = self._get_layer_params(layer)
-        qinput, qinput_scale = self.quant_fp8(x, x_s, x_s_ub)
-        logger.info_once(
-            "AiterBpreshuffle: apply_weights... ABOUT TO CALL C++ KERNEL..."
-        )
-        return rocm_aiter_ops.gemm_a8w8_bpreshuffle(
-            qinput, w_q, qinput_scale, w_s, bias, self.config.out_dtype
-        )
+        return rocm_aiter_ops.gemm_a8w8_bpreshuffle(A, B.t(), As, Bs, bias, out_dtype)
 
 
 # aiter CK Kernel
@@ -184,23 +184,17 @@ class AiterCKPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return AiterBpreshufflePerTokenFp8ScaledMMLinearKernel.can_implement(c)
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # The CK operator directly uses the N,K layout
-        # and requires no preprocessing.
-        layer.weight_layout = "NK_NOT_SHUFFLED"
-
-    def apply_weights(
-        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None = None
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
     ) -> torch.Tensor:
-        print("using AITER CK (Non-Shuffled) Kernel", flush=True)
-        w_q, w_s, x_s, x_s_ub = self._get_layer_params(layer)
-        qinput, qinput_scale = self.quant_fp8(x, x_s, x_s_ub)
-
-        logger.info_once(
-            "AiterCK: apply_weights... "
-            "ABOUT TO CALL C++ KERNEL (this is where it hangs)..."
-        )
-
-        return rocm_aiter_ops.gemm_a8w8(
-            qinput, w_q, qinput_scale, w_s, bias, self.config.out_dtype
+        return rocm_aiter_ops.gemm_a8w8(A, B.t(), As, Bs, bias, out_dtype).view(
+            *output_shape
         )

@@ -29,8 +29,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8DynamicTokenSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
-    kFp8StaticTokenSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
@@ -56,7 +56,7 @@ activation_quant_key_mapping = {
     DYNAMIC_QUANT: kFp8DynamicTokenSym,
 }
 weight_quant_key_mapping = {
-    QuantizationStrategy.CHANNEL: kFp8StaticTokenSym,
+    QuantizationStrategy.CHANNEL: kFp8StaticChannelSym,
     QuantizationStrategy.TENSOR: kFp8StaticTensorSym,
 }
 logger = init_logger(__name__)
@@ -187,6 +187,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.input_scale = None
         if self.strategy == QuantizationStrategy.BLOCK:
             maybe_post_process_fp8_weight_block(layer)
+
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
