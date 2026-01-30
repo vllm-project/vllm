@@ -486,58 +486,13 @@ class FlashInferMLASparseImpl(MLACommonBaseImpl[FlashInferMLASparseMetadata]):
                 scale=layer._k_scale,
             )
 
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        attn_out, _ = self._forward_decode(
+            q,
+            kv_cache,
+            topk_indices,
+            attn_metadata,
+            layer,
+        )
 
-        # FlashInfer sparse MLA only supports decode
-        # Prefill would need to fall back to dense attention
-        if num_decode_tokens > 0 and num_prefill_tokens == 0:
-            # Pure decode batch
-            attn_out, _ = self._forward_decode(
-                q,
-                kv_cache,
-                topk_indices,
-                attn_metadata,
-                layer,
-            )
-        elif num_decode_tokens > 0:
-            # Mixed batch: handle decode portion
-            attn_out = q.new_empty(
-                (num_actual_toks, self.num_heads, self.kv_lora_rank),
-                dtype=q.dtype,
-                device=q.device,
-            )
-
-            decode_out, _ = self._forward_decode(
-                q[:num_decode_tokens],
-                kv_cache,
-                topk_indices[:num_decode_tokens],
-                attn_metadata,
-                layer,
-            )
-            attn_out[:num_decode_tokens] = decode_out
-
-            # For prefill tokens, sparse attention is not supported
-            # This should not happen in normal operation since the scheduler
-            # should use a dense backend for prefill
-            if num_prefill_tokens > 0:
-                logger.warning_once(
-                    "FlashInfer MLA Sparse does not support prefill. "
-                    "Prefill tokens will use zero attention output."
-                )
-                attn_out[num_decode_tokens:] = 0
-        else:
-            # Pure prefill - not supported for sparse
-            logger.warning_once(
-                "FlashInfer MLA Sparse does not support prefill. "
-                "Using zero attention output."
-            )
-            attn_out = q.new_zeros(
-                (num_actual_toks, self.num_heads, self.kv_lora_rank),
-                dtype=q.dtype,
-                device=q.device,
-            )
-
-        # V up-projection
         self._v_up_proj(attn_out, out=output[:num_actual_toks])
         return output
