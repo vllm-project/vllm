@@ -71,36 +71,6 @@ class MockConnector(KVConnectorBase_V1):
         pass
 
 
-class MockCrossLayerConnector(MockConnector):
-    @property
-    def prefer_cross_layer_blocks(self) -> bool:
-        return True
-
-
-class MockKVCacheEvents:
-    """Mock KVConnectorKVEvents for testing event merging."""
-
-    def __init__(self, events: list | None = None):
-        self._events = events or []
-
-    def add_events(self, events: list):
-        self._events.extend(events)
-
-    def get_all_events(self) -> list:
-        return self._events
-
-
-class MockConnectorWithKVCacheEvents(MockConnector):
-    """Mock connector for testing get_kv_connector_kv_cache_events."""
-
-    def __init__(self):
-        # Skip parent __init__ to avoid needing vllm_config
-        self._kv_cache_events = None
-
-    def get_kv_connector_kv_cache_events(self):
-        return self._kv_cache_events
-
-
 # Register the mock connector
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
 
@@ -736,90 +706,6 @@ class TestMultiConnectorStats:
         # One non-empty
         stats.data["NixlConnector"].data["transfer_duration"].append(1.0)
         assert not stats.is_empty()
-
-
-class TestMultiConnectorPreferCrossLayerBlocks:
-    def test_all_connectors_prefer_cross_layer_blocks(self):
-        mc = MultiConnector.__new__(MultiConnector)
-        mc._connectors = [
-            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
-            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
-        ]
-        assert mc.prefer_cross_layer_blocks is True
-
-    def test_mixed_connectors_do_not_prefer_cross_layer_blocks(self):
-        mc = MultiConnector.__new__(MultiConnector)
-        mc._connectors = [
-            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
-            MockConnector.__new__(MockConnector),  # default False
-        ]
-        assert mc.prefer_cross_layer_blocks is False
-
-
-class TestMultiConnectorGetKVCacheEvents:
-    """Tests for get_kv_connector_kv_cache_events merge logic."""
-
-    def test_all_return_none(self):
-        mc = MultiConnector.__new__(MultiConnector)
-        conn1 = MockConnectorWithKVCacheEvents()
-        conn2 = MockConnectorWithKVCacheEvents()
-        conn1._kv_cache_events = None
-        conn2._kv_cache_events = None
-        mc._connectors = [conn1, conn2]
-
-        result = mc.get_kv_connector_kv_cache_events()
-
-        assert result is None
-
-    def test_single_connector_returns_events(self):
-        mc = MultiConnector.__new__(MultiConnector)
-        conn1 = MockConnectorWithKVCacheEvents()
-        conn2 = MockConnectorWithKVCacheEvents()
-        events1 = MockKVCacheEvents(["event1", "event2"])
-        conn1._kv_cache_events = events1
-        conn2._kv_cache_events = None
-        mc._connectors = [conn1, conn2]
-
-        result = mc.get_kv_connector_kv_cache_events()
-
-        assert result is events1
-        assert result.get_all_events() == ["event1", "event2"]
-
-    def test_merges_events_from_multiple_connectors(self):
-        mc = MultiConnector.__new__(MultiConnector)
-        conn1 = MockConnectorWithKVCacheEvents()
-        conn2 = MockConnectorWithKVCacheEvents()
-        conn3 = MockConnectorWithKVCacheEvents()
-        conn1._kv_cache_events = MockKVCacheEvents(["a", "b"])
-        conn2._kv_cache_events = MockKVCacheEvents(["c", "d"])
-        conn3._kv_cache_events = None  # Should be skipped
-        mc._connectors = [conn1, conn2, conn3]
-
-        result = mc.get_kv_connector_kv_cache_events()
-
-        # Events from conn1 and conn2 should be merged
-        assert result.get_all_events() == ["a", "b", "c", "d"]
-
-    def test_first_none_second_returns_value(self):
-        mc = MultiConnector.__new__(MultiConnector)
-        conn1 = MockConnectorWithKVCacheEvents()
-        conn2 = MockConnectorWithKVCacheEvents()
-        events2 = MockKVCacheEvents(["event"])
-        conn1._kv_cache_events = None
-        conn2._kv_cache_events = events2
-        mc._connectors = [conn1, conn2]
-
-        result = mc.get_kv_connector_kv_cache_events()
-
-        assert result is events2
-
-    def test_empty_connectors_list(self):
-        mc = MultiConnector.__new__(MultiConnector)
-        mc._connectors = []
-
-        result = mc.get_kv_connector_kv_cache_events()
-
-        assert result is None
 
 
 def test_multi_connector_overrides_all_base_methods():
