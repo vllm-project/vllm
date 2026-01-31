@@ -71,15 +71,6 @@ from typing import NamedTuple
 import pytest
 import torch
 
-# IMPORTANT: Set spawn method before any CUDA initialization
-# This prevents "Cannot re-initialize CUDA in forked subprocess" errors
-import multiprocessing
-if multiprocessing.get_start_method(allow_none=True) != 'spawn':
-    try:
-        multiprocessing.set_start_method('spawn', force=True)
-    except RuntimeError:
-        pass  # Already set
-
 from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
 from vllm.logger import init_logger
 
@@ -123,7 +114,7 @@ EXPECTED_PATTERNS = [
 ]
 
 
-class TestConfig(NamedTuple):
+class HelixTestConfig(NamedTuple):
     """Configuration for a single test case."""
     tp_size: int
     dcp_size: int
@@ -141,7 +132,7 @@ class TestConfig(NamedTuple):
 # Helix constraints: TPA ≤ num_kv_heads (8), K % TPA == 0
 GQA_CONFIGS = [
     # Standard DCP (helix_mode=False)
-    TestConfig(
+    HelixTestConfig(
         tp_size=4,
         dcp_size=2,
         helix_mode=False,
@@ -149,7 +140,7 @@ GQA_CONFIGS = [
         model_type="gqa",
         description="GQA + Standard DCP + FlashAttn",
     ),
-    TestConfig(
+    HelixTestConfig(
         tp_size=4,
         dcp_size=2,
         helix_mode=False,
@@ -160,7 +151,7 @@ GQA_CONFIGS = [
     # Helix mode (helix_mode=True)
     # TP=4, DCP=2 -> TPA=2, KVP=2
     # Valid for Llama-3.1-8B: TPA=2 ≤ 8 (num_kv_heads), 8 % 2 == 0
-    TestConfig(
+    HelixTestConfig(
         tp_size=4,
         dcp_size=2,
         helix_mode=True,
@@ -168,7 +159,7 @@ GQA_CONFIGS = [
         model_type="gqa",
         description="GQA + Helix (TPA=2, KVP=2) + FlashAttn",
     ),
-    TestConfig(
+    HelixTestConfig(
         tp_size=4,
         dcp_size=2,
         helix_mode=True,
@@ -178,7 +169,7 @@ GQA_CONFIGS = [
     ),
     # Additional config with larger TPA (if 8 GPUs available)
     # TP=8, DCP=2 -> TPA=4, KVP=2
-    # TestConfig(
+    # HelixTestConfig(
     #     tp_size=8,
     #     dcp_size=2,
     #     helix_mode=True,
@@ -191,7 +182,7 @@ GQA_CONFIGS = [
 # MLA Model Configurations (DeepSeek-V2-Lite: MLA attention)
 MLA_CONFIGS = [
     # Standard DCP (helix_mode=False)
-    TestConfig(
+    HelixTestConfig(
         tp_size=4,
         dcp_size=4,
         helix_mode=False,
@@ -201,7 +192,7 @@ MLA_CONFIGS = [
     ),
     # Helix mode (helix_mode=True)
     # TP=4, DCP=4 -> TPA=1, KVP=4 (valid for MLA)
-    TestConfig(
+    HelixTestConfig(
         tp_size=4,
         dcp_size=4,
         helix_mode=True,
@@ -217,25 +208,22 @@ MLA_CONFIGS = [
 # =============================================================================
 
 def check_gpu_requirements(tp_size: int, min_compute_capability: tuple = (9, 0)):
-    """Check if GPU requirements are met, skip test if not."""
-    # Check CUDA availability first
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
+    """Check if GPU requirements are met, skip test if not.
     
-    num_gpus = torch.cuda.device_count()
-    if num_gpus < tp_size:
-        pytest.skip(f"Need at least {tp_size} GPUs, have {num_gpus}")
-    
-    # Get compute capability
-    try:
-        cc = torch.cuda.get_device_capability(0)
-    except Exception as e:
-        pytest.skip(f"Cannot get device capability: {e}")
-    
+    Note: This function should be called inside the forked test process.
+    Do not wrap CUDA calls in try/except - let failures be visible.
+    """
+    # Check compute capability first (will fail visibly if CUDA has issues)
+    cc = torch.cuda.get_device_capability(0)
     if cc < min_compute_capability:
         pytest.skip(
             f"Need compute capability {min_compute_capability}, have {cc}"
         )
+    
+    # Check GPU count
+    num_gpus = torch.cuda.device_count()
+    if num_gpus < tp_size:
+        pytest.skip(f"Need at least {tp_size} GPUs, have {num_gpus}")
 
 
 def validate_response(response_text: str, expected_patterns: list[str]) -> bool:
@@ -267,7 +255,7 @@ def is_gibberish(text: str) -> bool:
 def run_sanity_check(
     client,
     model_id: str,
-    config: TestConfig,
+    config: HelixTestConfig,
 ) -> dict:
     """Run sanity check prompts and validate responses."""
     results = {
@@ -308,7 +296,7 @@ def run_sanity_check(
 
 
 def build_server_args(
-    config: TestConfig,
+    config: HelixTestConfig,
     model_id: str,
     trust_remote_code: bool = False,
 ) -> list[str]:
@@ -359,7 +347,7 @@ class TestHelixGQA:
     
     @pytest.mark.parametrize("config", [c for c in GQA_CONFIGS if c.helix_mode])
     @create_new_process_for_each_test()
-    def test_helix_gqa_sanity(self, config: TestConfig, num_gpus_available):
+    def test_helix_gqa_sanity(self, config: HelixTestConfig, num_gpus_available):
         """Test Helix GQA mode produces coherent output."""
         check_gpu_requirements(config.tp_size)
         
@@ -383,7 +371,7 @@ class TestHelixMLA:
     
     @pytest.mark.parametrize("config", [c for c in MLA_CONFIGS if c.helix_mode])
     @create_new_process_for_each_test()
-    def test_helix_mla_sanity(self, config: TestConfig, num_gpus_available):
+    def test_helix_mla_sanity(self, config: HelixTestConfig, num_gpus_available):
         """Test Helix MLA mode produces coherent output."""
         check_gpu_requirements(config.tp_size)
         
@@ -405,7 +393,7 @@ class TestStandardDCP:
     
     @pytest.mark.parametrize("config", [c for c in GQA_CONFIGS if not c.helix_mode])
     @create_new_process_for_each_test()
-    def test_standard_dcp_gqa_sanity(self, config: TestConfig, num_gpus_available):
+    def test_standard_dcp_gqa_sanity(self, config: HelixTestConfig, num_gpus_available):
         """Test standard DCP with GQA model produces coherent output."""
         check_gpu_requirements(config.tp_size)
         
@@ -425,7 +413,7 @@ class TestStandardDCP:
     
     @pytest.mark.parametrize("config", [c for c in MLA_CONFIGS if not c.helix_mode])
     @create_new_process_for_each_test()
-    def test_standard_dcp_mla_sanity(self, config: TestConfig, num_gpus_available):
+    def test_standard_dcp_mla_sanity(self, config: HelixTestConfig, num_gpus_available):
         """Test standard DCP with MLA model produces coherent output."""
         check_gpu_requirements(config.tp_size)
         
@@ -457,7 +445,7 @@ class TestHelixVsDCPConsistency:
         trust_remote_code = get_model_trust_remote_code(GQA_MODEL)
         
         # Standard DCP
-        dcp_config = TestConfig(
+        dcp_config = HelixTestConfig(
             tp_size=4, dcp_size=2, helix_mode=False,
             attn_backend="FLASH_ATTN", model_type="gqa",
             description="baseline",
@@ -477,7 +465,7 @@ class TestHelixVsDCPConsistency:
                 dcp_outputs.append(response.choices[0].text)
         
         # Helix
-        helix_config = TestConfig(
+        helix_config = HelixTestConfig(
             tp_size=4, dcp_size=2, helix_mode=True,
             attn_backend="FLASH_ATTN", model_type="gqa",
             description="helix",
@@ -519,7 +507,7 @@ class TestHelixVsDCPConsistency:
         trust_remote_code = get_model_trust_remote_code(MLA_MODEL)
         
         # Standard DCP
-        dcp_config = TestConfig(
+        dcp_config = HelixTestConfig(
             tp_size=4, dcp_size=4, helix_mode=False,
             attn_backend="FLASHMLA", model_type="mla",
             description="baseline",
@@ -539,7 +527,7 @@ class TestHelixVsDCPConsistency:
                 dcp_outputs.append(response.choices[0].text)
         
         # Helix
-        helix_config = TestConfig(
+        helix_config = HelixTestConfig(
             tp_size=4, dcp_size=4, helix_mode=True,
             attn_backend="FLASHMLA", model_type="mla",
             description="helix",
@@ -585,7 +573,7 @@ class TestQuickSmoke:
         
         logger.info(f"Model: {GQA_MODEL}")
         
-        config = TestConfig(
+        config = HelixTestConfig(
             tp_size=4, dcp_size=2, helix_mode=True,
             attn_backend="FLASH_ATTN", model_type="gqa",
             description="Helix GQA smoke test",
