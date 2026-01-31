@@ -232,7 +232,7 @@ class TokenizeParams:
             max_length = self.max_input_tokens
 
         # This prevents tokenization from taking up more resources than necessary
-        # while still failing `_apply_token_len_check` as expected by users
+        # while still failing `self._token_len_check` as expected by users
         if max_length is None and self.max_input_tokens is not None:
             max_length = self.max_input_tokens + 1
 
