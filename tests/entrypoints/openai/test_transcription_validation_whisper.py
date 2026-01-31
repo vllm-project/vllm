@@ -16,12 +16,11 @@ import soundfile as sf
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "openai/whisper-large-v3-turbo"
-SERVER_ARGS = ["--enforce-eager"]
 
 
 @pytest.fixture(scope="module")
 def server():
-    with RemoteOpenAIServer(MODEL_NAME, SERVER_ARGS) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, []) as remote_server:
         yield remote_server
 
 
