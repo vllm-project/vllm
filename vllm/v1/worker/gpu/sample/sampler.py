@@ -62,6 +62,7 @@ class Sampler:
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
+        cu_num_logits_np: np.ndarray,
         pos: torch.Tensor,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
@@ -78,7 +79,11 @@ class Sampler:
                 if self.logprobs_mode == "processed_logprobs"
                 else logits
             )
-            logprobs_tensors = compute_topk_logprobs(logits, max_num_logprobs, sampled)
+            expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
+            cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
+            logprobs_tensors = compute_topk_logprobs(
+                logits, max_num_logprobs, sampled, cu_num_logits
+            )
         else:
             logprobs_tensors = None
 
