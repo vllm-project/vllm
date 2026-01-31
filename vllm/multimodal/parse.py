@@ -34,6 +34,9 @@ from .inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
+    VisionChunk,
+    VisionChunkImage,
+    VisionChunkVideo,
 )
 from .media import MediaWithBytes
 
@@ -697,6 +700,25 @@ class VisionChunkDataParser(MultiModalDataParser):
     """
     Parser for vision chunk data (unified image and video chunks).
     """
+    def __init__(
+        self,
+        *,
+        target_sr: float | None = None,
+        target_channels: int | None = None,
+        audio_resample_method: Literal["librosa", "scipy"] = "librosa",
+        video_needs_metadata: bool = False,
+        expected_hidden_size: int | None = None,
+    ) -> None:
+        super().__init__(
+            target_sr=target_sr,
+            target_channels=target_channels,
+            audio_resample_method=audio_resample_method,
+            video_needs_metadata=video_needs_metadata,
+            expected_hidden_size=expected_hidden_size,
+        )
+        assert not self.video_needs_metadata, (
+            "VisionChunkDataParser does not support video metadata parsing yet."
+        )
 
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {
@@ -704,3 +726,114 @@ class VisionChunkDataParser(MultiModalDataParser):
             "video": self._parse_vision_chunk_data,
             "vision_chunk": self._parse_vision_chunk_data,
         }
+    
+    def _parse_image_data(
+        self,
+        data: ModalityData[ImageItem],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if data is None:
+            return VisionChunkProcessorItems(None)
+
+        if self._is_empty(data):
+            return None
+
+        if self.is_embeddings(data):
+            raise ValueError("Do not support embedding data for vision_chunk right now")
+
+        if (
+            isinstance(data, (PILImage.Image, MediaWithBytes))
+            or isinstance(data, (np.ndarray, torch.Tensor))
+            and data.ndim == 3
+        ):
+            data_items = [data]
+        elif isinstance(data, (np.ndarray, torch.Tensor)):
+            data_items = [elem for elem in data]
+        else:
+            data_items = data
+
+        data_items = [
+            VisionChunkImage(
+                type="image",
+                images=item,
+            )
+            for item in data_items
+        ]
+
+        return VisionChunkProcessorItems(data_items)
+    
+    def _parse_video_data(
+        self,
+        data: ModalityData[VideoItem],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if data is None:
+            return VisionChunkProcessorItems(None)
+
+        if self._is_empty(data):
+            return None
+
+        if self.is_embeddings(data):
+            raise ValueError("Do not support embedding data for vision_chunk right now")
+
+        data_items: list[VideoItem]
+        if (
+            is_list_of(data, PILImage.Image)
+            or isinstance(data, (np.ndarray, torch.Tensor))
+            and data.ndim == 4
+        ):
+            data_items = [data]
+        elif isinstance(data, (np.ndarray, torch.Tensor)):
+            data_items = [elem for elem in data]
+        elif isinstance(data, tuple) and len(data) == 2:
+            data_items = [data]
+        else:
+            data_items = data  # type: ignore[assignment]
+
+        data_items = [
+            VisionChunkVideo(
+                type="video",
+                videos=item,
+            )
+            for item in data_items
+        ]
+        return VisionChunkProcessorItems(data_items)
+
+        # new_videos = list[tuple[np.ndarray, dict[str, Any] | None]]()
+        # metadata_lst: list[dict[str, Any] | None] = []
+        # for data_item in data_items:
+        #     video, metadata = self._get_video_with_metadata(data_item)
+        #     if self.video_needs_metadata:
+        #         if metadata is None:
+        #             raise ValueError(
+        #                 "Video metadata is required but not found in mm input. "
+        #                 "Please check your video input in `multi_modal_data`"
+        #             )
+        #         new_videos.append((video, metadata))
+        #         metadata_lst.append(metadata)
+        #     else:
+        #         new_videos.append(video)
+
+        # if not self.video_needs_metadata:
+        #     metadata = None
+
+        # return VideoProcessorItems(new_videos, metadata=metadata_lst)
+
+    def parse_mm_data(self, mm_data: MultiModalDataDict, modality_order: list[str] = []) -> MultiModalDataItems:
+        mm_items = MultiModalDataItems()
+        parsed_image = self._parse_image_data(mm_data.get("image"))
+        parsed_video = self._parse_video_data(mm_data.get("video"))
+        assert len(modality_order) == parsed_image.get_count() + parsed_video.get_count(), (
+            "The length of modality_order should be equal to the total number of vision chunks."
+        )
+
+        for modality in modality_order:
+            if modality == "image":
+                if parsed_image is not None and parsed_image.get_count() > 0:
+                    mm_items["vision_chunk"].data.append(
+                        parsed_image.data.pop(0)
+                    )
+            elif modality == "video":
+                if parsed_video is not None and parsed_video.get_count() > 0:
+                    mm_items["vision_chunk"].data.append(
+                        parsed_video.data.pop(0)
+                    )
+        return mm_items
