@@ -265,6 +265,46 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
 
+    def send_async(
+        self, tensor: torch.Tensor, dst: int | None = None, stream=None
+    ) -> None:
+        """Non-blocking send using PyNccl (enqueues on stream, returns immediately).
+
+        For PyNccl, operations are inherently async on the CUDA stream.
+        The operation completes when the stream synchronizes.
+        NOTE: `dst` is the local rank of the destination rank.
+        """
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            # PyNccl send is already async on the CUDA stream
+            pynccl_comm.send(tensor, dst, stream=stream)
+        else:
+            # Fall back to torch distributed isend
+            return torch.distributed.isend(tensor, self.ranks[dst], self.device_group)
+
+    def recv_async(
+        self, tensor: torch.Tensor, src: int | None = None, stream=None
+    ) -> None:
+        """Non-blocking receive using PyNccl (enqueues on stream, returns immediately).
+
+        For PyNccl, operations are inherently async on the CUDA stream.
+        The operation completes when the stream synchronizes.
+        NOTE: `src` is the local rank of the source rank.
+        """
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is not None and not pynccl_comm.disabled:
+            # PyNccl recv is already async on the CUDA stream
+            pynccl_comm.recv(tensor, src, stream=stream)
+        else:
+            # Fall back to torch distributed irecv
+            return torch.distributed.irecv(tensor, self.ranks[src], self.device_group)
+
     def destroy(self):
         if self.pynccl_comm is not None:
             self.pynccl_comm = None

@@ -544,6 +544,16 @@ class GPUModelRunner(
             self.async_output_copy_stream = torch.cuda.Stream()
             self.prepare_inputs_event = torch.Event()
 
+        # Separate CUDA stream for pipeline parallel communication.
+        # This allows overlapping PP send/recv with computation on the main stream.
+        self.pp_comm_stream: torch.cuda.Stream | None = None
+        self.pp_comm_event: torch.cuda.Event | None = None
+        # Track pending PP send operation for deferred synchronization
+        self._pending_pp_send: bool = False
+        if get_pp_group().world_size > 1:
+            self.pp_comm_stream = torch.cuda.Stream()
+            self.pp_comm_event = torch.cuda.Event()
+
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
             self.compilation_config.cudagraph_capture_sizes

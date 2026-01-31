@@ -275,6 +275,41 @@ class DeviceCommunicatorBase:
         torch.distributed.recv(tensor, self.ranks[src], self.device_group)
         return tensor
 
+    def send_async(
+        self, tensor: torch.Tensor, dst: int | None = None, stream=None
+    ) -> dist.Work | None:
+        """Non-blocking send. Returns a Work handle for deferred wait.
+
+        Args:
+            tensor: Tensor to send.
+            dst: Local rank of destination (defaults to next rank in group).
+            stream: Optional CUDA stream (unused in base implementation).
+
+        NOTE: `dst` is the local rank of the destination rank.
+        """
+        del stream  # unused in base implementation
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        return torch.distributed.isend(tensor, self.ranks[dst], self.device_group)
+
+    def recv_async(
+        self, tensor: torch.Tensor, src: int | None = None, stream=None
+    ) -> dist.Work | None:
+        """Non-blocking receive into pre-allocated tensor.
+
+        Args:
+            tensor: Pre-allocated tensor to receive into.
+            src: Local rank of source (defaults to previous rank in group).
+            stream: Optional CUDA stream (unused in base implementation).
+
+        Returns a Work handle for deferred wait.
+        NOTE: `src` is the local rank of the source rank.
+        """
+        del stream  # unused in base implementation
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+        return torch.distributed.irecv(tensor, self.ranks[src], self.device_group)
+
     def destroy(self):
         pass
 

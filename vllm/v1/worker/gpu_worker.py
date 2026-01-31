@@ -621,6 +621,14 @@ class Worker(WorkerBase):
                 )
             }
 
+        # Wait for any pending PP send from previous iteration before receiving.
+        # This ensures the send completes before we reuse communication resources.
+        pp_comm_stream = self.model_runner.pp_comm_stream
+        if pp_comm_stream is not None and self.model_runner._pending_pp_send:
+            # Wait for the PP comm stream to complete on the main stream
+            torch.cuda.current_stream().wait_stream(pp_comm_stream)
+            self.model_runner._pending_pp_send = False
+
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict = get_pp_group().recv_tensor_dict(
                 all_gather_group=get_tp_group(),
@@ -645,11 +653,30 @@ class Worker(WorkerBase):
             and not get_pp_group().is_last_rank
         )
 
-        get_pp_group().send_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-            all_gather_tensors=all_gather_tensors,
-        )
+        # Use async send on a separate stream to overlap with next iteration's
+        # input preparation. The pp_comm_stream allows the main stream to proceed
+        # with scheduling and input prep while communication happens in parallel.
+        if pp_comm_stream is not None:
+            # Record an event on main stream so pp_comm_stream waits for model
+            # execution to complete before starting the send.
+            pp_comm_event = self.model_runner.pp_comm_event
+            assert pp_comm_event is not None
+            pp_comm_event.record()
+            pp_comm_stream.wait_event(pp_comm_event)
+
+            # Enqueue async send on the pp_comm_stream
+            get_pp_group().send_tensor_dict_async(
+                output.tensors,
+                stream=pp_comm_stream,
+            )
+            self.model_runner._pending_pp_send = True
+        else:
+            # Fallback to blocking send
+            get_pp_group().send_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+                all_gather_tensors=all_gather_tensors,
+            )
 
         return None
 

@@ -959,6 +959,161 @@ class GroupCoordinator:
                 tensor_dict[key] = value
         return tensor_dict
 
+    def send_tensor_dict_async(
+        self,
+        tensor_dict: dict[str, torch.Tensor | Any],
+        dst: int | None = None,
+        stream: "torch.cuda.Stream | None" = None,
+    ) -> None:
+        """Non-blocking send of tensor dictionary using NCCL group operations.
+
+        This method sends metadata via CPU (blocking) then enqueues all tensor
+        sends on the specified CUDA stream. The sends complete asynchronously
+        when the stream synchronizes.
+
+        Args:
+            tensor_dict: Dictionary of tensors and metadata to send.
+            dst: Local rank of destination (defaults to next rank in group).
+            stream: CUDA stream to enqueue sends on. If None, uses current stream.
+
+        NOTE: `dst` is the local rank of the destination rank.
+        """
+        # Bypass if world_size == 1
+        if not torch.distributed.is_initialized() or self.world_size == 1:
+            return
+
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+
+        # Send metadata via CPU (this is blocking but fast for small metadata)
+        metadata_list: list[tuple[Any, Any]] = []
+        assert isinstance(tensor_dict, dict), (
+            f"Expecting a dictionary, got {type(tensor_dict)}"
+        )
+        metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
+        self.send_object(metadata_list, dst=dst)
+
+        # Use NCCL group operations to batch all tensor sends
+        if self.device_communicator is not None:
+            from vllm.distributed.device_communicators.cuda_communicator import (
+                CudaCommunicator,
+            )
+
+            if isinstance(self.device_communicator, CudaCommunicator):
+                pynccl = self.device_communicator.pynccl_comm
+                if pynccl is not None and not pynccl.disabled:
+                    # Use PyNccl grouped operations for efficiency
+                    pynccl.group_start()
+                    for tensor in tensor_list:
+                        if tensor.numel() == 0:
+                            continue
+                        if not tensor.is_cpu:
+                            pynccl.send(tensor, dst, stream=stream)
+                    pynccl.group_end()
+                    return
+
+        # Fallback: send tensors individually (still async via isend for GPU)
+        for tensor in tensor_list:
+            if tensor.numel() == 0:
+                continue
+            if tensor.is_cpu:
+                # CPU tensors use blocking send
+                torch.distributed.send(
+                    tensor, dst=self.ranks[dst], group=self.cpu_group
+                )
+            else:
+                # GPU tensors use async send
+                self.send_async(tensor, dst, stream=stream)
+
+    def recv_tensor_dict_async(
+        self,
+        src: int | None = None,
+        stream: "torch.cuda.Stream | None" = None,
+    ) -> dict[str, torch.Tensor | Any] | None:
+        """Non-blocking receive of tensor dictionary using NCCL group operations.
+
+        This method receives metadata via CPU (blocking) then enqueues all tensor
+        receives on the specified CUDA stream. The receives complete asynchronously
+        when the stream synchronizes.
+
+        Args:
+            src: Local rank of source (defaults to previous rank in group).
+            stream: CUDA stream to enqueue receives on. If None, uses current stream.
+
+        Returns:
+            Dictionary of received tensors and metadata. The tensor data is only
+            valid after the stream synchronizes.
+
+        NOTE: `src` is the local rank of the source rank.
+        """
+        # Bypass if world_size == 1
+        if not torch.distributed.is_initialized() or self.world_size == 1:
+            return None
+
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+        assert src < self.world_size, f"Invalid src rank ({src})"
+
+        # Receive metadata via CPU (blocking)
+        recv_metadata_list = self.recv_object(src=src)
+        tensor_dict: dict[str, Any] = {}
+
+        # Collect GPU tensors to receive
+        gpu_tensors: list[torch.Tensor] = []
+        for key, value in recv_metadata_list:
+            if isinstance(value, TensorMetadata):
+                tensor = torch.empty(value.size, dtype=value.dtype, device=value.device)
+                tensor_dict[key] = tensor
+                if tensor.numel() == 0:
+                    continue
+                if not tensor.is_cpu:
+                    gpu_tensors.append(tensor)
+            else:
+                tensor_dict[key] = value
+
+        # Use NCCL group operations to batch all tensor receives
+        if self.device_communicator is not None:
+            from vllm.distributed.device_communicators.cuda_communicator import (
+                CudaCommunicator,
+            )
+
+            if isinstance(self.device_communicator, CudaCommunicator):
+                pynccl = self.device_communicator.pynccl_comm
+                if pynccl is not None and not pynccl.disabled:
+                    # Use PyNccl grouped operations for efficiency
+                    pynccl.group_start()
+                    for tensor in gpu_tensors:
+                        pynccl.recv(tensor, src, stream=stream)
+                    pynccl.group_end()
+
+                    # Handle CPU tensors (blocking)
+                    for key, value in recv_metadata_list:
+                        if isinstance(value, TensorMetadata):
+                            tensor = tensor_dict[key]
+                            if tensor.numel() == 0:
+                                continue
+                            if tensor.is_cpu:
+                                torch.distributed.recv(
+                                    tensor, src=self.ranks[src], group=self.cpu_group
+                                )
+                    return tensor_dict
+
+        # Fallback: receive tensors individually
+        for key, value in recv_metadata_list:
+            if isinstance(value, TensorMetadata):
+                tensor = tensor_dict[key]
+                if tensor.numel() == 0:
+                    continue
+                if tensor.is_cpu:
+                    torch.distributed.recv(
+                        tensor, src=self.ranks[src], group=self.cpu_group
+                    )
+                else:
+                    self.recv_async(tensor, src, stream=stream)
+
+        return tensor_dict
+
     def barrier(self):
         """Barrier synchronization among the group.
         NOTE: don't use `device_group` here! `barrier` in NCCL is
@@ -983,6 +1138,32 @@ class GroupCoordinator:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.recv(size, dtype, src)
+
+    def send_async(
+        self, tensor: torch.Tensor, dst: int | None = None, stream=None
+    ) -> Any:
+        """Non-blocking send. Returns immediately after enqueueing on stream.
+
+        For NCCL/PyNccl, operations are async on the CUDA stream.
+        Caller should synchronize the stream when the send must complete.
+        NOTE: `dst` is the local rank of the destination rank.
+        """
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.send_async(tensor, dst, stream=stream)
+
+    def recv_async(
+        self, tensor: torch.Tensor, src: int | None = None, stream=None
+    ) -> Any:
+        """Non-blocking receive into pre-allocated tensor.
+
+        For NCCL/PyNccl, operations are async on the CUDA stream.
+        Caller should synchronize the stream when the receive must complete.
+        NOTE: `src` is the local rank of the source rank.
+        """
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.recv_async(tensor, src, stream=stream)
 
     def destroy(self):
         if hasattr(self, "device_group"):
