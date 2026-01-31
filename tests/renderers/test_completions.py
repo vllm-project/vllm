@@ -363,7 +363,7 @@ class TestRenderEmbedPrompt:
 
         assert len(results) == 1
         assert is_embeds_prompt(results[0])
-        assert torch.allclose(results[0]["prompt_embeds"], tensor_input)
+        assert torch.equal(results[0]["prompt_embeds"], tensor_input)
 
     def test_multiple_prompt_embeds(self):
         renderer = _build_renderer(MockModelConfig())
@@ -407,7 +407,7 @@ class TestRenderEmbedPrompt:
         assert len(results) == 1
         # Should keep last 10 tokens
         expected = tensor_input[-10:]
-        assert torch.allclose(results[0]["prompt_embeds"], expected)
+        assert torch.equal(results[0]["prompt_embeds"], expected)
 
     def test_prompt_embed_different_dtypes(self):
         renderer = _build_renderer(MockModelConfig())
