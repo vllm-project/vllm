@@ -7,7 +7,6 @@ from pydantic import Field
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
-from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ChatRequestMixin,
@@ -17,9 +16,12 @@ from vllm.entrypoints.pooling.base.protocol import (
     EncodingRequestMixin,
     PoolingBasicRequestMixin,
 )
+from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 
 class PoolingCompletionRequest(

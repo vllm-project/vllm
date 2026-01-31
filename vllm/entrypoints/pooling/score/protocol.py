@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
-from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ClassifyRequestMixin,
