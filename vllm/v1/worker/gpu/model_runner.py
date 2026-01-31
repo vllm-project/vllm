@@ -316,7 +316,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
-        self.sampler(logits, idx_mapping, idx_mapping_np, pos)
+        self.sampler(logits, idx_mapping, idx_mapping_np, idx_mapping_np, pos)
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -686,6 +686,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits,
             input_batch.expanded_idx_mapping,
             input_batch.idx_mapping_np,
+            input_batch.cu_num_logits_np,
             sample_pos,
         )
 

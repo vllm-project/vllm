@@ -103,6 +103,7 @@ def compute_topk_logprobs(
     logits: torch.Tensor,
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
+    cu_num_logits: list[int] | None = None,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
@@ -135,4 +136,5 @@ def compute_topk_logprobs(
         logprob_token_ids=logprob_token_ids,
         logprobs=logprobs,
         selected_token_ranks=token_ranks,
+        cu_num_generated_tokens=cu_num_logits,
     )
