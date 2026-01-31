@@ -30,16 +30,13 @@ steps:
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\;"
 
 - label: PyTorch Fullgraph
-  timeout_in_minutes: 40
+  timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/
   - tests/compile
   commands:
     # fp8 kv scales not supported on sm89, tested on Blackwell instead
   - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
-    # Limit to no custom ops to reduce running time
-    # Wrap with quotes to escape yaml and avoid starting -k string with a -
-  - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
 
 - label: Pytorch Nightly Dependency Override Check # 2min
   # if this test fails, it means the nightly torch version is not compatible with some
