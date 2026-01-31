@@ -1038,7 +1038,7 @@ class SpecDecodeBaseProposer:
         # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
         # [0, 1, 0, 1, 2, 3, 0, 1, 2]
         #  _r1_  ____r2____  ___r3__
-        token_offests = (
+        token_offsets = (
             self.token_arange_np[:total_num_tokens] - new_query_start_locs_expanded
         )
 
@@ -1053,7 +1053,7 @@ class SpecDecodeBaseProposer:
         # [0, 1,                                // req 1
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
         #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
-        token_indices_np = token_offests + old_query_start_locs_expanded
+        token_indices_np = token_offsets + old_query_start_locs_expanded
         token_indices = torch.from_numpy(token_indices_np).to(device, non_blocking=True)
 
         spec_common_attn_metadata = CommonAttentionMetadata(

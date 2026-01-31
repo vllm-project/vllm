@@ -105,7 +105,7 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
     # cu_chunk_seqlen_p is a tensor of shape (nchunks+1,) that contains, for
-    # each chunk, its offests into the varlen sequence dimension. It is defined
+    # each chunk, its offsets into the varlen sequence dimension. It is defined
     # such that the i-th chunk contains tokens from cu_chunk_seqlen_p[i] to
     # cu_chunk_seqlen_p[i+1].
     cu_chunk_seqlen_p: torch.Tensor | None = None
