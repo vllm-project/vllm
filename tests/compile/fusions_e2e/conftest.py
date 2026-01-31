@@ -107,28 +107,39 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
         # Now check the matches
         for match_name in matches_check:
-            # When compiling multiple ranges, some passes only activate in some
-            if match_name == "ar_rms_fusion":
-                # ar-rms-norm only activates in one range
-                num_ranges_activated = 1
-            elif match_name == "rms_quant_fusion" and "ar_rms_fusion" in matches_check:
-                # AR+rms+quant takes precedence over rms+quant if activated.
-                num_ranges_activated = num_compile_ranges - 1
-            else:
-                num_ranges_activated = num_compile_ranges
-
+            num_ranges_activated = (
+                1 if match_name == "ar_rms_fusion" else num_compile_ranges
+            )
             n_expected = tp_size * num_ranges_activated
 
-            log_matches = log_matches_dict[match_name]
+            log_matches = list(int(ms) for ms in log_matches_dict[match_name])
             assert len(log_matches) == n_expected, (
                 f"Could not find {n_expected} {match_name} "
                 f"(found {len(log_matches)}) in:\n {log_holder.text}"
             )
 
             expected_matches = getattr(matches, match_name)
-            for i, m in enumerate(log_matches):
-                assert int(m) == expected_matches, (
-                    f"{match_name}[{i}] expected: {expected_matches}, found: {int(m)}"
+
+            if match_name == "rms_quant_fusion" and "ar_rms_fusion" in matches_check:
+                # AR+rms+quant takes precedence over rms+quant if activated.
+                # That means we get full matching where ar+rms+quant was not activated,
+                # and less where it was
+                assert sum(m == expected_matches for m in log_matches) == tp_size * (
+                    num_ranges_activated - 1
+                ), "Expecting full rms+quant fusion where ar+rms+quant not activated"
+
+                assert all(
+                    expected_matches - matches.ar_rms_fusion <= m <= expected_matches
+                    for m in log_matches
+                ), (
+                    f"Expecting at least {expected_matches - matches.ar_rms_fusion} "
+                    f"where ar+rms+quant was activated"
+                )
+            else:
+                expected_matches_list = [expected_matches] * n_expected
+                assert sorted(log_matches) == expected_matches_list, (
+                    f"{match_name} expected: {expected_matches_list}, "
+                    f"found: {sorted(log_matches)}"
                 )
 
             if match_name == "ar_rms_fusion":
