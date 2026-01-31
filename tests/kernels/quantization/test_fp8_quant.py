@@ -174,7 +174,7 @@ def test_static_fp8_quant_group_2d(
             f"group_shape ({group_shape[0]}, {group_shape[1]})"
         )
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     x = torch.rand(num_tokens, hidden_size, dtype=dtype, device="cuda")
     ref_out, scale = scaled_quantize(
