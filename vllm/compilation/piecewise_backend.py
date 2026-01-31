@@ -41,6 +41,7 @@ class PiecewiseBackend:
         vllm_backend: VllmBackend,
         returns_tuple: bool,
         compiled_runnables: dict[str, Callable[..., Any]] | None = None,
+        submod_name: str = "",
     ):
         """
         The backend for piecewise compilation.
