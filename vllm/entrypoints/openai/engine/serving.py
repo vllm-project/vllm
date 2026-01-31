@@ -5,10 +5,10 @@ import json
 import sys
 import time
 import traceback
-from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, cast
+from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
 import numpy as np
 from fastapi import Request
@@ -94,11 +94,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.utils import (
-    _validate_truncation_size,
-    get_max_tokens,
-    sanitize_message,
-)
+from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, PromptType, TokensPrompt
 from vllm.inputs.parse import (
@@ -112,7 +108,7 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.renderers import RendererLike
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -126,7 +122,6 @@ from vllm.utils.async_utils import (
     collect_from_async_generator,
     merge_async_iterators,
 )
-from vllm.v1.engine import EngineCoreRequest
 
 
 class GenerationError(Exception):
@@ -209,7 +204,7 @@ class ServeContext(Generic[RequestT]):
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    engine_prompts: list[TokensPrompt] | None = None
+    engine_prompts: list[TokensPrompt | EmbedsPrompt] | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
         None
@@ -529,41 +524,6 @@ class OpenAIServing:
             prompt_token_ids=prompt_token_ids,
             prompt_logprobs=None,
         )
-
-    def _get_completion_renderer(self) -> BaseRenderer:
-        """
-        Get a Renderer instance with the provided tokenizer.
-        Uses shared async tokenizer pool for efficiency.
-        """
-        return CompletionRenderer(
-            model_config=self.model_config,
-            tokenizer=self.renderer.tokenizer,
-            async_tokenizer_pool=self._async_tokenizer_pool,
-        )
-
-    def _build_render_config(
-        self,
-        request: Any,
-    ) -> RenderConfig:
-        """
-        Build and return a `RenderConfig` for an endpoint.
-
-        Used by the renderer to control how prompts are prepared
-        (e.g., tokenization and length handling). Endpoints should
-        implement this with logic appropriate to their request type.
-        """
-        raise NotImplementedError
-
-    def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
-        """
-        Return (and cache) an `AsyncMicrobatchTokenizer` bound to the
-        given tokenizer.
-        """
-        async_tokenizer = self._async_tokenizer_pool.get(tokenizer)
-        if async_tokenizer is None:
-            async_tokenizer = AsyncMicrobatchTokenizer(tokenizer)
-            self._async_tokenizer_pool[tokenizer] = async_tokenizer
-        return async_tokenizer
 
     async def _preprocess(
         self,
@@ -1065,69 +1025,42 @@ class OpenAIServing:
 
     async def _preprocess_chat(
         self,
-        request: ChatLikeRequest | ResponsesRequest,
-        renderer: RendererLike,
+        request: RendererChatRequest,
         messages: list[ChatCompletionMessageParam],
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
-        add_special_tokens: bool = False,
-    ) -> tuple[list[ConversationMessage], list[TokensPrompt]]:
-        chat_template_kwargs = {
-            "chat_template": chat_template,
-            "add_generation_prompt": add_generation_prompt,
-            "continue_final_message": continue_final_message,
-            "tools": tool_dicts,
-            "documents": documents,
-            **(chat_template_kwargs or {}),
-        }
-        chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
-            chat_template_kwargs,
-            default_chat_template_kwargs,
+    ) -> tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]:
+        from vllm.tokenizers.mistral import MistralTokenizer
+
+        renderer = self.renderer
+
+        default_template_kwargs = merge_kwargs(
+            default_template_kwargs,
+            dict(
+                tools=tool_dicts,
+                tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
+            ),
+        )
+
+        tok_params = request.build_tok_params(self.model_config)
+        chat_params = request.build_chat_params(
+            default_template, default_template_content_format
+        ).with_defaults(default_template_kwargs)
+
+        conversation, prompt = await renderer.render_messages_async(
+            messages, chat_params
         )
         engine_prompt = await renderer.tokenize_prompt_async(prompt, tok_params)
 
-        # Use the async tokenizer in `OpenAIServing` if possible.
-        # Later we can move it into the renderer so that we can return both
-        # text and token IDs in the same prompt from `render_messages_async`
-        # which is used for logging and `enable_response_messages`.
-        from vllm.tokenizers.mistral import MistralTokenizer
-
-        conversation, engine_prompt = await renderer.render_messages_async(
-            messages,
-            chat_template_content_format=chat_template_content_format,
-            tokenize=(
-                chat_template_kwargs.pop("tokenize", False)
-                or isinstance(renderer.tokenizer, MistralTokenizer)
-            ),
-            **chat_template_kwargs,
-        )
-
-        if "prompt_token_ids" not in engine_prompt:
-            extra_data = engine_prompt
-            engine_prompt = await self._tokenize_prompt_input_async(
-                request,
-                renderer.get_tokenizer(),
-                engine_prompt["prompt"],
-                add_special_tokens=add_special_tokens,
-            )
-            # Fill in other keys like MM data
-            engine_prompt.update(extra_data)  # type: ignore
-        else:
-            self._validate_input(
-                request=request,
-                input_ids=engine_prompt["prompt_token_ids"],  # type: ignore
-                input_text="",
-            )
-
-        engine_prompt = cast(TokensPrompt, engine_prompt)
-
-        if request.mm_processor_kwargs is not None:
-            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
-        if (cache_salt := getattr(request, "cache_salt", None)) is not None:
-            engine_prompt["cache_salt"] = cache_salt
+        extra_items = {
+            k: v
+            for k in ("mm_processor_kwargs", "cache_salt")
+            if (v := getattr(request, k, None)) is not None
+        }
+        engine_prompt.update(extra_items)  # type: ignore
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
@@ -1142,23 +1075,15 @@ class OpenAIServing:
                     )
                     raise NotImplementedError(msg)
 
-        if should_parse_tools:
-            if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
-                msg = (
-                    "Tool usage is only supported for Chat Completions API "
-                    "or Responses API requests."
-                )
-                raise NotImplementedError(msg)
-
-            tokenizer = renderer.get_tokenizer()
-            request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
+                # TODO: Update adjust_request to accept ResponsesRequest
+                tokenizer = renderer.get_tokenizer()
+                request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
 
         return conversation, [engine_prompt]
 
     async def _render_next_turn(
         self,
         request: ResponsesRequest,
-        renderer: RendererLike,
         messages: list[ResponseInputOutputItem],
         tool_dicts: list[dict[str, Any]] | None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None,
@@ -1171,7 +1096,6 @@ class OpenAIServing:
 
         _, engine_prompts = await self._preprocess_chat(
             request,
-            renderer,
             new_messages,
             default_template=chat_template,
             default_template_content_format=chat_template_content_format,
@@ -1255,7 +1179,6 @@ class OpenAIServing:
             elif isinstance(context, ParsableContext):
                 engine_prompts = await self._render_next_turn(
                     context.request,
-                    context.renderer,
                     context.parser.response_messages,
                     context.tool_dicts,
                     context.tool_parser_cls,

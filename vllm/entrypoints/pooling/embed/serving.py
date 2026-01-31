@@ -36,7 +36,7 @@ from vllm.utils.serial_utils import (
 logger = init_logger(__name__)
 
 
-EmbeddingServeContext = ServeContext[EmbeddingRequest]
+EmbeddingServeContext: TypeAlias = ServeContext[EmbeddingRequest]
 
 
 class OpenAIServingEmbedding(OpenAIServing):
@@ -94,19 +94,16 @@ class OpenAIServingEmbedding(OpenAIServing):
 
                 _, ctx.engine_prompts = await self._preprocess_chat(
                     ctx.request,
-                    self.renderer,
                     ctx.request.messages,
-                    chat_template=ctx.request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    add_generation_prompt=ctx.request.add_generation_prompt,
-                    continue_final_message=ctx.request.continue_final_message,
-                    add_special_tokens=ctx.request.add_special_tokens,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=None,
                 )
             elif isinstance(ctx.request, EmbeddingCompletionRequest):
-                renderer = self._get_completion_renderer()
-                ctx.engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=ctx.request.input,
-                    config=self._build_render_config(ctx.request),
+                ctx.engine_prompts = await self._preprocess_completion(
+                    ctx.request,
+                    prompt_input=ctx.request.input,
+                    prompt_embeds=None,
                 )
             else:
                 return self.create_error_response("Invalid classification request type")
@@ -115,19 +112,6 @@ class OpenAIServingEmbedding(OpenAIServing):
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
-
-    def _build_render_config(self, request: EmbeddingCompletionRequest) -> RenderConfig:
-        # Set max_length based on chunked processing capability
-        if self._should_use_chunked_processing(request):
-            max_length = None
-        else:
-            max_length = self.max_embed_len or self.max_model_len
-
-        return RenderConfig(
-            max_length=max_length,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            add_special_tokens=request.add_special_tokens,
-        )
 
     def _build_response(
         self,

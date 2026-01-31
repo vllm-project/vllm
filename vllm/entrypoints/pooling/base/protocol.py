@@ -8,9 +8,11 @@ from pydantic import Field, model_validator
 
 from vllm import PoolingParams
 from vllm.config.pooler import get_use_activation
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
-from vllm.logger import init_logger
 from vllm.renderers import ChatParams, merge_kwargs
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
@@ -120,6 +122,23 @@ class ChatRequestMixin(OpenAIBaseModel):
                 "`add_generation_prompt` to True."
             )
         return data
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParams:
+        return ChatParams(
+            chat_template=self.chat_template or default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=merge_kwargs(
+                self.chat_template_kwargs,
+                dict(
+                    add_generation_prompt=self.add_generation_prompt,
+                    continue_final_message=self.continue_final_message,
+                ),
+            ),
+        )
 
 
 class EncodingRequestMixin(OpenAIBaseModel):

@@ -79,9 +79,6 @@ class EmbedsPrompt(_CommonKeys):
     prompt_embeds: torch.Tensor
     """The embeddings of the prompt."""
 
-    prompt: NotRequired[str]
-    """The prompt text corresponding to the token embeddings, if available."""
-
 
 class DataPrompt(_CommonKeys):
     """Represents generic inputs handled by IO processor plugins."""
