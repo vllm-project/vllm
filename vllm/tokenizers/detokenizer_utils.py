@@ -36,13 +36,15 @@ def _convert_tokens_to_string_with_added_encoders(
     # Added tokens that get spaces around them (special=True or in all_special_tokens)
     special_added: set[str] = set()
     if spaces_between_special_tokens and added_vocab_set:
-        special = set(tokenizer.all_special_tokens)
-        dec = tokenizer.added_tokens_decoder
-        special_added = (
-            {t.content for t in dec.values() if t.special or t.content in special}
-            if dec
-            else added_vocab_set
-        )
+        special = set(getattr(tokenizer, "all_special_tokens", []) or [])
+        dec = getattr(tokenizer, "added_tokens_decoder", None)
+        if dec:
+            for t in dec.values():
+                c = getattr(t, "content", None) or str(t)
+                if getattr(t, "special", False) or c in special:
+                    special_added.add(c)
+        else:
+            special_added = added_vocab_set
 
     for token in output_tokens:
         if token in all_special_tokens:
