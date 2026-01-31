@@ -52,7 +52,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     get_kv_cache_layout,
     get_per_layer_parameters,
     infer_global_hyperparameters,
@@ -902,7 +902,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     seq_lens_cpu[num_decodes:] - query_lens_prefill_cpu
                 )
 
-            seq_lens_cpu = get_dcp_local_seq_lens(
+            seq_lens_cpu = get_cp_local_seq_lens(
                 seq_lens_cpu,
                 self.dcp_world_size,
                 self.dcp_rank,

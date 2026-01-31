@@ -326,6 +326,14 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
 
+    # Aliases for backward compatibility (cp = context parallelism = dcp)
+    cp_local_seq_lens: torch.Tensor | None = None
+    cp_local_seq_lens_cpu: torch.Tensor | None = None
+    """Sequence lengths of the local rank in context parallelism world"""
+
+    pcp_allgather_restore_idx: torch.Tensor | None = None
+    """Indices to restore the original order of KV in prefill context parallelism"""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
@@ -631,8 +639,8 @@ class AttentionImpl(ABC, Generic[T]):
     pcp_world_size: int
     pcp_rank: int
 
-    total_cp_world_size: int
-    total_cp_rank: int
+    cp_world_size: int
+    cp_rank: int
 
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
@@ -654,11 +662,11 @@ class AttentionImpl(ABC, Generic[T]):
         except AssertionError:
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        self.cp_world_size = self.pcp_world_size * self.dcp_world_size
+        self.cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
 
         self.need_to_return_lse_for_decode = (
-            self.dcp_world_size > 1 and self.can_return_lse_for_decode
+            self.cp_world_size > 1 and self.can_return_lse_for_decode
         )
         return self
 

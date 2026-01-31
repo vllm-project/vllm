@@ -47,7 +47,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import (
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     get_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -433,7 +433,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             query_kv_lens = query_start_loc[1:] - query_start_loc[:-1]
             dcp_context_kv_lens = seq_lens - query_kv_lens
 
-            dcp_context_kv_lens = get_dcp_local_seq_lens(
+            dcp_context_kv_lens = get_cp_local_seq_lens(
                 dcp_context_kv_lens,
                 self.dcp_world_size,
                 self.dcp_rank,
