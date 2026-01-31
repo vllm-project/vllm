@@ -158,7 +158,7 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
                 "They are ignored for now."
             )
 
-        return {"image": self.dummy_data_generator.get_dummy_mm_data()}
+        return self.dummy_data_generator.get_dummy_mm_data()
 
 
 class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessingInfo]):
@@ -192,8 +192,8 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
             mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
         )
 
-        processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
-        mm_processed_data = BatchFeature(dict(processor_data), tensor_type="pt")
+        _, passthrough_data = self._get_hf_mm_data(mm_items)
+        mm_processed_data = BatchFeature(dict(passthrough_data), tensor_type="pt")
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
