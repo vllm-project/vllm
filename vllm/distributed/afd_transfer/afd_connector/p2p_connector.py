@@ -20,6 +20,7 @@ from vllm.forward_context import (
     get_forward_context,
 )
 
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from .base import AFDConnectorBase
 from .metadata import AFDConnectorMetadata
 
@@ -64,6 +65,8 @@ class P2PAFDConnector(AFDConnectorBase):
         self.recv_attn_output_counter: int = 0
         self.recv_ffn_output_counter: int = 0
         self.dp_metadata_list: dict[int, DPMetadata] = {}
+        self.a2e_pynccl: PyNcclCommunicator | None = None
+        self.e2a_pynccl: PyNcclCommunicator | None = None
 
     def close(self) -> None:
         """Close the connector and release resources."""
@@ -118,7 +121,17 @@ class P2PAFDConnector(AFDConnectorBase):
                 backend="nccl",
                 group_name="e2a",
             )
-
+            logger.info("jcz before a2e_pynccl")
+            self.a2e_pynccl = PyNcclCommunicator(
+                group=self.a2e_group.cpu_group,
+                device=self.local_rank,
+            )
+            logger.info("jcz before e2a_pynccl")
+            self.e2a_pynccl = PyNcclCommunicator(
+                group=self.e2a_group.cpu_group,
+                device=self.local_rank,
+            )
+            logger.info("jcz after a2e_pynccl and e2a_pynccl")
         self._initialized = True
 
     def is_initialized(self) -> bool:
@@ -214,11 +227,25 @@ class P2PAFDConnector(AFDConnectorBase):
             return []
         assert dst < process_group.world_size, f"Invalid dst rank ({dst})"
         assert not hidden_states.is_cpu, "Hidden states must be on GPU"
-        torch.distributed.send(
-            hidden_states,
-            dst=process_group.ranks[dst],
-            group=process_group.device_group,
-        )
+
+        # Try to use PyNCCL first
+        pynccl_comm = None
+        if process_group == self.a2e_group:
+            pynccl_comm = self.a2e_pynccl
+        elif process_group == self.e2a_group:
+            pynccl_comm = self.e2a_pynccl
+
+        if pynccl_comm and not pynccl_comm.disabled:
+            # PyNCCL uses rank in group
+            logger.info("jcz send_hidden_states using pynccl")
+            pynccl_comm.send(hidden_states, dst)
+        else:
+            logger.info("jcz send_hidden_states using torch.distributed")
+            torch.distributed.send(
+                hidden_states,
+                dst=process_group.ranks[dst],
+                group=process_group.device_group,
+            )
 
     def _recv_hidden_states(
         self,
@@ -235,11 +262,25 @@ class P2PAFDConnector(AFDConnectorBase):
             dtype=tensor_metadata.dtype,
             device=tensor_metadata.device,
         )
-        torch.distributed.recv(
-            hidden_states,
-            src=process_group.ranks[src],
-            group=process_group.device_group,
-        )
+
+        # Try to use PyNCCL first
+        pynccl_comm = None
+        if process_group == self.a2e_group:
+            pynccl_comm = self.a2e_pynccl
+        elif process_group == self.e2a_group:
+            pynccl_comm = self.e2a_pynccl
+
+        if pynccl_comm and not pynccl_comm.disabled:
+            # PyNCCL uses rank in group
+            logger.info("jcz recv_hidden_states using pynccl")
+            pynccl_comm.recv(hidden_states, src)
+        else:
+            logger.info("jcz recv_hidden_states using torch.distributed")
+            torch.distributed.recv(
+                hidden_states,
+                src=process_group.ranks[src],
+                group=process_group.device_group,
+            )
         return hidden_states
 
     # -------------------------------------------------------------------------
