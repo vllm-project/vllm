@@ -22,13 +22,13 @@ RUN microdnf install -y dnf && dnf install -y gcc-toolset-14 make wget unzip \
 ###############################################################
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS centos-deps-builder
 RUN  microdnf install -y dnf && \ 
-     dnf install -y https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-gpg-keys-9.0-24.el9.noarch.rpm \
-        https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-stream-repos-9.0-24.el9.noarch.rpm \
+     dnf install -y https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-gpg-keys-9.0-26.el9.noarch.rpm \
+        https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-stream-repos-9.0-26.el9.noarch.rpm \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
         dnf config-manager --set-enabled crb
 
-RUN dnf install -y openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel && \
-    dnf remove -y centos-gpg-keys-9.0-24.el9.noarch centos-stream-repos-9.0-24.el9.noarch 
+RUN dnf install -y openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel yajl-devel && \
+    dnf remove -y centos-gpg-keys-9.0-24.el9.noarch centos-stream-repos-9.0-26.el9.noarch 
 
 
 ###############################################################

@@ -11,6 +11,7 @@ from tests.kernels.quantization.nvfp4_utils import (
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
@@ -30,10 +31,11 @@ BLOCK_SIZE = 16
 @pytest.mark.parametrize("shape", SHAPES)
 @torch.inference_mode()
 def test_silu_mul_nvfp4_quant(
+    default_vllm_config,
     dtype: torch.dtype,
     shape: tuple[int, int],
 ) -> None:
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     device = "cuda:0"
     torch.set_default_device(device)
 

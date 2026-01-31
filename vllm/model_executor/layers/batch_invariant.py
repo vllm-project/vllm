@@ -6,11 +6,11 @@ from typing import Any
 
 import torch
 
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -1005,7 +1005,9 @@ def override_envs_for_invariance(
 ):
     supported_backends = [
         AttentionBackendEnum.FLASH_ATTN,  # best supported backend
-        AttentionBackendEnum.FLASHINFER,
+        # FlashInfer temporarily disabled due to invariant CTA sizes.
+        # See FlashInfer issue #2424
+        # AttentionBackendEnum.FLASHINFER,
         AttentionBackendEnum.FLASH_ATTN_MLA,
         AttentionBackendEnum.TRITON_MLA,
         # Not yet supported MLA backends

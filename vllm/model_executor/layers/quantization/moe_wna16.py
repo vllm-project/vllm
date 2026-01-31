@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -163,7 +163,7 @@ class MoeWNA16Config(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if is_layer_skipped_quant(prefix, self.modules_to_not_convert):
             if isinstance(layer, FusedMoE):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
@@ -365,15 +365,12 @@ class MoeWNA16Method(FusedMoEMethodBase):
         self,
         layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         assert layer.activation == "silu", "Only SiLU activation is supported."
-        topk_weights, topk_ids = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
 
         return fused_experts(
             x,

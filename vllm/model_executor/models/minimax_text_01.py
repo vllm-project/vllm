@@ -14,8 +14,6 @@ import torch
 from torch import nn
 from transformers import MiniMaxConfig
 
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import (
@@ -25,6 +23,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -36,6 +35,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01LinearAttention
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -48,6 +49,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionMetadata
 
 from .interfaces import HasInnerState, IsHybrid
 from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
@@ -332,7 +334,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
             )
         else:
             raise ValueError(
-                f"Unsupported attention type: {self.config.attention_type}"
+                f"Unsupported attention_type {self.config.attention_type}: "
+                f"should be 0 (linear) or 1 (full)."
             )
 
         if expert_num == 1:
@@ -709,7 +712,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1005,3 +1008,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
             tp_size=parallel_config.tensor_parallel_size,
             head_dim=hf_config.head_dim,
         )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.linear_attention_state_copy_func()

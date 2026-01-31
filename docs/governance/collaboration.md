@@ -18,7 +18,7 @@ For features that you intend to maintain, please feel free to add yourself in [`
 If you use vLLM, we recommend you making the model work with vLLM by following the [model registration](../contributing/model/registration.md) process before you release it publicly.
 
 The vLLM team helps with new model architectures not supported by vLLM, especially models pushing architectural frontiers.
-Here's how the vLLM team works with model providers. The vLLM team includes all [committers](./committers.md) of the project. model providers can exclude certain members but shouldn't, as this may harm release timelines due to missing expertise. Contact [project leads](./process.md) if you want to collaborate.
+Here's how the vLLM team works with model providers. The vLLM team includes all [committers](./committers.md) of the project. Model providers can exclude certain members but shouldn't, as this may harm release timelines due to missing expertise. Contact [project leads](./process.md) if you want to collaborate.
 
 Once we establish the connection between the vLLM team and model provider:
 
@@ -30,7 +30,7 @@ The vLLM team works with model providers on features, integrations, and release 
 
 The vLLM maintainers will not publicly share details about model architecture, release timelines, or upcoming releases. We maintain model weights on secure servers with security measures (though we can work with security reviews and testing without certification). We delete pre-release weights or artifacts upon request.
 
-The vLLM team collaborates on marketing and promotional efforts for model releases. model providers can use vLLM's trademark and logo in publications and materials.
+The vLLM team collaborates on marketing and promotional efforts for model releases. Model providers can use vLLM's trademark and logo in publications and materials.
 
 ## Adding New Hardware
 

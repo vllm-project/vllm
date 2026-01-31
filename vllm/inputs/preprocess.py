@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from typing_extensions import assert_never
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, ObservabilityConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
@@ -17,6 +17,7 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.renderers import renderer_from_config
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -46,26 +47,26 @@ class InputPreprocessor:
     def __init__(
         self,
         model_config: ModelConfig,
-        tokenizer: TokenizerLike | None,
+        observability_config: ObservabilityConfig | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         mm_processor_cache: BaseMultiModalProcessorCache | None = None,
     ) -> None:
         super().__init__()
 
         self.model_config = model_config
-        self.tokenizer = tokenizer
+        self.observability_config = observability_config
+        self.renderer = renderer_from_config(model_config)
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_processor_cache
 
         self.mm_cache_stats = MultiModalCacheStats() if mm_processor_cache else None
 
-    def get_tokenizer(self) -> TokenizerLike:
-        if self.tokenizer is None:
-            raise ValueError(
-                "You cannot pass text prompts when `skip_tokenizer_init=True`"
-            )
+    @property
+    def tokenizer(self) -> TokenizerLike | None:
+        return self.renderer.tokenizer
 
-        return self.tokenizer
+    def get_tokenizer(self) -> TokenizerLike:
+        return self.renderer.get_tokenizer()
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
@@ -232,6 +233,7 @@ class InputPreprocessor:
         if not hasattr(self, "_mm_processor"):
             self._mm_processor = self.mm_registry.create_processor(
                 self.model_config,
+                self.observability_config,
                 tokenizer=self.tokenizer,
                 cache=self.mm_processor_cache,
             )
@@ -256,9 +258,10 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
+        mm_items = mm_processor.info.parse_mm_data(mm_data)
         mm_input = mm_processor.apply(
             prompt,
-            mm_data,
+            mm_items,
             hf_processor_mm_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
@@ -686,11 +689,7 @@ class InputPreprocessor:
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
-        res = self._preprocess(
-            prompt,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        res = self._preprocess(prompt, tokenization_kwargs, mm_uuids=mm_uuids)
 
         if self.mm_processor_cache and self.mm_cache_stats is not None:
             delta = self.mm_processor_cache.make_stats(delta=True)

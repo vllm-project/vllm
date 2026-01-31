@@ -5,7 +5,6 @@
 import torch
 from torch import nn
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
     divide,
@@ -42,15 +41,20 @@ from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
 # Added by the IBM Team, 2024
 
 
 # Adapted from transformers.models.mamba2.modeling_mamba2.MambaRMSNormGated
+# --8<-- [start:mixer2_gated_rms_norm]
 @CustomOp.register("mixer2_gated_rms_norm")
 class Mixer2RMSNormGated(CustomOp):
+    # --8<-- [end:mixer2_gated_rms_norm]
+
     def __init__(
         self,
         full_hidden_size: int,
@@ -214,6 +218,7 @@ def mamba_v2_sharded_weight_loader(
 
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
+# --8<-- [start:mamba_mixer2]
 @CustomOp.register("mamba_mixer2")
 class MambaMixer2(MambaBase, CustomOp):
     """
@@ -225,6 +230,8 @@ class MambaMixer2(MambaBase, CustomOp):
     invariant S4, and is why Mamba is called
     **selective** state spaces)
     """
+
+    # --8<-- [end:mamba_mixer2]
 
     def __init__(
         self,
@@ -508,6 +515,9 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=-1,
         )
 
+        # Check if running on Blackwell (SM100+) for kernel tuning
+        self.is_blackwell = current_platform.is_device_capability_family(100)
+
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -576,7 +586,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
-        prefix_caching_enabled = self.cache_config.enable_prefix_caching
+        is_mamba_cache_all = self.cache_config.mamba_cache_mode == "all"
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
@@ -626,7 +636,7 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=0,
         )
 
-        if prefix_caching_enabled and (num_prefills > 0 or num_decodes > 0):
+        if is_mamba_cache_all:
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
@@ -708,7 +718,7 @@ class MambaMixer2(MambaBase, CustomOp):
             initial_states = None
             if has_initial_states_p is not None and prep_initial_states:
                 kernel_ssm_indices = prefill_state_indices_tensor
-                if prefix_caching_enabled:
+                if is_mamba_cache_all:
                     kernel_ssm_indices = prefill_state_indices_tensor.gather(
                         1, block_idx_last_computed_token_p.unsqueeze(1)
                     ).squeeze(1)
@@ -737,14 +747,14 @@ class MambaMixer2(MambaBase, CustomOp):
                 cu_chunk_seqlens=cu_chunk_seqlen_p,
                 last_chunk_indices=last_chunk_indices_p,
                 initial_states=initial_states,
-                return_intermediate_states=prefix_caching_enabled,
+                return_intermediate_states=is_mamba_cache_all,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
             )
 
-            if prefix_caching_enabled:
+            if is_mamba_cache_all:
                 # The chunk_stride is the number of chunks per mamba block
                 # e.g., if mamba_block_size = 512 and chunk_size = 256,
                 # then chunk_stride = 2
@@ -875,6 +885,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 out=preallocated_ssm_out_d.view(num_decode_tokens, -1, self.head_dim),
                 num_accepted_tokens=num_accepted_tokens,
                 cu_seqlens=decode_query_start_loc,
+                is_blackwell=self.is_blackwell,
             )
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:

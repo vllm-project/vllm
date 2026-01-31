@@ -138,7 +138,7 @@ Note that the sampler will access the logits processors via `SamplingMetadata.lo
             # ...return sampler output data structure...
 
 
-        def sample(self, logits, sampling_metadta)
+        def sample(self, logits, sampling_metadata)
 
             ...
 

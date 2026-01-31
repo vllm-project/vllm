@@ -3,19 +3,18 @@
 
 import contextlib
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.selector import AttentionSelectorConfig
     from vllm.config import VllmConfig
+    from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
 
@@ -53,10 +52,17 @@ class XPUPlatform(Platform):
             "only NHD layout is supported by XPU attention kernels."
         )
 
+        dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif dtype == torch.float32:
+            logger.warning_once(
+                "Flash Attention on XPU does not support float32 dtype. "
+                "Falling back to Triton Attention backend."
+            )
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend.")
@@ -82,7 +88,7 @@ class XPUPlatform(Platform):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: Optional["AttentionBackendEnum"] = None,
+        backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         if backend is not None:
             assert backend in cls.get_supported_vit_attn_backends(), (
@@ -156,7 +162,9 @@ class XPUPlatform(Platform):
 
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
-
+        # decrease triton kernel compilation scratch space for speculative decoding
+        if vllm_config.speculative_config is not None:
+            os.environ["IGC_ForceOCLSIMDWidth"] = "16"  # noqa: SIM112
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"
@@ -165,32 +173,6 @@ class XPUPlatform(Platform):
             parallel_config.worker_cls = "vllm.v1.worker.xpu_worker.XPUWorker"
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
-
-        if parallel_config.distributed_executor_backend is None:
-            if parallel_config.world_size > 1:
-                parallel_config.distributed_executor_backend = "ray"
-            else:
-                parallel_config.distributed_executor_backend = "uni"
-        elif parallel_config.distributed_executor_backend == "mp":
-            # FIXME(kunshang):
-            # spawn needs calling `if __name__ == '__main__':`
-            # fork is not supported for xpu start new process.
-            if envs.VLLM_WORKER_MULTIPROC_METHOD != "spawn":
-                os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-                logger.warning(
-                    "Please use spawn as start method if you want to use mp."
-                )
-        elif (
-            parallel_config.distributed_executor_backend != "ray"
-            and parallel_config.distributed_executor_backend != "uni"
-            and parallel_config.distributed_executor_backend != "external_launcher"
-        ):
-            logger.warning(
-                "%s is not supported on XPU, fallback to ray distributed"
-                " executor backend.",
-                parallel_config.distributed_executor_backend,
-            )
-            parallel_config.distributed_executor_backend = "ray"
 
         if model_config and model_config.use_mla:
             logger.info(
