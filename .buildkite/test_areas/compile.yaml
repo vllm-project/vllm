@@ -69,9 +69,9 @@ steps:
   commands:
     - nvidia-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "True and not +rms_norm and not +quant_fp8"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
     # Qwen requires +quant_fp8 as -quant_fp8 rms+quant fusion is not supported
-    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "True and not +rms_norm and +quant_fp8 and qwen3"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3"
 
 - label: Fusion E2E Quick (H100)
   timeout_in_minutes: 20 # ~18 mins
@@ -87,9 +87,9 @@ steps:
   commands:
     - nvidia-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "True and not +rms_norm and not +quant_fp8"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
     # Qwen requires +quant_fp8 as -quant_fp8 rms+quant fusion is not supported
-    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "True and not +rms_norm and +quant_fp8 and qwen3"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3"
 
 - label: Fusion E2E Config Sweep (B200)
   timeout_in_minutes: 30 # ~24 mins
@@ -125,7 +125,7 @@ steps:
   commands:
     - nvidia-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "True and not +rms_norm and not +quant_fp8"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
 
 - label: Fusion E2E TP2 AR-RMS Quick (H100)
   timeout_in_minutes: 20 # ~18 mins
@@ -141,7 +141,7 @@ steps:
   commands:
     - nvidia-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "True and not +rms_norm and not +quant_fp8"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
 
 - label: Fusion E2E TP2 AR-RMS Config Sweep (B200)
   timeout_in_minutes: 40 # ~30 mins
@@ -181,7 +181,7 @@ steps:
   commands:
     - nvidia-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "True and not +rms_norm and not +quant_fp8"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
 
 - label: Fusion E2E TP2 AsyncTP Quick (H100)
   timeout_in_minutes: 20 # ~18 mins
@@ -201,7 +201,7 @@ steps:
   commands:
     - nvidia-smi
     # Run all models and attn backends but only Inductor partition and native custom ops
-    - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "True and not +rms_norm and not +quant_fp8"
+    - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
 
 - label: Fusion E2E TP2 AsyncTP Config Sweep (B200)
   timeout_in_minutes: 40 # ~40 mins

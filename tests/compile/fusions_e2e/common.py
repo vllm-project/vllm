@@ -73,8 +73,9 @@ INDUCTOR_GRAPH_PARTITION = [
             not has_cuda_graph_wrapper_metadata(),
             reason="torch version does not support Inductor partition",
         ),
+        id="inductor_partition",
     ),
-    False,
+    pytest.param(False, id="dynamo_partition"),
 ]
 
 FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
