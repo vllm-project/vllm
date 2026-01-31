@@ -242,7 +242,7 @@ class TokenizeParams:
             add_special_tokens=self.add_special_tokens,
         )
 
-    def _apply_text_len_check(self, tokenizer: TokenizerLike | None, text: str) -> str:
+    def _text_len_check(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply length checks to prompt text if necessary."""
         max_input_tokens = self.max_input_tokens
         if max_input_tokens is None:
@@ -276,7 +276,7 @@ class TokenizeParams:
     def _validate_text(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply all validators to prompt text."""
         for validator in (
-            self._apply_text_len_check,
+            self._text_len_check,
             self._text_lowercase,
         ):
             text = validator(tokenizer, text)
