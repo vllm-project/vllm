@@ -1395,12 +1395,14 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int],
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
+        for_cudagraph_capture: bool = False,
     ) -> tuple[torch.Tensor | None, np.ndarray | None]:
         if not isinstance(kv_cache_spec, CrossAttentionSpec):
             return None, None
 
         # Zero out buffer for padding requests that are not actually scheduled (CGs)
         self.encoder_seq_lens.np[:num_reqs] = 0
+
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
         for req_id in num_scheduled_tokens:
@@ -1417,6 +1419,15 @@ class GPUModelRunner(
                 feature.mm_position.length for feature in req_state.mm_features
             )
             self.encoder_seq_lens.np[req_index] = encoder_input_tokens
+        if for_cudagraph_capture:
+            # During CUDA graph capture, we need to use realistic encoder lengths
+            # so that max_seqlen_k is captured with the correct value.
+            max_encoder_len = getattr(
+                self.model_config.hf_config,
+                "max_source_positions",
+                self.max_encoder_len,
+            )
+            self.encoder_seq_lens.np[:num_reqs] = max_encoder_len
 
         self.encoder_seq_lens.copy_to_gpu(num_reqs)
         encoder_seq_lens = self.encoder_seq_lens.gpu[:num_reqs]
@@ -1834,6 +1845,7 @@ class GPUModelRunner(
                 num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
                 num_reqs_padded,
+                for_cudagraph_capture=for_cudagraph_capture,
             )
             if kv_cache_gid > 0:
                 cm.block_table_tensor = _get_block_table(kv_cache_gid)

@@ -263,18 +263,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         vllm_config: "VllmConfig",
         kv_cache_spec: "AttentionSpec",
     ) -> AttentionCGSupport:
-        # FA2 does not support CUDA graphs with encoder-decoder models due to
-        # accuracy issues reported in https://github.com/vllm-project/vllm/issues/33091
-        if (
-            vllm_config.model_config.is_encoder_decoder
-            and get_flash_attn_version() == 2
-        ):
-            logger.warning_once(
-                "FlashAttention2 does not support CUDA graphs with "
-                "encoder-decoder models due to accuracy issues reported in #33091. "
-                "Disabling CUDA graph."
-            )
-            return AttentionCGSupport.NEVER
         return cls._cudagraph_support
 
     def __init__(
