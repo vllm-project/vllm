@@ -180,6 +180,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         shard_size = kwargs.get("shard_size")
         shard_id = kwargs.get("shard_id")
         num_heads = kwargs.get("num_heads")
+        # Use tp_rank from kwargs if provided (for Helix GQA), else fall back to self.tp_rank
+        tp_rank = kwargs.get("tp_rank", self.tp_rank)
 
         # TODO: move these to PackedColumnParameter and PackedvLLMParameter
         if (
@@ -191,7 +193,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
             )
 
         param_data = self.data
-        shard_id = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
+        # For Q: use tp_rank directly; for K/V: divide by num_heads to get KV shard
+        shard_id = tp_rank if shard_id == "q" else tp_rank // num_heads
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
         loaded_weight = loaded_weight.narrow(
             self.output_dim, shard_id * shard_size, shard_size

@@ -1067,27 +1067,89 @@ class ModelConfig:
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
         if decode_context_parallel_size > 1 and not self.use_mla:
             total_num_kv_heads = self.get_total_num_kv_heads()
-            assert tensor_parallel_size > total_num_kv_heads, (
-                f"tensor parallel size {tensor_parallel_size} must be greater "
-                f"than total num kv heads {total_num_kv_heads} when enable "
-                f"decode context parallel for GQA/MQA"
-            )
 
-            max_dcp_size = tensor_parallel_size // total_num_kv_heads
-            assert decode_context_parallel_size <= max_dcp_size, (
-                f"decode context parallel size must less than or equal to "
-                f"(tensor parallel size {tensor_parallel_size} // total "
-                f"num kv heads {total_num_kv_heads}) = {max_dcp_size}, "
-                f"but got {decode_context_parallel_size}"
-            )
+            if parallel_config.helix_mode:
+                # Helix mode: uses All-to-All communication pattern
+                # TPA = TP / DCP determines attention head parallelism
+                # KVP = DCP determines sequence parallelism
+                tpa = tensor_parallel_size // decode_context_parallel_size
+                kvp = decode_context_parallel_size
 
-            num_q_per_kv = total_num_attention_heads // total_num_kv_heads
-            assert num_q_per_kv % decode_context_parallel_size == 0, (
-                f"Total number of q per kv attn heads ({num_q_per_kv})"
-                " must be divisible by dcp world size when enable "
-                "decode context parallel for GQA "
-                f"({parallel_config.decode_context_parallel_size})."
-            )
+                # Constraint 1: TPA <= K (num KV heads)
+                # This ensures each TPA rank has at least one KV head
+                assert tpa <= total_num_kv_heads, (
+                    f"Helix TPA ({tpa} = TP {tensor_parallel_size} / DCP "
+                    f"{decode_context_parallel_size}) must be <= num KV heads "
+                    f"({total_num_kv_heads}). Try increasing "
+                    f"decode_context_parallel_size or decreasing tensor_parallel_size."
+                )
+
+                # Constraint 2: K must be divisible by TPA
+                # This ensures even distribution of KV heads across TPA ranks
+                assert total_num_kv_heads % tpa == 0, (
+                    f"Total KV heads ({total_num_kv_heads}) must be divisible by "
+                    f"Helix TPA ({tpa}). Each TPA rank needs equal KV heads for "
+                    f"correct GQA Q-to-KV mapping."
+                )
+
+                # Constraint 3: Q heads must be divisible by TPA
+                # This ensures even distribution of Q heads across TPA ranks
+                assert total_num_attention_heads % tpa == 0, (
+                    f"Total Q heads ({total_num_attention_heads}) must be divisible "
+                    f"by Helix TPA ({tpa})."
+                )
+
+                # Check if this is MLA (TPA=1) or GQA (TPA>1)
+                if tpa == 1:
+                    # TPA=1 only works for MLA models (not GQA)
+                    # For GQA, TPA=1 would break Q-to-KV head binding because:
+                    # - Each GPU has different KV heads (standard TP distribution)
+                    # - AllGather Q gives all Q heads to each GPU
+                    # - But Q heads would be computed against wrong KV heads
+                    assert self.use_mla, (
+                        f"Helix with TPA=1 (TP={tensor_parallel_size}, "
+                        f"DCP={decode_context_parallel_size}) is only supported for "
+                        f"MLA models. For GQA models, use TPA > 1 by reducing "
+                        f"decode_context_parallel_size (e.g., DCP <= {tensor_parallel_size // 2})."
+                    )
+                    logger.info(
+                        "Helix mode enabled for MLA model: KVP=%d "
+                        "(sequence sharding only, no head sharding)",
+                        kvp,
+                    )
+                else:
+                    # GQA models: Helix with proper weight distribution
+                    # GPUs in the same KVP group will have the same Q and KV heads
+                    logger.info(
+                        "Helix mode enabled for GQA model: TPA=%d, KVP=%d, "
+                        "Q_heads_per_TPA=%d, KV_heads_per_TPA=%d",
+                        tpa, kvp,
+                        total_num_attention_heads // tpa,
+                        total_num_kv_heads // tpa,
+                    )
+            else:
+                # Standard DCP mode (not Helix)
+                assert tensor_parallel_size > total_num_kv_heads, (
+                    f"tensor parallel size {tensor_parallel_size} must be greater "
+                    f"than total num kv heads {total_num_kv_heads} when enable "
+                    f"decode context parallel for GQA/MQA"
+                )
+
+                max_dcp_size = tensor_parallel_size // total_num_kv_heads
+                assert decode_context_parallel_size <= max_dcp_size, (
+                    f"decode context parallel size must less than or equal to "
+                    f"(tensor parallel size {tensor_parallel_size} // total "
+                    f"num kv heads {total_num_kv_heads}) = {max_dcp_size}, "
+                    f"but got {decode_context_parallel_size}"
+                )
+
+                num_q_per_kv = total_num_attention_heads // total_num_kv_heads
+                assert num_q_per_kv % decode_context_parallel_size == 0, (
+                    f"Total number of q per kv attn heads ({num_q_per_kv})"
+                    " must be divisible by dcp world size when enable "
+                    "decode context parallel for GQA "
+                    f"({parallel_config.decode_context_parallel_size})."
+                )
 
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""
