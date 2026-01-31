@@ -185,15 +185,15 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         tokenization_kwargs: Mapping[str, object] | None = None,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        mm_items = self._to_mm_items(mm_data)
-        tokenization_kwargs = tokenization_kwargs or {}
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
+
         mm_hashes = self._hash_mm_items(
             mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
         )
 
-        mm_processed_data = BatchFeature(
-            mm_data.get("image", mm_data), tensor_type="pt"
-        )
+        _, passthrough_data = self._get_hf_mm_data(mm_items)
+        mm_processed_data = BatchFeature(dict(passthrough_data), tensor_type="pt")
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
