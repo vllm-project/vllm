@@ -845,17 +845,22 @@ class MPClient(EngineCoreClient):
             return
 
         def monitor_actors():
+            processed_done_refs = set()
             while True:
                 actor_run_refs = engine_manager.get_run_refs()
+                if not actor_run_refs:
+                    logger.info("There are no actors to monitor currently."
+                                " The monitoring function is about to terminate.")
+                    return
                 ref_to_index_mapping = {
                     ref: index for index, ref in enumerate(actor_run_refs)
                 }
-                actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+                actor_done_refs, run_refs = ray.wait(actor_run_refs, timeout=5)
                 if actor_done_refs:
                     for actor_ref in actor_done_refs:
+                        if actor_ref in processed_done_refs:
+                            continue
                         error_engine_id = ref_to_index_mapping[actor_ref]
-                        actor_index = actor_run_refs.index(actor_ref)
-                        engine_manager.get_run_refs().pop(actor_index)
                         fault_info = FaultInfo(
                             type="engine_actor dead",
                             message="Engine_actor died unexpectedly.",
@@ -865,6 +870,7 @@ class MPClient(EngineCoreClient):
                         engine_manager.engine_down_socket.send_multipart(
                             [b"", fault_info.serialize().encode("utf-8")]
                         )
+                        processed_done_refs.add(actor_ref)
 
         Thread(target=monitor_actors, daemon=True, name="MPClientEngineMonitor").start()
 
