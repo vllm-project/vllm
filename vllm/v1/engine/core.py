@@ -1518,11 +1518,6 @@ class DPEngineCoreProc(EngineCoreProc):
                 self.current_wave += 1
                 self.step_counter = 0
 
-            # 4) Check if drain is complete.
-            if self._drain_requested and not self.scheduler.has_requests():
-                logger.info("Drain complete, exiting")
-                break
-
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
         # Optimization - only perform finish-sync all-reduce every 32 steps.
         self.step_counter += 1
