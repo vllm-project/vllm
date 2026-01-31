@@ -358,7 +358,14 @@ def split_graph(
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
-            subgraph_id += 1
+
+            # keep consecutive splitting ops together
+            # (we know node.next exists because node isn't the last (output) node)
+            if should_split(node.next, splitting_ops):
+                # this will get incremented by the next node
+                subgraph_id -= 1
+            else:
+                subgraph_id += 1
         else:
             node_to_subgraph_id[node] = subgraph_id
 
