@@ -768,7 +768,7 @@ class ModelConfig:
             )
             self.tokenizer = object_storage_tokenizer.dir
 
-    def _get_encoder_config(self):
+    def _get_encoder_config(self) -> dict[str, Any] | None:
         model = self.model
         if is_remote_gguf(model):
             model, _ = split_remote_gguf(model)
@@ -1918,7 +1918,7 @@ def _get_and_verify_max_len(
     disable_sliding_window: bool,
     sliding_window: int | None,
     spec_target_max_model_len: int | None = None,
-    encoder_config: Any | None = None,
+    encoder_config: dict[str, Any] | None = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     (derived_max_model_len, max_len_key) = (
