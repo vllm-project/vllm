@@ -252,6 +252,8 @@ class TokenizeParams:
             max_input_chars = max_input_tokens * envs.VLLM_MAX_CHARS_PER_TOKEN
 
             if len(text) > max_input_chars:
+                # To save resources, fail the request outright without even
+                # attempting tokenization
                 raise VLLMValidationError(
                     f"You passed {len(text)} input characters "
                     f"and requested {self.max_output_tokens} output tokens. "

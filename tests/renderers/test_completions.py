@@ -272,6 +272,7 @@ class TestRenderPrompt:
                 TokenizeParams(max_total_tokens=100),
             )
 
+        # Should not even attempt tokenization
         assert renderer._tokenizer._captured_encode_kwargs == {}
 
     def test_text_max_length_exceeded_nonobvious(self, monkeypatch):
