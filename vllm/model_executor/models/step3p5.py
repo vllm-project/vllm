@@ -378,19 +378,15 @@ class FusedMoEBlock(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states, router_logits=hidden_states
-            )
-        else:
-            # router_logits: (num_tokens, n_experts)
-            router_logits, _ = self.gate(hidden_states)
-            fused_moe_out = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
-            )
+        # router_logits: (num_tokens, n_experts)
+        # Use FP32 for higher precision.
+        router_logits = (
+            hidden_states.to(torch.float32) @ self.gate.weight.to(torch.float32).t()
+        )
+        shared_output, final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
+        )
 
-        shared_output, final_hidden_states = fused_moe_out
         if self.share_expert is None:
             assert shared_output is None
 
