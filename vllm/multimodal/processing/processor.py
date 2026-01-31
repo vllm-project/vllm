@@ -1459,6 +1459,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         for modality, hashes in mm_hashes.items():
             missing_kwargs = mm_missing_kwargs.get(modality, [])
+            print("missing_kwargs", missing_kwargs)
             missing_prompt_updates = mm_missing_prompt_updates.get(modality, [])
 
             for item_idx, item_hash in enumerate(hashes):

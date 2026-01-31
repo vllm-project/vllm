@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
+import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn as nn
@@ -33,6 +34,7 @@ from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
+    VisionChunk,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -274,13 +276,16 @@ def dynamic_preprocess_internvl(
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
 def image_to_pixel_values_internvl(
-    image: Image.Image,
+    image: Image.Image | npt.NDArray,
     *,
     input_size: int,
     min_num: int,
     max_num: int,
     use_thumbnail: bool,
 ) -> torch.Tensor:
+    if isinstance(image, np.ndarray):
+        image = Image.fromarray(image, mode="RGB")
+
     target_ratios = get_internvl_target_ratios(min_num, max_num)
 
     transform = build_transform(input_size=input_size)
@@ -631,19 +636,60 @@ class InternVLProcessor(BaseInternVLProcessor):
                 text = [t.replace("<video>", video_repl.full, 1) for t in text]
         return text, video_inputs
 
+    def _preprocess_vision_chunk(
+        self,
+        text: list[str],
+        vision_chunks: list[VisionChunk],
+    ):
+        text = [
+            t.replace("<image>", "<vision_chunk>").replace("<video>", "<vision_chunk>")
+            for t in text
+        ]
+        if len(vision_chunks) == 0:
+            vision_chunk_inputs = {}
+        else:
+            pixel_values_lst = []
+            for chunk in vision_chunks:
+                if chunk["type"] == "image":
+                    pixel_values = self._images_to_pixel_values_lst([chunk["image"]])[0]
+                elif chunk["type"] == "video_chunk":
+                    pixel_values = self._videos_to_pixel_values_lst([chunk["video_chunk"]])[0]
+                pixel_values_lst.append(pixel_values)
+
+            vision_chunk_inputs = {
+                "pixel_values_flat_vision_chunk": torch.cat(pixel_values_lst),
+                "vision_chunk_num_patches": torch.tensor(
+                    [len(item) for item in pixel_values_lst]
+                ),
+            }
+
+            for pixel_values in pixel_values_lst:
+                num_patches = pixel_values.shape[0]
+                feature_size = num_patches * self.num_image_token
+
+                vision_chunk_repl = self.get_image_repl(feature_size, num_patches)
+                text = [t.replace("<vision_chunk>", vision_chunk_repl.full, 1) for t in text]
+        return text, vision_chunk_inputs
+
     def __call__(
         self,
         text: str | list[str] | None = None,
         images: Image.Image | list[Image.Image] | None = None,
         videos: npt.NDArray | list[npt.NDArray] | None = None,
+        vision_chunks: VisionChunk | list[VisionChunk] | None = None,
         min_dynamic_patch: int | None = None,
         max_dynamic_patch: int | None = None,
         dynamic_image_size: bool | None = None,
         return_tensors: str | TensorType | None = None,
     ) -> BatchFeature:
-        text, images, videos = [
-            self._make_batch_input(x) for x in (text, images, videos)
+        text, images, videos, vision_chunks = [
+            self._make_batch_input(x) for x in (text, images, videos, vision_chunks)
         ]
+
+        text, vision_chunk_inputs = self._preprocess_vision_chunk(
+            text=text,
+            vision_chunks=vision_chunks,
+        )
 
         text, image_inputs = self._preprocess_image(
             text=text,
@@ -661,7 +707,7 @@ class InternVLProcessor(BaseInternVLProcessor):
 
         text_inputs = self.tokenizer(text)
 
-        combined_outputs = {**text_inputs, **image_inputs, **video_inputs}
+        combined_outputs = {**text_inputs, **image_inputs, **video_inputs, **vision_chunk_inputs}
 
         return BatchFeature(combined_outputs, tensor_type=return_tensors)
 
@@ -892,6 +938,11 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     def supports_video(self):
         return self.get_hf_processor().supports_video
 
+    @property
+    def use_unified_vision_chunk(self):
+        hf_config = self.get_hf_config()
+        return getattr(hf_config, "use_unified_vision_chunk", False)
+
     def get_supported_mm_limits(self):
         hf_config = self.get_hf_config()
         if getattr(hf_config, "use_unified_vision_chunk", False):
@@ -1001,12 +1052,12 @@ class InternVLMultiModalProcessor(
             prompt, mm_data, mm_kwargs, tok_kwargs
         )
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        if (
-            self.info.supports_video
-            and (video_token_id := hf_processor.video_token_id) is not None
-        ):
-            processed_outputs["video_token_id"] = torch.tensor(video_token_id)
+        # hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        # if (
+        #     self.info.supports_video
+        #     and (video_token_id := hf_processor.video_token_id) is not None
+        # ):
+        #     processed_outputs["video_token_id"] = torch.tensor(video_token_id)
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -1015,6 +1066,14 @@ class InternVLMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         image_fields = super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
+        if self.info.use_unified_vision_chunk:
+            return dict(
+                pixel_values_vision_chunk=MultiModalFieldConfig.flat_from_sizes(
+                    "vision_chunk",
+                    hf_inputs.get("vision_chunk_num_patches", torch.empty(0)),
+                ),
+                vision_chunk_num_patches=MultiModalFieldConfig.batched("vision_chunk"),
+            )
         if self.info.supports_video:
             video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
             num_videos = len(video_num_patches)

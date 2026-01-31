@@ -755,7 +755,7 @@ class VisionChunkDataParser(MultiModalDataParser):
         data_items = [
             VisionChunkImage(
                 type="image",
-                images=item,
+                image=item,
             )
             for item in data_items
         ]
@@ -791,10 +791,11 @@ class VisionChunkDataParser(MultiModalDataParser):
 
         data_items = [
             VisionChunkVideo(
-                type="video",
-                videos=item,
+                type="video_chunk",
+                video_chunk=item,
+                video_idx=idx,
             )
-            for item in data_items
+            for idx, item in enumerate(data_items)
         ]
         return VisionChunkProcessorItems(data_items)
 
