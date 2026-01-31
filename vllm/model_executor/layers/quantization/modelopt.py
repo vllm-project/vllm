@@ -742,7 +742,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEModularExperts:
+    ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."
@@ -926,8 +926,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
             )
-        assert self.moe_kernel is not None
-        return self.moe_kernel.forward_monolithic(
+        assert isinstance(self.moe_kernel, mk.FusedMoEMonolithicKernel)
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1347,7 +1347,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEModularExperts:
+    ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."
@@ -1565,7 +1565,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_kernel is not None
+        assert isinstance(self.moe_kernel, mk.FusedMoEMonolithicKernel)
         return self.moe_kernel.forward_monolithic(
             x,
             layer.w13_weight,

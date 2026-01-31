@@ -66,7 +66,7 @@ class Config:
     quant_config: TestMoEQuantConfig | None
 
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
-    fused_experts_type: mk.FusedMoEModularExperts
+    fused_experts_type: mk.FusedMoEExpertsModular
 
     fused_moe_chunk_size: int | None
     world_size: int

@@ -1703,7 +1703,7 @@ def fused_experts_impl(
     intermediate_cache3 = cache13[: M * top_k_num * K].view(M, top_k_num, K)
 
     # This needs separate memory since it's used concurrently with cache1
-    activation_out_dim = mk.FusedMoEModularExperts.adjust_N_for_activation(
+    activation_out_dim = mk.FusedMoEExpertsModular.adjust_N_for_activation(
         N, activation
     )
     intermediate_cache2 = torch.empty(
@@ -1896,7 +1896,7 @@ def fused_experts_impl(
     return out_hidden_states
 
 
-class TritonExperts(mk.FusedMoEModularExperts):
+class TritonExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,

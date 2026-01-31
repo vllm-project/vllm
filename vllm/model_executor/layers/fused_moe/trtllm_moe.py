@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 
-class TrtLlmGenExperts(mk.FusedMoEModularExperts):
+class TrtLlmGenExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,

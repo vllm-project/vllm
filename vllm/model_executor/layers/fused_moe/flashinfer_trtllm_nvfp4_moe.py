@@ -89,7 +89,7 @@ class FlashInferTrtLlmNvFp4ExpertsBase(mk.FusedMoEExperts):
 
 
 class FlashInferTrtLlmNvFp4ExpertsModular(
-    FlashInferTrtLlmNvFp4ExpertsBase, mk.FusedMoEModularExperts
+    FlashInferTrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModular
 ):
     """
     Modular version of the implementation (just the experts).
@@ -194,7 +194,7 @@ class FlashInferTrtLlmNvFp4ExpertsModular(
 
 
 class FlashInferTrtLlmNvFp4ExpertsMonolithic(
-    FlashInferTrtLlmNvFp4ExpertsBase, mk.FusedMoEMonolithicExperts
+    FlashInferTrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsMonolithic
 ):
     """
     Monolithic version of the kernel (router + experts).

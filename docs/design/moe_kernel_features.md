@@ -76,7 +76,7 @@ Each experts kernel supports one or more activation functions, e.g. silu or gelu
 
 As with the backends, some experts support applying topk weights on the input activations. The entries in the column in this table only apply to the non-modular experts.
 
-Most experts flavors include an equivalent modular interface which will be a subclass of `FusedMoEModularExperts`.
+Most experts flavors include an equivalent modular interface which will be a subclass of `FusedMoEExpertsModular`.
 
 To be used with a particular `FusedMoEPrepareAndFinalize` subclass, MoE kernels must have compatible activation formats, quantization types and quantization formats.
 
@@ -107,7 +107,7 @@ To be used with a particular `FusedMoEPrepareAndFinalize` subclass, MoE kernels 
 
 The following table shows "families" of modular kernels that are intended to work together. There are some combinations which may work but have not yet been tested, e.g. flashinfer with other fp8 experts. Note that the "naive" backend will work with any non-modular experts.
 
-| backend | `FusedMoEPrepareAndFinalize` subclasses | `FusedMoEModularExperts` subclasses |
+| backend | `FusedMoEPrepareAndFinalize` subclasses | `FusedMoEExpertsModular` subclasses |
 |---------|-----------------------------------------|----------------------------------------------|
 | deepep_high_throughput | `DeepEPHTPrepareAndFinalize` |  `DeepGemmExperts`,</br>`TritonExperts`,</br>`TritonOrDeepGemmExperts`,</br>`CutlassExpertsFp8`, </br>`MarlinExperts` |
 | deepep_low_latency,</br>pplx | `DeepEPLLPrepareAndFinalize`,</br>`PplxPrepareAndFinalize` |  `BatchedDeepGemmExperts`,</br>`BatchedTritonExperts`,</br>`CutlassBatchedExpertsFp8`,</br>`BatchedMarlinExperts` |

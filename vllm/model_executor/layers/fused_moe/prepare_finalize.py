@@ -34,7 +34,7 @@ class MoEPrepareAndFinalizeNaiveEPBase(mk.FusedMoEPrepareAndFinalizeBase):
         is_sequence_parallel: bool = False,
         num_dispatchers: int = 1,
         use_monolithic: bool = False,
-    ) -> "MoEPrepareAndFinalizeNaiveEP" | "MoEPrepareAndFinalizeNaiveEPMonolithic":
+    ) -> "MoEPrepareAndFinalizeNaiveEPBase":
         cls = (
             MoEPrepareAndFinalizeNaiveEPMonolithic
             if use_monolithic
@@ -210,7 +210,7 @@ class MoEPrepareAndFinalizeNaiveEPMonolithic(
     to the router logits (the MoE kernel runs the router internally).
     """
 
-    def prepare_monolithic(
+    def prepare(
         self,
         a1: torch.Tensor,
         router_logits: torch.Tensor,
@@ -246,7 +246,6 @@ class MoEPrepareAndFinalizeNaiveEPMonolithic(
         out = get_ep_group().combine(
             fused_expert_output, is_sequence_parallel=self.is_sequence_parallel
         )
-        assert isinstance(out, torch.Tensor)
         return out
 
 
@@ -258,9 +257,7 @@ class MoEPrepareAndFinalizeNoEPBase(mk.FusedMoEPrepareAndFinalizeBase):
     """
 
     @staticmethod
-    def make(
-        use_monolithic: bool,
-    ) -> "MoEPrepareAndFinalizeNoEP" | "MoEPrepareAndFinalizeNoEPMonolithic":
+    def make(use_monolithic: bool) -> "MoEPrepareAndFinalizeNoEPBase":
         return (
             MoEPrepareAndFinalizeNoEPMonolithic()
             if use_monolithic

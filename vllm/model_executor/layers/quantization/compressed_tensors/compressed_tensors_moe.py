@@ -19,8 +19,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEActivationFormat,
+    FusedMoEExpertsModular,
     FusedMoEMethodBase,
-    FusedMoEModularExperts,
     FusedMoeWeightScaleSupported,
     UnquantizedFusedMoEMethod,
 )
@@ -572,7 +572,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEModularExperts:
+    ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."
@@ -602,8 +602,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_kernel is not None
-        return self.moe_kernel.forward_monolithic(
+        assert isinstance(self.moe_kernel, mk.FusedMoEMonolithicKernel)
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -945,7 +945,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEModularExperts:
+    ) -> mk.FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."
@@ -974,11 +974,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.is_monolithic
-        assert layer.activation == "silu"
-
-        assert self.moe_kernel is not None
-        return self.moe_kernel.forward_monolithic(
+        assert isinstance(self.moe_kernel, mk.FusedMoEMonolithicKernel)
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1455,7 +1452,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEModularExperts:
+    ) -> mk.FusedMoEExpertsModular:
         assert self.num_bits == 4, "only supporting w4"
         layer.w13_weight = layer.w13_weight_packed
         layer.w2_weight = layer.w2_weight_packed
@@ -1714,7 +1711,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEModularExperts:
+    ) -> mk.FusedMoEExpertsModular:
         if self.moe.is_lora_enabled:
             assert self.moe_quant_config is not None
             from vllm.triton_utils import HAS_TRITON
@@ -2316,7 +2313,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEModularExperts:
+    ) -> mk.FusedMoEExpertsModular:
         assert self.moe_quant_config is not None
         assert (
             prepare_finalize.activation_format == FusedMoEActivationFormat.Standard
@@ -2324,7 +2321,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         from vllm.model_executor.layers.fused_moe import CutlassExpertsW4A8Fp8
 
-        experts: FusedMoEModularExperts
+        experts: FusedMoEExpertsModular
 
         logger.debug("CutlassExpertsW4A8Fp8(%s)", self.__class__.__name__)
         experts = CutlassExpertsW4A8Fp8(

@@ -23,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
-    FusedMoEModularExperts,
+    FusedMoEExpertsModular,
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
@@ -91,7 +91,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> FusedMoEModularExperts:
+    ) -> FusedMoEExpertsModular:
         assert self.moe_quant_config is not None
         if (
             prepare_finalize.activation_format

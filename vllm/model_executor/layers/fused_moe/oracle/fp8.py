@@ -52,7 +52,7 @@ class Fp8MoeBackend(Enum):
 
 def backend_to_kernel_cls(
     backend: Fp8MoeBackend,
-) -> type[mk.FusedMoEModularExperts]:
+) -> type[mk.FusedMoEExperts]:
     if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
         from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_fp8_moe import (
             FlashInferTrtLlmFp8Experts,
@@ -132,13 +132,11 @@ def select_fp8_moe_backend(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
     allow_vllm_cutlass: bool = False,
-) -> tuple[Fp8MoeBackend, type[mk.FusedMoEModularExperts] | None]:
+) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts] | None]:
     """
     Select the primary FP8 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    k_cls: type[mk.FusedMoEModularExperts] | None = None
-
     if config.is_lora_enabled:
         return Fp8MoeBackend.TRITON, backend_to_kernel_cls(Fp8MoeBackend.TRITON)
 
@@ -190,7 +188,7 @@ def select_fp8_moe_backend(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEModularExperts]]:
+    ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
         k_cls = backend_to_kernel_cls(backend)
         supported, reason = k_cls.is_supported_config(
             k_cls, config, weight_key, activation_key, activation_format
@@ -429,7 +427,7 @@ def make_fp8_moe_quant_config(
 def make_fp8_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-    experts_cls: type[mk.FusedMoEModularExperts],
+    experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
@@ -440,6 +438,7 @@ def make_fp8_moe_kernel(
         quant_config=moe_quant_config,
         routing_tables=routing_tables,
         allow_new_interface=True,
+        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
     )
     assert prepare_finalize is not None
 

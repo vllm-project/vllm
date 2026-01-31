@@ -20,7 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.v1.engine.utils import current_platform
 
 
-class FlashInferTrtLlmFp8Experts(mk.FusedMoEMonolithicExperts):
+class FlashInferTrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
     """
     Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """

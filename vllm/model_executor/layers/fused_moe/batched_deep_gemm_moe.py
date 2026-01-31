@@ -260,7 +260,7 @@ def persistent_masked_m_silu_mul_quant(
     return y_q, y_s
 
 
-class BatchedDeepGemmExperts(mk.FusedMoEModularExperts):
+class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
         moe_config: FusedMoEConfig,

@@ -286,7 +286,7 @@ def rocm_aiter_fused_experts(
         )
 
 
-class AiterExperts(mk.FusedMoEModularExperts):
+class AiterExperts(mk.FusedMoEExpertsModular):
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True

@@ -244,7 +244,7 @@ def make_routing_data(
     return routing_data, gather_indx, scatter_indx
 
 
-class BaseOAITritonExperts(mk.FusedMoEModularExperts):
+class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         raise NotImplementedError(
