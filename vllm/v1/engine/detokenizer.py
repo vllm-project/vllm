@@ -203,10 +203,12 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             # Store dict of added token ids so that we can suppress
             # the spaces between them.
             if (
-                added_token_ids := getattr(self.tokenizer, "added_token_ids", None)
+                added_token_ids := getattr(
+                    self.tokenizer, "_vllm_special_added_token_ids", None
+                )
             ) is None:
                 added_tokens_decoder = self.tokenizer.get_added_tokens_decoder()
-                self.tokenizer.added_token_ids = added_token_ids = {
+                self.tokenizer._vllm_special_added_token_ids = added_token_ids = {
                     tid: (tok.content if hasattr(tok, "content") else str(tok))
                     for tid, tok in added_tokens_decoder.items()
                     if getattr(tok, "special", True)
