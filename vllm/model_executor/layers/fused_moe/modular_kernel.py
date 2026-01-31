@@ -171,8 +171,12 @@ ReceiverType = Callable[[], PrepareResultType]
 
 class FusedMoEPrepareAndFinalize(ABC):
     """
-    An abstract base class for FusedMoEPrepareAndFinalizeModular (Modular)
-    and FusedMoEPrepareAndFinalizeMonolithic (Monolithic) implementations.
+    An abstract base class for the [Quantize-Prepare] and [Finalize] steps
+    described above.
+
+    There are two variants of this class:
+    * FusedMoEPrepareAndFinalizeModular - this operates on topk ids and weights
+    * FusedMoEPrepareAndFinalizeMonolithic - the operates on router_logits
     """
 
     def post_init_setup(self, fused_experts: "FusedMoEExperts"):
@@ -231,7 +235,7 @@ class FusedMoEPrepareAndFinalize(ABC):
 class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     """
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
-    described above.
+    described above for the Modular case.
     """
 
     @abstractmethod
@@ -402,8 +406,7 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
 class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
     """
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
-    described above but for the monolithic interface (accepts router logits
-    rather than topk ids and weights).
+    described above for the monolithic case.
     """
 
     @abstractmethod
