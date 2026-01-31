@@ -45,6 +45,7 @@ from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
     extract_layer_index,
     is_pp_missing_parameter,
@@ -92,7 +93,7 @@ class Step3p5MLP(nn.Module):
         self.prefix = prefix
         self.hidden_size = hidden_size
         self.limit = None
-        layer_idx = int(prefix.split("layers.")[1].split(".")[0])
+        layer_idx = extract_layer_index(prefix)
         if (
             config.swiglu_limits_shared
             and config.swiglu_limits_shared[layer_idx] is not None
@@ -103,7 +104,7 @@ class Step3p5MLP(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(hidden_states)
-        intermediate_act = self.act_fn.forward_cuda(gate_up)
+        intermediate_act = self.act_fn(gate_up)
         output, _ = self.down_proj(intermediate_act)
         return output
 
@@ -241,17 +242,6 @@ class Step3p5Attention(nn.Module):
             self.head_dim if self.partial_rotary_factor == 1 else self.head_dim // 2
         )
 
-    def qk_norm_rope(self, q, k, positions):
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head.contiguous())
-        q = q_by_head.view(q.shape)
-        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head.contiguous())
-        k = k_by_head.view(k.shape)
-        if self.use_rope:
-            q, k = self.rotary_emb(positions, q, k)
-        return q, k
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -259,7 +249,16 @@ class Step3p5Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.qk_norm_rope(q, k, positions)
+        # Add qk-norm inline similar to Qwen3 MOE attention
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
+        q_by_head = self.q_norm(q_by_head.contiguous())
+        q = q_by_head.view(q.shape)
+
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
+        k_by_head = self.k_norm(k_by_head.contiguous())
+        k = k_by_head.view(k.shape)
+        if self.use_rope:
+            q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         if self.use_head_wise_attn_gate:
             extra_dims, _ = self.g_proj(hidden_states)
@@ -623,6 +622,137 @@ class Step3p5Model(nn.Module):
 
         return hidden_states
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        config = self.config
+        assert config.num_attention_groups > 1, "Only support GQA"
+        qkv_params_mapping = []
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        expert_params_mapping = [
+            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
+            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
+            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2"),
+        ]
+
+        disable_moe_stacked_params = [data[1] for data in expert_params_mapping]
+
+        for name, loaded_weight in weights:
+            if name.startswith("model."):
+                local_name = name[len("model.") :]
+                full_name = name
+            else:
+                local_name = name
+                full_name = f"model.{name}" if name else "model"
+
+            spec_layer = get_spec_layer_idx_from_weight_name(config, full_name)
+            if spec_layer is not None:
+                continue  # skip spec decode layers for main model
+
+            # Skip any layers beyond the main model's depth (e.g., MTP layers)
+            if full_name.startswith("model.layers."):
+                parts = full_name.split(".")
+                if len(parts) > 2 and parts[2].isdigit():
+                    layer_idx = int(parts[2])
+                    if layer_idx >= config.num_hidden_layers:
+                        continue
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in local_name:
+                    continue
+                if any(
+                    disable_moe_stacked_param in local_name
+                    for disable_moe_stacked_param in disable_moe_stacked_params
+                ):
+                    continue
+                replaced_name = local_name.replace(weight_name, param_name)
+                if is_pp_missing_parameter(replaced_name, self):
+                    continue
+                if replaced_name not in params_dict:
+                    continue
+                param = params_dict[replaced_name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                loaded_params.add(replaced_name)
+                break
+            else:
+                for param_name, weight_name, shard_id in expert_params_mapping:
+                    if weight_name not in local_name:
+                        continue
+                    replaced_name = local_name.replace(weight_name, param_name)
+                    if is_pp_missing_parameter(replaced_name, self):
+                        continue
+                    if (
+                        replaced_name.endswith(".bias")
+                        or replaced_name.endswith("_bias")
+                    ) and replaced_name not in params_dict:
+                        continue
+                    if replaced_name not in params_dict:
+                        continue
+                    param = params_dict[replaced_name]
+                    weight_loader = param.weight_loader
+                    moe_expert_num = self.moe_num_experts
+                    assert loaded_weight.shape[0] == moe_expert_num
+                    for expert_id in range(moe_expert_num):
+                        loaded_weight_expert = loaded_weight[expert_id]
+                        weight_loader(
+                            param,
+                            loaded_weight_expert,
+                            replaced_name,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                        )
+                    loaded_params.add(replaced_name)
+                    break
+                else:
+                    for (
+                        param_name,
+                        weight_name,
+                        start_idx,
+                        end_idx,
+                    ) in qkv_params_mapping:
+                        if weight_name not in local_name:
+                            continue
+                        replaced_name = local_name.replace(weight_name, param_name)
+                        if is_pp_missing_parameter(replaced_name, self):
+                            continue
+                        if replaced_name not in params_dict:
+                            continue
+                        param = params_dict[replaced_name]
+                        dim = param.shape[param.output_dim]
+                        begin_idx = int(start_idx * dim)
+                        end_idx = int(end_idx * dim)
+                        param_slice = param.narrow(
+                            param.output_dim, begin_idx, end_idx - begin_idx
+                        )
+                        param_slice.copy_(loaded_weight)
+                        loaded_params.add(replaced_name)
+                        break
+                    else:
+                        if is_pp_missing_parameter(local_name, self):
+                            continue
+                        if "expert_bias" in local_name:
+                            logger.warning_once("ignore expert_bias")
+                            continue
+                        if local_name not in params_dict:
+                            continue
+                        param = params_dict[local_name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+                        loaded_params.add(local_name)
+        return loaded_params
+
 
 class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
     def __init__(
@@ -738,123 +868,9 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
             layer.n_redundant_experts = self.num_redundant_experts
             layer.experts.update_expert_map()
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        vllm_config = self.vllm_config
-        config = vllm_config.model_config.hf_config
-        assert config.num_attention_groups > 1, "Only support GQA"
-        qkv_params_mapping = []
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        loaded_params = set()
-
-        expert_params_mapping = [
-            (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
-            (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
-            (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2"),
-        ]
-
-        disable_moe_stacked_params = [data[1] for data in expert_params_mapping]
-
-        for name, loaded_weight in weights:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
-            if spec_layer is not None:
-                continue  # skip spec decode layers for main model
-            # Skip any layers beyond the main model's depth (e.g., MTP layers)
-            if name.startswith("model.layers."):
-                parts = name.split(".")
-                if len(parts) > 2 and parts[2].isdigit():
-                    layer_idx = int(parts[2])
-                    if layer_idx >= config.num_hidden_layers:
-                        continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                if any(
-                    disable_moe_stacked_param in name
-                    for disable_moe_stacked_param in disable_moe_stacked_params
-                ):
-                    continue
-                name = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
-                break
-            else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Skip loading extra bias for GPTQ models.
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    moe_expert_num = self.model.moe_num_experts
-                    assert loaded_weight.shape[0] == moe_expert_num
-                    for expert_id in range(moe_expert_num):
-                        loaded_weight_expert = loaded_weight[expert_id]
-                        weight_loader(
-                            param,
-                            loaded_weight_expert,
-                            name,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
-                        )
-                    loaded_params.add(name)
-                    break
-                else:
-                    for (
-                        param_name,
-                        weight_name,
-                        start_idx,
-                        end_idx,
-                    ) in qkv_params_mapping:
-                        if weight_name not in name:
-                            continue
-                        name = name.replace(weight_name, param_name)
-                        if is_pp_missing_parameter(name, self):
-                            continue
-                        param = params_dict[name]
-                        dim = param.shape[param.output_dim]
-                        begin_idx = int(start_idx * dim)
-                        end_idx = int(end_idx * dim)
-                        param_slice = param.narrow(
-                            param.output_dim, begin_idx, end_idx - begin_idx
-                        )
-                        param_slice.copy_(loaded_weight)
-                        loaded_params.add(name)
-                        break
-                    else:
-                        if is_pp_missing_parameter(name, self):
-                            continue
-                        if "expert_bias" in name:
-                            logger.warning_once("ignore expert_bias")
-                            continue
-                        param = params_dict[name]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
-                        weight_loader(param, loaded_weight)
-                        loaded_params.add(name)
-        return loaded_params
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
 
 
 def get_spec_layer_idx_from_weight_name(
