@@ -1115,6 +1115,42 @@ def get_dcp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_context_model_parallel_group = get_dcp_group
 
+
+_HELIX_KVP: GroupCoordinator | None = None
+# Note: _HELIX_TPA group removed - was created but never used, wasting resources
+# on multi-node setups like GB200 NVL72. Only _HELIX_TPA_SIZE is needed.
+_HELIX_KVP_SIZE: int = 0  # KVP size (sequence parallelism within Helix)
+_HELIX_TPA_SIZE: int = 0  # TPA size (head parallelism within Helix)
+
+
+def get_helix_kvp_group() -> GroupCoordinator:
+    """Get the KVP (KV parallel) group for Helix.
+
+    In Helix GQA mode (TPA > 1), this returns the properly structured
+    KVP group where each group contains GPUs that share the same TPA rank
+    but process different KV cache shards.
+
+    For MLA models (TPA=1), falls back to DCP group.
+    """
+    if _HELIX_KVP is not None:
+        return _HELIX_KVP
+    # Fallback for MLA (TPA=1) - DCP group has correct topology
+    return get_dcp_group()
+
+
+def get_helix_tpa_group() -> GroupCoordinator:
+    """Get the TPA (tensor parallel for attention) group for Helix.
+
+    Note: Currently TPA group is NOT needed for correctness:
+    - For GQA: Each GPU computes its TPA-local heads independently
+    - For o_proj: Uses full TP AllReduce (handled by existing TP group)
+    """
+    raise NotImplementedError(
+        "TPA group is not needed for Helix GQA. "
+        "o_proj uses full TP AllReduce via existing TP group."
+    )
+
+
 _PP: GroupCoordinator | None = None
 
 
@@ -1391,6 +1427,59 @@ def initialize_model_parallel(
         group_name="dcp",
     )
 
+    # Build Helix-specific groups if helix_mode is enabled and TPA > 1
+    # (for GQA models where we need proper head-to-KV mapping)
+    global _HELIX_KVP
+    if config is not None and config.parallel_config.helix_mode:
+        helix_tpa_size = config.parallel_config.helix_tpa_size
+        helix_kvp_size = config.parallel_config.helix_kvp_size
+
+        if helix_tpa_size > 1:
+            # For GQA models (TPA > 1), create proper Helix topology
+            # where GPUs in the same KVP group have the same TPA rank
+            #
+            # Example: TP=8, DCP=2 (KVP=2, TPA=4)
+            # TP ranks:  [0, 1, 2, 3, 4, 5, 6, 7]
+            # TPA ranks: [0, 0, 1, 1, 2, 2, 3, 3]  (TP rank // KVP)
+            # KVP ranks: [0, 1, 0, 1, 0, 1, 0, 1]  (TP rank % KVP)
+            #
+            # KVP groups (GPUs with same TPA rank):
+            # TPA 0: [0, 1], TPA 1: [2, 3], TPA 2: [4, 5], TPA 3: [6, 7]
+            # (same heads, different sequence shards)
+            kvp_group_ranks = []
+            for tpa_rank in range(helix_tpa_size):
+                group = [tpa_rank * helix_kvp_size + kvp_rank
+                         for kvp_rank in range(helix_kvp_size)]
+                kvp_group_ranks.append(group)
+
+            _HELIX_KVP = init_model_parallel_group(
+                kvp_group_ranks,
+                get_world_group().local_rank,
+                backend,
+                group_name="helix_kvp",
+            )
+
+            # Note: We intentionally do NOT create a TPA group for Helix GQA:
+            # 1. TPA group is not used for correctness (each GPU computes independently)
+            # 2. Creating cross-node NCCL communicators on GB200 NVL72
+            #    consumes significant resources, causing CUBLAS failures
+            # 3. Only _HELIX_TPA_SIZE is needed for head sharding math
+            #
+            # The o_proj correctly uses full TP AllReduce (not TPA AllReduce)
+
+            # Store sizes for use in attention parallel helpers
+            global _HELIX_KVP_SIZE, _HELIX_TPA_SIZE
+            _HELIX_KVP_SIZE = helix_kvp_size
+            _HELIX_TPA_SIZE = helix_tpa_size
+
+            logger.info(
+                "Helix groups initialized: TPA=%d, KVP=%d. "
+                "KVP groups: %s (TPA groups not created - not needed for GQA)",
+                helix_tpa_size,
+                helix_kvp_size,
+                kvp_group_ranks,
+            )
+
     global _PCP
     assert _PCP is None, "prefill context parallel group is already initialized"
     group_ranks = (
@@ -1569,6 +1658,72 @@ def get_decode_context_model_parallel_rank() -> int:
     return get_dcp_group().rank_in_group
 
 
+def is_helix_gqa_mode() -> bool:
+    """Check if Helix GQA mode is enabled (TPA > 1).
+
+    Helix GQA mode is enabled when:
+    - helix_mode=True AND
+    - TPA (tensor parallel for attention) > 1
+
+    For MLA models, TPA=1 so this returns False.
+    """
+    # Helix GQA mode has TPA > 1 (stored when groups initialized)
+    return _HELIX_TPA_SIZE > 1
+
+
+def get_attention_tp_world_size(disable_parallel: bool = False) -> int:
+    """Get the world size for attention head parallelism.
+
+    In Helix GQA mode, attention heads are sharded by TPA (not full TP).
+    In standard mode or Helix MLA mode, heads are sharded by full TP.
+
+    Args:
+        disable_parallel: If True, return 1 (used in MLP)
+
+    Returns:
+        - 1 if disable_parallel is True
+        - helix_tpa_size if Helix GQA mode (TPA > 1)
+        - tp_size otherwise (standard TP or Helix MLA)
+
+    Used by: get_num_kv_heads, get_num_heads
+    """
+    if disable_parallel:
+        return 1
+    # Check if Helix GQA mode (TPA size stored when groups initialized)
+    if _HELIX_TPA_SIZE > 0:
+        return _HELIX_TPA_SIZE
+    return get_tensor_model_parallel_world_size()
+
+
+def get_attention_tp_rank(disable_parallel: bool = False) -> int:
+    """Get the rank for attention head parallelism.
+
+    In Helix GQA mode, maps TP rank to TPA rank (same heads for GPUs
+    with same TPA rank but different KVP ranks).
+
+    In standard mode, returns regular TP rank.
+
+    Args:
+        disable_parallel: If True, return 0 (used in MLP)
+
+    Returns:
+        - 0 if disable_parallel is True
+        - TPA rank if Helix GQA mode (TP rank // KVP size)
+        - TP rank otherwise
+
+    Used by: get_num_kv_heads, get_num_heads
+    """
+    if disable_parallel:
+        return 0
+    # Check if Helix GQA mode (KVP size stored when groups initialized)
+    if _HELIX_KVP_SIZE > 0:
+        tp_rank = get_tensor_model_parallel_rank()
+        # TPA rank = TP rank // KVP size
+        # e.g., with TP=8, KVP=2: ranks [0,1]->TPA 0, [2,3]->TPA 1, etc.
+        return tp_rank // _HELIX_KVP_SIZE
+    return get_tensor_model_parallel_rank()
+
+
 def get_node_count() -> int:
     """Return the total number of nodes in the distributed environment."""
     assert _NODE_COUNT is not None, "distributed environment is not initialized"
@@ -1587,6 +1742,16 @@ def destroy_model_parallel():
     if _DCP:
         _DCP.destroy()
     _DCP = None
+
+    global _HELIX_KVP, _HELIX_KVP_SIZE
+    if _HELIX_KVP:
+        _HELIX_KVP.destroy()
+    _HELIX_KVP = None
+    _HELIX_KVP_SIZE = 0
+
+    global _HELIX_TPA_SIZE
+    # _HELIX_TPA group no longer created (not needed for GQA), just reset size
+    _HELIX_TPA_SIZE = 0
 
     global _PCP
     if _PCP:

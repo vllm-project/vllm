@@ -23,6 +23,7 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.helix import helix_alltoall_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 if is_flash_attn_varlen_func_available():
@@ -591,6 +592,7 @@ class FlashAttentionImpl(AttentionImpl):
             if self.vllm_flash_attn_version is not None
             else False
         )
+        self.helix_mode = get_current_vllm_config().parallel_config.helix_mode
 
     def forward(
         self,
@@ -849,13 +851,24 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
         )
-        # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
-        context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
-            context_attn_out,
-            context_lse.transpose(0, 1),
-            get_dcp_group(),
-            return_lse=True,
-        )
+        # FA returns LSE in shape [ H, B ] but reduction functions want [ B, H ]
+        if self.helix_mode:
+            # Helix MLA (TPA=1): Use All-to-All + LSE reduction
+            from vllm.distributed.parallel_state import get_helix_kvp_group
+            context_attn_out_cor, context_lse_cor = helix_alltoall_lse_reduce(
+                context_attn_out,
+                context_lse.transpose(0, 1),
+                get_helix_kvp_group(),
+                return_lse=True,
+            )
+        else:
+            # Standard DCP: AllGather + ReduceScatter
+            context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
+                context_attn_out,
+                context_lse.transpose(0, 1),
+                get_dcp_group(),
+                return_lse=True,
+            )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
         query_attn_out, query_lse = flash_attn_varlen_func(

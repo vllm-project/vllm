@@ -272,6 +272,19 @@ class ParallelConfig:
     Block_size should be divisible by cp_kv_cache_interleave_size.
     """
 
+    helix_mode: bool = False
+    """Enable Helix parallelism for decode. When enabled, uses All-to-All
+    communication instead of AllGather+ReduceScatter for context parallel
+    attention. Requires decode_context_parallel_size > 1. The DCP group
+    becomes the KVP (KV parallel) group in Helix terminology.
+    
+    For GQA models, Helix splits attention heads into TPA groups where each
+    group processes different head shards but the same KV cache shard.
+    For MLA models (TPA=1), Helix uses All-to-All + LSE reduction.
+    
+    Reference: https://arxiv.org/abs/2507.07120
+    """
+
     data_parallel_index: int = Field(init=False)
     """Equal to the data parallel rank but not used for torch process groups
     and not overridden for dense models."""
@@ -320,6 +333,19 @@ class ParallelConfig:
             raise ValueError(
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
             )
+
+        # Helix validation
+        if self.helix_mode:
+            if self.decode_context_parallel_size <= 1:
+                raise ValueError(
+                    "helix_mode requires decode_context_parallel_size > 1"
+                )
+            if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+                raise ValueError(
+                    f"tensor_parallel_size ({self.tensor_parallel_size}) must be "
+                    f"divisible by decode_context_parallel_size "
+                    f"({self.decode_context_parallel_size}) when helix_mode is enabled"
+                )
 
         if self.enable_eplb:
             if not current_platform.is_cuda_alike():
@@ -370,6 +396,19 @@ class ParallelConfig:
     @property
     def num_ubatches(self) -> int:
         return 2 if self.enable_dbo else self.ubatch_size
+
+    @property
+    def helix_kvp_size(self) -> int:
+        """KVP (KV parallel) size for Helix. Reuses DCP when Helix is enabled."""
+        return self.decode_context_parallel_size if self.helix_mode else 1
+
+    @property
+    def helix_tpa_size(self) -> int:
+        """TPA (tensor parallel for attention) size for Helix.
+        Derived as TP / KVP when Helix is enabled."""
+        if self.helix_mode:
+            return self.tensor_parallel_size // self.decode_context_parallel_size
+        return self.tensor_parallel_size
 
     @property
     def local_engines_only(self) -> bool:
