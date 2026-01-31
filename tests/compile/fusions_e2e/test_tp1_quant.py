@@ -27,8 +27,13 @@ from .models import (
 
 
 @pytest.mark.parametrize(
-    "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_fp8, llama4_scout_fp8, qwen3_a3b_fp8],
+    "model_name, matches_fn, model_kwargs, hf_overrides, use_deepgemm",
+    [
+        (*llama3_8b_fp8, False),
+        (*llama4_scout_fp8, False),
+        (*qwen3_a3b_fp8, False),
+        (*qwen3_a3b_fp8, True),
+    ],
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [6])
@@ -45,9 +50,16 @@ def test_tp1_fp8_fusions(
     n_layers: int,
     custom_ops: str,
     inductor_graph_partition: bool,
+    use_deepgemm: bool,
     run_e2e_fusion_test,
     monkeypatch,
 ):
+    if use_deepgemm:
+        # TODO(luka/eliza) DeepGEMM uses different quants, matching not supported
+        #  - on Blackwell, uses a special quant fp8, currently not supported
+        #  - on Hopper, tma-aligned scales inhibit matching (fix WIP)
+        pytest.skip("DeepGEMM & quant matching not currently supported")
+
     matches = matches_fn(n_layers)
 
     if "qwen" in model_name.lower() and "-quant_fp8" in custom_ops:
@@ -58,9 +70,6 @@ def test_tp1_fp8_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
-
-    # TODO(eliza): remove this after rms+quant block fusion is fixed
-    monkeypatch.setenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "0")
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -86,6 +95,7 @@ def test_tp1_fp8_fusions(
         model_kwargs,
         attn_backend,
         compilation_config,
+        use_deepgemm,
         matches_check,
     )
 

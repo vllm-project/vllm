@@ -31,8 +31,13 @@ from .models import (
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
-    "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_fp8, llama4_scout_fp8, qwen3_a3b_fp8],
+    "model_name, matches_fn, model_kwargs, hf_overrides, use_deepgemm",
+    [
+        (*llama3_8b_fp8, False),
+        (*llama4_scout_fp8, False),
+        (*qwen3_a3b_fp8, False),
+        (*qwen3_a3b_fp8, True),
+    ],
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
@@ -45,6 +50,7 @@ def test_tp2_ar_rms_fp8_fusions(
     matches_fn: Callable[[int], Matches],
     model_kwargs: dict,
     hf_overrides: Callable[[int], dict],
+    use_deepgemm: bool,
     attn_backend: AttentionBackendCase,
     n_layers: int,
     custom_ops: str,
@@ -52,6 +58,12 @@ def test_tp2_ar_rms_fp8_fusions(
     run_e2e_fusion_test,
     monkeypatch,
 ):
+    if use_deepgemm:
+        # TODO(luka/eliza) DeepGEMM uses different quants, matching not supported
+        #  - on Blackwell, uses a special quant fp8, currently not supported
+        #  - on Hopper, tma-aligned scales inhibit matching (fix WIP)
+        pytest.skip("DeepGEMM & quant matching not currently supported")
+
     matches = matches_fn(n_layers)
 
     if "qwen" in model_name.lower() and "-quant_fp8" in custom_ops:
@@ -89,6 +101,7 @@ def test_tp2_ar_rms_fp8_fusions(
         model_kwargs,
         attn_backend,
         compilation_config,
+        use_deepgemm,
         matches_check,
         tp_size=2,
     )
