@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.afd_transfer.afd_connector.factory import AFDConnectorFactory
 from vllm.distributed.afd_transfer.afd_connector.metadata import AFDConnectorMetadata
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
@@ -120,61 +121,154 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
 
     def _get_current_layer_idx(self) -> int:
         return (self._counter // self.afd_config.num_afd_stages) % self.num_layers
+    
+    def _ffn_forward(self,
+                     batch_descriptor=None,
+                     cudagraph_runtime_mode: CUDAGraphMode = None,
+                     is_ubatch:bool=False):
+        num_ubatches = self.vllm_config.parallel_config.num_ubatches if is_ubatch else 1
+        rank_ffn_output = None
+        
+        # TODO(jcz): process first_k_dense_replace
+        # for layer_idx in range(self.first_k_dense_replace,self.num_layers):
+        for layer_idx in range(0, self.num_layers):
+            for ubatch_idx in range(num_ubatches):
+                hidden_states, recv_metadata = self.connector.recv_attn_output()
+                if hasattr(self.connector, "dp_metadata_list"):
+                    dp_metadata = self.connector.dp_metadata_list.get(
+                        recv_metadata.stage_idx, None
+                    )
+                else:
+                    dp_metadata = None
+                num_tokens = hidden_states.shape[0]
+                if recv_metadata is not None and recv_metadata.recv_handle_list is not None:
+                    for work in recv_metadata.recv_handle_list:
+                        work.wait()
+                # Try to use CUDA graph if available
+                cuda_graph_info = self._find_cuda_graph(layer_idx, num_tokens)
+                if cuda_graph_info is not None:
+                    # Use captured CUDA graph for computation
+                    with set_forward_context(
+                        attn_metadata=None, vllm_config=self.vllm_config
+                    ):
+                        get_forward_context().dp_metadata = dp_metadata
+                        rank_ffn_output = self._execute_with_cuda_graph(
+                            hidden_states, cuda_graph_info
+                        )
+                else:
+                    # Fallback to eager mode
+                    with set_forward_context(
+                        attn_metadata=None, vllm_config=self.vllm_config
+                    ):
+                        get_forward_context().dp_metadata = dp_metadata
+                        rank_ffn_output = self._execute_eager_mode(
+                            hidden_states, layer_idx
+                        )
 
+                recv_metadata.recv_handle_list = None
+                self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
+        return rank_ffn_output
+    
     @torch.inference_mode()
-    def execute_model(self, scheduler_output=None, intermediate_tensors=None):
+    def execute_model(
+        self, 
+        scheduler_output=None, 
+        intermediate_tensors=None, 
+        is_ubatch: bool = False
+    ):
         """Execute FFN computation for a single request"""
-        # scheduler_output and intermediate_tensors are unused in FFN server
-        # mode
-        self.profiler.step()
-
         try:
-            hidden_states, recv_metadata = self.connector.recv_attn_output()
-            if hasattr(self.connector, "dp_metadata_list"):
-                dp_metadata = self.connector.dp_metadata_list.get(
-                    recv_metadata.stage_idx, None
+            if self.use_cuda_graph and not is_ubatch:
+                # TODO(yxj): use _cuda_graphs_full replay
+                self._ffn_forward(
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE, 
+                    is_ubatch=is_ubatch
                 )
-            else:
-                dp_metadata = None
-            current_layer_idx = recv_metadata.layer_idx
-            # logger.info(
-            #     f"layer {current_layer_idx} moe recv hidden states type:{type(hidden_states)}, shape:{hidden_states.shape}"
-            #     f" dp_metadata: {dp_metadata}"
-            # )
-            num_tokens = hidden_states.shape[0]
-            if recv_metadata is not None and recv_metadata.recv_handle_list is not None:
-                for work in recv_metadata.recv_handle_list:
-                    work.wait()
-            # Try to use CUDA graph if available
-            cuda_graph_info = self._find_cuda_graph(current_layer_idx, num_tokens)
-            if cuda_graph_info is not None:
-                # Use captured CUDA graph for computation
-                with set_forward_context(
-                    attn_metadata=None, vllm_config=self.vllm_config
-                ):
-                    get_forward_context().dp_metadata = dp_metadata
-                    rank_ffn_output = self._execute_with_cuda_graph(
-                        hidden_states, cuda_graph_info
+                logger.info(f"is_ubatch is false eager")
+            elif self.use_cuda_graph and is_ubatch:
+                # TODO(yxj): ffn图模式会直接replay，应该设计成ffn收到attn消息才开始replay
+                # replay
+                if self.connector_name == "camm2nconnector":
+                    # TODO(yxj): self.decode_max_num_token * self.attn_size * (self.topk // self.ffn_size)
+                    max_num_tokens = (
+                        self.decode_max_num_token 
+                        * self.attn_size 
+                        * (self.n_routed_experts // self.ffn_size)
                     )
-            else:
-                # Fallback to eager mode
-                with set_forward_context(
-                    attn_metadata=None, vllm_config=self.vllm_config
-                ):
-                    get_forward_context().dp_metadata = dp_metadata
-                    rank_ffn_output = self._execute_eager_mode(
-                        hidden_states, current_layer_idx
+                else:
+                    max_num_tokens = (
+                        self.decode_max_num_token 
+                        * self.topk 
+                        * self.attn_size
                     )
-
-            recv_metadata.recv_handle_list = None
-            self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
+                cuda_graph_info = self._cuda_graphs_ubatch_full.get(max_num_tokens)
+                graph = cuda_graph_info["graph"]
+                graph.replay()
+                logger.info(f"ffn replay cudagraph")
+            else:
+                logger.info(f"ffn_forward, is_ubatch is {is_ubatch}")
+                self._ffn_forward(
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE, 
+                    is_ubatch=is_ubatch
+                )
         except Exception as e:
             raise ValueError(f"Error computing FFN: {e}") from e
-        finally:
-            self._counter += 1
-            if self._counter == self.num_layers * self.afd_config.num_afd_stages:
-                self._counter = 0
         return None  # FFN server doesn't return ModelRunnerOutput
+
+    # @torch.inference_mode()
+    # def execute_model(self, scheduler_output=None, intermediate_tensors=None):
+    #     """Execute FFN computation for a single request"""
+    #     # scheduler_output and intermediate_tensors are unused in FFN server
+    #     # mode
+    #     self.profiler.step()
+
+    #     try:
+    #         hidden_states, recv_metadata = self.connector.recv_attn_output()
+    #         if hasattr(self.connector, "dp_metadata_list"):
+    #             dp_metadata = self.connector.dp_metadata_list.get(
+    #                 recv_metadata.stage_idx, None
+    #             )
+    #         else:
+    #             dp_metadata = None
+    #         current_layer_idx = recv_metadata.layer_idx
+    #         # logger.info(
+    #         #     f"layer {current_layer_idx} moe recv hidden states type:{type(hidden_states)}, shape:{hidden_states.shape}"
+    #         #     f" dp_metadata: {dp_metadata}"
+    #         # )
+    #         num_tokens = hidden_states.shape[0]
+    #         if recv_metadata is not None and recv_metadata.recv_handle_list is not None:
+    #             for work in recv_metadata.recv_handle_list:
+    #                 work.wait()
+    #         # Try to use CUDA graph if available
+    #         cuda_graph_info = self._find_cuda_graph(current_layer_idx, num_tokens)
+    #         if cuda_graph_info is not None:
+    #             # Use captured CUDA graph for computation
+    #             with set_forward_context(
+    #                 attn_metadata=None, vllm_config=self.vllm_config
+    #             ):
+    #                 get_forward_context().dp_metadata = dp_metadata
+    #                 rank_ffn_output = self._execute_with_cuda_graph(
+    #                     hidden_states, cuda_graph_info
+    #                 )
+    #         else:
+    #             # Fallback to eager mode
+    #             with set_forward_context(
+    #                 attn_metadata=None, vllm_config=self.vllm_config
+    #             ):
+    #                 get_forward_context().dp_metadata = dp_metadata
+    #                 rank_ffn_output = self._execute_eager_mode(
+    #                     hidden_states, current_layer_idx
+    #                 )
+
+    #         recv_metadata.recv_handle_list = None
+    #         self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
+    #     except Exception as e:
+    #         raise ValueError(f"Error computing FFN: {e}") from e
+    #     finally:
+    #         self._counter += 1
+    #         if self._counter == self.num_layers * self.afd_config.num_afd_stages:
+    #             self._counter = 0
+    #     return None  # FFN server doesn't return ModelRunnerOutput
 
     def _execute_with_cuda_graph(
         self, hidden_states: torch.Tensor, cuda_graph_info: dict
