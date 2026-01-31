@@ -1043,7 +1043,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                         f"`{modality}_embeds`"
                     )
 
-        print("_to_mm_items", mm_items)
         for modality, items in mm_items.items():
             self.info.validate_num_items(modality, len(items))
 
@@ -1424,9 +1423,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 else:
                     missing_modality_data.append(data)
             mm_missing_data[modality] = missing_modality_data
-        print("mm_missing_data", mm_missing_data)
-        print("mm_missing_idxs", mm_missing_idxs)
-        print("mm_is_cached", mm_is_cached)
         return mm_is_cached, self._to_mm_items(mm_missing_data)
 
     def _recompute_cached_prompt_update(
@@ -1462,7 +1458,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         for modality, hashes in mm_hashes.items():
             missing_kwargs = mm_missing_kwargs.get(modality, [])
-            print("missing_kwargs", missing_kwargs)
             missing_prompt_updates = mm_missing_prompt_updates.get(modality, [])
 
             for item_idx, item_hash in enumerate(hashes):
@@ -1555,7 +1550,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         caching the results and reusing cached results.
         """
         cache = self.cache
-        print("mm_data_items", mm_data_items)
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
         if cache is None or passthrough_data:
             return self._apply_hf_processor(
@@ -1596,8 +1590,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             enable_hf_prompt_update=False,
         )
 
-        print("mm_missing_data_items", mm_missing_data_items)
-        # print("mm_missing_processed_data", mm_missing_processed_data)
         mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_missing_processed_data,
             self._get_mm_fields_config(
@@ -1605,7 +1597,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             ),
         )
 
-        print("mm_missing_kwargs", mm_missing_kwargs)
         mm_missing_prompt_updates = self._get_mm_prompt_updates(
             mm_missing_data_items,
             hf_processor_mm_kwargs,
