@@ -69,8 +69,11 @@ class InputProcessor:
 
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
-        self.mm_encoder_cache_size = 0
-        if self.mm_registry.supports_multimodal_inputs(self.model_config):
+        self.mm_encoder_cache_size = None
+        if (
+            self.mm_registry.supports_multimodal_inputs(self.model_config)
+            and not self.model_config.skip_tokenizer_init
+        ):
             max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
                 self.model_config
             )
@@ -752,7 +755,11 @@ class InputProcessor:
                 f"model length of {max_prompt_len}. {suggestion}"
             )
 
-        if prompt_type == "decoder" and prompt_inputs["type"] == "multimodal":
+        if (
+            prompt_type == "decoder"
+            and prompt_inputs["type"] == "multimodal"
+            and self.mm_encoder_cache_size is not None
+        ):
             decoder_mm_positions = prompt_inputs["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
