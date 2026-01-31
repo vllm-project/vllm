@@ -36,7 +36,7 @@ class EncoderRunner:
         Clear the multi-modal cache that was used during profiling,
         but no longer needed during inference.
         """
-        # TODO: Implement MM budget
+        # TODO: Implement MM budget for encoder dummy run
         pass
 
     def reset_encoder_cache(self) -> None:
