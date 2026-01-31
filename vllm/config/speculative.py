@@ -687,6 +687,7 @@ class SpeculativeConfig:
             "gpt_oss",
             "hunyuan_vl",
             "hunyuan_v1_dense",
+            "afmoe",
         ]
         if (
             self.method == "eagle3"

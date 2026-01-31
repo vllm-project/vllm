@@ -962,6 +962,18 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
+        if (
+            self.model_config
+            and vllm_is_batch_invariant()
+            and not self.model_config.disable_cascade_attn
+        ):
+            self.model_config.disable_cascade_attn = True
+            logger.warning_once(
+                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
+                scope="local",
+            )
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
