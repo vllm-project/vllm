@@ -51,7 +51,11 @@ def test_processor_with_audio_sample_rate(
     hf_processor_mm_kwargs: dict[str, Any] = {
         "audio_sample_rate": audio_sample_rate,
     }
-    processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+    )
 
     # Verify audio tokens are generated
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
@@ -90,7 +94,11 @@ def test_longer_audio_generates_more_tokens(model_id: str) -> None:
         hf_processor_mm_kwargs: dict[str, Any] = {
             "audio_sample_rate": audio_sample_rate,
         }
-        processed = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
+        processed = processor.apply(
+            prompt,
+            mm_items=processor.info.parse_mm_data(mm_data),
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
         hf_proc = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
         audio_token_id = tokenizer.convert_tokens_to_ids(hf_proc.audio_token)
         return processed["prompt_token_ids"].count(audio_token_id)

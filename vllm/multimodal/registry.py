@@ -330,7 +330,7 @@ class MultiModalRegistry:
         )
         mm_inputs = processor.apply(
             prompt=processor_inputs.prompt,
-            mm_data=processor_inputs.mm_data,
+            mm_items=processor_inputs.mm_items,
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
             tokenization_kwargs=processor_inputs.tokenization_kwargs,
         )

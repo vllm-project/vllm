@@ -212,7 +212,7 @@ class InputProcessor:
 
     def _parse_mm_items(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
         mm_processor = self.input_preprocessor._get_mm_processor()
-        return mm_processor.data_parser.parse_mm_data(mm_data)
+        return mm_processor.info.parse_mm_data(mm_data)
 
     def _validate_singleton_mm_uuids(self, prompt: SingletonPrompt) -> None:
         if isinstance(prompt, str):

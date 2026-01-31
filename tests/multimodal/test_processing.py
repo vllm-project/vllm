@@ -970,7 +970,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     with exc_ctx:
         processor.apply(
             "<image>" * num_images,
-            mm_data=mm_data,
+            mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs={},
         )
 

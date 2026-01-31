@@ -175,7 +175,11 @@ def test_get_image_size_with_most_features(
 
     for asset in image_assets:
         mm_data = {"image": [asset.pil_image]}
-        processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
+        processed_inputs = processor.apply(
+            prompt,
+            mm_items=processor.info.parse_mm_data(mm_data),
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+        )
         mm_kwargs_data = processed_inputs["mm_kwargs"].get_data()
         num_patches_tensor = mm_kwargs_data["num_patches"]
         tokens = int(num_patches_tensor.item()) * image_seq_length
