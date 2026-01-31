@@ -189,13 +189,17 @@ class CudaPlatformBase(Platform):
                 # Default case
                 hf_text_config = model_config.hf_text_config
                 qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
+                # Check if DCP is enabled - FlashInferMLA doesn't support LSE for DCP
+                dcp_enabled = parallel_config.decode_context_parallel_size > 1
                 if (
                     cls.is_device_capability_family(100)
                     and not use_sparse
                     and qk_nope_head_dim == 128
+                    and not dcp_enabled  # FlashInferMLA doesn't return LSE for DCP
                 ):
                     # Blackwell => Force FlashInfer MLA (unless sparse, i.e. DSv3.2)
                     # and only if qk_nope_head_dim == 128 (kernel constraint)
+                    # and DCP is not enabled (FlashInferMLA doesn't support LSE)
                     use_flashinfer_mla = True
                     # Set the backend in AttentionConfig so it's used during
                     # backend selection
@@ -204,6 +208,7 @@ class CudaPlatformBase(Platform):
                     )
                 elif cls.is_device_capability_family(100) and not use_sparse:
                     # Fall back to CUTLASS_MLA as 2nd priority on Blackwell
+                    # Also used when DCP is enabled (CUTLASS_MLA supports LSE)
                     use_cutlass_mla = True
                 elif is_flashmla_dense_supported()[0]:
                     # Non-Blackwell with FlashMLA support
