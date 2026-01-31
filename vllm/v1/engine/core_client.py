@@ -580,31 +580,16 @@ class MPClient(EngineCoreClient):
         self._finalizer()
 
     def _send_drain_to_engines(self):
-        """Send DRAIN message to all engine cores."""
+        """Send DRAIN message to all engine cores via shutdown pipe."""
         if self.resources.engine_dead:
             return
-        # prefer shutdown pipe for drain signaling if engine_manager available
-        if self.resources.engine_manager is not None and hasattr(
-            self.resources.engine_manager, "signal_drain"
-        ):
-            logger.info(
-                "Sending DRAIN to %d engine(s) via shutdown pipe",
-                len(self.core_engines),
-            )
-            self.resources.engine_manager.signal_drain()
-        else:
-            # fallback to ZMQ
-            try:
-                logger.info(
-                    "Sending DRAIN to %d engine(s) via ZMQ", len(self.core_engines)
-                )
-                for engine_id in self.core_engines:
-                    self.input_socket.send_multipart(
-                        [engine_id, EngineCoreRequestType.DRAIN.value],
-                        flags=zmq.NOBLOCK,
-                    )
-            except Exception:
-                logger.debug_once("Failed to send DRAIN, engines may be gone")
+        # drain mode requires non-headless, so engine_manager is always set
+        assert self.resources.engine_manager is not None
+        logger.info(
+            "Sending DRAIN to %d engine(s) via shutdown pipe",
+            len(self.core_engines),
+        )
+        self.resources.engine_manager.signal_drain()
 
     async def drain_async(self, timeout: float) -> bool:
         """Signal engines to drain and wait for them to exit."""
