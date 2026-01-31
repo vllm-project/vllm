@@ -60,13 +60,11 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
       bool valid = valid_row && (elem_idx < hidden_size);
       if constexpr (CVT_FP4_PACK16) {
         ld256_or_zero_cg_u32<scalar_t>(
-            vec,
-            &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 8],
+            vec, &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 8],
             valid);
       } else {
         ld128_or_zero_cg_u32<scalar_t>(
-            vec,
-            &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 4],
+            vec, &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 4],
             valid);
       }
 
@@ -98,21 +96,17 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
 
       if constexpr (CVT_FP4_PACK16) {
         ld256_or_zero_cg_u32<scalar_t>(
-            in_vec,
-            &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 8],
+            in_vec, &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 8],
             valid);
         ld256_or_zero_cg_u32<scalar_t>(
-            w_vec,
-            &reinterpret_cast<const uint32_t*>(weight)[col_idx * 8],
+            w_vec, &reinterpret_cast<const uint32_t*>(weight)[col_idx * 8],
             valid);
       } else {
         ld128_or_zero_cg_u32<scalar_t>(
-            in_vec,
-            &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 4],
+            in_vec, &reinterpret_cast<const uint32_t*>(row_input)[col_idx * 4],
             valid);
         ld128_or_zero_cg_u32<scalar_t>(
-            w_vec,
-            &reinterpret_cast<const uint32_t*>(weight)[col_idx * 4],
+            w_vec, &reinterpret_cast<const uint32_t*>(weight)[col_idx * 4],
             valid);
       }
 
