@@ -688,19 +688,27 @@ class InputPreprocessor:
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> ProcessorInputs:
         """Efficient Frame Selection For Videos."""
-        if self.model_config and hasattr(self.model_config, 'multimodal_config') and self.model_config.multimodal_config:
+        if (
+            self.model_config 
+            and hasattr(self.model_config, 'multimodal_config') 
+            and self.model_config.multimodal_config
+            ):
             efs_sparse_rate = self.model_config.multimodal_config.video_sparse_rate
         else:
             efs_sparse_rate = 0.0
         efs_sparse_enabled = is_multimodal_efs_enabled(efs_sparse_rate)
-        if efs_sparse_enabled:
-            if ('multi_modal_data' in prompt and isinstance(prompt['multi_modal_data'], dict) and 'video' in prompt['multi_modal_data']):
-                videos = prompt['multi_modal_data']['video']
-                detector = SimilarFrameDetector(
-                    sparse_ratio=(1-efs_sparse_rate)
-                )
-                videos = detector.process_video_frames(videos)
-                prompt['multi_modal_data']['video'] = videos
+        if (
+             efs_sparse_enabled
++            and "multi_modal_data" in prompt
++            and isinstance(prompt["multi_modal_data"], dict)
++            and "video" in prompt["multi_modal_data"]
++            ):
+            videos = prompt['multi_modal_data']['video']
+            detector = SimilarFrameDetector(
+                sparse_ratio=(1-efs_sparse_rate)
+            )
+            videos = detector.process_video_frames(videos)
+            prompt['multi_modal_data']['video'] = videos
         """Preprocess the input prompt."""
         res = self._preprocess(prompt, tokenization_kwargs, mm_uuids=mm_uuids)
 
