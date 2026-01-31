@@ -71,7 +71,6 @@ class Grok2Renderer(RendererLike):
             content_format="string",
         )
 
-        kwargs["return_dict"] = False
         prompt_raw = tokenizer.apply_chat_template(
             conversation=conversation,
             messages=messages,
@@ -98,7 +97,6 @@ class Grok2Renderer(RendererLike):
             content_format="string",
         )
 
-        kwargs["return_dict"] = False
         prompt_raw = tokenizer.apply_chat_template(
             conversation=conversation,
             messages=messages,

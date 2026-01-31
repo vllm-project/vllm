@@ -432,7 +432,7 @@ class Grok2Tokenizer(TokenizerLike):
             raise ValueError(
                 "No chat template available. Provide `chat_template` explicitly."
             )
-        kwargs["return_dict"] = False
+
         prompt = hf_chat_utils.apply_chat_template(
             conversation=messages,
             chat_template=template,
