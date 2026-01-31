@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -47,6 +47,7 @@ from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -274,20 +275,21 @@ class Step3p5Attention(nn.Module):
 class FusedMoEBlock(nn.Module):
     def __init__(
         self,
-        config: ModelConfig,
-        parallel_config: ParallelConfig,
-        shared_experts: torch.nn.Module,
-        quant_config: QuantizationConfig | None = None,
-        reduce_results: bool = True,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ):
         super().__init__()
+
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layer_idx = extract_layer_index(prefix)
 
         self.ep_size = get_ep_group().device_group.size()
         self.ep_rank = get_ep_group().device_group.rank()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
 
+        self.hidden_size = config.hidden_size
         self.enable_eplb = parallel_config.enable_eplb
         self.n_routed_experts = config.moe_num_experts
         self.n_logical_experts = self.n_routed_experts
@@ -336,18 +338,29 @@ class FusedMoEBlock(nn.Module):
                 swiglu_limit,
             )
 
+        self.share_expert = Step3p5MLP(
+            config=config,
+            hidden_size=self.hidden_size,
+            intermediate_size=config.share_expert_dim,
+            hidden_act="silu",
+            reduce_results=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.share_expert",
+        )
+
         self.experts = SharedFusedMoE(
-            shared_experts=shared_experts,
+            shared_experts=self.share_expert,
             num_experts=config.moe_num_experts,
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=reduce_results,
+            reduce_results=False,
             renormalize=config.norm_expert_weight,
             quant_config=quant_config,
             activation=activation,
             prefix=f"{prefix}.experts",
-            custom_routing_function=self.router_bias_func,
+            scoring_func=getattr(config, "moe_router_activation", "sigmoid"),
+            e_score_correction_bias=self.router_bias,
             routed_scaling_factor=config.moe_router_scaling_factor,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
@@ -359,54 +372,55 @@ class FusedMoEBlock(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
-
-    def router_bias_func(
-        self,
-        hidden_states: torch.Tensor,
-        gating_output: torch.Tensor,
-        topk: int,
-        renormalize: bool,
-    ):
-        gate_prob = torch.sigmoid(gating_output.float())
-        gate_prob_with_bias = gate_prob + self.router_bias.unsqueeze(0)
-        _, indices = torch.topk(gate_prob_with_bias, k=topk, dim=1)
-        topk_prob = torch.gather(gate_prob, 1, indices)
-        expert_topk_weight = topk_prob
-        if renormalize:
-            expert_topk_weight = expert_topk_weight / (
-                torch.sum(expert_topk_weight, dim=-1, keepdim=True) + 1e-20
-            )
-        expert_topk_weight *= self.routed_scaling_factor
-        return expert_topk_weight, indices.to(torch.int32)
-
-    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        orig_shape = hidden_states.shape
-        hidden_dim = hidden_states.shape[-1]
+ 
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        router_logits = (
-            hidden_states.to(torch.float32) @ self.gate.weight.to(torch.float32).t()
-        )
-        shared_out, final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
 
-        return shared_out, final_hidden_states.view(orig_shape)
+        if self.experts.is_internal_router:
+            # In this case, the gate/router runs inside the FusedMoE class
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states, router_logits=hidden_states
+            )
+        else:
+            # router_logits: (num_tokens, n_experts)
+            router_logits, _ = self.gate(hidden_states)
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
+
+        shared_output, final_hidden_states = fused_moe_out
+        if self.share_expert is None:
+            assert shared_output is None
+
+        if self.share_expert is None:
+            assert shared_output is None
+
+        if self.share_expert is not None:
+            assert shared_output is not None
+            final_hidden_states += shared_output
+
+        if self.tp_size > 1:
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
+                final_hidden_states
+            )
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 class Step3p5DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: ModelConfig,
-        parallel_config: ParallelConfig,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        config = config.hf_config
+        config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
-        layer_idx = int(prefix.split("layers.")[1].split(".")[0])
+        layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         if cache_config is not None:
             cache_config.sliding_window = None
         if config.att_impl_type == "GQA":
@@ -476,28 +490,8 @@ class Step3p5DecoderLayer(nn.Module):
         else:
             moe_layers_idx = [i for i in range(1, config.num_hidden_layers)]
         if layer_idx in moe_layers_idx:
-            reduce_results = True
-            if (
-                self.use_fused_all_reduce
-                or self.tp_group.world_size == 1
-                and get_ep_group().world_size == 1
-            ):
-                reduce_results = False
-            self.share_expert = Step3p5MLP(
-                config=config,
-                hidden_size=self.hidden_size,
-                intermediate_size=config.share_expert_dim,
-                hidden_act="silu",
-                reduce_results=reduce_results,
-                quant_config=quant_config,
-                prefix=f"{prefix}.share_expert",
-            )
             self.moe = FusedMoEBlock(
-                shared_experts=self.share_expert,
-                config=config,
-                parallel_config=parallel_config,
-                quant_config=quant_config,
-                reduce_results=reduce_results,
+                vllm_config,
                 prefix=f"{prefix}.moe",
             )
             self.use_moe = True
@@ -539,10 +533,7 @@ class Step3p5DecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
 
         if self.use_moe:
-            shared_output, moe_output = self.moe(hidden_states)
-            ffn_output = self.add_and_maybe_inplace_all_reduce(
-                moe_output, shared_output
-            )
+            ffn_output = self.moe(hidden_states)
         else:
             ffn_output = self.mlp(hidden_states)
         hidden_states = ffn_output + residual
@@ -553,9 +544,11 @@ class Step3p5DecoderLayer(nn.Module):
 class Step3p5Model(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+
+        self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
+        # cache_config = vllm_config.cache_config
+        # quant_config = vllm_config.quant_config
         self.vocab_size = config.vocab_size
         self.config = config
 
@@ -574,10 +567,7 @@ class Step3p5Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Step3p5DecoderLayer(
-                config=vllm_config.model_config,
-                parallel_config=vllm_config.parallel_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
@@ -754,7 +744,12 @@ class Step3p5Model(nn.Module):
         return loaded_params
 
 
+
 class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".share_expert.": ".moe.share_expert."}
+    )
+
     def __init__(
         self,
         *,
@@ -870,7 +865,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 def get_spec_layer_idx_from_weight_name(
@@ -881,6 +876,6 @@ def get_spec_layer_idx_from_weight_name(
     ):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}."):
+            if weight_name.startswith(f"layers.{layer_idx + i}."):
                 return layer_idx + i
     return None
