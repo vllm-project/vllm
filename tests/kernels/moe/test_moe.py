@@ -412,7 +412,7 @@ def test_naive_block_assignment_moe(
     monkeypatch,
     workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
 
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
 
