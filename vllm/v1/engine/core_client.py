@@ -849,8 +849,10 @@ class MPClient(EngineCoreClient):
             while True:
                 actor_run_refs = engine_manager.get_run_refs()
                 if not actor_run_refs:
-                    logger.info("There are no actors to monitor currently."
-                                " The monitoring function is about to terminate.")
+                    logger.info(
+                        "There are no actors to monitor currently."
+                        " The monitoring function is about to terminate."
+                    )
                     return
                 ref_to_index_mapping = {
                     ref: index for index, ref in enumerate(actor_run_refs)
