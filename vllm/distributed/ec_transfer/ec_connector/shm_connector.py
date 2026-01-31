@@ -1,24 +1,31 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/distributed/ec_transfer/ec_connector/example_connector.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Tuple
-import time, queue, torch, zmq, contextlib, pickle
+import contextlib
 import gc
+import os
+import pickle
+import queue
+import time
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+import torch
+import zmq
+from torch.multiprocessing.reductions import reduce_tensor
+
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorMetadata,
     ECConnectorRole,
 )
-from vllm.logger import init_logger
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.distributed.parallel_state import get_world_group
+from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from torch.multiprocessing.reductions import reduce_tensor
-from collections.abc import Iterator
+from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
@@ -56,8 +63,7 @@ class SHMConnector(ECConnectorBase):
         self._mm_datas_need_loads: dict[str, int] = {}
         transfer_config = vllm_config.ec_transfer_config
         if transfer_config is not None:
-            self._storage_path = \
-                transfer_config.get_from_extra_config(
+            self._storage_path = transfer_config.get_from_extra_config(
                 "shared_storage_path", "/tmp"
             )
             logger.debug(transfer_config)
@@ -78,20 +84,20 @@ class SHMConnector(ECConnectorBase):
             ]
         logger.debug("Consumer addrs is: %s", self.consumer_sock_addrs)
 
-        self.thread_executor = \
-            ThreadPoolExecutor(
+        self.thread_executor = ThreadPoolExecutor(
             max_workers=getattr(transfer_config, "max_workers", 8) or 8
         )
         if transfer_config.ec_role == "ec_producer":
             self.send_queue = queue.Queue[tuple[str, torch.Tensor]]()
             self.zmq_paths = [
-                make_zmq_path("tcp", host, port) for host, port in self.consumer_sock_addrs
+                make_zmq_path("tcp", host, port)
+                for host, port in self.consumer_sock_addrs
                 ]
             self.thread_executor.submit(self.producer_run)
             logger.debug("============ Producer Mode ===============")
         elif transfer_config.ec_role == "ec_consumer":
             self.handle_caches: dict[str, Any] = {}
-            self.recv_queue: queue.Queue[Tuple[str, Any]] = queue.Queue()
+            self.recv_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
             self.thread_executor.submit(self.consumer_run)
             self.thread_executor.submit(self.recv_feat_async)
             logger.debug("============= Consumer Start =============")
@@ -100,10 +106,10 @@ class SHMConnector(ECConnectorBase):
         """
         Start loading the cache from the connector into vLLM's encoder cache.
 
-       This method maps the metadata provided by the scheduler to the internal handle storage and registers the tensors in the `encoder_cache`.
+        This method loads the encoder cache based on metadata provided by the scheduler.
         It is called before `_gather_mm_embeddings` for the EC Connector. For EC,
         the `encoder_cache` and `mm_hash` are stored in `kwargs`.
-        
+
         Args:
             encoder_cache (dict[str, torch.Tensor]): A dictionary mapping multimodal
                 data hashes (`mm_hash`) to encoder cache tensors.
@@ -134,8 +140,7 @@ class SHMConnector(ECConnectorBase):
                 logger.debug("recv tensor for hash %s", mm_data.mm_hash)
             except Exception as e:
                 logger.error(
-                     "Unhandled Cache Miss %s, error code: %s",
-                    mm_data.mm_hash, str(e)
+                    "Unhandled Cache Miss %s, error code: %s", mm_data.mm_hash, str(e)
                 )
 
     def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
@@ -173,9 +178,9 @@ class SHMConnector(ECConnectorBase):
             return self._found_match_for_mm_data(identifier)
     
     def update_state_after_alloc(
-            self,
-            request: "Request",
-            index: int,
+        self,
+        request: "Request",
+        index: int,
     ) -> None:
         """
         Update ECConnector state after encoder cache allocation.
@@ -186,8 +191,8 @@ class SHMConnector(ECConnectorBase):
         self._mm_datas_need_loads[mm_hash] = num_encoder_token
 
     def build_connector_meta(
-            self,
-            scheduler_output: SchedulerOutput,
+        self,
+        scheduler_output: SchedulerOutput,
     ) -> ECConnectorMetadata:
         """Build the connector metadata for this step.
 
@@ -204,7 +209,7 @@ class SHMConnector(ECConnectorBase):
         return meta
 
     def get_finished(
-            self, finished_req_ids: set[str]
+        self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
         """
         Notifies worker-side connector ids of requests that have
@@ -243,9 +248,9 @@ class SHMConnector(ECConnectorBase):
             return os.path.exists(filename)
 
     def _generate_foldername_debug(
-            self,
-            mm_hash: str,
-            create_folder: bool = True,  # <- now defaults to True
+        self,
+        mm_hash: str,
+        create_folder: bool = True,  # <- now defaults to True
     ) -> str:
         """
         Return the folder in which the cache for this mm_hash lives.
@@ -279,14 +284,14 @@ class SHMConnector(ECConnectorBase):
 
     def producer_run(self):
         """
-        Background worker for the Producer. 
+        Background worker for the Producer.
         Detaches tensors, reduces them to shared handles, and broadcasts to all consumers.
         """
         while True:
             try:
                 feat_key, tensor = self.send_queue.get()
                 shared_handle = reduce_tensor(tensor.detach().clone())
-                send_data = {"key": feat_key,"value": shared_handle}
+                send_data = {"key": feat_key, "value": shared_handle}
                 future_list = []
                 for path in self.zmq_paths:
                     future = self.thread_executor.submit(
@@ -304,17 +309,16 @@ class SHMConnector(ECConnectorBase):
                 if len(self.zmq_paths) == ack_count:
                     filename = self._generate_filename_debug(feat_key)
                     logger.debug(
-                        "rank %s send the feat key %s, filename %s", 
-                        get_world_group().local_rank, 
-                        feat_key, 
+                        "rank %s send the feat key %s, filename %s",
+                        get_world_group().local_rank,
+                        feat_key,
                         filename)
                 self.send_queue.task_done()
             except Exception as e:
                 logger.error(
-                    "put key: %s into store fail, error code: %s",
-                    feat_key, str(e)
+                    "put key: %s into store fail, error code: %s", feat_key, str(e)
                 )
-                if 'feat_key' in locals():
+                if "feat_key" in locals():
                     self.send_queue.task_done()
                 continue
 
@@ -330,10 +334,9 @@ class SHMConnector(ECConnectorBase):
                 self.recv_queue.task_done()
             except Exception as e:
                 logger.error(
-                    "get key: %s into store fail, error code: %s",
-                    feat_key, str(e)
+                    "get key: %s into store fail, error code: %s", feat_key, str(e)
                 )
-                if 'feat_key' in locals():
+                if "feat_key" in locals():
                     self.recv_queue.task_done()
                 continue
 
@@ -379,8 +382,7 @@ def ensure_zmq_send(socket: zmq.Socket, data: list, max_retries: int = 3):
             retries_left -= 1
             if retries_left > 0:
                 logger.warning(
-                    "Send failed: %s, retrying... (%s attempts left)", e, 
-                    retries_left
+                    "Send failed: %s, retrying... (%s attempts left)", e, retries_left
                 )
                 time.sleep(0.1)
             else:
