@@ -43,24 +43,6 @@ from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 logger = init_logger(__name__)
 
 
-def apply_default_truncation(
-    tokenization_kwargs: dict[str, Any], model_config: ModelConfig
-) -> tuple[dict[str, Any], bool]:
-    """Apply default truncation settings when caller didn't provide them."""
-    has_user_truncation = (
-        "truncation" in tokenization_kwargs or "max_length" in tokenization_kwargs
-    )
-    if not has_user_truncation:
-        tokenization_kwargs["truncation"] = True
-        tokenization_kwargs["max_length"] = model_config.max_model_len + 1
-    elif tokenization_kwargs.get("truncation") and "max_length" not in (
-        tokenization_kwargs
-    ):
-        tokenization_kwargs["max_length"] = model_config.max_model_len
-
-    return tokenization_kwargs, has_user_truncation
-
-
 class InputPreprocessor:
     def __init__(
         self,
@@ -214,7 +196,7 @@ class InputPreprocessor:
     def _get_tokenization_kw(
         self,
         overrides: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], bool]:
+    ) -> dict[str, Any]:
         kwargs = dict[str, Any]()
 
         if self.model_config.is_encoder_decoder:
@@ -226,11 +208,7 @@ class InputPreprocessor:
         if overrides:
             kwargs.update(overrides)
 
-        kwargs, has_user_truncation = apply_default_truncation(
-            kwargs, self.model_config
-        )
-
-        return kwargs, has_user_truncation
+        return kwargs
 
     def _tokenize_prompt(
         self,
@@ -242,25 +220,14 @@ class InputPreprocessor:
         corresponding token IDs.
         """
         tokenizer = self.get_tokenizer()
-        tokenization_kwargs, has_user_truncation = self._get_tokenization_kw(
-            tokenization_kwargs
-        )
+        tokenization_kwargs = self._get_tokenization_kw(tokenization_kwargs)
 
         encoder_config = self.model_config.encoder_config
 
         if encoder_config and encoder_config.get("do_lower_case", False):
             prompt = prompt.lower()
 
-        token_ids = tokenizer.encode(prompt, **tokenization_kwargs)
-
-        if not has_user_truncation and len(token_ids) > self.model_config.max_model_len:
-            raise ValueError(
-                "The tokenized prompt contains more than "
-                f"{self.model_config.max_model_len} tokens which is the maximum "
-                "context length. Please shorten it or set truncate_prompt_tokens."
-            )
-
-        return token_ids
+        return tokenizer.encode(prompt, **tokenization_kwargs)
 
     def _get_mm_processor(self) -> BaseMultiModalProcessor:
         if not hasattr(self, "_mm_processor"):

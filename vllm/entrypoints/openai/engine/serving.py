@@ -923,11 +923,13 @@ class OpenAIServing:
                 operation = operations.get(type(request), "embedding generation")
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
-                    f"{self.max_model_len} tokens. However, your requested "
-                    f"tokens in the input for {operation} are too long. "
-                    "Please reduce the length of the input."
+                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{token_num} tokens in the input for {operation}. "
+                    f"Please reduce the length of the input.",
+                    parameter="input_tokens",
+                    value=token_num,
                 )
-            return
+            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # Note: TokenizeRequest and DetokenizeRequest doesn't have max_tokens
         # and does not require model context length validation
@@ -935,7 +937,7 @@ class OpenAIServing:
             request,
             (TokenizeCompletionRequest, TokenizeChatRequest, DetokenizeRequest),
         ):
-            return
+            return TokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
 
         # chat completion endpoint supports max_completion_tokens
         if isinstance(request, ChatCompletionRequest):
@@ -950,8 +952,10 @@ class OpenAIServing:
             raise VLLMValidationError(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, your request has "
-                f"more input tokens. Please reduce the length of the "
-                f"input messages."
+                f"{token_num} input tokens. Please reduce the length of "
+                "the input messages.",
+                parameter="input_tokens",
+                value=token_num,
             )
 
         if max_tokens is not None and token_num + max_tokens > self.max_model_len:
