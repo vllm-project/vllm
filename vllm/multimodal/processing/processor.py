@@ -1423,7 +1423,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 else:
                     missing_modality_data.append(data)
             mm_missing_data[modality] = missing_modality_data
-
+        print("mm_missing_data", mm_missing_data)
+        print("mm_missing_idxs", mm_missing_idxs)
+        print("mm_is_cached", mm_is_cached)
         return mm_is_cached, self._to_mm_items(mm_missing_data)
 
     def _recompute_cached_prompt_update(
@@ -1552,7 +1554,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         caching the results and reusing cached results.
         """
         cache = self.cache
-
+        print("mm_data_items", mm_data_items)
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
         if cache is None or passthrough_data:
             return self._apply_hf_processor(

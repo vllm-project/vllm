@@ -1035,10 +1035,11 @@ class InternVLDummyInputsBuilder(
     """InternVL DummyInputsBuilder extended for video support"""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        # num_videos = mm_counts.get("video", 0)
+        if self.info.use_unified_vision_chunk:
+            return "<vision_chunk>" * mm_counts.get("vision_chunk", 0)
 
-        # return super().get_dummy_text(mm_counts) + "<video>" * num_videos
-        return "<vision_chunk>" * mm_counts.get("vision_chunk", 0)
+        num_videos = mm_counts.get("video", 0)
+        return super().get_dummy_text(mm_counts) + "<video>" * num_videos
 
     def get_dummy_mm_data(
         self,
@@ -1046,37 +1047,42 @@ class InternVLDummyInputsBuilder(
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        target_width, target_height = self.info.get_image_size_with_most_features()
-        dummy_image = self._get_dummy_images(
-            width=target_width,
-            height=target_height,
-            num_images=mm_counts.get("vision_chunk", 0),
+        if self.info.use_unified_vision_chunk:
+            target_width, target_height = self.info.get_image_size_with_most_features()
+            dummy_image = self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=1,
+            )[0]
+            return {
+                "vision_chunk": [VisionChunkImage(
+                    type="image", image=dummy_image,
+                )] * mm_counts.get("vision_chunk", 0)
+            }
+        
+        dummy_image = super().get_dummy_mm_data(
+            seq_len=seq_len, mm_counts=mm_counts, mm_options=mm_options
         )
-        return {
-            "vision_chunk": VisionChunkImage(
-                type="image", image=dummy_image,
+        if self.info.supports_video:
+            config = self.info.get_hf_config()
+            image_size: int = config.vision_config.image_size
+            target_num_frames = self.info.get_num_frames_with_most_features(
+                seq_len, mm_counts
             )
-        }
-        # if self.info.supports_video:
-        #     config = self.info.get_hf_config()
-        #     image_size: int = config.vision_config.image_size
-        #     target_num_frames = self.info.get_num_frames_with_most_features(
-        #         seq_len, mm_counts
-        #     )
-        #     num_videos = mm_counts.get("video", 0)
-        #     video_overrides = mm_options.get("video") if mm_options else None
-        #     dummy_video = {
-        #         "video": self._get_dummy_videos(
-        #             width=image_size,
-        #             height=image_size,
-        #             num_frames=target_num_frames,
-        #             num_videos=num_videos,
-        #             overrides=video_overrides,
-        #         )
-        #     }
-        # else:
-        #     dummy_video = {}
-        # return {**dummy_image, **dummy_video}
+            num_videos = mm_counts.get("video", 0)
+            video_overrides = mm_options.get("video") if mm_options else None
+            dummy_video = {
+                "video": self._get_dummy_videos(
+                    width=image_size,
+                    height=image_size,
+                    num_frames=target_num_frames,
+                    num_videos=num_videos,
+                    overrides=video_overrides,
+                )
+            }
+        else:
+            dummy_video = {}
+        return {**dummy_image, **dummy_video}
 
 
 class InternVLMultiModalProcessor(
@@ -1104,12 +1110,15 @@ class InternVLMultiModalProcessor(
             prompt, mm_data, mm_kwargs, tok_kwargs
         )
 
-        # hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        # if (
-        #     self.info.supports_video
-        #     and (video_token_id := hf_processor.video_token_id) is not None
-        # ):
-        #     processed_outputs["video_token_id"] = torch.tensor(video_token_id)
+        if self.info.use_unified_vision_chunk:
+            return processed_outputs
+
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+        if (
+            self.info.supports_video
+            and (video_token_id := hf_processor.video_token_id) is not None
+        ):
+            processed_outputs["video_token_id"] = torch.tensor(video_token_id)
         return processed_outputs
 
     def _get_mm_fields_config(
@@ -1117,7 +1126,6 @@ class InternVLMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        image_fields = super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
         if self.info.use_unified_vision_chunk:
             return dict(
                 pixel_values_vision_chunk=MultiModalFieldConfig.flat_from_sizes(
@@ -1126,6 +1134,8 @@ class InternVLMultiModalProcessor(
                 ),
                 vision_chunk_num_patches=MultiModalFieldConfig.batched("vision_chunk"),
             )
+
+        image_fields = super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
         if self.info.supports_video:
             video_num_patches = hf_inputs.get("video_num_patches", torch.empty(0))
             num_videos = len(video_num_patches)

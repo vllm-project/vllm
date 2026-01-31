@@ -682,7 +682,7 @@ class MultiModalDataParser:
             "vision_chunk": self._parse_vision_chunk_data,
         }
 
-    def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
+    def parse_mm_data(self, mm_data: MultiModalDataDict, modality_order: list[str] | None = None) -> MultiModalDataItems:
         subparsers = self._get_subparsers()
 
         mm_items = MultiModalDataItems()
@@ -727,6 +727,19 @@ class VisionChunkDataParser(MultiModalDataParser):
             "video": self._parse_vision_chunk_data,
             "vision_chunk": self._parse_vision_chunk_data,
         }
+    
+    def _parse_vision_chunk_data(
+        self,
+        data: ModalityData[Any],
+    ) -> ModalityDataItems[Any, Any] | None:
+        """Parse vision chunk data (unified image and video chunks)."""
+        if data is None or self._is_empty(data):
+            return None
+        if self.is_embeddings(data):
+            raise ValueError("Do not support embedding data for vision_chunk right now")
+        if isinstance(data, dict):
+            data = [data]
+        return VisionChunkProcessorItems(data)
     
     def _parse_image_data(
         self,
