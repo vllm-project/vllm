@@ -691,3 +691,16 @@ class MultiModalDataParser:
                 mm_items[k] = parsed_data
 
         return mm_items
+
+
+class VisionChunkDataParser(MultiModalDataParser):
+    """
+    Parser for vision chunk data (unified image and video chunks).
+    """
+
+    def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
+        return {
+            "image": self._parse_vision_chunk_data,
+            "video": self._parse_vision_chunk_data,
+            "vision_chunk": self._parse_vision_chunk_data,
+        }
