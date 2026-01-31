@@ -114,6 +114,11 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache"""
+        ...
+
+    @abstractmethod
     async def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
