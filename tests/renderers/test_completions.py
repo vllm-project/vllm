@@ -28,7 +28,6 @@ class MockModelConfig:
     model: str = MODEL_NAME
     tokenizer: str = MODEL_NAME
     trust_remote_code: bool = False
-    max_model_len: int = 100
     tokenizer_revision = None
     tokenizer_mode = "auto"
     hf_config = MockHFConfig()
@@ -300,7 +299,7 @@ class TestRenderPrompt:
     def test_token_max_length_exceeded(self):
         renderer = _build_renderer(MockModelConfig())
 
-        long_tokens = list(range(150))  # Exceeds max_model_len=100
+        long_tokens = list(range(150))  # Exceeds max_total_tokens=100
         prompts = renderer.render_completions(long_tokens)
 
         with pytest.raises(
@@ -331,7 +330,7 @@ class TestRenderPrompt:
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(
-                max_total_tokens=renderer.config.max_model_len,
+                max_total_tokens=100,
                 needs_detokenization=True,
             ),
         )
@@ -359,7 +358,7 @@ class TestRenderEmbedPrompt:
         prompts = renderer.render_completions(prompt_embeds=embed_bytes)
         results = renderer.tokenize_prompts(
             prompts,
-            TokenizeParams(max_total_tokens=renderer.config.max_model_len),
+            TokenizeParams(max_total_tokens=100),
         )
 
         assert len(results) == 1
@@ -380,7 +379,7 @@ class TestRenderEmbedPrompt:
         )
         results = renderer.tokenize_prompts(
             prompts,
-            TokenizeParams(max_total_tokens=renderer.config.max_model_len),
+            TokenizeParams(max_total_tokens=100),
         )
 
         assert len(results) == 2
@@ -400,7 +399,7 @@ class TestRenderEmbedPrompt:
         results = renderer.tokenize_prompts(
             prompts,
             TokenizeParams(
-                max_total_tokens=renderer.config.max_model_len,
+                max_total_tokens=100,
                 truncate_prompt_tokens=10,
             ),
         )
@@ -424,7 +423,7 @@ class TestRenderEmbedPrompt:
             )
             results = renderer.tokenize_prompts(
                 prompts,
-                TokenizeParams(max_total_tokens=renderer.config.max_model_len),
+                TokenizeParams(max_total_tokens=100),
             )
 
             assert len(results) == 1
@@ -441,7 +440,7 @@ class TestRenderEmbedPrompt:
         )
         results = renderer.tokenize_prompts(
             prompts,
-            TokenizeParams(max_total_tokens=renderer.config.max_model_len),
+            TokenizeParams(max_total_tokens=100),
         )
 
         assert len(results) == 1
@@ -460,7 +459,7 @@ class TestRenderEmbedPrompt:
         )
         results = renderer.tokenize_prompts(
             prompts,
-            TokenizeParams(max_total_tokens=renderer.config.max_model_len),
+            TokenizeParams(max_total_tokens=100),
         )
 
         assert len(results) == 2
