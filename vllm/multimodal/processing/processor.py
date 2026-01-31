@@ -1017,34 +1017,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        return self.apply(prompt, mm_data, hf_processor_mm_kwargs, mm_uuids=mm_uuids)
-
-    def _to_mm_items(
-        self,
-        mm_data: MultiModalDataDict,
-    ) -> MultiModalDataItems:
-        """
-        Normalize
-        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
-        to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
-        before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
-        """
-        mm_items = self.data_parser.parse_mm_data(mm_data)
-
-        mm_config = self.info.ctx.model_config.get_multimodal_config()
-        if not mm_config.enable_mm_embeds:
-            for modality, items in mm_items.items():
-                if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
-                    raise ValueError(
-                        f"You must set `--enable-mm-embeds` to input "
-                        f"`{modality}_embeds`"
-                    )
-
-        for modality, items in mm_items.items():
-            self.info.validate_num_items(modality, len(items))
-
-        return mm_items
+        return self.apply(prompt, mm_items, hf_processor_mm_kwargs, mm_uuids=mm_uuids)
 
     @abstractmethod
     def _get_mm_fields_config(
