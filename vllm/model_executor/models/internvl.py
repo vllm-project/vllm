@@ -42,6 +42,7 @@ from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
     VisionChunkDataParser,
+    VisionChunkProcessorItems
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -1095,6 +1096,36 @@ class InternVLMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+        out_mm_data = out_mm_kwargs.get_data()
+
+        if self.info.use_unified_vision_chunk:
+            vision_num_patches = out_mm_data["vision_chunk_num_patches"]
+            assert isinstance(vision_num_patches, torch.Tensor)
+            vision_num_patches = vision_num_patches.tolist()
+
+            def get_replacement_internvl(item_idx: int):
+                chunks = mm_items.get_items(
+                    "vision_chunk", VisionChunkProcessorItems
+                )
+
+                num_patches = vision_num_patches[item_idx]
+                feature_size = hf_processor.num_image_token * num_patches
+
+                if num_patches is not None:
+                    assert isinstance(num_patches, int)
+
+                return hf_processor.get_image_repl(feature_size, num_patches)
+
+            return [
+                PromptReplacement(
+                    modality="vision_chunk",
+                    target="<vision_chunk>",
+                    replacement=get_replacement_internvl,
+                )
+            ]
+
         prompt_repl = super()._get_prompt_updates(
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
