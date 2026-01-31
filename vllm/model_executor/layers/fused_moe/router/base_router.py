@@ -62,7 +62,7 @@ if current_platform.is_cuda_alike():
 
         # 2. Record expert load metrics.
 
-        # TODO(bowen): When using `FusedMoEModularKernel`, this
+        # TODO(bowen): When using `FusedMoEKernelModular`, this
         # can be done in a more unified way, since
         # `FusedMoEPrepareAndFinalizeModular` will return the expert
         # token count, in some cases directly from the kernel.

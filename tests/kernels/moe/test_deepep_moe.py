@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernelModular
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -134,7 +134,7 @@ def make_modular_kernel(
     q_dtype: torch.dtype | None,
     use_fp8_dispatch: bool,
     quant_config: FusedMoEQuantConfig,
-) -> FusedMoEModularKernel:
+) -> FusedMoEKernelModular:
     ht_args: DeepEPHTArgs | None = None
     ll_args: DeepEPLLArgs | None = None
 
@@ -179,7 +179,7 @@ def make_modular_kernel(
             quant_config=quant_config,
         )
 
-    mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
+    mk = FusedMoEKernelModular(prepare_finalize=a2a, fused_experts=fused_experts)
     return mk
 
 
@@ -237,7 +237,7 @@ def deep_ep_moe_impl(
         )
 
         # Make modular kernel
-        mk: FusedMoEModularKernel = make_modular_kernel(
+        mk: FusedMoEKernelModular = make_modular_kernel(
             pg,
             pgi,
             low_latency_mode,

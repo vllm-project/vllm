@@ -751,7 +751,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w13_bias = Parameter(w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(w2_bias, requires_grad=False)
 
-            # Ideally we'd use FusedMoEModularKernel.prepare_finalize object
+            # Ideally we'd use FusedMoEKernelModular.prepare_finalize object
             # (stored in self.fused_experts) to determine if the MoE has a
             # batched activation format. As self.fused_experts is not
             # initialized at this point, we resort to checking the MoE config

@@ -28,7 +28,7 @@ from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
     UnfusedOAITritonExperts,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernelModular
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
@@ -180,7 +180,7 @@ def oai_triton_moe_impl(
     else:
         fused_experts = OAITritonExperts(make_dummy_moe_config(), quant_config)
 
-    mk = FusedMoEModularKernel(MoEPrepareAndFinalizeNoEP(), fused_experts)
+    mk = FusedMoEKernelModular(MoEPrepareAndFinalizeNoEP(), fused_experts)
 
     return mk.forward(
         hidden_states=x,

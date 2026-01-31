@@ -203,7 +203,7 @@ def benchmark_config(
 
         deep_gemm_experts = None
         if use_deep_gemm:
-            deep_gemm_experts = mk.FusedMoEModularKernel.make_mk(
+            deep_gemm_experts = mk.FusedMoEKernelModular.make_mk(
                 prepare_finalize=MoEPrepareAndFinalizeNoEP(),
                 fused_experts=TritonOrDeepGemmExperts(
                     moe_config=FusedMoEConfig(

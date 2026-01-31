@@ -132,7 +132,7 @@ def bench_run(
             per_act_token_quant=per_act_token,
         )
 
-        fn = mk.FusedMoEModularKernel.make_mk(
+        fn = mk.FusedMoEKernelModular.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
                 moe_config=make_dummy_moe_config(
@@ -164,7 +164,7 @@ def bench_run(
             per_act_token_quant=per_act_token,
         )
 
-        fn = mk.FusedMoEModularKernel.make_mk(
+        fn = mk.FusedMoEKernelModular.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
                 moe_config=make_dummy_moe_config(

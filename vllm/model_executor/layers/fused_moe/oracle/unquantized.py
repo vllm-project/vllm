@@ -126,7 +126,7 @@ def make_unquantized_moe_kernel(
     backend: UnquantizedMoeBackend,
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-) -> tuple[mk.FusedMoEModularKernel | None, bool]:
+) -> tuple[mk.FusedMoEKernelModular | None, bool]:
     use_inplace = True
 
     if backend in UNSUPPORTED_BACKEND:
@@ -137,7 +137,7 @@ def make_unquantized_moe_kernel(
             FlashInferExperts,
         )
 
-        kernel = mk.FusedMoEModularKernel.make_mk(
+        kernel = mk.FusedMoEKernelModular.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
                 moe_config=moe_config,
@@ -150,7 +150,7 @@ def make_unquantized_moe_kernel(
             AiterExperts,
         )
 
-        kernel = mk.FusedMoEModularKernel.make_mk(
+        kernel = mk.FusedMoEKernelModular.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             AiterExperts(
                 moe_config=moe_config,

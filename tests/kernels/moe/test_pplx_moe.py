@@ -41,7 +41,7 @@ from vllm.model_executor.layers.fused_moe import fused_topk, override_config
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernelModular
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
@@ -588,7 +588,7 @@ def pplx_moe(
         moe_config=make_dummy_moe_config(),
     )
 
-    fused_experts = FusedMoEModularKernel(
+    fused_experts = FusedMoEKernelModular(
         prepare_finalize,
         experts,
         shared_experts,

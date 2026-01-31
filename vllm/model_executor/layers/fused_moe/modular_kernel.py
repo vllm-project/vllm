@@ -63,7 +63,7 @@ logger = init_logger(__name__)
 #   Some FusedMoEExpertsModular implementations may choose to do
 #   the weight application and/or reduction. The class communicates this
 #   to [Finalize] via a TopKWeightAndReduce object.
-# * FusedMoEModularKernel - an interface class that combines a
+# * FusedMoEKernelModular - an interface class that combines a
 #   FusedMoEPrepareAndFinalizeModular and a FusedMoEExpertsModular to
 #   provide the standard fused MoE kernel interface.
 # * TopKWeightAndReduce - A TopKWeightAndReduce implementation chosen
@@ -986,7 +986,7 @@ class FusedMoEKernel(torch.nn.Module):
         if isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
         ) and isinstance(fused_experts, FusedMoEExpertsMonolithic):
-            return FusedMoEMonolithicKernel(
+            return FusedMoEKernelMonolithic(
                 prepare_finalize,
                 fused_experts,
                 shared_experts,
@@ -995,7 +995,7 @@ class FusedMoEKernel(torch.nn.Module):
         elif isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeModular
         ) and isinstance(fused_experts, FusedMoEExpertsModular):
-            return FusedMoEModularKernel(
+            return FusedMoEKernelModular(
                 prepare_finalize,
                 fused_experts,
                 shared_experts,
@@ -1030,7 +1030,7 @@ class FusedMoEKernel(torch.nn.Module):
 
 
 @final
-class FusedMoEModularKernel(FusedMoEKernel):
+class FusedMoEKernelModular(FusedMoEKernel):
     """
     This class combines a FusedMoEPrepareAndFinalizeModular instance and
     a FusedMoEExpertsModular to provide an interface that
@@ -1042,36 +1042,6 @@ class FusedMoEModularKernel(FusedMoEKernel):
     layer due to any layer specific state that may be used by the component
     objects.
     """
-
-    def __init__(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        fused_experts: FusedMoEExpertsModular,
-        shared_experts: torch.nn.Module | None = None,
-        moe_parallel_config: FusedMoEParallelConfig | None = None,
-    ):
-        if not isinstance(prepare_finalize, FusedMoEPrepareAndFinalizeModular):
-            raise TypeError(
-                "prepare_finalize must be an instance of "
-                "FusedMoEPrepareAndFinalizeModular, but got "
-                f"{prepare_finalize.__class__.__name__}."
-            )
-        if not isinstance(fused_experts, FusedMoEExpertsModular):
-            raise TypeError(
-                "fused_experts must be an instance of "
-                "FusedMoEExpertsModular, but got "
-                f"{fused_experts.__class__.__name__}."
-            )
-
-        super().__init__(
-            prepare_finalize,
-            fused_experts,
-            shared_experts,
-            moe_parallel_config,
-        )
-
-        self.prepare_finalize: FusedMoEPrepareAndFinalizeModular = prepare_finalize
-        self.fused_experts: FusedMoEExpertsModular = fused_experts
 
     def _chunk_info(self, M: int) -> tuple[int, int]:
         """
@@ -1122,7 +1092,7 @@ class FusedMoEModularKernel(FusedMoEKernel):
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
         # Force worst-case allocation in profiling run for
-        # "mk.FusedMoEModularKernel.Standard" formats where this is only bounded
+        # "mk.FusedMoEKernelModular.Standard" formats where this is only bounded
         # by `VLLM_FUSED_MOE_CHUNK_SIZE` and may not be seen during profiling with
         # DP+EP due to the random token routing.
         is_profile_run = (
@@ -1358,7 +1328,7 @@ class FusedMoEModularKernel(FusedMoEKernel):
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
     ) -> torch.Tensor:
-        assert isinstance(self.fused_experts, FusedMoEExperts)
+        assert isinstance(self.fused_experts, FusedMoEExpertsModular)
 
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1451,6 +1421,8 @@ class FusedMoEModularKernel(FusedMoEKernel):
         The _finalize method is a wrapper around self.prepare_finalize.finalize
         that handles DBO, async and shared expert overlap.
         """
+        assert isinstance(self.fused_experts, FusedMoEExpertsModular)
+        assert isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeModular)
         shared_output: torch.Tensor | None = None
 
         if not self.prepare_finalize.supports_async():
@@ -1591,31 +1563,7 @@ class FusedMoEModularKernel(FusedMoEKernel):
 
 
 @final
-class FusedMoEMonolithicKernel(FusedMoEKernel):
-    def __init__(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalizeMonolithic,
-        fused_experts: FusedMoEExpertsMonolithic,
-        shared_experts: torch.nn.Module | None = None,
-        moe_parallel_config: FusedMoEParallelConfig | None = None,
-    ):
-        if not isinstance(prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic):
-            raise TypeError(
-                "prepare_finalize must be an instance of "
-                "FusedMoEPrepareAndFinalizeMonolithic"
-            )
-        if not isinstance(fused_experts, FusedMoEExpertsMonolithic):
-            raise TypeError(
-                "fused_experts must be an instance of FusedMoEExpertsMonolithic"
-            )
-
-        super().__init__(
-            prepare_finalize,
-            fused_experts,
-            shared_experts,
-            moe_parallel_config,
-        )
-
+class FusedMoEKernelMonolithic(FusedMoEKernel):
     def forward(
         self,
         hidden_states: torch.Tensor,

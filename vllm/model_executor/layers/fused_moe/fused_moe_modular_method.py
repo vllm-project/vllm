@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel,
+    FusedMoEKernelModular,
     FusedMoEPrepareAndFinalizeModular,
 )
 
@@ -26,7 +26,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     # --8<-- [end:modular_fused_moe]
 
     def __init__(
-        self, old_quant_method: FusedMoEMethodBase, experts: FusedMoEModularKernel
+        self, old_quant_method: FusedMoEMethodBase, experts: FusedMoEKernelModular
     ):
         super().__init__(old_quant_method.moe)
         self.moe_quant_config = old_quant_method.moe_quant_config
@@ -49,7 +49,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     ) -> "FusedMoEModularMethod":
         return FusedMoEModularMethod(
             old_quant_method,
-            FusedMoEModularKernel(
+            FusedMoEKernelModular(
                 prepare_finalize,
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
                 shared_experts,
