@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Tuple
 import time, queue, torch, zmq, contextlib, pickle
-import gc, msgpack
+import gc
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
@@ -134,7 +134,7 @@ class SHMConnector(ECConnectorBase):
                 logger.debug("recv tensor for hash %s", mm_data.mm_hash)
             except Exception as e:
                 logger.error(
-                    "Unhandled Cache Miss %s, error code: %s",
+                     "Unhandled Cache Miss %s, error code: %s",
                     mm_data.mm_hash, str(e)
                 )
 
@@ -267,12 +267,15 @@ class SHMConnector(ECConnectorBase):
         foldername = self._generate_foldername_debug(mm_hash)  # <- folder auto-created
         return foldername
 
-    def shared_handle_send(self, path, payload):
+    def shared_handle_send(self, path, send_data):
         """Send shared memory handle to a specific ZMQ address and wait for ACK."""
         with zmq_ctx(zmq.REQ, path) as sock:
             sock.setsockopt(zmq.RCVTIMEO, 5000)
-            ensure_zmq_send(sock, payload)
-            return sock.recv()
+            ensure_zmq_send(sock, pickle.dumps(send_data))
+            ack = sock.recv()
+            if ack != b"ACK":
+                raise ValueError("Unexpected ACK response: %s" % ack)
+            return ack
 
     def producer_run(self):
         """
@@ -282,23 +285,12 @@ class SHMConnector(ECConnectorBase):
         while True:
             try:
                 feat_key, tensor = self.send_queue.get()
-                tensor_clone = tensor.detach().clone()
-                storage = tensor_clone.untyped_storage()
-                device, handle, size, offset, view_metadata = storage._share_cuda_()
-                send_data = {
-                "k": feat_key,
-                "h": bytes(handle),
-                "shape": list(tensor_clone.shape), 
-                "stride": list(tensor_clone.stride()),  
-                "dtype": str(tensor_clone.dtype),     
-                "size": size,
-                "offset": offset
-            }
-                payload = msgpack.packb(send_data, use_bin_type=True)
+                shared_handle = reduce_tensor(tensor.detach().clone())
+                send_data = {"key": feat_key,"value": shared_handle}
                 future_list = []
                 for path in self.zmq_paths:
                     future = self.thread_executor.submit(
-                        self.shared_handle_send, path, payload
+                        self.shared_handle_send, path, send_data
                         )
                     future_list.append(future)
                 ack_count = 0
@@ -331,23 +323,16 @@ class SHMConnector(ECConnectorBase):
         while True:
             try:
                 payload = self.recv_queue.get()
-                data = msgpack.unpackb(payload, raw=False)
-                feat_key = data["k"]
-                dtype = getattr(torch, data["dtype"].split(".")[-1])
-                def manual_rebuild(local_rank_ignored):
-                    # 使用 PyTorch 内部 API 根据句柄重建存储
-                    storage = torch.UntypedStorage._new_shared_cuda(
-                        data["h"], data["size"], data["offset"]
-                    )
-                    t = torch.tensor([], dtype=dtype, device='cuda')
-                    t.set_(storage, 0, tuple(data["shape"]), tuple(data["stride"]))
-                    return t
-                self.handle_caches[feat_key] = (manual_rebuild, (None,))
+                data = pickle.loads(payload)
+                feat_key = data["key"]
+                share_handle = data["value"]
+                self.handle_caches[feat_key] = share_handle
                 self.recv_queue.task_done()
             except Exception as e:
                 logger.error(
-                    f"get key: {feat_key} into store fail, error code: {str(e)}"
-                    )
+                    "get key: %s into store fail, error code: %s",
+                    feat_key, str(e)
+                )
                 if 'feat_key' in locals():
                     self.recv_queue.task_done()
                 continue
@@ -401,7 +386,8 @@ def ensure_zmq_send(socket: zmq.Socket, data: list, max_retries: int = 3):
             else:
                 logger.error("Send failed after all retries: %s", e)
                 raise RuntimeError(
-                    f"Failed to send data after {max_retries} retries: {e}")
+                    "Failed to send data after %s retries: %s" % (max_retries, e)
+                    )
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
@@ -410,7 +396,7 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     Handles context creation, socket binding/connection, and clean destruction.
     """
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
-        raise ValueError(f"Unexpected socket type: {socket_type}")
+        raise ValueError("Unexpected socket type: %s" % socket_type)
     ctx: zmq.Context | None = None
     try:
         ctx = zmq.Context()
