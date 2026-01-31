@@ -1016,7 +1016,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "vllm:num_kv_cache_total_blocks{model_name=\"$model_name\"} * (1 - vllm:kv_cache_usage_perc{model_name=\"$model_name\"}) * (vllm:num_prefix_cached_tokens{model_name=\"$model_name\"} / vllm:num_prefix_cached_blocks{model_name=\"$model_name\"})",
+          "expr": "(vllm:num_kv_cache_total_blocks{model_name=\"$model_name\"} * (1 - vllm:kv_cache_usage_perc{model_name=\"$model_name\"}) * (vllm:num_prefix_cached_tokens{model_name=\"$model_name\"} / vllm:num_prefix_cached_blocks{model_name=\"$model_name\"})) or on() vector(0)",
           "instant": false,
           "legendFormat": "Available Token Capacity",
           "range": true,
