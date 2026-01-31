@@ -406,7 +406,7 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalizeBase):
     """
 
     @abstractmethod
-    def prepare_monolithic(
+    def prepare(
         self,
         a1: torch.Tensor,
         router_logits: torch.Tensor,
@@ -427,11 +427,10 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalizeBase):
         - quantized + dispatched a.
         - Optional quantized + dispatched a1_scales.
         """
-        raise NotImplementedError(
-            f"prepare_monolithic not supported for {self.__class__.__name__}"
-        )
+        raise NotImplementedError
 
-    def finalize_monolithic(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
+    @abstractmethod
+    def finalize(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
         """
         Optional method for subclasses compatible with monolithic
         FusedMoEModularExperts kernels.
@@ -497,8 +496,7 @@ class FusedMoEExperts(ABC):
         """
         raise NotImplementedError
 
-        #
-
+    #
     # Various helpers for registering support for various features.
     # Used by the oracle to select a particular kernel for a deployment.
     #
@@ -692,6 +690,10 @@ class FusedMoEModularExperts(FusedMoEExperts):
         above.
     """
 
+    @staticmethod
+    def is_monolithic() -> bool:
+        return False
+
     def moe_problem_size(
         self,
         a1: torch.Tensor,
@@ -876,7 +878,11 @@ class FusedMoEMonolithicExperts(FusedMoEExperts):
         rather than topk ids and weights).
     """
 
-    def apply_monolithic(
+    @staticmethod
+    def is_monolithic() -> bool:
+        return False
+
+    def apply(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -1600,7 +1606,7 @@ class FusedMoEMonolithicKernel(FusedMoEKernel):
             moe_parallel_config,
         )
 
-    def forward_monolithic(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -1625,14 +1631,14 @@ class FusedMoEMonolithicKernel(FusedMoEKernel):
         assert isinstance(self.fused_experts, FusedMoEMonolithicExperts)
 
         # TODO(rob): add inplace support.
-        a1q, a1q_scale, router_logits = self.prepare_finalize.prepare_monolithic(
+        a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
             hidden_states,
             router_logits=router_logits,
             quant_config=self.fused_experts.quant_config,
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
         )
 
-        fused_out = self.fused_experts.apply_monolithic(
+        fused_out = self.fused_experts.apply(
             hidden_states=a1q,
             w1=w1,
             w2=w2,
@@ -1649,6 +1655,6 @@ class FusedMoEMonolithicKernel(FusedMoEKernel):
             topk_group=topk_group,
         )
 
-        output = self.prepare_finalize.finalize_monolithic(fused_out)
+        output = self.prepare_finalize.finalize(fused_out)
 
         return output

@@ -9,13 +9,26 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
-    TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
-class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
+class MoEPrepareAndFinalizeNaiveEPBase(mk.FusedMoEPrepareAndFinalizeBase):
+    """
+    Base class for Naive Prepare/Finalize for Dp/Ep with two subclasses:
+    * Modular Case
+    * Monolithic Case
+
+    In modular case, a separate router runs *before* and we dispatch
+    the topk weights and ids.
+
+    In monolithic case, the router runs *inside* the MoE kernel so we
+    dispatch the router logits.
+
+    In both cases, the quantization of X happens prior to dispatching.
+    """
+
     def __init__(
         self,
         is_sequence_parallel: bool = False,
@@ -95,6 +108,17 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
 
         return a1q_scale
 
+
+class MoEPrepareAndFinalizeNaiveEP(
+    MoEPrepareAndFinalizeNaiveEPBase, mk.FusedMoEPrepareAndFinalize
+):
+    """
+    Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
+
+    Uses Torch AR/RS or AR for dispatch/combine operations, applied
+    to the topk weights and ids.
+    """
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -160,6 +184,17 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
             get_ep_group().combine(out, is_sequence_parallel=self.is_sequence_parallel)
         )
 
+
+class MoEPrepareAndFinalizeNaiveEPMonolithic(
+    MoEPrepareAndFinalizeNaiveEPBase, mk.FusedMoEPrepareAndFinalizeMonolithic
+):
+    """
+    Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
+
+    Uses Torch AR/RS or AR for dispatch/combine operations, applied
+    to the router logits (the MoE kernel runs the router internally).
+    """
+
     def prepare_monolithic(
         self,
         a1: torch.Tensor,
@@ -189,12 +224,10 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
 
         return a1q, a1q_scale, router_logits
 
-    def finalize_monolithic(
+    def finalize(
         self,
         fused_expert_output: torch.Tensor,
-        weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> torch.Tensor:
-        assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP)
         out = get_ep_group().combine(
             fused_expert_output, is_sequence_parallel=self.is_sequence_parallel
         )
@@ -202,7 +235,13 @@ class MoEPrepareAndFinalizeNaiveEP(mk.FusedMoEPrepareAndFinalize):
         return out
 
 
-class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
+class MoEPrepareAndFinalizeNoEPBase(mk.FusedMoEPrepareAndFinalizeBase):
+    """
+    Base class for TP case Prepare/Finalize.
+    * prepare: applies input quantization
+    * finalize: applies the reduction (if needed)
+    """
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -219,6 +258,37 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
     def output_is_reduced(self) -> bool:
         return False
 
+    def _quantize_input(
+        self,
+        a1: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # Defer input quant to moe kernel for backends (e.g. AITER, FI)
+        # which use a single kernel call for quant + experts.
+        if defer_input_quant:
+            return a1, None
+
+        input_sf = (
+            quant_config.a1_gscale
+            if quant_config.use_nvfp4_w4a4
+            else quant_config.a1_scale
+        )
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            a1,
+            input_sf,
+            quant_dtype=quant_config.quant_dtype,
+            per_act_token_quant=quant_config.per_act_token_quant,
+            block_shape=quant_config.block_shape,
+            is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
+        )
+
+        return a1q, a1q_scale
+
+
+class MoEPrepareAndFinalizeNoEPMonolithic(
+    mk.FusedMoEPrepareAndFinalize, MoEPrepareAndFinalizeNoEPBase
+):
     def prepare(
         self,
         a1: torch.Tensor,
@@ -239,53 +309,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             # Note: do not use inplace for shared experts overlap
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        # Defer input quant to moe kernel for backends (e.g. AITER, FI)
-        # which use a single kernel call for quant + experts.
-        if defer_input_quant:
-            return a1, None, None, None, None
-
-        input_sf = (
-            quant_config.a1_gscale
-            if quant_config.use_nvfp4_w4a4
-            else quant_config.a1_scale
-        )
-        a1q, a1q_scale = a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            input_sf,
-            quant_dtype=quant_config.quant_dtype,
-            per_act_token_quant=quant_config.per_act_token_quant,
-            block_shape=quant_config.block_shape,
-            is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
-        )
+        a1q, a1q_scale = self._quantize_input(a1, quant_config, defer_input_quant)
 
         return a1q, a1q_scale, None, None, None
-
-    def prepare_monolithic(
-        self,
-        a1: torch.Tensor,
-        router_logits: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
-        defer_input_quant: bool = False,
-    ) -> mk.PrepareMonolithicResultType:
-        # Defer input quant to moe kernel for backends (e.g. AITER, FI)
-        # which use a single kernel call for quant + experts.
-        if defer_input_quant:
-            return a1, None, router_logits
-
-        input_sf = (
-            quant_config.a1_gscale
-            if quant_config.use_nvfp4_w4a4
-            else quant_config.a1_scale
-        )
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            input_sf,
-            quant_dtype=quant_config.quant_dtype,
-            per_act_token_quant=quant_config.per_act_token_quant,
-            block_shape=quant_config.block_shape,
-            is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
-        )
-        return a1q, a1q_scale, router_logits
 
     def finalize(
         self,
@@ -306,10 +332,22 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
-    def finalize_monolithic(
+
+class MoEPrepareAndFinalizeNoEP(
+    mk.FusedMoEPrepareAndFinalizeMonolithic, MoEPrepareAndFinalizeNoEPBase
+):
+    def prepare(
+        self,
+        a1: torch.Tensor,
+        router_logits: torch.Tensor,
+        quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
+    ) -> mk.PrepareMonolithicResultType:
+        a1q, a1q_scale = self._quantize_input(a1, quant_config, defer_input_quant)
+        return a1q, a1q_scale, router_logits
+
+    def finalize(
         self,
         fused_expert_output: torch.Tensor,
-        weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> torch.Tensor:
-        assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP)
         return fused_expert_output

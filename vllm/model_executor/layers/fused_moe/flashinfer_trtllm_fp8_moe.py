@@ -11,9 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceNoOP,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -23,7 +20,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.v1.engine.utils import current_platform
 
 
-class FlashInferTrtLlmFp8Experts(mk.FusedMoEModularExperts):
+class FlashInferTrtLlmFp8Experts(mk.FusedMoEMonolithicExperts):
+    """
+    Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
+    """
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -128,47 +129,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEModularExperts):
     def supports_expert_map(self) -> bool:
         return False
 
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        return TopKWeightAndReduceNoOP()
-
-    def workspace_shapes(
-        self,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        global_num_experts: int,
-        local_num_experts: int,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        raise NotImplementedError(
-            f"{self.__class__.__name__} only supports the apply_monolithic interface."
-        )
-
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        apply_router_weight_on_input: bool,
-    ):
-        raise NotImplementedError(
-            f"{self.__class__.__name__} only supports the apply_monolithic interface."
-        )
-
-    def _apply_per_block_monolithic(
+    def _apply_per_block(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -227,7 +188,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEModularExperts):
             routing_method_type=self.routing_method_type,
         )
 
-    def _apply_per_tensor_monolithic(
+    def _apply_per_tensor(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -274,7 +235,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEModularExperts):
         )
         return out
 
-    def apply_monolithic(
+    def apply(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -292,7 +253,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEModularExperts):
         topk_group: int | None = None,
     ) -> torch.Tensor:
         if self.quant_config.block_shape is not None:
-            return self._apply_per_block_monolithic(
+            return self._apply_per_block(
                 hidden_states,
                 w1,
                 w2,
@@ -307,7 +268,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEModularExperts):
                 routed_scaling_factor=routed_scaling_factor,
             )
         elif self.quant_config.is_per_tensor:
-            return self._apply_per_tensor_monolithic(
+            return self._apply_per_tensor(
                 hidden_states,
                 w1,
                 w2,

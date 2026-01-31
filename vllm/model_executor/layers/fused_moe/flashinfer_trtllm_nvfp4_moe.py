@@ -22,7 +22,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 
-class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEModularExperts):
+class FlashInferTrtLlmNvFp4ExpertsBase(mk.FusedMoEExperts):
+    """
+    NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface.
+    """
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -74,6 +78,24 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEModularExperts):
         return activation in ["silu"]
 
     @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    def supports_chunking(self) -> bool:
+        return False
+
+    def supports_expert_map(self) -> bool:
+        return False
+
+
+class FlashInferTrtLlmNvFp4ExpertsModular(
+    FlashInferTrtLlmNvFp4ExpertsBase, mk.FusedMoEModularExperts
+):
+    """
+    Modular version of the implementation (just the experts).
+    """
+
+    @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """Supports EP and TP."""
         return True
@@ -84,26 +106,7 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEModularExperts):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # NOTE(rob): this is a conservative list.
-        return routing_method_type in [
-            RoutingMethodType.DeepSeekV3,
-            RoutingMethodType.Renormalize,
-            RoutingMethodType.RenormalizeNaive,
-            RoutingMethodType.Llama4,
-        ]
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    def supports_chunking(self) -> bool:
-        return False
-
-    def supports_expert_map(self) -> bool:
-        return False
-
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        return TopKWeightAndReduceNoOP()
+        return True
 
     def workspace_shapes(
         self,
@@ -126,6 +129,9 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEModularExperts):
         output = (M, self.hidden_dim)
 
         return (workspace1, workspace2, output)
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceNoOP()
 
     def apply(
         self,
@@ -186,7 +192,34 @@ class FlashInferTrtLlmNvFp4Experts(mk.FusedMoEModularExperts):
             output=output,
         )
 
-    def apply_monolithic(
+
+class FlashInferTrtLlmNvFp4Experts(
+    FlashInferTrtLlmNvFp4ExpertsBase, mk.FusedMoEMonolithicExperts
+):
+    """
+    Monolithic version of the kernel (router + experts).
+    """
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        """The modular implementation should be used for the Dp/Ep case"""
+        return not moe_parallel_config.use_all2all_kernels
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method_type: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # NOTE(rob): this is a conservative list.
+        return routing_method_type in [
+            RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.Llama4,
+        ]
+
+    def apply(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
