@@ -6,8 +6,10 @@ from typing import Any, TypeAlias
 
 from pydantic import ConfigDict, Field, model_validator
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
@@ -15,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     OpenAIBaseModel,
 )
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 
 
 class TokenizeCompletionRequest(OpenAIBaseModel):
@@ -34,6 +37,13 @@ class TokenizeCompletionRequest(OpenAIBaseModel):
             "If true, also return the token strings corresponding to the token ids."
         ),
     )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=None,
+            max_output_tokens=0,
+            add_special_tokens=self.add_special_tokens,
+        )
 
 
 class TokenizeChatRequest(OpenAIBaseModel):
@@ -109,6 +119,30 @@ class TokenizeChatRequest(OpenAIBaseModel):
             )
         return data
 
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParams:
+        return ChatParams(
+            chat_template=self.chat_template or default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=merge_kwargs(
+                self.chat_template_kwargs,
+                dict(
+                    add_generation_prompt=self.add_generation_prompt,
+                    continue_final_message=self.continue_final_message,
+                ),
+            ),
+        )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=None,
+            max_output_tokens=0,
+            add_special_tokens=self.add_special_tokens,
+        )
+
 
 TokenizeRequest: TypeAlias = TokenizeCompletionRequest | TokenizeChatRequest
 
@@ -123,6 +157,13 @@ class TokenizeResponse(OpenAIBaseModel):
 class DetokenizeRequest(OpenAIBaseModel):
     model: str | None = None
     tokens: list[int]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=None,
+            max_output_tokens=0,
+            needs_detokenization=True,
+        )
 
 
 class DetokenizeResponse(OpenAIBaseModel):

@@ -5,7 +5,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator, Sequence
-from typing import Final, cast
+from typing import Any, Final, cast
 
 import jinja2
 from fastapi import Request
@@ -14,10 +14,7 @@ from typing_extensions import assert_never
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    UsageInfo,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.pooling.protocol import (
@@ -30,8 +27,6 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingResponse,
     PoolingResponseData,
 )
-from vllm.entrypoints.renderer import RenderConfig
-from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import PoolingTask, SupportedTask
@@ -99,11 +94,6 @@ class OpenAIServingPooling(OpenAIServing):
                     "dimensions is currently not supported"
                 )
 
-            truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
-            truncate_prompt_tokens = _validate_truncation_size(
-                self.max_model_len, truncate_prompt_tokens
-            )
-
             if is_io_processor_request:
                 if self.io_processor is None:
                     raise ValueError(
@@ -134,19 +124,16 @@ class OpenAIServingPooling(OpenAIServing):
 
                 _, engine_prompts = await self._preprocess_chat(
                     request,
-                    self.renderer,
                     request.messages,
-                    chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
-                    add_special_tokens=request.add_special_tokens,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=None,
                 )
             elif isinstance(request, PoolingCompletionRequest):
-                renderer = self._get_completion_renderer()
-                engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=request.input,
-                    config=self._build_render_config(request),
+                engine_prompts = await self._preprocess_completion(
+                    request,
+                    prompt_input=request.input,
+                    prompt_embeds=None,
                 )
             else:
                 raise ValueError(f"Unsupported request of type {type(request)}")
@@ -207,11 +194,18 @@ class OpenAIServingPooling(OpenAIServing):
                     else await self._get_trace_headers(raw_request.headers)
                 )
 
+                if is_io_processor_request:
+                    tokenization_kwargs: dict[str, Any] = {}
+                else:
+                    tok_params = request.build_tok_params(self.model_config)  # type: ignore
+                    tokenization_kwargs = tok_params.get_encode_kwargs()
+
                 generator = self.engine_client.encode(
                     engine_prompt,
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
                     trace_headers=trace_headers,
                     priority=request.priority,
                 )
@@ -338,10 +332,3 @@ class OpenAIServingPooling(OpenAIServing):
             return encode_bytes(bytes_only=encoding_format == "bytes_only")
         else:
             assert_never(encoding_format)
-
-    def _build_render_config(self, request: PoolingCompletionRequest) -> RenderConfig:
-        return RenderConfig(
-            max_length=self.max_model_len,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            add_special_tokens=request.add_special_tokens,
-        )

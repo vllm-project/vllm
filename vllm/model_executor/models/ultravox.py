@@ -209,6 +209,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
         item_processor_data = dict(**mm_data, audios=audios)
 
         # some tokenizer kwargs are incompatible with UltravoxProcessor
+        tok_kwargs.pop("add_special_tokens", None)
         tok_kwargs.pop("padding", None)
         tok_kwargs.pop("truncation", None)
 

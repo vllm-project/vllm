@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias, TypedDict
 
 from typing_extensions import TypeIs
 
-from vllm.utils.collection_utils import is_list_of
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from .data import (
     EmbedsPrompt,
@@ -20,50 +19,6 @@ from .data import (
 
 if TYPE_CHECKING:
     import torch
-
-
-def parse_raw_prompts(
-    prompt: str | list[str] | list[int] | list[list[int]],
-) -> Sequence[TextPrompt] | Sequence[TokensPrompt]:
-    if isinstance(prompt, str):
-        # case 1: a string
-        return [TextPrompt(prompt=prompt)]
-
-    if isinstance(prompt, list):
-        if len(prompt) == 0:
-            raise ValueError("please provide at least one prompt")
-
-        # case 2: array of strings
-        if is_list_of(prompt, str):
-            prompt = cast(list[str], prompt)
-            return [TextPrompt(prompt=elem) for elem in prompt]
-
-        # case 3: array of tokens
-        if is_list_of(prompt, int):
-            prompt = cast(list[int], prompt)
-            return [TokensPrompt(prompt_token_ids=prompt)]
-
-        # case 4: array of token arrays
-        if is_list_of(prompt, list):
-            if len(prompt) == 1 and isinstance(prompt[0], list) and len(prompt[0]) == 0:
-                raise ValueError("please provide at least one prompt")
-            for elem in prompt:
-                if not isinstance(elem, list):
-                    raise TypeError(
-                        "prompt must be a list of lists, but found a non-list element."
-                    )
-                if not is_list_of(elem, int):
-                    raise TypeError(
-                        "Nested lists of tokens must contain only integers."
-                    )
-
-            prompt = cast(list[list[int]], prompt)
-            return [TokensPrompt(prompt_token_ids=elem) for elem in prompt]
-
-    raise TypeError(
-        "prompt must be a string, array of strings, "
-        "array of tokens, or array of token arrays"
-    )
 
 
 class ParsedStrPrompt(TypedDict):
@@ -144,4 +99,11 @@ def get_prompt_components(prompt: PromptType) -> PromptComponents:
         text=prompt.get("prompt"),  # type: ignore[arg-type]
         token_ids=prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
         embeds=prompt.get("prompt_embeds"),
+    )
+
+
+def get_prompt_len(prompt: TokensPrompt | EmbedsPrompt):
+    return length_from_prompt_token_ids_or_embeds(
+        prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        prompt.get("prompt_embeds"),  # type: ignore[arg-type]
     )
