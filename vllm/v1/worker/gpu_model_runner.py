@@ -3585,6 +3585,14 @@ class GPUModelRunner(
 
         afd_metadata = self._build_afd_metadata(ubatch_slices_padded, num_tokens_unpadded)
 
+        # send is_ubatch to ffn side
+        is_ubatch = True if ubatch_slices_padded else False
+        # to support inequal AF,[ffn_size,ffn_size + min_size) send
+        if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
+            logger.info(f'jcz self.afd_connector.rank in prepare input is {self.afd_connector.world_rank}')
+            self.afd_connector.send_is_ubatch(is_ubatch)
+        logger.info(f'jcz send is_ubatch in prepare input is {is_ubatch}')
+
         self.profiler.step()
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -4926,6 +4934,15 @@ class GPUModelRunner(
             afd_metadata = self._build_afd_metadata(
                 ubatch_slices_padded, num_tokens_unpadded
             )
+
+            # send is_ubatch to ffn side
+            is_ubatch = True if ubatch_slices_padded else False
+            # to support inequal AF,[ffn_size,ffn_size + min_size) send
+            logger.info(f"jcz is_attn_top_min_size_rank:{self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank)}")
+            if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
+                logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
+                self.afd_connector.send_is_ubatch(is_ubatch)
+            logger.info(f'jcz send is_ubatch in prepare input is {is_ubatch}')
 
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),
