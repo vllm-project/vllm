@@ -259,7 +259,7 @@ class TestRenderPrompt:
 
         renderer = _build_renderer(MockModelConfig())
 
-        # Exceeds max_model_len and max_model_len * VLLM_MAX_CHARS_PER_TOKEN
+        # Exceeds max_total_tokens and max_total_tokens * VLLM_MAX_CHARS_PER_TOKEN
         long_tokens = "x" * 150
         prompts = renderer.render_completions(long_tokens)
 
@@ -280,7 +280,7 @@ class TestRenderPrompt:
 
         renderer = _build_renderer(MockModelConfig())
 
-        # Exceeds max_model_len but not max_model_len * VLLM_MAX_CHARS_PER_TOKEN
+        # Exceeds max_total_tokens but not max_total_tokens * VLLM_MAX_CHARS_PER_TOKEN
         long_tokens = "x" * 150
         prompts = renderer.render_completions(long_tokens)
 
