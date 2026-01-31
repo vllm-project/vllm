@@ -7,7 +7,7 @@ import itertools
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass
@@ -59,6 +59,10 @@ from vllm.model_executor.layers.rotary_embedding import (
     XDRotaryEmbedding,
 )
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+)
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
@@ -1391,12 +1395,14 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int],
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
+        for_cudagraph_capture: bool = False,
     ) -> tuple[torch.Tensor | None, np.ndarray | None]:
         if not isinstance(kv_cache_spec, CrossAttentionSpec):
             return None, None
 
         # Zero out buffer for padding requests that are not actually scheduled (CGs)
         self.encoder_seq_lens.np[:num_reqs] = 0
+
         # Build encoder_seq_lens array mapping request indices to
         # encoder lengths for inputs scheduled in this batch
         for req_id in num_scheduled_tokens:
@@ -1413,6 +1419,15 @@ class GPUModelRunner(
                 feature.mm_position.length for feature in req_state.mm_features
             )
             self.encoder_seq_lens.np[req_index] = encoder_input_tokens
+        if for_cudagraph_capture:
+            # During CUDA graph capture, we need to use realistic encoder lengths
+            # so that max_seqlen_k is captured with the correct value.
+            max_encoder_len = getattr(
+                self.model_config.hf_config,
+                "max_source_positions",
+                self.max_encoder_len,
+            )
+            self.encoder_seq_lens.np[:num_reqs] = max_encoder_len
 
         self.encoder_seq_lens.copy_to_gpu(num_reqs)
         encoder_seq_lens = self.encoder_seq_lens.gpu[:num_reqs]
@@ -1830,6 +1845,7 @@ class GPUModelRunner(
                 num_scheduled_tokens or {},
                 kv_cache_group.kv_cache_spec,
                 num_reqs_padded,
+                for_cudagraph_capture=for_cudagraph_capture,
             )
             if kv_cache_gid > 0:
                 cm.block_table_tensor = _get_block_table(kv_cache_gid)
@@ -2524,8 +2540,10 @@ class GPUModelRunner(
         return mm_embeds, is_mm_embed
 
     def get_model(self) -> nn.Module:
-        # get raw model out of the cudagraph wrapper.
+        if not hasattr(self, "model"):
+            raise ValueError("Cannot get model before model has been initialized")
         if isinstance(self.model, (CUDAGraphWrapper, UBatchWrapper)):
+            # get raw model out of the cudagraph wrapper.
             return self.model.unwrap()
         return self.model
 
@@ -4270,13 +4288,89 @@ class GPUModelRunner(
 
         return None
 
-    def reload_weights(self) -> None:
-        assert getattr(self, "model", None) is not None, (
-            "Cannot reload weights before model is loaded."
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        weights_path: str | None = None,
+        is_checkpoint_format: bool = True,
+    ) -> None:
+        """
+        Reload weights from a weights iterator or from disk
+
+        :param weights_iterator: weights to load into model
+        :param weights_path: path to load weights from if weights_iterator is not
+            provided. Use path of original model if neither is provided.
+        :param is_checkpoint_format: set to False if weights have already been processed
+            into kernel format (repacking, renaming, ect.)
+        """
+        # TODO(@kylesayrs): generalize to all runners and loaders
+        # argument validation
+        if weights_iterator is None and not is_checkpoint_format:
+            logger.warning(
+                "Reloading from disk means that weights will be in checkpoint format. "
+                "Please use `is_checkpoint_format=True` "
+                "to avoid weight reloading errors"
+            )
+
+        model = self.get_model()
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        counter_before_reloading = time.perf_counter()
+
+        # load weights from disk if none are provided
+        if weights_iterator is None:
+            model_loader = get_model_loader(self.load_config)
+            if not hasattr(model_loader, "get_all_weights"):
+                raise NotImplementedError(
+                    f"Model reloading with `{self.load_config.load_format}` format"
+                )
+
+            if weights_path is not None:
+                self.model_config.model = weights_path
+            weights_iterator = model_loader.get_all_weights(self.model_config, model)
+            weights_iterator = cast(
+                Iterable[tuple[str, torch.Tensor]], weights_iterator
+            )
+
+        # begin loading weights
+        logger.info_once("Reloading weights inplace...", scope="local")
+        load_device = (
+            self.vllm_config.load_config.device or self.vllm_config.device_config.device
         )
-        model_loader = get_model_loader(self.load_config)
-        logger.info("Reloading weights inplace...")
-        model_loader.load_weights(self.get_model(), model_config=self.model_config)
+        with torch.device(load_device):
+            if is_checkpoint_format:
+                # load weights from checkpoint/ original model format
+                initialize_layerwise_reload(model)
+                loaded_weights = model.load_weights(weights_iterator)
+                finalize_layerwise_reload(model, self.model_config)
+
+            else:
+                # load weights from kernel format
+                logger.warning_once(
+                    "Reloading with `is_checkpoint_format=True` requires that "
+                    "weights be in kernel format and already sharded",
+                    scope="local",
+                )
+                loaded_weights = set()
+                for name, loaded_weight in weights_iterator:
+                    param = model.get_parameter(name)  # TODO: buffers?
+                    param.copy_(loaded_weight)
+                    loaded_weights.add(name)
+
+        # logging and validation
+        counter_after_reloading = time.perf_counter()
+        diff_seconds = counter_after_reloading - counter_before_reloading
+        logger.info_once(
+            "Reloading and processing weights took %.2f seconds",
+            diff_seconds,
+            scope="local",
+        )
+        if self.model_config.quantization is None and loaded_weights is not None:
+            weights_not_loaded = weights_to_load - loaded_weights
+            if weights_not_loaded:
+                logger.warning(
+                    "Following weights were not loaded from checkpoint: %s",
+                    weights_not_loaded,
+                )
 
     def save_tensorized_model(
         self,
@@ -4367,7 +4461,7 @@ class GPUModelRunner(
 
             # Compute prompt logprobs.
             logprobs = self.sampler.compute_logprobs(logits)
-            token_ids, logprobs, ranks = self.sampler.gather_logprobs(
+            token_ids, logprobs, ranks, _ = self.sampler.gather_logprobs(
                 logprobs, num_prompt_logprobs, tgt_token_ids
             )
 
