@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
-    FusedMoEPrepareAndFinalize,
+    FusedMoEPrepareAndFinalizeModular,
 )
 
 logger = init_logger(__name__)
@@ -44,7 +44,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def make(
         moe_layer: torch.nn.Module,
         old_quant_method: FusedMoEMethodBase,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         shared_experts: torch.nn.Module | None,
     ) -> "FusedMoEModularMethod":
         return FusedMoEModularMethod(

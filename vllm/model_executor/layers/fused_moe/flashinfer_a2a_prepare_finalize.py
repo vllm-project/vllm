@@ -18,7 +18,7 @@ def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
 
 
-class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class FlashInferA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Base class for FlashInfer MoE prepare and finalize operations."""
 
     def __init__(

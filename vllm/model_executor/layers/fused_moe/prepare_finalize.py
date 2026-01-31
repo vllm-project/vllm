@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
-class MoEPrepareAndFinalizeNaiveEPBase(mk.FusedMoEPrepareAndFinalizeBase):
+class MoEPrepareAndFinalizeNaiveEPBase(mk.FusedMoEPrepareAndFinalize):
     """
     Base class for Naive Prepare/Finalize for Dp/Ep with two subclasses:
     * Modular Case
@@ -125,7 +125,7 @@ class MoEPrepareAndFinalizeNaiveEPBase(mk.FusedMoEPrepareAndFinalizeBase):
 
 
 class MoEPrepareAndFinalizeNaiveEP(
-    MoEPrepareAndFinalizeNaiveEPBase, mk.FusedMoEPrepareAndFinalize
+    MoEPrepareAndFinalizeNaiveEPBase, mk.FusedMoEPrepareAndFinalizeModular
 ):
     """
     Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
@@ -249,7 +249,7 @@ class MoEPrepareAndFinalizeNaiveEPMonolithic(
         return out
 
 
-class MoEPrepareAndFinalizeNoEPBase(mk.FusedMoEPrepareAndFinalizeBase):
+class MoEPrepareAndFinalizeNoEPBase(mk.FusedMoEPrepareAndFinalize):
     """
     Base class for TP case Prepare/Finalize.
     * prepare: applies input quantization
@@ -309,7 +309,7 @@ class MoEPrepareAndFinalizeNoEPBase(mk.FusedMoEPrepareAndFinalizeBase):
 
 
 class MoEPrepareAndFinalizeNoEP(
-    mk.FusedMoEPrepareAndFinalize, MoEPrepareAndFinalizeNoEPBase
+    mk.FusedMoEPrepareAndFinalizeModular, MoEPrepareAndFinalizeNoEPBase
 ):
     def prepare(
         self,

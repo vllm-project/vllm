@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
-class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     Prepare/Finalize using MoRI kernels.
     """

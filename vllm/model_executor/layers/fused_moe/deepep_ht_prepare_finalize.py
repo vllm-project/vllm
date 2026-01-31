@@ -25,7 +25,7 @@ from vllm.v1.worker.ubatching import (
 )
 
 
-class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     Prepare/Finalize using DeepEP High-Throughput kernels.
     """

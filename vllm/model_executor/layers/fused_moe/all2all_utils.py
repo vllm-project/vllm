@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import
     FlashInferA2APrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEPrepareAndFinalizeBase,
+    FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNaiveEPBase,
@@ -82,7 +82,7 @@ def maybe_make_prepare_finalize(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
-) -> FusedMoEPrepareAndFinalizeBase | None:
+) -> FusedMoEPrepareAndFinalize | None:
     # NOTE(rob): we are migrating each quant_method to hold the MK
     # in all cases. The allow_new_interface=False flag allow us to fall
     # back to the old method for methods that have not yet been migrated.
@@ -119,7 +119,7 @@ def maybe_make_prepare_finalize(
     all2all_manager = get_ep_group().device_communicator.all2all_manager
     assert all2all_manager is not None
 
-    prepare_finalize: FusedMoEPrepareAndFinalizeBase | None = None
+    prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
     if moe.use_pplx_kernels:
         assert quant_config is not None

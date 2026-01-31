@@ -488,7 +488,7 @@ def invoke_moe_batched_triton_kernel(
     )
 
 
-class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     A reference prepare/finalize class that reorganizes the tokens into
     expert batched format, i.e. E x max_num_tokens x K.  This is the format

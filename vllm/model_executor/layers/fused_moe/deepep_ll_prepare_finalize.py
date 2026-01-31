@@ -49,7 +49,7 @@ def dequant_fp8(
     return (expert_x_fp32 * expert_x_scales).view(expert_x_fp8.size())
 
 
-class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     Prepare/Finalize using DeepEP low-latency kernels.
     """
