@@ -548,8 +548,6 @@ class Step3p5Model(nn.Module):
 
         self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
-        # cache_config = vllm_config.cache_config
-        # quant_config = vllm_config.quant_config
         self.vocab_size = config.vocab_size
         self.config = config
 

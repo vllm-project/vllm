@@ -484,6 +484,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Step1ForCausalLM": _HfExamplesInfo(
         "stepfun-ai/Step-Audio-EditX", trust_remote_code=True
     ),
+    "Step3p5ForCausalLM": _HfExamplesInfo(
+        "stepfun-ai/step-3.5-flash", is_available_online=False
+    ),
     "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
