@@ -706,7 +706,7 @@ class InputPreprocessor:
             and "video" in prompt["multi_modal_data"]
         ):
             videos = prompt["multi_modal_data"]["video"]
-            detector = SimilarFrameDetector(sparse_ratio=(1-efs_sparse_rate))
+            detector = SimilarFrameDetector(sparse_ratio=(1 - efs_sparse_rate))
             videos = detector.process_video_frames(videos)
             prompt["multi_modal_data"]["video"] = videos
         """Preprocess the input prompt."""
