@@ -893,6 +893,9 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         return self.get_hf_processor().supports_video
 
     def get_supported_mm_limits(self):
+        hf_config = self.get_hf_config()
+        if getattr(hf_config, "use_unified_vision_chunk", False):
+            return {"image": None, "video": None, "vision_chunk": None}
         video_limit = {"video": None} if self.supports_video else {}
         return {**super().get_supported_mm_limits(), **video_limit}
 
@@ -977,6 +980,15 @@ class InternVLMultiModalProcessor(
     BaseInternVLMultiModalProcessor[InternVLProcessingInfo]
 ):
     """InternVL MultiModalProcessor extended for video support"""
+
+    def _get_modality_order(self, prompt, mm_data):
+        if isinstance(prompt, str):
+            import regex as re
+            pattern = r"<(image|video)>"
+            modalities = re.findall(pattern, prompt)
+            return modalities
+        else:
+            return super()._get_modality_order(prompt, mm_data)
 
     def _call_hf_processor(
         self,

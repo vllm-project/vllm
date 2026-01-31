@@ -801,13 +801,14 @@ def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
 
 # InternVL
 def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "OpenGVLab/InternVL3-2B"
+    model_name = "/mnt/data0/LLM/InternVL3_5-1B"
 
     engine_args = EngineArgs(
         model=model_name,
         trust_remote_code=True,
         max_model_len=8192,
         limit_mm_per_prompt={modality: 1},
+        hf_overrides={"use_unified_vision_chunk": True},
     )
 
     if modality == "image":

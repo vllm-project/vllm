@@ -31,6 +31,7 @@ from .inputs import (
     ImageItem,
     ModalityData,
     MultiModalDataDict,
+    MultiModalUUIDDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
@@ -817,11 +818,26 @@ class VisionChunkDataParser(MultiModalDataParser):
 
         # return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
-    def parse_mm_data(self, mm_data: MultiModalDataDict, modality_order: list[str] = []) -> MultiModalDataItems:
+    def parse_mm_data(
+        self,
+        mm_data: MultiModalDataDict,
+        modality_order: list[str] = [],
+    ) -> MultiModalDataItems:
         mm_items = MultiModalDataItems()
+
+        parsed_vision_chunk = self._parse_vision_chunk_data(mm_data.get("vision_chunk"))
+        if parsed_vision_chunk is not None:
+            mm_items["vision_chunk"] = parsed_vision_chunk
+            return mm_items
+
+        mm_items.setdefault("vision_chunk", VisionChunkProcessorItems([]))
         parsed_image = self._parse_image_data(mm_data.get("image"))
         parsed_video = self._parse_video_data(mm_data.get("video"))
-        assert len(modality_order) == parsed_image.get_count() + parsed_video.get_count(), (
+
+        image_count = 0 if parsed_image is None else parsed_image.get_count()
+        video_count = 0 if parsed_video is None else parsed_video.get_count()
+
+        assert len(modality_order) == image_count + video_count, (
             "The length of modality_order should be equal to the total number of vision chunks."
         )
 
@@ -836,4 +852,6 @@ class VisionChunkDataParser(MultiModalDataParser):
                     mm_items["vision_chunk"].data.append(
                         parsed_video.data.pop(0)
                     )
+        print("mm_items:", mm_items)
+
         return mm_items

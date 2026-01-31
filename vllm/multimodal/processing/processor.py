@@ -1023,6 +1023,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _to_mm_items(
         self,
         mm_data: MultiModalDataDict,
+        modality_order: list[str] | None = None,
     ) -> MultiModalDataItems:
         """
         Normalize
@@ -1031,7 +1032,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         before passing them to
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
         """
-        mm_items = self.data_parser.parse_mm_data(mm_data)
+        mm_items = self.data_parser.parse_mm_data(mm_data, modality_order=modality_order)
 
         mm_config = self.info.ctx.model_config.get_multimodal_config()
         if not mm_config.enable_mm_embeds:
@@ -1771,6 +1772,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return prompt_ids, mm_placeholders
 
+    def _get_modality_order(
+        self,
+        prompt: str | list[int],
+        mm_data: MultiModalDataDict,
+    ) -> list[str]:
+        """Get the modality order in the prompt."""
+        return []
+
     def apply(
         self,
         prompt: str | list[int],
@@ -1797,7 +1806,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         if request_id is not None:
             self.info.ctx.create_timing_stats(request_id)
 
-        mm_items = self._to_mm_items(mm_data)
+        modality_order = self._get_modality_order(prompt, mm_data)
+        mm_items = self._to_mm_items(mm_data, modality_order)
 
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
