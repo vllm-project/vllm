@@ -1,12 +1,20 @@
 mod generated;
+mod openai;
 
-use generated::vllm_engine_client::VllmEngineClient;
+use openai::{ChatCompletionRequest, ChatMessage};
 
 #[tokio::main]
 async fn main() {
-    println!("vllm-api-server - proto types available");
+    // Verify OpenAI types work with serde
+    let json = r#"{
+        "model": "test",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": true
+    }"#;
 
-    // Verify types compile
-    let _: Option<generated::GenerateRequest> = None;
-    let _: Option<generated::SamplingParams> = None;
+    let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(req.model, "test");
+    assert!(req.is_streaming());
+
+    println!("OpenAI types working correctly");
 }
