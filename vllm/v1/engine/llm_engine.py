@@ -332,6 +332,14 @@ class LLMEngine:
             reset_running_requests, reset_connector
         )
 
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings computed with old weights are not reused.
+        """
+        self.engine_core.reset_encoder_cache()
+
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 

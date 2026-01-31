@@ -184,6 +184,15 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings are not reused.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError

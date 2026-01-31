@@ -720,6 +720,14 @@ class GPUModelRunner(
         if self.mm_budget:
             self.mm_budget.reset_cache()
 
+    def reset_encoder_cache(self) -> None:
+        """Clear the GPU-side encoder cache storing vision embeddings.
+
+        This should be called when model weights are updated to ensure
+        stale embeddings computed with old weights are not reused.
+        """
+        self.encoder_cache.clear()
+
     @torch.inference_mode()
     def init_fp8_kv_scales(self) -> None:
         """
