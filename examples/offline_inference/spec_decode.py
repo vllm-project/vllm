@@ -80,7 +80,6 @@ def parse_args():
 
 
 def main(args):
-
     model_dir = args.model_dir
     if args.model_dir is None:
         if args.custom_mm_prompts:
@@ -227,7 +226,7 @@ def main(args):
 if __name__ == "__main__":
     args = parse_args()
     args.enable_multimodal_chat = args.backend == "openai-chat"
-    
+
     acceptance_length = main(args)
 
     if args.test:
