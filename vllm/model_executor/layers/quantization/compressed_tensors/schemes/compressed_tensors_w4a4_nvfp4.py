@@ -8,15 +8,10 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
-    run_nvfp4_emulations,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    cutlass_fp4_supported,
-    pad_nvfp4_activation_for_cutlass,
-    pad_nvfp4_weight_for_cutlass,
-    slice_nvfp4_output,
-    swizzle_blockscale,
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    apply_nvfp4_linear,
+    convert_to_nvfp4_linear_kernel_format,
+    select_nvfp4_linear_backend,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -104,46 +99,10 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             1.0 / weight_global_scale, requires_grad=False
         )
 
-        if self.backend == "flashinfer-trtllm":
-            # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
-            # FlashInfer provides nvfp4_quantize to quantize + shuffle the
-            # layout but we use our own quantization so we have to call
-            # shuffles ourselves.
-            from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
-
-            weight = layer.weight_packed.data
-            weight_scale = layer.weight_scale.data
-
-            epilogue_tile_m = 128
-            weight = shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m)
-            weight_scale = (
-                shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
-                .reshape(weight_scale.shape)
-                .view(torch.float8_e4m3fn)
-            )
-
-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
-            layer.weight_packed = Parameter(weight, requires_grad=False)
-        else:
-            swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
-            if self.backend == "fbgemm":
-                swizzled_weight_scale = swizzled_weight_scale.view(-1).view(torch.uint8)
-            layer.weight_scale = Parameter(swizzled_weight_scale, requires_grad=False)
-
-            # Pad weights for CUTLASS/FlashInfer kernel alignment (K and N
-            # divisible by 32). fbgemm has its own layout requirements.
-            if self.backend in ("cutlass", "flashinfer-cutlass"):
-                weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
-                    layer.weight_packed.data
-                )
-                layer.weights_padding_cols = weights_padding_cols
-                layer.weight_packed = Parameter(weight, requires_grad=False)
-            else:
-                layer.weights_padding_cols = 0
-                layer.weight_packed = Parameter(
-                    layer.weight_packed.data, requires_grad=False
-                )
-
+        # Pre-compute alpha and inverse for runtime quantization
+        layer.input_global_scale_inv = Parameter(
+            input_global_scale_inv, requires_grad=False
+        )
         layer.alpha = Parameter(
             layer.input_global_scale * layer.weight_global_scale, requires_grad=False
         )
@@ -157,61 +116,9 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-            out = run_nvfp4_emulations(
-                x=x,
-                input_global_scale=layer.input_global_scale,
-                weight=layer.weight_packed,
-                weight_scale_swizzled=layer.weight_scale,
-                weight_global_scale=layer.weight_global_scale,
-            )
-            if bias is not None:
-                out = out + bias
-            return out
-
-        output_dtype = x.dtype
-        output_size = layer.output_size_per_partition
-        output_shape = [*x.shape[:-1], output_size]
-
-        # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale,
-            is_sf_swizzled_layout=True,
+        return apply_nvfp4_linear(
             backend=self.backend,
+            layer=layer,
+            x=x,
+            bias=bias,
         )
-
-        # Pad activations to match weight K-dimension padding
-        weights_padding_cols = getattr(layer, "weights_padding_cols", 0)
-        x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_cols)
-
-        mm_args = (
-            x_fp4,
-            layer.weight_packed,
-            x_blockscale,
-            layer.weight_scale,
-            layer.alpha,
-            output_dtype,
-        )
-        if self.backend.startswith("flashinfer-"):
-            backend_name = self.backend[len("flashinfer-") :]
-            out = flashinfer_scaled_fp4_mm(*mm_args, backend=backend_name)
-        elif self.backend == "fbgemm":
-            out = torch.ops.fbgemm.f4f4bf16(
-                x_fp4,
-                layer.weight_packed,
-                x_blockscale.view(-1).view(torch.uint8),
-                layer.weight_scale,
-                layer.alpha,
-                use_mx=False,
-            ).to(output_dtype)
-        else:
-            assert self.backend == "cutlass"
-            out = cutlass_scaled_fp4_mm(*mm_args)
-
-        # Slice output to remove N-dimension padding
-        out = slice_nvfp4_output(out, output_size)
-
-        if bias is not None:
-            out = out + bias
-        return out.view(*output_shape)
