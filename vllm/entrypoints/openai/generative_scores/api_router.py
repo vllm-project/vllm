@@ -116,7 +116,7 @@ def register_generative_scores_api_routers(app):
     app.include_router(router)
 
 
-def init_generative_scores_state(
+async def init_generative_scores_state(
     engine_client: "EngineClient",
     state: "State",
     args: "Namespace",

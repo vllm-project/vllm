@@ -33,9 +33,11 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.tokenizers import get_tokenizer
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODEL_NAME = "openai-community/gpt2"
+# Use local model path for testing
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_PATH = "/shared/public/elr-models/Qwen/Qwen3-0.6B/e6de91484c29aa9480d55605af694f39b081c455/"
 BASE_MODEL_PATHS = [
-    BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
+    BaseModelPath(name=MODEL_NAME, model_path=MODEL_PATH),
 ]
 
 
@@ -48,7 +50,7 @@ class MockHFConfig:
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
-    tokenizer = MODEL_NAME
+    tokenizer = MODEL_PATH
     trust_remote_code = False
     tokenizer_mode = "auto"
     max_model_len = 100
@@ -64,7 +66,7 @@ class MockModelConfig:
     generation_config: str = "auto"
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init = False
-    vocab_size = 50257  # GPT-2 vocab size
+    vocab_size = 151936  # Qwen3-0.6B vocab size
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -81,7 +83,7 @@ class MockModelConfig:
 def _create_mock_engine():
     """Create a mock AsyncLLM engine."""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_PATH)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
@@ -125,6 +127,7 @@ def _create_mock_request_output(
         request_id="test-request",
         prompt="test prompt",
         prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
         outputs=[completion_output],
         finished=True,
     )
@@ -331,6 +334,8 @@ class TestValidation:
                 },
                 "at least one item",
             ),
+            # Note: mixed_item_types (string and token list) is validated by
+            # Pydantic before our code runs, so we test it in e2e tests instead
         ],
         ids=["invalid_token_id", "empty_label_tokens", "empty_items"],
     )

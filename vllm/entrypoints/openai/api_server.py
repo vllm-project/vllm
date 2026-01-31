@@ -327,7 +327,7 @@ async def init_app_state(
             init_generative_scores_state,
         )
 
-        init_generative_scores_state(
+        await init_generative_scores_state(
             engine_client, state, args, request_logger, supported_tasks
         )
 

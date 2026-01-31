@@ -130,7 +130,7 @@ class GenerativeScoreResponse(OpenAIBaseModel):
         usage: Token usage information.
     """
 
-    id: str = Field(default_factory=lambda: f"genscore-{random_uuid()}")
+    id: str = Field(default="")
     object: Literal["generative_score"] = "generative_score"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str

@@ -115,6 +115,9 @@ class OpenAIServingGenerativeScores(OpenAIServing):
                 "items must contain at least one item."
             )
 
+        # Note: Mixed item types (string and token list) are validated by
+        # Pydantic at request parsing time, so we don't need to check here.
+
         try:
             lora_request = self._maybe_get_adapters(request)
         except (ValueError, TypeError, RuntimeError) as e:
