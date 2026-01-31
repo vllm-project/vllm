@@ -35,6 +35,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VisionChunk,
+    VisionChunkImage,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -987,15 +988,57 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
+# class InternVLDummyInputsBuilder(
+#     BaseInternVLDummyInputsBuilder[InternVLProcessingInfo]
+# ):
+#     """InternVL DummyInputsBuilder extended for video support"""
+
+#     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+#         num_videos = mm_counts.get("video", 0)
+
+#         return super().get_dummy_text(mm_counts) + "<video>" * num_videos
+
+#     def get_dummy_mm_data(
+#         self,
+#         seq_len: int,
+#         mm_counts: Mapping[str, int],
+#         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+#     ) -> MultiModalDataDict:
+#         dummy_image = super().get_dummy_mm_data(
+#             seq_len=seq_len, mm_counts=mm_counts, mm_options=mm_options
+#         )
+#         if self.info.supports_video:
+#             config = self.info.get_hf_config()
+#             image_size: int = config.vision_config.image_size
+#             target_num_frames = self.info.get_num_frames_with_most_features(
+#                 seq_len, mm_counts
+#             )
+#             num_videos = mm_counts.get("video", 0)
+#             video_overrides = mm_options.get("video") if mm_options else None
+#             dummy_video = {
+#                 "video": self._get_dummy_videos(
+#                     width=image_size,
+#                     height=image_size,
+#                     num_frames=target_num_frames,
+#                     num_videos=num_videos,
+#                     overrides=video_overrides,
+#                 )
+#             }
+#         else:
+#             dummy_video = {}
+#         return {**dummy_image, **dummy_video}
+    
+
 class InternVLDummyInputsBuilder(
     BaseInternVLDummyInputsBuilder[InternVLProcessingInfo]
 ):
     """InternVL DummyInputsBuilder extended for video support"""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        num_videos = mm_counts.get("video", 0)
+        # num_videos = mm_counts.get("video", 0)
 
-        return super().get_dummy_text(mm_counts) + "<video>" * num_videos
+        # return super().get_dummy_text(mm_counts) + "<video>" * num_videos
+        return "<vision_chunk>" * mm_counts.get("vision_chunk", 0)
 
     def get_dummy_mm_data(
         self,
@@ -1003,29 +1046,37 @@ class InternVLDummyInputsBuilder(
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        dummy_image = super().get_dummy_mm_data(
-            seq_len=seq_len, mm_counts=mm_counts, mm_options=mm_options
+        target_width, target_height = self.info.get_image_size_with_most_features()
+        dummy_image = self._get_dummy_images(
+            width=target_width,
+            height=target_height,
+            num_images=mm_counts.get("vision_chunk", 0),
         )
-        if self.info.supports_video:
-            config = self.info.get_hf_config()
-            image_size: int = config.vision_config.image_size
-            target_num_frames = self.info.get_num_frames_with_most_features(
-                seq_len, mm_counts
+        return {
+            "vision_chunk": VisionChunkImage(
+                type="image", image=dummy_image,
             )
-            num_videos = mm_counts.get("video", 0)
-            video_overrides = mm_options.get("video") if mm_options else None
-            dummy_video = {
-                "video": self._get_dummy_videos(
-                    width=image_size,
-                    height=image_size,
-                    num_frames=target_num_frames,
-                    num_videos=num_videos,
-                    overrides=video_overrides,
-                )
-            }
-        else:
-            dummy_video = {}
-        return {**dummy_image, **dummy_video}
+        }
+        # if self.info.supports_video:
+        #     config = self.info.get_hf_config()
+        #     image_size: int = config.vision_config.image_size
+        #     target_num_frames = self.info.get_num_frames_with_most_features(
+        #         seq_len, mm_counts
+        #     )
+        #     num_videos = mm_counts.get("video", 0)
+        #     video_overrides = mm_options.get("video") if mm_options else None
+        #     dummy_video = {
+        #         "video": self._get_dummy_videos(
+        #             width=image_size,
+        #             height=image_size,
+        #             num_frames=target_num_frames,
+        #             num_videos=num_videos,
+        #             overrides=video_overrides,
+        #         )
+        #     }
+        # else:
+        #     dummy_video = {}
+        # return {**dummy_image, **dummy_video}
 
 
 class InternVLMultiModalProcessor(
