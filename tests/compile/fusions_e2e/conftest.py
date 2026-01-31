@@ -5,10 +5,52 @@ import logging
 import pytest
 import regex as re
 
+from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
 
-from ..fusion_test_utils import run_model
 from .common import FUSION_LOG_PATTERNS, AttentionBackendCase, Matches
+
+
+def run_model(compile_config: int | CompilationConfig, model: str, **model_kwargs):
+    """Run a model with the given compilation config for E2E fusion tests."""
+    compilation_config = (
+        compile_config
+        if isinstance(compile_config, CompilationConfig)
+        else CompilationConfig(mode=compile_config)
+    )
+
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    sampling_params = SamplingParams(temperature=0)
+    # Allow override from model_kwargs
+    model_kwargs = {"tensor_parallel_size": 1, **model_kwargs}
+    model_kwargs = {"disable_custom_all_reduce": True, **model_kwargs}
+
+    # No cudagraphs by default
+    if compilation_config.cudagraph_mode is None:
+        compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    llm = LLM(
+        model=model,
+        compilation_config=compilation_config,
+        **model_kwargs,
+    )
+    outputs = llm.generate(prompts, sampling_params)
+
+    # Print the outputs.
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+    # Get the compile ranges split points after vllm config post init
+    # in order to compute compile ranges correctly
+    compilation_config.compile_ranges_split_points = (
+        llm.llm_engine.vllm_config.compilation_config.compile_ranges_split_points
+    )
 
 
 @pytest.fixture

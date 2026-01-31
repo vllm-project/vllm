@@ -97,35 +97,3 @@ FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
     ),
     "async_tp": re.compile(r"collective_fusion.py:\d+] Replaced (\d+) patterns"),
 }
-
-# Fusions
-# rms+quant, silu+quant, qk_norm+rope(, rope+cache)
-# attn+quant
-# ar+rms(+q)
-# SP, AsyncTP
-
-# rope
-
-# tp=1 fp8
-# tp=2 fp8
-# - asynctp
-# - ar+rms(+q)
-# tp=2 bf16
-# - asynctp
-# - ar+rms(+q)
-
-# L40: tp1, triton-only
-# H100: tp1, triton
-# H100: tp2, triton
-# B200: tp1, fi, triton
-# B200: tp2, fi, triton?? - no cross product?
-
-# each case has 1 qwen E2E with all layers (tp2)
-# - nightly only
-# - b200: FI only
-# - h100: Triton only (FA3 once supported)
-
-# H100: tp2, eval, moe
-# H100: tp2, eval, dense
-# B200: tp2, eval, moe
-# B200: tp2, eval, dense
