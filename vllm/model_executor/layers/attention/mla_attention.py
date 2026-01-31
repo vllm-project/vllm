@@ -253,6 +253,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.helix import helix_alltoall_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -1964,6 +1965,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
+        self.helix_mode: bool = (
+            get_current_vllm_config().parallel_config.helix_mode
+        )
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
@@ -2471,3 +2475,4 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError
+

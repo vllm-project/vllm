@@ -825,35 +825,44 @@ class FlashAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         query = query.contiguous()
-        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
-        context_attn_out, context_lse = flash_attn_varlen_func(
-            q=query_across_dcp,
-            k=key_cache,
-            v=value_cache,
-            out=None,
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=attn_metadata.dcp_context_kv_lens,
-            max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
-            softmax_scale=self.scale,
-            causal=False,
-            alibi_slopes=self.alibi_slopes,
-            window_size=sliding_window_size,
-            block_table=block_table,
-            softcap=self.logits_soft_cap,
-            return_softmax_lse=True,
-            scheduler_metadata=attn_metadata.scheduler_metadata,
-            fa_version=self.vllm_flash_attn_version,
-            q_descale=q_descale,
-            k_descale=k_descale,
-            v_descale=v_descale,
-        )
-        # FA returns LSE in shape [ H, B ] but reduction functions want [ B, H ]
-        if self.helix_mode:
-            # Helix MLA (TPA=1): Use All-to-All + LSE reduction
+
+        # Check if this is Helix GQA mode (TPA > 1)
+        # In Helix GQA mode, GPUs in the same KVP group have the same Q and KV heads
+        # so we don't need to AllGather Q - each GPU computes with its local Q and KV
+        from vllm.distributed.parallel_state import is_helix_gqa_mode
+        helix_gqa_mode = is_helix_gqa_mode()
+
+        if helix_gqa_mode:
+            # Helix GQA: Compute with local Q and local KV (same heads within KVP group)
+            # Each GPU has the same Q and KV heads, just different sequence shards
+            context_attn_out, context_lse = flash_attn_varlen_func(
+                q=query,  # Use local query, no AllGather needed
+                k=key_cache,
+                v=value_cache,
+                out=None,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=attn_metadata.dcp_context_kv_lens,
+                max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
+                softmax_scale=self.scale,
+                causal=False,
+                alibi_slopes=self.alibi_slopes,
+                window_size=sliding_window_size,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                return_softmax_lse=True,
+                scheduler_metadata=attn_metadata.scheduler_metadata,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
+            )
+            # All-to-All + LSE reduction across KVP group
+            # Combines partial outputs from different sequence shards
+            # and scatters along head dim: [B, H_tpa, D] -> [B, H_tp, D]
             from vllm.distributed.parallel_state import get_helix_kvp_group
             context_attn_out_cor, context_lse_cor = helix_alltoall_lse_reduce(
                 context_attn_out,
@@ -862,13 +871,48 @@ class FlashAttentionImpl(AttentionImpl):
                 return_lse=True,
             )
         else:
-            # Standard DCP: AllGather + ReduceScatter
-            context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
-                context_attn_out,
-                context_lse.transpose(0, 1),
-                get_dcp_group(),
-                return_lse=True,
+            # Standard DCP or Helix MLA (TPA=1): AllGather Q, then compute
+            query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+            context_attn_out, context_lse = flash_attn_varlen_func(
+                q=query_across_dcp,
+                k=key_cache,
+                v=value_cache,
+                out=None,
+                cu_seqlens_q=cu_seqlens_q,
+                max_seqlen_q=max_seqlen_q,
+                seqused_k=attn_metadata.dcp_context_kv_lens,
+                max_seqlen_k=attn_metadata.max_dcp_context_kv_len,
+                softmax_scale=self.scale,
+                causal=False,
+                alibi_slopes=self.alibi_slopes,
+                window_size=sliding_window_size,
+                block_table=block_table,
+                softcap=self.logits_soft_cap,
+                return_softmax_lse=True,
+                scheduler_metadata=attn_metadata.scheduler_metadata,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale,
+                k_descale=k_descale,
+                v_descale=v_descale,
             )
+            # FA returns LSE in shape [ H, B ] but reduction functions want [ B, H ]
+            if self.helix_mode:
+                # Helix MLA (TPA=1): Use All-to-All + LSE reduction
+                from vllm.distributed.parallel_state import get_helix_kvp_group
+                context_attn_out_cor, context_lse_cor = helix_alltoall_lse_reduce(
+                    context_attn_out,
+                    context_lse.transpose(0, 1),
+                    get_helix_kvp_group(),
+                    return_lse=True,
+                )
+            else:
+                # Standard DCP: AllGather + ReduceScatter
+                context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
+                    context_attn_out,
+                    context_lse.transpose(0, 1),
+                    get_dcp_group(),
+                    return_lse=True,
+                )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
         query_attn_out, query_lse = flash_attn_varlen_func(
@@ -891,6 +935,23 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
         )
+
+        # In Helix GQA mode, query attention output has TPA-sized heads but
+        # context attention output has TP-sized heads (after All-to-All scatter).
+        # We need to scatter query attention output to match.
+        if helix_gqa_mode:
+            from vllm.distributed.parallel_state import get_helix_kvp_group
+            kvp_group = get_helix_kvp_group()
+            kvp_rank = kvp_group.rank_in_group
+            kvp_size = kvp_group.world_size
+            # Scatter heads: [B, H_tpa, D] -> [B, H_tp, D]
+            num_heads = query_attn_out.shape[1]
+            heads_per_rank = num_heads // kvp_size
+            start_head = kvp_rank * heads_per_rank
+            end_head = start_head + heads_per_rank
+            query_attn_out = query_attn_out[:, start_head:end_head, :].contiguous()
+            query_lse = query_lse[start_head:end_head, :].contiguous()
+
         assert context_attn_out_cor.shape == query_attn_out.shape
         assert context_lse_cor.shape == query_lse.shape
         merge_attn_states(

@@ -59,6 +59,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.helix import helix_alltoall_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
@@ -239,23 +240,56 @@ class BatchDCPPrefillWrapper:
         value: torch.Tensor,
         out: torch.Tensor,
     ):
-        prefill_query_across_dcp = get_dcp_group().all_gather(
-            prefill_query.contiguous(), dim=1
-        )
-        output_context_tmp, lse_context_tmp = self._context.run(
-            prefill_query_across_dcp,
-            kv_cache_permute,
-            k_scale=layer._k_scale_float,
-            v_scale=layer._v_scale_float,
-            return_lse=True,
-        )
-        output_context, lse_context = cp_lse_ag_out_rs(
-            output_context_tmp,
-            lse_context_tmp,
-            get_dcp_group(),
-            return_lse=True,
-            is_lse_base_on_e=False,
-        )
+        # Check if this is Helix GQA mode (TPA > 1)
+        from vllm.distributed.parallel_state import is_helix_gqa_mode
+        if is_helix_gqa_mode():
+            # Helix GQA: Compute with local Q (no AllGather needed)
+            output_context_tmp, lse_context_tmp = self._context.run(
+                prefill_query.contiguous(),
+                kv_cache_permute,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                return_lse=True,
+            )
+            # All-to-All + LSE reduction across KVP group
+            from vllm.distributed.parallel_state import get_helix_kvp_group
+            output_context, lse_context = helix_alltoall_lse_reduce(
+                output_context_tmp,
+                lse_context_tmp,
+                get_helix_kvp_group(),
+                return_lse=True,
+            )
+        else:
+            # Standard DCP or Helix MLA: AllGather Q, then compute
+            prefill_query_across_dcp = get_dcp_group().all_gather(
+                prefill_query.contiguous(), dim=1
+            )
+            output_context_tmp, lse_context_tmp = self._context.run(
+                prefill_query_across_dcp,
+                kv_cache_permute,
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                return_lse=True,
+            )
+            helix_mode = get_current_vllm_config().parallel_config.helix_mode
+            if helix_mode:
+                # Helix MLA (TPA=1): Use All-to-All + LSE reduction
+                from vllm.distributed.parallel_state import get_helix_kvp_group
+                output_context, lse_context = helix_alltoall_lse_reduce(
+                    output_context_tmp,
+                    lse_context_tmp,
+                    get_helix_kvp_group(),
+                    return_lse=True,
+                )
+            else:
+                # Standard DCP: AllGather + ReduceScatter
+                output_context, lse_context = cp_lse_ag_out_rs(
+                    output_context_tmp,
+                    lse_context_tmp,
+                    get_dcp_group(),
+                    return_lse=True,
+                    is_lse_base_on_e=False,
+                )
         lse_context = lse_context.transpose(0, 1).contiguous()
 
         output_query, lse_query = self._new_tokens.run(
@@ -265,6 +299,19 @@ class BatchDCPPrefillWrapper:
             return_lse=True,
         )
         lse_query = lse_query.transpose(0, 1).contiguous()
+
+        # In Helix GQA mode, scatter query attention output heads to match
+        if is_helix_gqa_mode():
+            from vllm.distributed.parallel_state import get_helix_kvp_group
+            kvp_group = get_helix_kvp_group()
+            kvp_rank = kvp_group.rank_in_group
+            kvp_size = kvp_group.world_size
+            num_heads = output_query.shape[1]
+            heads_per_rank = num_heads // kvp_size
+            start_head = kvp_rank * heads_per_rank
+            end_head = start_head + heads_per_rank
+            output_query = output_query[:, start_head:end_head, :].contiguous()
+            lse_query = lse_query[start_head:end_head, :].contiguous()
 
         merge_attn_states(
             out,
@@ -1228,6 +1275,7 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+        self.helix_mode = vllm_config.parallel_config.helix_mode
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return (
@@ -1514,30 +1562,67 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if use_dcp:
-                    decode_query = get_dcp_group().all_gather(
-                        decode_query.contiguous(), dim=-2
-                    )
-                    output_tmp = torch.empty_like(decode_query)
-                    lse = torch.empty(
-                        (decode_query.size(0), decode_query.size(1)),
-                        dtype=torch.float32,
-                        device=decode_query.device,
-                    )
-                    decode_wrapper.run(
-                        decode_query,
-                        kv_cache_permute,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
-                        out=output_tmp,
-                        lse=lse,
-                        return_lse=True,
-                    )
-                    output[:num_decode_tokens] = cp_lse_ag_out_rs(
-                        output_tmp,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=False,
-                    )
+                    # Check if Helix GQA mode (TPA > 1)
+                    from vllm.distributed.parallel_state import is_helix_gqa_mode
+                    if is_helix_gqa_mode():
+                        # Helix GQA: No Q AllGather needed
+                        output_tmp = torch.empty_like(decode_query)
+                        lse = torch.empty(
+                            (decode_query.size(0), decode_query.size(1)),
+                            dtype=torch.float32,
+                            device=decode_query.device,
+                        )
+                        decode_wrapper.run(
+                            decode_query,
+                            kv_cache_permute,
+                            k_scale=layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                            out=output_tmp,
+                            lse=lse,
+                            return_lse=True,
+                        )
+                        from vllm.distributed.parallel_state import get_helix_kvp_group
+                        output[:num_decode_tokens] = helix_alltoall_lse_reduce(
+                            output_tmp,
+                            lse,
+                            get_helix_kvp_group(),
+                        )
+                    else:
+                        # Standard DCP or Helix MLA: AllGather Q
+                        decode_query = get_dcp_group().all_gather(
+                            decode_query.contiguous(), dim=-2
+                        )
+                        output_tmp = torch.empty_like(decode_query)
+                        lse = torch.empty(
+                            (decode_query.size(0), decode_query.size(1)),
+                            dtype=torch.float32,
+                            device=decode_query.device,
+                        )
+                        decode_wrapper.run(
+                            decode_query,
+                            kv_cache_permute,
+                            k_scale=layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                            out=output_tmp,
+                            lse=lse,
+                            return_lse=True,
+                        )
+                        if self.helix_mode:
+                            # Helix MLA: Use All-to-All + LSE reduction
+                            from vllm.distributed.parallel_state import get_helix_kvp_group
+                            output[:num_decode_tokens] = helix_alltoall_lse_reduce(
+                                output_tmp,
+                                lse,
+                                get_helix_kvp_group(),
+                            )
+                        else:
+                            # Standard DCP: AllGather + ReduceScatter
+                            output[:num_decode_tokens] = cp_lse_ag_out_rs(
+                                output_tmp,
+                                lse,
+                                get_dcp_group(),
+                                is_lse_base_on_e=False,
+                            )
                 else:
                     decode_wrapper.run(
                         decode_query,
