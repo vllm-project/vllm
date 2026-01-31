@@ -5,11 +5,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 import torch
-from typing_extensions import deprecated
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.registry import MultiModalRegistry
@@ -40,7 +39,7 @@ class MultiModalBudget:
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
 
         max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
             model_config,
@@ -201,52 +200,6 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
-@deprecated("`scatter_mm_placeholders` is deprecated and will be removed in v0.15.0.")
-def scatter_mm_placeholders(
-    embeds: torch.Tensor,
-    is_embed: torch.Tensor | None,
-) -> torch.Tensor:
-    """
-    Scatter the multimodal embeddings into a contiguous tensor that represents
-    the placeholder tokens.
-
-    [`vllm.multimodal.processing.PromptUpdateDetails.is_embed`][].
-
-    Args:
-        embeds: The multimodal embeddings.
-            Shape: `(num_embeds, embed_dim)`
-        is_embed: A boolean mask indicating which positions in the placeholder
-            tokens need to be filled with multimodal embeddings.
-            Shape: `(num_placeholders, num_embeds)`
-    """
-    if is_embed is None:
-        return embeds
-
-    placeholders = embeds.new_full(
-        (is_embed.shape[0], embeds.shape[-1]),
-        fill_value=torch.nan,
-    )
-    placeholders[is_embed] = embeds
-    return placeholders
-
-
-@deprecated("`gather_mm_placeholders` is deprecated and will be removed in v0.15.0.")
-def gather_mm_placeholders(
-    placeholders: torch.Tensor,
-    is_embed: torch.Tensor | None,
-) -> torch.Tensor:
-    """
-    Reconstructs the embeddings from the placeholder tokens.
-
-    This is the operation of [`scatter_mm_placeholders`]
-    [vllm.v1.worker.utils.scatter_mm_placeholders].
-    """
-    if is_embed is None:
-        return placeholders
-
-    return placeholders[is_embed]
-
-
 def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
     """
     Calculate the amount of memory required by vLLM, then validate
@@ -352,8 +305,8 @@ def bind_kv_cache(
                 pass
             else:
                 raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():

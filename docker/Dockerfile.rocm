@@ -227,7 +227,7 @@ RUN if [ "$GIT_REPO_CHECK" != "0" ]; then \
 # This ensures setuptools_scm sees clean repo state for version detection
 RUN --mount=type=bind,source=.git,target=vllm/.git \
     cd vllm \
-    && pip install setuptools_scm \
+    && pip install setuptools_scm regex \
     && VLLM_VERSION=$(python3 -c "import setuptools_scm; print(setuptools_scm.get_version())") \
     && echo "Detected vLLM version: ${VLLM_VERSION}" \
     && echo "${VLLM_VERSION}" > /tmp/vllm_version.txt
@@ -342,6 +342,19 @@ RUN mkdir src && mv vllm src/vllm
 FROM base AS final
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
+
+# Clean up sccache from release image (not needed at runtime)
+# This removes the binary and wrappers that may have been installed during build
+RUN rm -f /usr/bin/sccache || true \
+    && rm -rf /opt/sccache-wrappers || true
+
+# Unset sccache environment variables for the release image
+# This prevents S3 bucket config from leaking into production images
+ENV SCCACHE_BUCKET=
+ENV SCCACHE_REGION=
+ENV SCCACHE_S3_NO_CREDENTIALS=
+ENV SCCACHE_IDLE_TIMEOUT=
+
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually remove it so that later steps of numpy upgrade can continue
 RUN case "$(which python3)" in \
@@ -385,5 +398,5 @@ RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt
 CMD ["/bin/bash"]
 
 #Set entrypoint for vllm-openai official images
-FROM final As vllm-openai
+FROM final AS vllm-openai
 ENTRYPOINT ["vllm", "serve"]

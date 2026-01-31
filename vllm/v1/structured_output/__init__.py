@@ -74,9 +74,6 @@ class StructuredOutputManager:
             self.tokenizer = cached_tokenizer_from_config(
                 model_config=self.vllm_config.model_config
             )
-            reasoning_parser = (
-                self.vllm_config.structured_outputs_config.reasoning_parser
-            )
             reasoning_parser_plugin = (
                 self.vllm_config.structured_outputs_config.reasoning_parser_plugin
             )
@@ -294,7 +291,7 @@ class StructuredOutputManager:
             assert request.structured_output_request is not None
             if request.structured_output_request.reasoning_ended is None:
                 request.structured_output_request.reasoning_ended = (
-                    self.reasoner.is_reasoning_end(request.prompt_token_ids)
+                    self.reasoner.is_reasoning_end(request.prompt_token_ids or [])
                 )
             return request.structured_output_request.reasoning_ended
         return True
@@ -323,8 +320,9 @@ class StructuredOutputManager:
 
         # Check if reasoning ends in *this* step
         delta_from = request.num_computed_tokens - request.num_output_placeholders
+        all_token_ids = request.all_token_ids
         if self.reasoner.is_reasoning_end_streaming(
-            request.all_token_ids, request.all_token_ids[delta_from:]
+            all_token_ids, all_token_ids[delta_from:]
         ):
             # Reasoning just ended, so we shouldn't advance til
             # next pass

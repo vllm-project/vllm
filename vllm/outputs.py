@@ -196,6 +196,16 @@ class RequestOutput:
         )
 
 
+# Sentinel to indicate request is finished, used with streaming inputs.
+STREAM_FINISHED = RequestOutput(
+    request_id="",
+    prompt=None,
+    prompt_token_ids=None,
+    prompt_logprobs=None,
+    outputs=[],
+    finished=True,
+)
+
 _O = TypeVar("_O", default=PoolingOutput)
 
 

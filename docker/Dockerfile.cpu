@@ -15,15 +15,17 @@
 # Build arguments:
 #   PYTHON_VERSION=3.13|3.12 (default)|3.11|3.10
 #   VLLM_CPU_DISABLE_AVX512=false (default)|true
-#   VLLM_CPU_AVX512BF16=false (default)|true
-#   VLLM_CPU_AVX512VNNI=false (default)|true
-#   VLLM_CPU_AMXBF16=false |true (default)
+#   VLLM_CPU_AVX2=false (default)|true (for cross-compilation)
+#   VLLM_CPU_AVX512=false (default)|true (for cross-compilation)
+#   VLLM_CPU_AVX512BF16=false (default)|true (for cross-compilation)
+#   VLLM_CPU_AVX512VNNI=false (default)|true (for cross-compilation)
+#   VLLM_CPU_AMXBF16=false (default)|true (for cross-compilation)
 #
 
 ######################### COMMON BASE IMAGE #########################
 FROM ubuntu:22.04 AS base-common
 
-WORKDIR /workspace/
+WORKDIR /workspace
 
 ARG PYTHON_VERSION=3.12
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
@@ -33,7 +35,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update -y \
     && apt-get install -y --no-install-recommends sudo ccache git curl wget ca-certificates \
-        gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof \
+    gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12 \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
@@ -54,9 +56,12 @@ ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
+
+# Copy requirements files for installation
+COPY requirements/common.txt requirements/common.txt
+COPY requirements/cpu.txt requirements/cpu.txt
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/common.txt,target=requirements/common.txt \
-    --mount=type=bind,src=requirements/cpu.txt,target=requirements/cpu.txt \
     uv pip install --upgrade pip && \
     uv pip install -r requirements/cpu.txt
 
@@ -88,6 +93,12 @@ ARG GIT_REPO_CHECK=0
 # Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
 ARG VLLM_CPU_DISABLE_AVX512=0
 ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
+# Support for cross-compilation with AVX2 ISA: docker build --build-arg VLLM_CPU_AVX2="1" ...
+ARG VLLM_CPU_AVX2=0
+ENV VLLM_CPU_AVX2=${VLLM_CPU_AVX2}
+# Support for cross-compilation with AVX512 ISA: docker build --build-arg VLLM_CPU_AVX512="1" ...
+ARG VLLM_CPU_AVX512=0
+ENV VLLM_CPU_AVX512=${VLLM_CPU_AVX512}
 # Support for building with AVX512BF16 ISA: docker build --build-arg VLLM_CPU_AVX512BF16="true" ...
 ARG VLLM_CPU_AVX512BF16=0
 ENV VLLM_CPU_AVX512BF16=${VLLM_CPU_AVX512BF16}
@@ -98,41 +109,44 @@ ENV VLLM_CPU_AVX512VNNI=${VLLM_CPU_AVX512VNNI}
 ARG VLLM_CPU_AMXBF16=1
 ENV VLLM_CPU_AMXBF16=${VLLM_CPU_AMXBF16}
 
-WORKDIR /workspace/vllm
+WORKDIR /vllm-workspace
+
+# Copy build requirements
+COPY requirements/cpu-build.txt requirements/build.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,src=requirements/cpu-build.txt,target=requirements/build.txt \
     uv pip install -r requirements/build.txt
 
 COPY . .
-RUN --mount=type=bind,source=.git,target=.git \
-    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
+
+RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=cache,target=/workspace/vllm/.deps,sharing=locked \
-    --mount=type=bind,source=.git,target=.git \
+    --mount=type=cache,target=/vllm-workspace/.deps,sharing=locked \
     VLLM_TARGET_DEVICE=cpu python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 ######################### TEST DEPS #########################
 FROM base AS vllm-test-deps
 
-WORKDIR /workspace/vllm
+WORKDIR /vllm-workspace
+
+# Copy test requirements
+COPY requirements/test.in requirements/cpu-test.in
 
 # TODO: Update to 2.9.0 when there is a new build for intel_extension_for_pytorch for that version
-RUN --mount=type=bind,src=requirements/test.in,target=requirements/test.in \
-    cp requirements/test.in requirements/cpu-test.in && \
+RUN \
     sed -i '/mamba_ssm/d' requirements/cpu-test.in && \
     remove_packages_not_supported_on_aarch64() { \
-      case "$(uname -m)" in \
-        aarch64|arm64) \
-          sed -i '/decord/d' requirements/cpu-test.in; \
-          sed -i '/terratorch/d' requirements/cpu-test.in; \
-          ;; \
-      esac; \
+    case "$(uname -m)" in \
+    aarch64|arm64) \
+    sed -i '/decord/d' requirements/cpu-test.in; \
+    sed -i '/terratorch/d' requirements/cpu-test.in; \
+    ;; \
+    esac; \
     }; \
     remove_packages_not_supported_on_aarch64 && \
-    sed -i 's/^torch==.*/torch==2.9.1/g' requirements/cpu-test.in && \
+    sed -i 's/^torch==.*/torch==2.10.0/g' requirements/cpu-test.in && \
     sed -i 's/torchaudio.*/torchaudio/g' requirements/cpu-test.in && \
     sed -i 's/torchvision.*/torchvision/g' requirements/cpu-test.in && \
     uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --torch-backend cpu
@@ -143,7 +157,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ######################### DEV IMAGE #########################
 FROM vllm-build AS vllm-dev
 
-WORKDIR /workspace/vllm
+WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -160,7 +174,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
     VLLM_TARGET_DEVICE=cpu python3 setup.py develop
 
-COPY --from=vllm-test-deps /workspace/vllm/requirements/cpu-test.txt requirements/test.txt
+COPY --from=vllm-test-deps /vllm-workspace/requirements/cpu-test.txt requirements/test.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/dev.txt && \
@@ -171,10 +185,10 @@ ENTRYPOINT ["bash"]
 ######################### TEST IMAGE #########################
 FROM vllm-test-deps AS vllm-test
 
-WORKDIR /workspace/
+WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=vllm-build,src=/workspace/vllm/dist,target=dist \
+    --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
 
 ADD ./tests/ ./tests/
@@ -183,9 +197,6 @@ ADD ./benchmarks/ ./benchmarks/
 ADD ./vllm/collect_env.py .
 ADD ./.buildkite/ ./.buildkite/
 
-# Create symlink for vllm-workspace to maintain CI compatibility
-RUN ln -sf /workspace /vllm-workspace
-
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e tests/vllm_test_utils
@@ -193,11 +204,36 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ######################### RELEASE IMAGE #########################
 FROM base AS vllm-openai
 
-WORKDIR /workspace/
+WORKDIR /vllm-workspace
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/root/.cache/ccache \
-    --mount=type=bind,from=vllm-build,src=/workspace/vllm/dist,target=dist \
+    --mount=type=bind,from=vllm-build,src=/vllm-workspace/dist,target=dist \
     uv pip install dist/*.whl
+
+# Add labels to document build configuration
+LABEL org.opencontainers.image.title="vLLM CPU"
+LABEL org.opencontainers.image.description="vLLM inference engine for CPU platforms"
+LABEL org.opencontainers.image.vendor="vLLM Project"
+LABEL org.opencontainers.image.source="https://github.com/vllm-project/vllm"
+
+# Build configuration labels
+ARG TARGETARCH
+ARG VLLM_CPU_DISABLE_AVX512
+ARG VLLM_CPU_AVX2
+ARG VLLM_CPU_AVX512
+ARG VLLM_CPU_AVX512BF16
+ARG VLLM_CPU_AVX512VNNI
+ARG VLLM_CPU_AMXBF16
+ARG PYTHON_VERSION
+
+LABEL ai.vllm.build.target-arch="${TARGETARCH}"
+LABEL ai.vllm.build.cpu-disable-avx512="${VLLM_CPU_DISABLE_AVX512:-false}"
+LABEL ai.vllm.build.cpu-avx2="${VLLM_CPU_AVX2:-false}"
+LABEL ai.vllm.build.cpu-avx512="${VLLM_CPU_AVX512:-false}"
+LABEL ai.vllm.build.cpu-avx512bf16="${VLLM_CPU_AVX512BF16:-false}"
+LABEL ai.vllm.build.cpu-avx512vnni="${VLLM_CPU_AVX512VNNI:-false}"
+LABEL ai.vllm.build.cpu-amxbf16="${VLLM_CPU_AMXBF16:-false}"
+LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
 
 ENTRYPOINT ["vllm", "serve"]

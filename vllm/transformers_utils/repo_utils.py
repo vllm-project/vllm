@@ -12,10 +12,7 @@ from pathlib import Path
 from typing import TypeVar
 
 import huggingface_hub
-from huggingface_hub import (
-    hf_hub_download,
-    try_to_load_from_cache,
-)
+from huggingface_hub import hf_hub_download, try_to_load_from_cache
 from huggingface_hub import list_repo_files as hf_list_repo_files
 from huggingface_hub.utils import (
     EntryNotFoundError,
@@ -29,21 +26,6 @@ from vllm import envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-
-def _get_hf_token() -> str | None:
-    """
-    Get the HuggingFace token from environment variable.
-
-    Returns None if the token is not set, is an empty string,
-    or contains only whitespace.
-    This follows the same pattern as huggingface_hub library which
-    treats empty string tokens as None to avoid authentication errors.
-    """
-    token = os.getenv("HF_TOKEN")
-    if token and token.strip():
-        return token
-    return None
 
 
 _R = TypeVar("_R")
@@ -145,6 +127,42 @@ def list_filtered_repo_files(
     return file_list
 
 
+def any_pattern_in_repo_files(
+    model_name_or_path: str,
+    allow_patterns: list[str],
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+):
+    return (
+        len(
+            list_filtered_repo_files(
+                model_name_or_path=model_name_or_path,
+                allow_patterns=allow_patterns,
+                revision=revision,
+                repo_type=repo_type,
+                token=token,
+            )
+        )
+        > 0
+    )
+
+
+def is_mistral_model_repo(
+    model_name_or_path: str,
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+) -> bool:
+    return any_pattern_in_repo_files(
+        model_name_or_path=model_name_or_path,
+        allow_patterns=["consolidated*.safetensors"],
+        revision=revision,
+        repo_type=repo_type,
+        token=token,
+    )
+
+
 def file_exists(
     repo_id: str,
     file_name: str,
@@ -153,6 +171,8 @@ def file_exists(
     revision: str | None = None,
     token: str | bool | None = None,
 ) -> bool:
+    # `list_repo_files` is cached and retried on error, so this is more efficient than
+    # huggingface_hub.file_exists default implementation when looking for multiple files
     file_list = list_repo_files(
         repo_id, repo_type=repo_type, revision=revision, token=token
     )
@@ -178,9 +198,7 @@ def file_or_path_exists(
     # hf_hub. This will fail in offline mode.
 
     # Call HF to check if the file exists
-    return file_exists(
-        str(model), config_name, revision=revision, token=_get_hf_token()
-    )
+    return file_exists(str(model), config_name, revision=revision)
 
 
 def get_model_path(model: str | Path, revision: str | None = None):
@@ -209,9 +227,7 @@ def get_hf_file_bytes(
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:
-        hf_hub_file = hf_hub_download(
-            model, file_name, revision=revision, token=_get_hf_token()
-        )
+        hf_hub_file = hf_hub_download(model, file_name, revision=revision)
         file_path = Path(hf_hub_file)
 
     if file_path is not None and file_path.is_file():

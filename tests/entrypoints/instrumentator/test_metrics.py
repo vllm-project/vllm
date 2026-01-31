@@ -77,7 +77,7 @@ def _get_expected_values(num_requests: int, prompt_ids: list[int], max_tokens: i
     # {metric_family: [(suffix, expected_value)]}
     return {
         "vllm:time_to_first_token_seconds": [("_count", num_requests)],
-        "vllm:time_per_output_token_seconds": [
+        "vllm:inter_token_latency_seconds": [
             ("_count", num_requests * (max_tokens - 1))
         ],
         "vllm:e2e_request_latency_seconds": [("_count", num_requests)],
@@ -203,9 +203,6 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_params_max_tokens_sum",
     "vllm:request_params_max_tokens_bucket",
     "vllm:request_params_max_tokens_count",
-    "vllm:time_per_output_token_seconds_sum",
-    "vllm:time_per_output_token_seconds_bucket",
-    "vllm:time_per_output_token_seconds_count",
     "vllm:time_to_first_token_seconds_sum",
     "vllm:time_to_first_token_seconds_bucket",
     "vllm:time_to_first_token_seconds_count",
@@ -234,14 +231,7 @@ EXPECTED_METRICS_MM = [
     "vllm:mm_cache_hits",
 ]
 
-HIDDEN_DEPRECATED_METRICS: list[str] = [
-    "vllm:gpu_cache_usage_perc",
-    "vllm:gpu_prefix_cache_queries",
-    "vllm:gpu_prefix_cache_hits",
-    "vllm:time_per_output_token_seconds_sum",
-    "vllm:time_per_output_token_seconds_bucket",
-    "vllm:time_per_output_token_seconds_count",
-]
+HIDDEN_DEPRECATED_METRICS: list[str] = []
 
 
 @pytest.mark.asyncio
