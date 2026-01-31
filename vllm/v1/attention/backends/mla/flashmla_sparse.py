@@ -687,6 +687,9 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
 
 class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
+
+    forward_includes_kv_cache_update: bool = True
+
     @staticmethod
     def _compute_fp8_decode_padded_heads(num_heads: int) -> int:
         # FP8 decode kernel only supports h_q = 64 or 128
@@ -973,6 +976,25 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         )[0]
         output = output[:, : self.num_heads, :]
         return output
+    
+    def do_update_kv_cache(                                                                                                                                                                           
+        self,                                                                                                                                                                                       
+        k_c_normed: torch.Tensor,                                                                                                                                                                   
+        k_pe: torch.Tensor,                                                                                                                                                                         
+        kv_cache: torch.Tensor,                                                                                                                                                                     
+        slot_mapping: torch.Tensor,                                                                                                                                                                 
+        k_scale: torch.Tensor,                                                                                                                                                                      
+    ) -> None:                                                                                                                                                                                      
+        """Write the latent and rope to kv cache."""                                                                                                                                                
+        if kv_cache.numel() > 0:                                                                                                                                                                    
+            ops.concat_and_cache_mla(                                                                                                                                                               
+                k_c_normed,                                                                                                                                                                         
+                k_pe.squeeze(1),                                                                                                                                                                    
+                kv_cache,                                                                                                                                                                           
+                slot_mapping.flatten(),                                                                                                                                                             
+                kv_cache_dtype=self.kv_cache_dtype,                                                                                                                                                 
+                scale=k_scale,                                                                                                                                                                      
+            )   
 
     def forward(
         self,
@@ -1025,16 +1047,12 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         q = torch.cat([ql_nope, q_pe], dim=-1)
 
-        # write the latent and rope to kv cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=layer._k_scale,
-            )
+        if self.forward_includes_kv_cache_update:
+            self.do_update_kv_cache(                                                                                                                                                                          
+                k_c_normed, k_pe, kv_cache,                                                                                                                                                                 
+                attn_metadata.slot_mapping,                                                                                                                                                                 
+                layer._k_scale                                                                                                                                                                              
+            )    
 
         if not use_fp8_cache:
             attn_out = self._forward_bf16_kv(q, kv_cache, topk_indices, attn_metadata)
