@@ -44,7 +44,7 @@ class AudioDummyOptions(BaseDummyOptions):
 
 
 MMEncoderTPMode = Literal["weights", "data"]
-MMCacheType = Literal["shm", "lru"]
+MMCacheType = Literal["shm", "lru", "lmdb"]
 DummyOptions: TypeAlias = (
     BaseDummyOptions | VideoDummyOptions | ImageDummyOptions | AudioDummyOptions
 )
@@ -108,6 +108,14 @@ class MultiModalConfig:
     """Size limit (in MiB) for each object stored in the multi-modal processor
     shared memory cache. Only effective when `mm_processor_cache_type` is
     `"shm"`."""
+    mm_lmdb_cache_max_object_size_mb: int = Field(default=128, ge=0)
+    """Size limit (in MiB) for each object stored in the multi-modal processor
+    shared memory cache. Only effective when `mm_processor_cache_type` is
+    `"lmdb"`."""
+    mm_lmdb_cache_min_eviction_age: int = Field(default=600, ge=0)
+    """Minimum age (in seconds) before an object in the multi-modal processor
+    LMDB cache can be evicted. Only effective when `mm_processor_cache_type` is
+    `"lmdb"`. Must be long enough to cover the lifetime of a single request."""
     mm_encoder_only: bool = False
     """
     When enabled, skips the language component of the model.
@@ -196,6 +204,31 @@ class MultiModalConfig:
                 "'mm_shm_cache_max_object_size_mb' should only be set when "
                 "'mm_processor_cache_type' is 'shm'."
             )
+
+        if self.mm_processor_cache_type != "lmdb":
+            if (
+                self.mm_lmdb_cache_max_object_size_mb
+                != MultiModalConfig.mm_lmdb_cache_max_object_size_mb
+            ):
+                raise ValueError(
+                    "'mm_lmdb_cache_max_object_size_mb' should only be set when "
+                    "'mm_processor_cache_type' is 'lmdb'."
+                )
+
+            if (
+                self.mm_lmdb_cache_min_eviction_age
+                != MultiModalConfig.mm_lmdb_cache_min_eviction_age
+            ):
+                raise ValueError(
+                    "'mm_lmdb_cache_min_eviction_age' should only be set when "
+                    "'mm_processor_cache_type' is 'lmdb'."
+                )
+        else:
+            # Ensure the LMDB cache ID environment variable is set
+            from vllm.multimodal.lmdb_cache import LmdbMultiModalCache
+
+            LmdbMultiModalCache.ensure_cache_id()
+
         return self
 
     def compute_hash(self) -> str:

@@ -306,6 +306,8 @@ class ModelConfig:
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
+    mm_lmdb_cache_max_object_size_mb: InitVar[int | None] = None
+    mm_lmdb_cache_min_eviction_age: InitVar[int | None] = None
     mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
@@ -356,6 +358,8 @@ class ModelConfig:
             "mm_processor_cache_gb",
             "mm_processor_cache_type",
             "mm_shm_cache_max_object_size_mb",
+            "mm_lmdb_cache_max_object_size_mb",
+            "mm_lmdb_cache_min_eviction_age",
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
             "skip_mm_profiling",
@@ -421,6 +425,8 @@ class ModelConfig:
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
+        mm_lmdb_cache_max_object_size_mb: int | None,
+        mm_lmdb_cache_min_eviction_age: int | None,
         mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
@@ -595,6 +601,8 @@ class ModelConfig:
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+                mm_lmdb_cache_max_object_size_mb=mm_lmdb_cache_max_object_size_mb,
+                mm_lmdb_cache_min_eviction_age=mm_lmdb_cache_min_eviction_age,
                 mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,

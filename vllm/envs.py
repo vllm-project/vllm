@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
+    VLLM_MM_LMDB_CACHE_ID: str | None = None
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
@@ -796,6 +797,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # imported at runtime.
     # If a non-existing backend is used, an AssertionError will be thrown.
     "VLLM_MEDIA_CONNECTOR": lambda: os.getenv("VLLM_MEDIA_CONNECTOR", "http"),
+    # The LMDB multimodal cache ID to use.
+    # N.B. This is automatically assigned on configuration load if not set.
+    "VLLM_MM_LMDB_CACHE_ID": lambda: os.getenv("VLLM_MM_LMDB_CACHE_ID"),
     # Hash algorithm for multimodal content hashing.
     # - "blake3": Default, fast cryptographic hash (not FIPS 140-3 compliant)
     # - "sha256": FIPS 140-3 compliant, widely supported
@@ -1753,6 +1757,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
         "VLLM_ASSETS_CACHE",
         "VLLM_ASSETS_CACHE_MODEL_CLEAN",
+        "VLLM_MM_LMDB_CACHE_ID",
         "VLLM_WORKER_MULTIPROC_METHOD",
         "VLLM_ENABLE_V1_MULTIPROCESSING",
         "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",

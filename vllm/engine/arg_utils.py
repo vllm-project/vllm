@@ -468,6 +468,12 @@ class EngineArgs:
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
+    mm_lmdb_cache_max_object_size_mb: int = (
+        MultiModalConfig.mm_lmdb_cache_max_object_size_mb
+    )
+    mm_lmdb_cache_min_eviction_age: int = (
+        MultiModalConfig.mm_lmdb_cache_min_eviction_age
+    )
     mm_encoder_only: bool = MultiModalConfig.mm_encoder_only
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
@@ -980,6 +986,14 @@ class EngineArgs:
             **multimodal_kwargs["mm_shm_cache_max_object_size_mb"],
         )
         multimodal_group.add_argument(
+            "--mm-lmdb-cache-max-object-size-mb",
+            **multimodal_kwargs["mm_lmdb_cache_max_object_size_mb"],
+        )
+        multimodal_group.add_argument(
+            "--mm-lmdb-cache-min-eviction-age",
+            **multimodal_kwargs["mm_lmdb_cache_min_eviction_age"],
+        )
+        multimodal_group.add_argument(
             "--mm-encoder-only", **multimodal_kwargs["mm_encoder_only"]
         )
         multimodal_group.add_argument(
@@ -1265,6 +1279,8 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            mm_lmdb_cache_max_object_size_mb=self.mm_lmdb_cache_max_object_size_mb,
+            mm_lmdb_cache_min_eviction_age=self.mm_lmdb_cache_min_eviction_age,
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,

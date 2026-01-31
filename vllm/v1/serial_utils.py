@@ -164,9 +164,10 @@ class MsgpackEncoder:
 
         if isinstance(obj, slice):
             # We are assuming only int-based values will be used here.
-            return tuple(
-                int(v) if v is not None else None
-                for v in (obj.start, obj.stop, obj.step)
+            return (
+                int(obj.start) if obj.start is not None else None,
+                int(obj.stop) if obj.stop is not None else None,
+                int(obj.step) if obj.step is not None else None,
             )
 
         if isinstance(obj, MultiModalKwargsItem):

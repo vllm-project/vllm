@@ -1549,10 +1549,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
         """
-        cache = self.cache
-
         _, passthrough_data = self._get_hf_mm_data(mm_data_items)
-        if cache is None or passthrough_data:
+        if self.cache is None or passthrough_data:
             return self._apply_hf_processor(
                 prompt=prompt,
                 mm_data_items=mm_data_items,
@@ -1569,49 +1567,50 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_uuids=mm_uuids,
             )
 
-        with timed_preprocessor_operation(self.info.ctx, "cache_lookup"):
-            mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
-                cache=cache,
-                mm_data_items=mm_data_items,
-                mm_hashes=mm_hashes,
+        with self.cache.begin() as cache:
+            with timed_preprocessor_operation(self.info.ctx, "cache_lookup"):
+                mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
+                    cache=cache,
+                    mm_data_items=mm_data_items,
+                    mm_hashes=mm_hashes,
+                )
+
+            # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
+            # so we can't apply prompt updates until the new multimodal
+            # items are combined with the cached multimodal items
+            (
+                prompt_ids,
+                mm_missing_processed_data,
+                is_update_applied,
+            ) = self._apply_hf_processor_main(
+                prompt=prompt,
+                mm_items=mm_missing_data_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
+                enable_hf_prompt_update=False,
             )
 
-        # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
-        # so we can't apply prompt updates until the new multimodal
-        # items are combined with the cached multimodal items
-        (
-            prompt_ids,
-            mm_missing_processed_data,
-            is_update_applied,
-        ) = self._apply_hf_processor_main(
-            prompt=prompt,
-            mm_items=mm_missing_data_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            enable_hf_prompt_update=False,
-        )
-
-        mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
-            mm_missing_processed_data,
-            self._get_mm_fields_config(
-                mm_missing_processed_data, hf_processor_mm_kwargs
-            ),
-        )
-
-        mm_missing_prompt_updates = self._get_mm_prompt_updates(
-            mm_missing_data_items,
-            hf_processor_mm_kwargs,
-            mm_missing_kwargs,
-        )
-
-        with timed_preprocessor_operation(self.info.ctx, "cache_lookup"):
-            mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
-                cache,
-                mm_hashes=mm_hashes,
-                mm_is_cached=mm_is_cached,
-                mm_missing_kwargs=mm_missing_kwargs,
-                mm_missing_prompt_updates=mm_missing_prompt_updates,
+            mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
+                mm_missing_processed_data,
+                self._get_mm_fields_config(
+                    mm_missing_processed_data, hf_processor_mm_kwargs
+                ),
             )
+
+            mm_missing_prompt_updates = self._get_mm_prompt_updates(
+                mm_missing_data_items,
+                hf_processor_mm_kwargs,
+                mm_missing_kwargs,
+            )
+
+            with timed_preprocessor_operation(self.info.ctx, "cache_lookup"):
+                mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
+                    cache,
+                    mm_hashes=mm_hashes,
+                    mm_is_cached=mm_is_cached,
+                    mm_missing_kwargs=mm_missing_kwargs,
+                    mm_missing_prompt_updates=mm_missing_prompt_updates,
+                )
 
         mm_info = MultiModalProcessingInfo(
             kwargs=mm_kwargs,
