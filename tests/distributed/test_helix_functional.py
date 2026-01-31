@@ -69,9 +69,8 @@ import os
 from typing import NamedTuple
 
 import pytest
-import torch
 
-from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
+from tests.utils import RemoteOpenAIServer, multi_gpu_test
 from vllm.logger import init_logger
 
 logger = init_logger("test_helix_functional")
@@ -207,23 +206,9 @@ MLA_CONFIGS = [
 # Helper Functions
 # =============================================================================
 
-def check_gpu_requirements(tp_size: int, min_compute_capability: tuple = (9, 0)):
-    """Check if GPU requirements are met, skip test if not.
-    
-    Note: This function should be called inside the forked test process.
-    Do not wrap CUDA calls in try/except - let failures be visible.
-    """
-    # Check compute capability first (will fail visibly if CUDA has issues)
-    cc = torch.cuda.get_device_capability(0)
-    if cc < min_compute_capability:
-        pytest.skip(
-            f"Need compute capability {min_compute_capability}, have {cc}"
-        )
-    
-    # Check GPU count
-    num_gpus = torch.cuda.device_count()
-    if num_gpus < tp_size:
-        pytest.skip(f"Need at least {tp_size} GPUs, have {num_gpus}")
+# Note: GPU requirements (count, compute capability) are checked via:
+# - @multi_gpu_test(num_gpus=N) decorator - uses cuda_device_count_stateless()
+# - Compute capability check happens at vLLM server startup time
 
 
 def validate_response(response_text: str, expected_patterns: list[str]) -> bool:
@@ -346,11 +331,9 @@ class TestHelixGQA:
     """Test Helix mode with GQA models (e.g., Llama, Nemotron)."""
     
     @pytest.mark.parametrize("config", [c for c in GQA_CONFIGS if c.helix_mode])
-    @create_new_process_for_each_test()
-    def test_helix_gqa_sanity(self, config: HelixTestConfig, num_gpus_available):
+    @multi_gpu_test(num_gpus=4)
+    def test_helix_gqa_sanity(self, config: HelixTestConfig):
         """Test Helix GQA mode produces coherent output."""
-        check_gpu_requirements(config.tp_size)
-        
         logger.info(f"Testing: {config.description}")
         logger.info(f"Model: {GQA_MODEL}")
         
@@ -370,11 +353,9 @@ class TestHelixMLA:
     """Test Helix mode with MLA models (e.g., DeepSeek-V2)."""
     
     @pytest.mark.parametrize("config", [c for c in MLA_CONFIGS if c.helix_mode])
-    @create_new_process_for_each_test()
-    def test_helix_mla_sanity(self, config: HelixTestConfig, num_gpus_available):
+    @multi_gpu_test(num_gpus=4)
+    def test_helix_mla_sanity(self, config: HelixTestConfig):
         """Test Helix MLA mode produces coherent output."""
-        check_gpu_requirements(config.tp_size)
-        
         logger.info(f"Testing: {config.description}")
         
         server_args = build_server_args(config, MLA_MODEL, trust_remote_code=True)
@@ -392,11 +373,9 @@ class TestStandardDCP:
     """Test standard DCP mode (helix_mode=False) - baseline."""
     
     @pytest.mark.parametrize("config", [c for c in GQA_CONFIGS if not c.helix_mode])
-    @create_new_process_for_each_test()
-    def test_standard_dcp_gqa_sanity(self, config: HelixTestConfig, num_gpus_available):
+    @multi_gpu_test(num_gpus=4)
+    def test_standard_dcp_gqa_sanity(self, config: HelixTestConfig):
         """Test standard DCP with GQA model produces coherent output."""
-        check_gpu_requirements(config.tp_size)
-        
         logger.info(f"Testing: {config.description}")
         logger.info(f"Model: {GQA_MODEL}")
         
@@ -412,11 +391,9 @@ class TestStandardDCP:
         assert results["passed"], f"Sanity check failed: {results['errors']}"
     
     @pytest.mark.parametrize("config", [c for c in MLA_CONFIGS if not c.helix_mode])
-    @create_new_process_for_each_test()
-    def test_standard_dcp_mla_sanity(self, config: HelixTestConfig, num_gpus_available):
+    @multi_gpu_test(num_gpus=4)
+    def test_standard_dcp_mla_sanity(self, config: HelixTestConfig):
         """Test standard DCP with MLA model produces coherent output."""
-        check_gpu_requirements(config.tp_size)
-        
         logger.info(f"Testing: {config.description}")
         logger.info(f"Model: {MLA_MODEL}")
         
@@ -435,11 +412,9 @@ class TestStandardDCP:
 class TestHelixVsDCPConsistency:
     """Test that Helix produces outputs consistent with standard DCP."""
     
-    @create_new_process_for_each_test()
-    def test_gqa_helix_vs_dcp_consistency(self, num_gpus_available):
+    @multi_gpu_test(num_gpus=4)
+    def test_gqa_helix_vs_dcp_consistency(self):
         """Verify Helix GQA output matches standard DCP output."""
-        check_gpu_requirements(4)
-        
         logger.info(f"Model: {GQA_MODEL}")
         prompts = ["What is the capital of Japan?"]
         trust_remote_code = get_model_trust_remote_code(GQA_MODEL)
@@ -497,11 +472,9 @@ class TestHelixVsDCPConsistency:
                 f"Helix: {helix_out}"
             )
     
-    @create_new_process_for_each_test()
-    def test_mla_helix_vs_dcp_consistency(self, num_gpus_available):
+    @multi_gpu_test(num_gpus=4)
+    def test_mla_helix_vs_dcp_consistency(self):
         """Verify Helix MLA output matches standard DCP output."""
-        check_gpu_requirements(4)
-        
         logger.info(f"Model: {MLA_MODEL}")
         prompts = ["What is 5 + 5?"]
         trust_remote_code = get_model_trust_remote_code(MLA_MODEL)
@@ -566,11 +539,9 @@ class TestHelixVsDCPConsistency:
 class TestQuickSmoke:
     """Quick smoke test to verify basic functionality."""
     
-    @create_new_process_for_each_test()
-    def test_helix_gqa_quick(self, num_gpus_available):
+    @multi_gpu_test(num_gpus=4)
+    def test_helix_gqa_quick(self):
         """Quick smoke test for Helix GQA."""
-        check_gpu_requirements(4)
-        
         logger.info(f"Model: {GQA_MODEL}")
         
         config = HelixTestConfig(
