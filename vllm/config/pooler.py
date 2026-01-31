@@ -44,11 +44,13 @@ class PoolerConfig:
     The pooling method used for tokenwise pooling.
     """
 
-    ## for embeddings models
-    normalize: bool | None = None
+    use_activation: bool | None = None
     """
-    DEPRECATED: please use `use_activation` instead.
+    Whether to apply activation function to the pooler outputs.
+    `None` uses the pooler's default, which is `True` in most cases.
     """
+
+    ## for embedding models
     dimensions: int | None = None
     """
     Reduce the dimensions of embeddings if model
@@ -72,19 +74,6 @@ class PoolerConfig:
     """
 
     ## for classification models
-    softmax: float | None = None
-    """
-    DEPRECATED: please use `use_activation` instead.
-    """
-    activation: float | None = None
-    """
-    DEPRECATED: please use `use_activation` instead.
-    """
-    use_activation: bool | None = None
-    """
-    Whether to apply activation function to the classification outputs.
-    Defaults to True.
-    """
     logit_bias: float | None = None
     """
     If provided, apply classification logit biases. Defaults to None.
@@ -104,10 +93,7 @@ class PoolerConfig:
     `math-shepherd-mistral-7b-prm` model.
     """
 
-    def __post_init__(self):
-        # raise deprecated warning for softmax and activation
-        self.use_activation = get_use_activation(self)
-
+    def __post_init__(self) -> None:
         if pooling_type := self.pooling_type:
             if self.seq_pooling_type is not None:
                 raise ValueError(
