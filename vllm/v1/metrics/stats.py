@@ -173,6 +173,7 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+    encoder_cache_usage: float = 0.0
 
     # Total number of KV cache blocks available.
     num_kv_cache_total_blocks: int = 0
