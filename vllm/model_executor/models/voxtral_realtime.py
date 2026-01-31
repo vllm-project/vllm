@@ -50,7 +50,6 @@ logger = init_logger(__name__)
 _PRE_ALLOCATE_BUFFER_SIZE_IN_S = 30
 
 
-
 class VoxtralRealtimeMultiModalProcessor(VoxtralMultiModalProcessor):
     def __init__(
         self,
@@ -217,7 +216,7 @@ class VoxtralRealtimeBuffer:
     dummy_inputs=VoxtralDummyInputsBuilder,
 )
 @support_torch_compile
-class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
+class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -225,10 +224,7 @@ class VoxtralStreamingGeneration(VoxtralForConditionalGeneration, SupportsRealti
 
         assert (
             not vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ), (
-            "Voxtral streaming doesn't support full cudagraphs yet. "
-            "Please use PIECEWISE."
-        )
+        ), "Voxtral realtime doesn't support full cudagraphs yet. Please use PIECEWISE."
 
         self.time_embedding: TimeEmbedding = TimeEmbedding(
             dim=self.config.text_config.hidden_size
