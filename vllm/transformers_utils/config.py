@@ -834,7 +834,7 @@ def parse_pooling_type(pooling_name: str):
 @cache
 def get_sentence_transformer_tokenizer_config(
     model: str | Path, revision: str | None = "main"
-):
+) -> dict[str, Any] | None:
     """
     Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
