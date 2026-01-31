@@ -308,6 +308,13 @@ class GenerateRequest(BaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
+    tier: float = Field(
+        default=1.0,
+        description=(
+            "The tier of the request (0.0 to 1.0, where 1.0 is highest priority). "
+            "Used for SLO-based request scheduling. Default: 1.0"
+        ),
+    )
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",

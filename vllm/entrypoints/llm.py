@@ -1625,6 +1625,7 @@ class LLM:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
+        tier: float = 1,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> str:
         prompt_text, _, _ = get_prompt_components(prompt)
@@ -1646,6 +1647,7 @@ class LLM:
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
+            tier=tier,
             prompt_text=prompt_text,
         )
         return engine_request.request_id

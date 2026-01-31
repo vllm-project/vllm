@@ -58,6 +58,7 @@ class EngineClient(ABC):
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        tier: float = 1,
         data_parallel_rank: int | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
@@ -72,6 +73,7 @@ class EngineClient(ABC):
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
+        tier: float = 1,
         truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:

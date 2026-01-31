@@ -233,6 +233,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
+                        tier=request.tier,
                         prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
                         data_parallel_rank=data_parallel_rank,

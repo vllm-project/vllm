@@ -61,6 +61,14 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    max_num_reqs: int | None = None
+    """Maximum number of requests that can live in the queue,
+    or None if no limit."""
+
+    max_pending_context_tokens: int | None = None
+    """Maximum sum of context tokens in requests that are in the pending
+    state, or None if no limit."""
+
     max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
@@ -290,6 +298,19 @@ class SchedulerConfig:
             raise ValueError(
                 f"{self.max_long_partial_prefills=} must be less than or equal to "
                 f"{self.max_num_partial_prefills=}."
+            )
+
+        if self.max_num_reqs is not None and self.max_num_reqs <= 0:
+            raise ValueError(
+                f"max_num_reqs ({self.max_num_reqs}) must be greater than 0."
+            )
+
+        if self.max_pending_context_tokens is not None and (
+            self.max_pending_context_tokens <= 0
+        ):
+            raise ValueError(
+                "max_pending_context_tokens "
+                f"({self.max_pending_context_tokens}) must be greater than 0."
             )
 
         return self

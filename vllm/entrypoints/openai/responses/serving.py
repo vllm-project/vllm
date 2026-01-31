@@ -498,6 +498,7 @@ class OpenAIServingResponses(OpenAIServing):
                     context=context,
                     lora_request=lora_request,
                     priority=request.priority,
+                    tier=request.tier,
                     trace_headers=trace_headers,
                 )
                 generators.append(generator)
