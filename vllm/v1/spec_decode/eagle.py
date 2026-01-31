@@ -271,7 +271,7 @@ class SpecDecodeBaseProposer:
         ).repeat(max_batch_size, 1)
 
     def _raise_if_padded_drafter_batch_disabled(self):
-        if self.vllm_config.speculative_config.disable_padded_drafter_batch:
+        if self.speculative_config.disable_padded_drafter_batch:
             raise NotImplementedError(
                 "Speculative Decoding with draft models or parallel drafting only "
                 "supports padded drafter batch. Please unset "
