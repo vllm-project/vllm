@@ -4,11 +4,13 @@ import cv2
 import numpy as np
 import torch
 
+
 class SimilarFrameDetector:
     """
     Detects similar frames in video and samples keyframes based on photometric loss (SSIM + L1).
     Reduces redundant frames by selecting representative keyframes at a specified sparse ratio.
     """
+
     def __init__(
         self,
         sparse_ratio: float = 0.5,
@@ -18,7 +20,7 @@ class SimilarFrameDetector:
     ):
         """
         Initialize SimilarFrameDetector with sampling parameters.
-        
+
         Args:
             sparse_ratio: Ratio of frames to keep (0-1)
             use_downsampled_loss: Whether to compute loss on downsampled frames (speed up)
@@ -29,16 +31,16 @@ class SimilarFrameDetector:
         self.use_downsampled_loss = use_downsampled_loss
         self.downscale_factor = downscale_factor
         self.alpha = alpha
-    
+
     def _detect_and_convert_format(
         self, video_data: np.ndarray | torch.Tensor
     ) -> tuple[torch.Tensor, str]:
         """
         Convert input video data to unified tensor format (channels_first) and record original format.
-        
+
         Args:
             video_data: Input video (4D: [frames, C, H, W] or [frames, H, W, C])
-        
+
         Returns:
             Converted tensor (channels_first), original format label
         """
@@ -79,7 +81,7 @@ class SimilarFrameDetector:
         # Ensure k is even and between 2 and total_frames
         k = max(2, min(total_frames, 2 * (k // 2)))
         return k
-    
+
     def _downsample_frames(self, frames: torch.Tensor) -> torch.Tensor:
         """
         Downsample frames to reduce computation cost.
@@ -117,9 +119,9 @@ class SimilarFrameDetector:
                     interpolation=cv2.INTER_LINEAR,
                 )
                 downsampled[f] = torch.from_numpy(downsampled_frame.transpose(2, 0, 1))
-        
+
         return downsampled
-    
+
     def _calculate_ssim(self, img1: torch.Tensor, img2: torch.Tensor) -> float:
         """
         Calculate Structural Similarity Index (SSIM) between two frames.
@@ -132,7 +134,7 @@ class SimilarFrameDetector:
         else:
             gray1 = img1[0]
             gray2 = img2[0]
-        
+
         # Move to CPU for cv2 operations
         gray1_np = gray1.cpu().numpy() if gray1.device.type != "cpu" else gray1.numpy()
         gray2_np = gray2.cpu().numpy() if gray2.device.type != "cpu" else gray2.numpy()
@@ -158,7 +160,7 @@ class SimilarFrameDetector:
             (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
         )
         return float(np.mean(ssim_map))
-    
+
     def _calculate_photometric_loss(
         self, frame1: torch.Tensor, frame2: torch.Tensor
     ) -> float:
@@ -175,7 +177,7 @@ class SimilarFrameDetector:
         # Weighted combination of SSIM and L1 loss
         loss = self.alpha * (1 - ssim) / 2 + (1 - self.alpha) * l1_loss
         return loss
-    
+
     def _calculate_video_photometric_losses(self, frames: torch.Tensor) -> torch.Tensor:
         """Compute photometric loss for all adjacent frame pairs in video."""
         frame_number = frames.shape[0]
@@ -183,9 +185,8 @@ class SimilarFrameDetector:
         for f in range(frame_number - 1):
             loss = self._calculate_photometric_loss(frames[f], frames[f + 1])
             losses.append(loss)
-        
         return torch.tensor(losses, device=frames.device)
-    
+
     def _select_split_points(
         self, photometric_losses: torch.Tensor, k: int
     ) -> list[int]:
@@ -196,19 +197,17 @@ class SimilarFrameDetector:
         total_frames = len(photometric_losses) + 1
         if k - 1 <= 0:
             return []
-        
         # Select top (k-1) loss indices as split points
         top_indices = torch.topk(photometric_losses, k - 1).indices.tolist()
         split_points = sorted(top_indices)
         return split_points
-    
+
     def _create_segments(
         self, split_points: list[int], total_frames: int
     ) -> list[tuple[int, int]]:
         """Split video frame indices into segments based on split points."""
         segments = []
         start = 0
-
         for split_point in split_points:
             end = split_point + 1
             if end > start:
@@ -219,7 +218,7 @@ class SimilarFrameDetector:
         if start < total_frames:
             segments.append((start, total_frames))
         return segments
-    
+
     def _select_keyframes_from_segments(
         self, video_data: torch.Tensor, segments: list[tuple[int, int]]
     ) -> tuple[torch.Tensor, list[int]]:
@@ -237,7 +236,7 @@ class SimilarFrameDetector:
                 if mid_index < video_data.shape[0]:
                     selected_frames.append(video_data[mid_index])
                     selected_frame_indices.append(mid_index)
-        
+
         # Fallback: select first and last frame if no valid keyframes
         if selected_frames:
             return torch.stack(selected_frames, dim=0), selected_frame_indices
@@ -245,23 +244,23 @@ class SimilarFrameDetector:
             fallback_frames = [video_data[0], video_data[-1]]
             fallback_indices = [0, video_data.shape[0] - 1]
             return torch.stack(fallback_frames, dim=0), fallback_indices
-        
+
     def preprocess(
         self, videos: list[torch.Tensor | tuple]
     ) -> tuple[list[torch.Tensor], bool]:
         """
         Preprocess input video list: extract tensor data from tuple (if needed).
-        
+
         Args:
             videos: List of tensors or (tensor + metadata) tuples
-        
+
         Returns:
             List of video tensors, flag indicating if input was tuple-based
         """
         processed = False
         if not videos:
             return [], processed
-        
+
         first_element = videos[0]
 
         if torch.is_tensor(first_element):
@@ -285,10 +284,10 @@ class SimilarFrameDetector:
     ) -> tuple[list[torch.Tensor], list[list[int]]]:
         """
         Core method: sample keyframes from video list based on photometric loss.
-        
+
         Args:
             video_list: List of video data (numpy array/tensor)
-        
+
         Returns:
             Sampled keyframes, original indices of sampled frames
         """
@@ -324,7 +323,7 @@ class SimilarFrameDetector:
                 result_selected_frames_index.append(selected_frames_index)
                 result_videos.append(selected_frames)
                 continue
-            
+
             k = self._calculate_target_frames(frame_number)
 
             # Use downsampled frames for loss calculation (speed up)
@@ -341,7 +340,6 @@ class SimilarFrameDetector:
             selected_frames, selected_frames_index = (
                 self._select_keyframes_from_segments(video_data, segments)
             )
-            
             result_selected_frames_index.append(selected_frames_index)
             result_videos.append(selected_frames)
 
@@ -358,16 +356,16 @@ class SimilarFrameDetector:
             final_results.append(converted_result)
 
         return final_results, result_selected_frames_index
-    
+
     def process_video_frames(
         self, videos: list[torch.Tensor | tuple]
     ) -> list[torch.Tensor] | list[tuple]:
         """
         End-to-end video frame sampling (preprocess + frame sampling + metadata update).
-        
+
         Args:
             videos: List of tensors or (tensor + metadata) tuples
-        
+
         Returns:
             Sampled keyframes (with updated metadata if input was tuple)
         """
@@ -379,14 +377,14 @@ class SimilarFrameDetector:
             result = []
             for i, (_, *metadata) in enumerate(videos):
                 video_metadata = metadata[0] if metadata else {}
-                
+
                 frame_number = video_list[i].shape[0]
                 if frame_number == 1:
                     updated_metadata = video_metadata.copy()
                     updated_metadata["frames_indices"] = [0]
                     result.append((video_sampled[i], updated_metadata))
                     continue
-                
+
                 frames_indices = video_metadata.get("frames_indices", torch.tensor([]))
                 # Update frame indices to sampled keyframes
                 if i < len(sampled_frames_index) and len(frames_indices) > 0:
@@ -406,14 +404,14 @@ class SimilarFrameDetector:
                         ]
                 else:
                     selected_indices = frames_indices
-                
+
                 updated_metadata = video_metadata.copy()
                 updated_metadata["frames_indices"] = selected_indices
                 result.append((video_sampled[i], updated_metadata))
             return result
         else:
             return video_sampled
-        
+
 def is_multimodal_efs_enabled(efs_sparse_rate: float | None) -> bool:
     """Check if EFS (Efficient Frame Sampling) is enabled (valid sparse rate > 0)."""
     return efs_sparse_rate is not None and efs_sparse_rate > 0
