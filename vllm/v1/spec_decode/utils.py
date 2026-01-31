@@ -159,13 +159,15 @@ def create_vllm_config_for_draft_model(
     The vllm_config is useful when loading the draft model with get_model().
     """
     old = target_model_vllm_config
-    new_parallel_config = old.speculative_config.draft_parallel_config.replace(
+    assert old.speculative_config is not None, "speculative_config is not set"
+    old_spec_config = old.speculative_config
+    new_parallel_config = old_spec_config.draft_parallel_config.replace(
         rank=old.parallel_config.rank
     )
     new: VllmConfig = old.replace(
         quant_config=None,
         parallel_config=new_parallel_config,
-        model_config=old.speculative_config.draft_model_config,
+        model_config=old_spec_config.draft_model_config,
     )
     return new
 

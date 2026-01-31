@@ -1394,6 +1394,37 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# OpenPangu
+def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "FreedomIntelligence/openPangu-VL-7B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=4,
+        trust_remote_code=True,
+        enforce_eager=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "[unused19]"
+    elif modality == "video":
+        placeholder = "[unused32]"
+
+    prompts = [
+        (
+            f"<s>[unused9]系统：[unused10][unused9]用户：[unused18]{placeholder}[unused20]{question}[unused10][unused9]助手："
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Ovis
 def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2051,6 +2082,7 @@ model_example_map = {
     "molmo2": run_molmo2,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
+    "openpangu_vl": run_openpangu_vl,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
     "paddleocr_vl": run_paddleocr_vl,

@@ -4,7 +4,6 @@
 import torch
 
 from vllm.config import VllmConfig
-from vllm.config.speculative import SpeculativeConfig
 from vllm.logger import init_logger
 from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
 
@@ -28,7 +27,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self._raise_if_draft_tp_mismatch()
 
     def _raise_if_vocab_size_mismatch(self):
-        self.vllm_config.speculative_config.verify_equal_vocab_size_if_draft_model()
+        self.speculative_config.verify_equal_vocab_size_if_draft_model()
 
     def _raise_if_draft_tp_mismatch(self):
         # Note(Tomas Ruiz) If we run the target model with TP > 1 and
@@ -37,7 +36,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         # (because TP=1), then the torch compile cache is overwritten and corrupted.
         # We need a mechanism like this: https://github.com/vllm-project/vllm/pull/5414
         # To prevent this error, we assert that both TP sizes must be the same.
-        spec_cfg: SpeculativeConfig = self.vllm_config.speculative_config
+        spec_cfg = self.speculative_config
         tgt_tp = spec_cfg.target_parallel_config.tensor_parallel_size
         draft_tp = spec_cfg.draft_parallel_config.tensor_parallel_size
         if draft_tp != tgt_tp:
