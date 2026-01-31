@@ -824,6 +824,8 @@ class VisionChunkDataParser(MultiModalDataParser):
         mm_data: MultiModalDataDict,
         modality_order: list[str] = [],
     ) -> MultiModalDataItems:
+        print("mm_data:", mm_data)
+        print("modality_order:", modality_order)
         mm_items = MultiModalDataItems()
 
         parsed_vision_chunk = self._parse_vision_chunk_data(mm_data.get("vision_chunk"))

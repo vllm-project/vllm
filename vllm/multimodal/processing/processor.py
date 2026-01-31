@@ -1807,6 +1807,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         if request_id is not None:
             self.info.ctx.create_timing_stats(request_id)
 
+        print(prompt, mm_data)
         modality_order = self._get_modality_order(prompt, mm_data)
         mm_items = self._to_mm_items(mm_data, modality_order)
 
