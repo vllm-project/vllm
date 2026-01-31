@@ -20,7 +20,7 @@ tonic = "0.12"
 prost = "0.13"
 
 # Tokenizer
-tokenizers = "0.21"
+tokenizers = { version = "0.21", features = ["http"] }
 
 # Streaming
 tokio-stream = "0.1"

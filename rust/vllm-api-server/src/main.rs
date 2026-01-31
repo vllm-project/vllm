@@ -1,13 +1,57 @@
 mod generated;
-mod openai;
 mod grpc;
+mod openai;
+mod routes;
+mod server;
+
+use clap::Parser;
+use std::sync::Arc;
+use tokenizers::Tokenizer;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use grpc::VllmClient;
+use server::AppState;
+
+#[derive(Parser, Debug)]
+#[command(name = "vllm-api-server")]
+#[command(about = "Rust API server for vLLM")]
+struct Args {
+    /// HTTP port to listen on
+    #[arg(long, default_value = "8000")]
+    port: u16,
+
+    /// gRPC server address
+    #[arg(long, default_value = "localhost:50051")]
+    grpc_addr: String,
+
+    /// Model name (for tokenizer and response metadata)
+    #[arg(long)]
+    model: String,
+}
 
 #[tokio::main]
-async fn main() {
-    println!("Modules compiled successfully");
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::new(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+        ))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 
-    // Note: This would fail without a running server, just verifying types compile
-    let _ = VllmClient::connect("localhost:50051");
+    let args = Args::parse();
+
+    tracing::info!("Loading tokenizer for model: {}", args.model);
+    let tokenizer = Tokenizer::from_pretrained(&args.model, None)
+        .map_err(|e| format!("Failed to load tokenizer: {}", e))?;
+
+    tracing::info!("Connecting to gRPC server at {}", args.grpc_addr);
+    let grpc_client = VllmClient::connect(&args.grpc_addr).await?;
+
+    let state = Arc::new(AppState::new(tokenizer, grpc_client, args.model));
+
+    let addr = format!("0.0.0.0:{}", args.port);
+    server::run_server(&addr, state).await?;
+
+    Ok(())
 }
