@@ -8,12 +8,10 @@ from vllm.config import PassConfig
 
 from ...utils import multi_gpu_test
 from .common import (
-    CUSTOM_OPS_FP8,
-    CUSTOM_OPS_RMS_NORM,
     INDUCTOR_GRAPH_PARTITION,
     AttentionBackendCase,
     Matches,
-    custom_ops_product,
+    custom_ops_combos,
     is_blackwell,
 )
 from .models import (
@@ -37,9 +35,7 @@ from .models import (
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN, FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
-@pytest.mark.parametrize(
-    "custom_ops", custom_ops_product(CUSTOM_OPS_FP8, CUSTOM_OPS_RMS_NORM)
-)
+@pytest.mark.parametrize("custom_ops", custom_ops_combos("quant_fp8", "rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 def test_tp2_ar_rms_fp8_fusions(
     model_name: str,
@@ -102,7 +98,7 @@ def test_tp2_ar_rms_fp8_fusions(
 )
 @pytest.mark.parametrize("attn_backend", [FLASHINFER_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
-@pytest.mark.parametrize("custom_ops", CUSTOM_OPS_RMS_NORM)
+@pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 @pytest.mark.skipif(not is_blackwell(), reason="Blackwell required for fp4")
 def test_tp2_ar_rms_fp4_fusions(
@@ -158,7 +154,7 @@ def test_tp2_ar_rms_fp4_fusions(
 )
 @pytest.mark.parametrize("attn_backend", [TRITON_ATTN])
 @pytest.mark.parametrize("n_layers", [4])
-@pytest.mark.parametrize("custom_ops", CUSTOM_OPS_RMS_NORM)
+@pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
 @pytest.mark.parametrize("inductor_graph_partition", INDUCTOR_GRAPH_PARTITION)
 def test_tp2_ar_rms_fusions(
     model_name: str,

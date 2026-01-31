@@ -43,16 +43,21 @@ is_blackwell = lambda: current_platform.is_device_capability_family(100)
 """Are we running on Blackwell, a lot of tests depend on it"""
 
 
-# Custom ops toggle lists for parametrization
-CUSTOM_OPS_FP8 = ["-quant_fp8", "+quant_fp8"]
-CUSTOM_OPS_RMS_NORM = ["-rms_norm", "+rms_norm"]
-CUSTOM_OPS_QUANT_RMS_NORM = ["+quant_fp8,+rms_norm"]
-
-
-def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
+def custom_ops_combos(*custom_ops: str) -> Iterable[str]:
     """Generate all combinations of custom ops for parametrization."""
+    custom_ops_lists = [[f"-{op}", f"+{op}"] for op in custom_ops]
     for op_list in itertools.product(*custom_ops_lists):
         yield ",".join(op_list)
+
+
+# Quick inline validation
+assert list(custom_ops_combos("silu_and_mul")) == ["-silu_and_mul", "+silu_and_mul"]
+assert list(custom_ops_combos("quant_fp8", "rms_norm")) == [
+    "-quant_fp8,-rms_norm",
+    "-quant_fp8,+rms_norm",
+    "+quant_fp8,-rms_norm",
+    "+quant_fp8,+rms_norm",
+]
 
 
 def has_cuda_graph_wrapper_metadata() -> bool:
