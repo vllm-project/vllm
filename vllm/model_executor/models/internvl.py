@@ -39,6 +39,7 @@ from vllm.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
+    VisionChunkDataParser,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -878,6 +879,14 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
 class InternVLProcessingInfo(BaseInternVLProcessingInfo):
     """InternVL ProcessingInfo extended for video processing"""
+
+    def get_data_parser(self):
+        hf_config = self.get_hf_config()
+        if getattr(hf_config, "use_unified_vision_chunk", False):
+            return VisionChunkDataParser(
+                expected_hidden_size=self._get_expected_hidden_size(),
+            )
+        return super().get_data_parser()
 
     @property
     def supports_video(self):
