@@ -7,9 +7,9 @@ import torch
 
 class SimilarFrameDetector:
     """
-    Detects similar frames in video and samples keyframes 
+    Detects similar frames in video and samples keyframes
     based on photometric loss (SSIM + L1).
-    Reduces redundant frames by selecting representative 
+    Reduces redundant frames by selecting representative
     keyframes at a specified sparse ratio.
     """
 
@@ -25,7 +25,7 @@ class SimilarFrameDetector:
 
         Args:
             sparse_ratio: Ratio of frames to keep (0-1)
-            use_downsampled_loss: Whether to compute loss on 
+            use_downsampled_loss: Whether to compute loss on
             downsampled frames (speed up)
             downscale_factor: Downscale ratio for frame resolution
             alpha: Weight coefficient for SSIM loss (1-alpha for L1 loss)
@@ -39,7 +39,7 @@ class SimilarFrameDetector:
         self, video_data: np.ndarray | torch.Tensor
     ) -> tuple[torch.Tensor, str]:
         """
-        Convert input video data to unified tensor 
+        Convert input video data to unified tensor
         format (channels_first) and record original format.
 
         Args:
@@ -195,7 +195,7 @@ class SimilarFrameDetector:
         self, photometric_losses: torch.Tensor, k: int
     ) -> list[int]:
         """
-        Select split points by top-k largest loss 
+        Select split points by top-k largest loss
         values (frame pairs with biggest changes).
         These points divide video into k segments.
         """
