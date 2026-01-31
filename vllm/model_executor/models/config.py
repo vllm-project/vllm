@@ -517,13 +517,24 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         # compute new attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
 
-        assert attn_page_size >= mamba_page_size
-
         if attn_page_size == mamba_page_size:
-            # don't need to pad mamba page size
+            # don't need to pad - sizes already match
             return
 
-        # pad mamba page size to exactly match attention
+        # Pad whichever is smaller to match the larger
+        if mamba_page_size > attn_page_size:
+            # Mamba has larger page size - need to increase attention block size
+            # This can happen with linear attention layers that have large 3D/4D states
+            new_attn_block_size = cdiv(mamba_page_size, attn_page_size_1_token)
+            cache_config.block_size = new_attn_block_size
+            attn_page_size = new_attn_block_size * attn_page_size_1_token
+            logger.info(
+                "Setting attention block size to %d tokens "
+                "to ensure attention page size matches large mamba page size.",
+                new_attn_block_size,
+            )
+
+        # pad mamba page size to exactly match attention (if needed)
         if (
             cache_config.mamba_page_size_padded is None
             or cache_config.mamba_page_size_padded != attn_page_size
@@ -582,6 +593,24 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
 
+class NemotronFlashForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Configure NemotronFlash model settings."""
+        # Update mamba cache dtype like NemotronH
+        cache_config = vllm_config.cache_config
+        if cache_config.mamba_ssm_cache_dtype == "auto":
+            hf_config = vllm_config.model_config.hf_config
+            mamba_ssm_cache_dtype = getattr(
+                hf_config, "mamba_ssm_cache_dtype", "float32"
+            )
+            logger.info(
+                "Updating mamba_ssm_cache_dtype to '%s' for NemotronFlash model",
+                mamba_ssm_cache_dtype,
+            )
+            cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -604,4 +633,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
+    "NemotronFlashForCausalLM": NemotronFlashForCausalLMConfig,
 }

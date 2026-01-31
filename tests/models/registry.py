@@ -262,6 +262,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "FalconForCausalLM": _HfExamplesInfo("tiiuae/falcon-7b"),
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
+    "FastSLMForCausalLM": _HfExamplesInfo(
+        "nvidia/Nemotron-Flash-3B", trust_remote_code=True
+    ),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
     "Gemma2ForCausalLM": _HfExamplesInfo(
         "google/gemma-2-9b", extras={"tiny": "google/gemma-2-2b-it"}

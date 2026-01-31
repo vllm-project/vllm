@@ -135,6 +135,11 @@ class SchedulerConfig:
     avoid gaps in GPU utilization, leading to better latency and throughput.
     """
 
+    num_input_prefix_tokens: int = Field(init=False, default=0)
+    """Number of prefix tokens (e.g., meta tokens, memory tokens) prepended to 
+    input sequences. These are learnable parameters used by some models to enhance 
+    context representation. Set automatically from the model config."""
+
     stream_interval: int = Field(default=1, ge=1)
     """The interval (or buffer size) for streaming in terms of token length.
     A smaller value (1) makes streaming smoother by sending each token immediately,

@@ -4757,12 +4757,17 @@ class GPUModelRunner(
             self.query_start_loc.copy_to_gpu()
 
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
+            # For PIECEWISE, don't use cudagraph_capture mode for metadata since
+            # attention runs in eager mode. Only FULL mode captures attention.
+            use_cudagraph_capture_metadata = (
+                is_graph_capturing and cudagraph_runtime_mode == CUDAGraphMode.FULL
+            )
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
                 num_reqs=num_reqs_padded,
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
-                for_cudagraph_capture=is_graph_capturing,
+                for_cudagraph_capture=use_cudagraph_capture_metadata,
                 slot_mappings=slot_mappings_by_group,
             )
 
@@ -4923,7 +4928,11 @@ class GPUModelRunner(
             # MM Encoder only model no need to run sampler.
             return torch.tensor([])
 
-        hidden_states = torch.rand_like(hidden_states)
+        has_inf_or_nan = (
+            torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
+        )
+        if has_inf_or_nan:
+            hidden_states = torch.rand_like(hidden_states)
 
         logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)

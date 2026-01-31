@@ -153,6 +153,7 @@ class Mixer2RMSNormGated(CustomOp):
             bias=None,
             z=gate,
             eps=self.variance_epsilon,
+            group_size=self.group_size,
             norm_before_gate=False,
         )
 
@@ -171,6 +172,14 @@ def mamba_v2_sharded_weight_loader(
     def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         # - track boundary of (sharded) param, and loaded_weight, respectively
         boundary, loaded_boundary = 0, 0
+
+        # Calculate expected total dimension
+        expected_total_dim = sum(full_dim - extra for full_dim, extra, _ in shard_spec)
+
+        # Handle checkpoints with padding (e.g., Nemotron-Flash-3B: 6400→6144)
+        # If loaded_weight is larger than expected, slice it to remove padding
+        if loaded_weight.shape[0] > expected_total_dim:
+            loaded_weight = loaded_weight[:expected_total_dim]
 
         # - iterate over the shard specs
         for full_dim, extra, duplicate_groups in shard_spec:
@@ -575,6 +584,7 @@ class MambaMixer2(MambaBase, CustomOp):
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         is_mamba_cache_all = self.cache_config.mamba_cache_mode == "all"
+
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
@@ -598,30 +608,31 @@ class MambaMixer2(MambaBase, CustomOp):
                 hidden_states_B_C.transpose(0, 1).clone().transpose(0, 1)
             ).contiguous()
             hidden_states, _B, _C = self.split_hidden_states_B_C_fn(hidden_states_B_C)
-            return hidden_states
+            output.copy_(hidden_states)
+            return
 
         num_prefills = attn_metadata.num_prefills  # request count
         num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
-        num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
         has_prefill = num_prefills > 0
         has_decode = num_decodes > 0
-        num_actual_tokens = num_prefill_tokens + num_decodes
+
+        total_input_tokens = hidden_states_B_C.size(0)
+        num_prefill_total = total_input_tokens - num_decodes
 
         # Separate prefill and decode by splitting varlen input
-        # Split along token dimension
         hidden_states_B_C_d, hidden_states_B_C_p = torch.split(
-            hidden_states_B_C[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
+            hidden_states_B_C,
+            [num_decodes, num_prefill_total],
             dim=0,
         )
         dt_d, dt_p = torch.split(
-            dt[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
+            dt,
+            [num_decodes, num_prefill_total],
             dim=0,
         )
-        # Split along batch dimension
+        # Split along batch dimension - process all input tokens
         state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor[:num_actual_tokens],
+            state_indices_tensor,
             [num_decodes, num_prefills],
             dim=0,
         )
@@ -656,9 +667,10 @@ class MambaMixer2(MambaBase, CustomOp):
             block_idx_first_scheduled_token_p = None
             num_computed_tokens_p = None
 
+        # Preallocate output slices for all input tokens
         preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
-            output[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
+            output,
+            [num_decodes, num_prefill_total],
             dim=0,
         )
 
@@ -677,6 +689,7 @@ class MambaMixer2(MambaBase, CustomOp):
             #   are provided (which are pointers into
             #   "state_indices_tensor_p"), it will write additional cache
             #   states aligned at "block_size_to_align".
+
             x = hidden_states_B_C_p.transpose(
                 0, 1
             )  # this is the form that causal-conv see
@@ -695,7 +708,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
-            ).transpose(0, 1)[:num_prefill_tokens]
+            ).transpose(0, 1)  # Keep all tokens (meta + prefill)
 
             hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(
                 hidden_states_B_C_p
@@ -718,12 +731,12 @@ class MambaMixer2(MambaBase, CustomOp):
             # NOTE: final output is an in-place update of out tensor
             varlen_states = mamba_chunk_scan_combined_varlen(
                 hidden_states_p.view(
-                    num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
+                    num_prefill_total, self.num_heads // self.tp_size, self.head_dim
                 ),
                 dt_p,
                 self.A,
-                B_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
-                C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
+                B_p.view(num_prefill_total, self.n_groups // self.tp_size, -1),
+                C_p.view(num_prefill_total, self.n_groups // self.tp_size, -1),
                 chunk_size=chunk_size,
                 D=self.D,
                 z=None,
@@ -736,7 +749,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 return_intermediate_states=is_mamba_cache_all,
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
-                out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
+                out=preallocated_ssm_out_p.view(num_prefill_total, -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
             )
 
@@ -826,6 +839,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 state_indices_tensor_d_output = state_indices_tensor_d.gather(
                     1, block_idx_last_scheduled_token_d.unsqueeze(1)
                 ).squeeze(1)
+
                 # for decode:
                 #   block_idx_first_scheduled_token_d ==
                 #       block_idx_last_scheduled_token_d
