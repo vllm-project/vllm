@@ -117,7 +117,7 @@ class CudagraphDispatcher:
             return [0] + captured_counts
         else:
             # No specialization: only capture graphs with LoRA active
-            return [0, lora_config.max_loras + 1]
+            return [lora_config.max_loras + 1]
 
     def _create_padded_batch_descriptor(
         self,
