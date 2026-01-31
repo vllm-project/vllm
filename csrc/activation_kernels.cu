@@ -9,17 +9,52 @@
 
 namespace vllm {
 
+struct alignas(32) u32x8_t {
+  uint32_t u0, u1, u2, u3, u4, u5, u6, u7;
+};
+
+__device__ __forceinline__ void ld256(u32x8_t& val, const u32x8_t* ptr) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+  asm volatile("ld.global.nc.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];\n"
+               : "=r"(val.u0), "=r"(val.u1), "=r"(val.u2), "=r"(val.u3),
+                 "=r"(val.u4), "=r"(val.u5), "=r"(val.u6), "=r"(val.u7)
+               : "l"(ptr));
+#else
+  const uint4* uint_ptr = reinterpret_cast<const uint4*>(ptr);
+  uint4 top_half = __ldg(&uint_ptr[0]);
+  uint4 bottom_half = __ldg(&uint_ptr[1]);
+  val.u0 = top_half.x;
+  val.u1 = top_half.y;
+  val.u2 = top_half.z;
+  val.u3 = top_half.w;
+  val.u4 = bottom_half.x;
+  val.u5 = bottom_half.y;
+  val.u6 = bottom_half.z;
+  val.u7 = bottom_half.w;
+#endif
+}
+
+__device__ __forceinline__ void st256(u32x8_t& val, u32x8_t* ptr) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+  asm volatile("st.global.v8.u32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};\n"
+               :
+               : "l"(ptr), "r"(val.u0), "r"(val.u1), "r"(val.u2), "r"(val.u3),
+                 "r"(val.u4), "r"(val.u5), "r"(val.u6), "r"(val.u7)
+               : "memory");
+#else
+  uint4* uint_ptr = reinterpret_cast<uint4*>(ptr);
+  uint_ptr[0] = make_uint4(val.u0, val.u1, val.u2, val.u3);
+  uint_ptr[1] = make_uint4(val.u4, val.u5, val.u6, val.u7);
+#endif
+}
+
 template <bool support_256>
 struct VecTraits;
 
 template <>
 struct VecTraits<true> {
   static constexpr int ARCH_MAX_VEC_SIZE = 32;
-#if __CUDACC_VER_MAJOR__ >= 13
-  using vec_t = longlong4_32a;
-#else
-  using vec_t = longlong4;
-#endif
+  using vec_t = u32x8_t;
 };
 
 template <>
@@ -131,8 +166,8 @@ __global__ void __maxnreg__(32)
     for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
       vec_t x, y;
       if constexpr (use_256b) {
-        x = x_vec[i];
-        y = y_vec[i];
+        ld256(x, &x_vec[i]);
+        ld256(y, &y_vec[i]);
       } else {
         x = VLLM_LDG(&x_vec[i]);
         y = VLLM_LDG(&y_vec[i]);
@@ -144,7 +179,11 @@ __global__ void __maxnreg__(32)
         xp[j] =
             packed_compute<packed_t, PACKED_ACT_FN, act_first>(xp[j], yp[j]);
       }
-      out_vec[i] = x;
+      if constexpr (use_256b) {
+        st256(x, &out_vec[i]);
+      } else {
+        out_vec[i] = x;
+      }
     }
   } else {
     // Scalar fallback for unaligned data or small d
@@ -351,8 +390,8 @@ __global__ void __maxnreg__(32)
     for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
       vec_t x, y;
       if constexpr (use_256b) {
-        x = x_vec[i];
-        y = y_vec[i];
+        ld256(x, &x_vec[i]);
+        ld256(y, &y_vec[i]);
       } else {
         x = VLLM_LDG(&x_vec[i]);
         y = VLLM_LDG(&y_vec[i]);
@@ -363,7 +402,11 @@ __global__ void __maxnreg__(32)
       for (int j = 0; j < VEC_SIZE; j++) {
         xp[j] = packed_mul(PACKED_ACT_FN(xp[j], param), yp[j]);
       }
-      out_vec[i] = x;
+      if constexpr (use_256b) {
+        st256(x, &out_vec[i]);
+      } else {
+        out_vec[i] = x;
+      }
     }
   } else {
     // Scalar fallback for unaligned data or small d
@@ -551,7 +594,7 @@ __global__ void __maxnreg__(32)
     for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
       vec_t v;
       if constexpr (use_256b) {
-        v = in_vec[i];
+        ld256(v, &in_vec[i]);
       } else {
         v = VLLM_LDG(&in_vec[i]);
       }
@@ -560,7 +603,11 @@ __global__ void __maxnreg__(32)
       for (int j = 0; j < VEC_SIZE; j++) {
         vp[j] = PACKED_ACT_FN(vp[j]);
       }
-      out_vec[i] = v;
+      if constexpr (use_256b) {
+        st256(v, &out_vec[i]);
+      } else {
+        out_vec[i] = v;
+      }
     }
   } else {
     // Scalar fallback for unaligned data or small d
