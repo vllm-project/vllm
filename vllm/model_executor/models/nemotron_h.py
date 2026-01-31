@@ -645,6 +645,9 @@ class NemotronHModel(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return hidden_states
 
+    def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
+        return weight_name.startswith("mtp.")
+
     def _get_max_n_routed_experts(self) -> int:
         """Get max n_routed_experts from config or block_configs for puzzle models.
 
@@ -710,6 +713,10 @@ class NemotronHModel(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
+
+            # Skip MTP/spec decode layers early (before stacked params mapping)
+            if name.startswith("mtp."):
+                continue
 
             # load stacked params
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -846,6 +853,12 @@ class NemotronHForCausalLM(
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_num_heads * hf_config.mamba_head_dim
 
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+
         return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
@@ -854,6 +867,7 @@ class NemotronHForCausalLM(
             head_dim=hf_config.mamba_head_dim,
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
+            num_spec=num_spec,
         )
 
     @classmethod
