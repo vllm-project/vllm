@@ -193,7 +193,7 @@ class FlashInferTrtLlmNvFp4ExpertsModular(
         )
 
 
-class FlashInferTrtLlmNvFp4Experts(
+class FlashInferTrtLlmNvFp4ExpertsMonolithic(
     FlashInferTrtLlmNvFp4ExpertsBase, mk.FusedMoEMonolithicExperts
 ):
     """

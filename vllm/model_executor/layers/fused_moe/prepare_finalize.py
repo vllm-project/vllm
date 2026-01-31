@@ -29,6 +29,21 @@ class MoEPrepareAndFinalizeNaiveEPBase(mk.FusedMoEPrepareAndFinalizeBase):
     In both cases, the quantization of X happens prior to dispatching.
     """
 
+    @staticmethod
+    def make(
+        is_sequence_parallel: bool = False,
+        num_dispatchers: int = 1,
+        use_monolithic: bool = False,
+    ) -> "MoEPrepareAndFinalizeNaiveEP" | "MoEPrepareAndFinalizeNaiveEPMonolithic":
+        cls = (
+            MoEPrepareAndFinalizeNaiveEPMonolithic
+            if use_monolithic
+            else MoEPrepareAndFinalizeNaiveEP
+        )
+        return cls(
+            is_sequence_parallel=is_sequence_parallel, num_dispatchers=num_dispatchers
+        )
+
     def __init__(
         self,
         is_sequence_parallel: bool = False,
@@ -242,6 +257,16 @@ class MoEPrepareAndFinalizeNoEPBase(mk.FusedMoEPrepareAndFinalizeBase):
     * finalize: applies the reduction (if needed)
     """
 
+    @staticmethod
+    def make(
+        use_monolithic: bool,
+    ) -> "MoEPrepareAndFinalizeNoEP" | "MoEPrepareAndFinalizeNoEPMonolithic":
+        return (
+            MoEPrepareAndFinalizeNoEPMonolithic()
+            if use_monolithic
+            else MoEPrepareAndFinalizeNoEP()
+        )
+
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -286,7 +311,7 @@ class MoEPrepareAndFinalizeNoEPBase(mk.FusedMoEPrepareAndFinalizeBase):
         return a1q, a1q_scale
 
 
-class MoEPrepareAndFinalizeNoEPMonolithic(
+class MoEPrepareAndFinalizeNoEP(
     mk.FusedMoEPrepareAndFinalize, MoEPrepareAndFinalizeNoEPBase
 ):
     def prepare(
@@ -333,7 +358,7 @@ class MoEPrepareAndFinalizeNoEPMonolithic(
         )
 
 
-class MoEPrepareAndFinalizeNoEP(
+class MoEPrepareAndFinalizeNoEPMonolithic(
     mk.FusedMoEPrepareAndFinalizeMonolithic, MoEPrepareAndFinalizeNoEPBase
 ):
     def prepare(

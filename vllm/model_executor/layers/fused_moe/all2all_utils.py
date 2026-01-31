@@ -17,11 +17,11 @@ from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import
     FlashInferA2APrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEPrepareAndFinalize,
+    FusedMoEPrepareAndFinalizeBase,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNaiveEP,
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNaiveEPBase,
+    MoEPrepareAndFinalizeNoEPBase,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
@@ -82,7 +82,7 @@ def maybe_make_prepare_finalize(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
-) -> FusedMoEPrepareAndFinalize | None:
+) -> FusedMoEPrepareAndFinalizeBase | None:
     # NOTE(rob): we are migrating each quant_method to hold the MK
     # in all cases. The allow_new_interface=False flag allow us to fall
     # back to the old method for methods that have not yet been migrated.
@@ -107,19 +107,19 @@ def maybe_make_prepare_finalize(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
             )
-            return MoEPrepareAndFinalizeNaiveEP(
+            return MoEPrepareAndFinalizeNaiveEPBase.make(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
                 num_dispatchers=(
                     get_ep_group().device_communicator.all2all_manager.world_size
                 ),
             )
         else:
-            return MoEPrepareAndFinalizeNoEP()
+            return MoEPrepareAndFinalizeNoEPBase.make(use_monolithic)
 
     all2all_manager = get_ep_group().device_communicator.all2all_manager
     assert all2all_manager is not None
 
-    prepare_finalize: FusedMoEPrepareAndFinalize | None = None
+    prepare_finalize: FusedMoEPrepareAndFinalizeBase | None = None
 
     if moe.use_pplx_kernels:
         assert quant_config is not None
@@ -247,8 +247,9 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_naive_all2all_kernels and allow_new_interface:
-        prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
-            is_sequence_parallel=(moe.moe_parallel_config.is_sequence_parallel),
+        prepare_finalize = MoEPrepareAndFinalizeNaiveEPBase.make(
+            use_monolithic=use_monolithic,
+            is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,
         )
 
