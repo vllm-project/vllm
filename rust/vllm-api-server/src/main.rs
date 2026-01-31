@@ -1,20 +1,13 @@
 mod generated;
 mod openai;
+mod grpc;
 
-use openai::{ChatCompletionRequest, ChatMessage};
+use grpc::VllmClient;
 
 #[tokio::main]
 async fn main() {
-    // Verify OpenAI types work with serde
-    let json = r#"{
-        "model": "test",
-        "messages": [{"role": "user", "content": "hello"}],
-        "stream": true
-    }"#;
+    println!("Modules compiled successfully");
 
-    let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
-    assert_eq!(req.model, "test");
-    assert!(req.is_streaming());
-
-    println!("OpenAI types working correctly");
+    // Note: This would fail without a running server, just verifying types compile
+    let _ = VllmClient::connect("localhost:50051");
 }
