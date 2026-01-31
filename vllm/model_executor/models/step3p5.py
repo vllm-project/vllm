@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.nn.parameter import Parameter
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -56,6 +57,19 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class FP32ReplicatedLinear(ReplicatedLinear):
+    """
+    Use FP32 for higher precision.
+    """
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        assert self.params_dtype == torch.float32
+        return super().forward(x.to(torch.float32))
 
 
 class Step3p5MLP(nn.Module):
@@ -308,11 +322,12 @@ class FusedMoEBlock(nn.Module):
                 f"the number of experts {config.moe_num_experts}."
             )
 
-        self.gate = ReplicatedLinear(
+        self.gate = FP32ReplicatedLinear(
             config.hidden_size,
             config.moe_num_experts,
             bias=False,
             quant_config=None,
+            params_dtype=torch.float32,  # Use FP32 for higher precision.
             prefix=f"{prefix}.gate",
         )
         self.use_moe_router_bias = config.use_moe_router_bias
@@ -378,15 +393,19 @@ class FusedMoEBlock(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # router_logits: (num_tokens, n_experts)
-        # Use FP32 for higher precision.
-        router_logits = (
-            hidden_states.to(torch.float32) @ self.gate.weight.to(torch.float32).t()
-        )
-        shared_output, final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
-        )
+        if self.experts.is_internal_router:
+            # In this case, the gate/router runs inside the FusedMoE class
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states, router_logits=hidden_states
+            )
+        else:
+            # router_logits: (num_tokens, n_experts)
+            router_logits, _ = self.gate(hidden_states)
+            fused_moe_out = self.experts(
+                hidden_states=hidden_states, router_logits=router_logits
+            )
 
+        shared_output, final_hidden_states = fused_moe_out
         if self.share_expert is None:
             assert shared_output is None
 
