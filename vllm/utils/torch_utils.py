@@ -333,6 +333,8 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
 
 def create_kv_caches_with_random_flash(
@@ -613,8 +615,9 @@ def weak_ref_tensor(tensor: Any) -> Any:
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
+    This ignores 0-size tensors as those don't allocate any memory.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
         return torch.ops._C.weak_ref_tensor(tensor)
     else:
         return tensor
@@ -706,9 +709,7 @@ def is_torch_equal(target: str) -> bool:
 
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
-    return (
-        is_torch_equal_or_newer("2.8.0.dev") and torch.distributed.is_xccl_available()
-    )
+    return torch.distributed.is_xccl_available()
 
 
 # create a library to hold the custom op

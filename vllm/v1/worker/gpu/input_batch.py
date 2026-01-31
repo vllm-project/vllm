@@ -15,9 +15,6 @@ class InputBuffers:
         self,
         max_num_reqs: int,
         max_num_tokens: int,
-        inputs_embeds_size: int,
-        vocab_size: int,
-        dtype: torch.dtype,
         device: torch.device,
     ):
         self.max_num_reqs = max_num_reqs
@@ -64,9 +61,13 @@ class InputBatch:
     positions: torch.Tensor
     # [3, num_tokens_after_padding]
     mrope_positions: torch.Tensor | None
+    # [num_tokens_after_padding, hidden_size]
+    inputs_embeds: torch.Tensor | None
 
     # layer_name -> Metadata
     attn_metadata: dict[str, Any]
+    # layer_name -> slot_mapping
+    slot_mappings: dict[str, torch.Tensor]
 
     # [total_num_logits]
     logits_indices: torch.Tensor
@@ -132,7 +133,9 @@ class InputBatch:
             input_ids=input_ids,
             positions=positions,
             mrope_positions=None,
+            inputs_embeds=None,
             attn_metadata=None,  # type: ignore
+            slot_mappings=None,  # type: ignore
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,

@@ -16,14 +16,14 @@ steps:
   # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
   # we can only upgrade after this is resolved
   # TODO(jerryzh168): resolve the above comment
-  - uv pip install --system torchao==0.13.0 --index-url https://download.pytorch.org/whl/cu129
+  - uv pip install --system torchao==0.14.1 --index-url https://download.pytorch.org/whl/cu129
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
 - label: Quantized MoE Test (B200)
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
-  gpu: b200
+  device: b200
   source_file_dependencies:
   - tests/quantization/test_blackwell_moe.py
   - vllm/model_executor/models/deepseek_v2.py

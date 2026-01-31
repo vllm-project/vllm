@@ -249,8 +249,8 @@ def fp8_mqa_logits(
         q: Query tensor of shape [M, H, D]. Casted to
             `torch.float8_e4m3fn` by caller.
         kv: Tuple `(k_fp8, k_scales)` where `k_fp8` has shape [N, D] with
-            dtype `torch.float8_e4m3fn` and `k_scales` has shape [N] (or
-            [N, 1]) with dtype `torch.float32`.
+            dtype `torch.float8_e4m3fn` and `k_scales` has shape [N])
+            with dtype `torch.float32`.
         weights: weights of shape [M, H], dtype `torch.float32`.
         cu_seqlen_ks: Start indices (inclusive) for valid K per query position,
             shape [M], dtype int32.
@@ -338,6 +338,11 @@ def _ceil_to_ue8m0(x: torch.Tensor):
 
 def _align(x: int, y: int) -> int:
     return cdiv(x, y) * y
+
+
+# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/v2.1.1/csrc/utils/math.hpp#L19
+def get_tma_aligned_size(x: int, element_size: int):
+    return _align(x, 16 // element_size)
 
 
 DEFAULT_BLOCK_SIZE = [128, 128]

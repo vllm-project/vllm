@@ -2,19 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
-    MLACommonBaseImpl,
     get_mla_dims,
 )
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -22,6 +21,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
@@ -31,6 +31,48 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
+
+
+@triton.jit
+def fetch_id_to_ragged_kernel(
+    in_tensor_ptr,  # [num_seq, topk]
+    cumsum_ptr,  # [num_seq + 1]
+    out_tensor_ptr,  # [max_num_seq * topk]
+    in_tensor_ptr_stride,
+    TOPK: tl.constexpr,
+    TOKEN_NUM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    seq_id = tl.program_id(0)
+    block_id = tl.program_id(1)
+    offset = tl.arange(0, BLOCK_SIZE)
+    token_start = tl.load(cumsum_ptr + seq_id)
+    token_end = tl.load(cumsum_ptr + seq_id + 1)
+    token_num = token_end - token_start
+    row_offset = block_id * BLOCK_SIZE
+    if row_offset >= token_num:
+        return
+    in_tensor_offset = seq_id * in_tensor_ptr_stride + row_offset + offset
+    in_tensor_mask = (row_offset + offset) < TOPK
+    in_tensor_val = tl.load(in_tensor_ptr + in_tensor_offset, mask=in_tensor_mask)
+    out_tensor_offset = token_start + row_offset + offset
+    out_tensor_mask = (out_tensor_offset < token_end) & in_tensor_mask
+    tl.store(out_tensor_ptr + out_tensor_offset, in_tensor_val, mask=out_tensor_mask)
+
+
+def fetch_id_to_ragged_triton(
+    in_tensor: torch.Tensor, cumsum: torch.Tensor, out_tensor: torch.Tensor, topk
+):
+    num_tokens = in_tensor.size(0)
+    block_size = 64
+    num_block_per_row = triton.cdiv(topk, block_size)
+    grid = (
+        num_tokens,
+        num_block_per_row,
+    )
+    fetch_id_to_ragged_kernel[grid](
+        in_tensor, cumsum, out_tensor, in_tensor.stride(0), topk, num_tokens, block_size
+    )
 
 
 class ROCMAiterMLASparseBackend(AttentionBackend):
@@ -83,6 +125,13 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 
     block_table: torch.Tensor
     req_id_per_token: torch.Tensor
+
+    qo_indptr: torch.Tensor
+    paged_kv_last_page_len: torch.Tensor
+    paged_kv_indices: torch.Tensor
+    paged_kv_indptr: torch.Tensor
+    paged_kv_indptr_rest: torch.Tensor
+
     block_size: int = 1
     topk_tokens: int = 2048
 
@@ -91,7 +140,7 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 class ROCMAiterMLASparseMetadataBuilder(
     AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
 ):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
     def __init__(
         self,
@@ -104,6 +153,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.device = device
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
@@ -124,6 +174,23 @@ class ROCMAiterMLASparseMetadataBuilder(
             dtype=torch.int32,
             device=device,
         )
+        self.qo_indptr = torch.arange(
+            0, max_num_batched_tokens + 1, dtype=torch.int32, device=device
+        )
+        self.paged_kv_last_page_len = torch.ones(
+            max_num_batched_tokens, dtype=torch.int32, device=device
+        )
+
+        # These two needs to be calculated in runtime,
+        # but we still needs to prepare the buffer
+        self.paged_kv_indices = torch.zeros(
+            [max_num_batched_tokens * self.topk_tokens],
+            dtype=torch.int32,
+            device=device,
+        )
+        self.paged_kv_indptr = torch.zeros(
+            [max_num_batched_tokens + 1], dtype=torch.int32, device=device
+        )
 
     def build(
         self,
@@ -142,7 +209,15 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
             torch.from_numpy(req_id_per_token), non_blocking=True
         )
+        self.paged_kv_indices.fill_(0)
+        self.paged_kv_indptr.fill_(0)
+
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
+        qo_indptr = self.qo_indptr[: num_tokens + 1]
+        paged_kv_last_page_len = self.paged_kv_last_page_len[:num_tokens]
+        paged_kv_indices = self.paged_kv_indices[: num_tokens * self.topk_tokens]
+        paged_kv_indptr = self.paged_kv_indptr[: num_tokens + 1]
+        paged_kv_indptr_rest = self.paged_kv_indptr[num_tokens + 1 :]
 
         metadata = ROCMAiterMLASparseMetadata(
             num_reqs=common_attn_metadata.num_reqs,
@@ -155,6 +230,11 @@ class ROCMAiterMLASparseMetadataBuilder(
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            qo_indptr=qo_indptr,
+            paged_kv_last_page_len=paged_kv_last_page_len,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_indptr=paged_kv_indptr,
+            paged_kv_indptr_rest=paged_kv_indptr_rest,
         )
         return metadata
 
@@ -188,7 +268,7 @@ def reference_mla_sparse_prefill(
     return (result, lse)
 
 
-class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
+class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata]):
     def __init__(
         self,
         num_heads: int,
@@ -203,95 +283,73 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
         topk_indice_buffer: torch.Tensor | None = None,
-        indexer: Optional["Indexer"] = None,
+        indexer: "Indexer | None" = None,
         **mla_args,
     ) -> None:
-        super().__init__(
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            logits_soft_cap,
-            attn_type,
-            kv_sharing_target_layer_name,
-            **mla_args,
-        )
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+        self.kv_cache_dtype = kv_cache_dtype
+        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
-        self.is_fp8bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
     def _forward_bf16_kv(
         self,
-        q: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        topk_indices: torch.Tensor,
+        q: torch.Tensor,  # [sq, heads, d_qk]
+        kv_c_and_k_pe_cache: torch.Tensor,  # [blocks, heads, d_qk]
+        topk_indices: torch.Tensor,  # [sq, topk]
         attn_metadata: ROCMAiterMLASparseMetadata,
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
-        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
-            -1, 1, kv_c_and_k_pe_cache.shape[-1]
+        output = torch.empty(
+            [num_tokens, self.num_heads, self.kv_lora_rank],
+            dtype=q.dtype,
+            device=q.device,
+        )
+        seq_len = (topk_indices != -1).sum(dim=-1)
+        torch.cumsum(seq_len, dim=0, out=attn_metadata.paged_kv_indptr[1:])
+        attn_metadata.paged_kv_indptr_rest.fill_(attn_metadata.paged_kv_indptr[-1])
+        fetch_id_to_ragged_triton(
+            topk_indices,
+            attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_indices,
+            attn_metadata.topk_tokens,
         )
 
-        topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = reference_mla_sparse_prefill(
-            q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale, 512
-        )[0]
+        rocm_aiter_ops.mla_decode_fwd(
+            q,
+            kv_c_and_k_pe_cache,
+            output,
+            self.scale,
+            attn_metadata.qo_indptr,
+            1,
+            attn_metadata.paged_kv_indptr,
+            attn_metadata.paged_kv_indices,
+            attn_metadata.paged_kv_last_page_len,
+        )
+
         return output[:, : self.num_heads, :]
 
-    def forward(
+    def forward_mqa(
         self,
-        layer: AttentionLayer,
-        q: torch.Tensor,
-        k_c_normed: torch.Tensor,  # key in unified attn
-        k_pe: torch.Tensor,  # value in unified attn
-        kv_cache: torch.Tensor,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: ROCMAiterMLASparseMetadata,
-        output: torch.Tensor | None = None,
-        output_scale: torch.Tensor | None = None,
-        output_block_scale: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
 
-        assert output is not None, "Output tensor must be provided."
+        # Concatenate q if it's a tuple (ql_nope, q_pe)
+        if isinstance(q, tuple):
+            q = torch.cat(q, dim=-1)
 
-        if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError(
-                "fused output quantization is not yet supported for ROCMAiterMLASparse"
-            )
+        num_actual_toks = q.shape[0]
 
-        if attn_metadata is None:
-            # The zero fill is required when used with DP + EP
-            # to ensure all ranks within a DP group compute the
-            # same expert outputs.
-            return output.fill_(0)
-
-        num_actual_toks = attn_metadata.num_actual_tokens
-
-        # Inputs and outputs may be padded for CUDA graphs
-
-        q = q[:num_actual_toks, ...]
-        k_c_normed = k_c_normed[:num_actual_toks, ...]
-        k_pe = k_pe[:num_actual_toks, ...]
-
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        # Convert from (B, N, P) to (N, B, P)
-        q_nope = q_nope.transpose(0, 1)
-        if self.is_fp8bmm_enabled:
-            # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-            ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                q_nope, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
-            )
-        else:
-            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            ql_nope = torch.bmm(q_nope, self.W_UK_T)
-            # Convert from (N, B, L) to (B, N, L)
-            ql_nope = ql_nope.transpose(0, 1)
-
+        # Get topk indices
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
@@ -303,22 +361,8 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
-        q = torch.cat([ql_nope, q_pe], dim=-1)
-
-        # write the latent and rope to kv cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=layer._k_scale,
-            )
-
         attn_out = self._forward_bf16_kv(
-            q, kv_cache, topk_indices_global, attn_metadata
+            q, kv_c_and_k_pe_cache, topk_indices_global, attn_metadata
         )
 
-        self._v_up_proj(attn_out, out=output[:num_actual_toks])
-        return output
+        return attn_out, None
