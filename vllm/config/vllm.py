@@ -619,6 +619,11 @@ class VllmConfig:
                     "`external_launcher` distributed executor backend, but you chose "
                     f"`{executor_backend}`."
                 )
+            if self.cache_config.mamba_cache_mode != "none":
+                raise ValueError(
+                    "Currently, async scheduling is not compatible with "
+                    "prefix caching for Mamba models."
+                )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
             if (
@@ -648,6 +653,13 @@ class VllmConfig:
                     "with the `%s` distributed executor backend (only `mp`, `uni`, and "
                     "`external_launcher` are supported).",
                     executor_backend,
+                    scope="local",
+                )
+                self.scheduler_config.async_scheduling = False
+            elif self.cache_config.mamba_cache_mode != "none":
+                logger.warning_once(
+                    "Async scheduling is not compatible with "
+                    "prefix caching for Mamba models and will be disabled.",
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
@@ -947,6 +959,18 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
+        if (
+            self.model_config
+            and vllm_is_batch_invariant()
+            and not self.model_config.disable_cascade_attn
+        ):
+            self.model_config.disable_cascade_attn = True
+            logger.warning_once(
+                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
+                scope="local",
+            )
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
