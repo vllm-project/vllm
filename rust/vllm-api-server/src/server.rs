@@ -1,4 +1,4 @@
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokenizers::Tokenizer;
@@ -11,14 +11,21 @@ pub struct AppState {
     pub tokenizer: Tokenizer,
     pub grpc_client: Mutex<VllmClient>,
     pub model_name: String,
+    pub chat_template: Option<String>,
 }
 
 impl AppState {
-    pub fn new(tokenizer: Tokenizer, grpc_client: VllmClient, model_name: String) -> Self {
+    pub fn new(
+        tokenizer: Tokenizer,
+        grpc_client: VllmClient,
+        model_name: String,
+        chat_template: Option<String>,
+    ) -> Self {
         Self {
             tokenizer,
             grpc_client: Mutex::new(grpc_client),
             model_name,
+            chat_template,
         }
     }
 }
@@ -26,6 +33,7 @@ impl AppState {
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(routes::health_check))
+        .route("/v1/chat/completions", post(routes::chat_completions))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

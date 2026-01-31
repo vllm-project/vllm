@@ -27,6 +27,10 @@ struct Args {
     /// Model name (for tokenizer and response metadata)
     #[arg(long)]
     model: String,
+
+    /// Override chat template (Jinja2 format)
+    #[arg(long)]
+    chat_template: Option<String>,
 }
 
 #[tokio::main]
@@ -45,10 +49,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tokenizer = Tokenizer::from_pretrained(&args.model, None)
         .map_err(|e| format!("Failed to load tokenizer: {}", e))?;
 
+    // Try to get chat template from tokenizer config
+    let chat_template = args.chat_template.or_else(|| {
+        // Note: tokenizers crate doesn't directly expose chat_template
+        // For now, we use the fallback template
+        tracing::warn!("Using fallback chat template - consider providing --chat-template");
+        None
+    });
+
     tracing::info!("Connecting to gRPC server at {}", args.grpc_addr);
     let grpc_client = VllmClient::connect(&args.grpc_addr).await?;
 
-    let state = Arc::new(AppState::new(tokenizer, grpc_client, args.model));
+    let state = Arc::new(AppState::new(
+        tokenizer,
+        grpc_client,
+        args.model,
+        chat_template,
+    ));
 
     let addr = format!("0.0.0.0:{}", args.port);
     server::run_server(&addr, state).await?;
