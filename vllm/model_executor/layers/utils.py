@@ -146,6 +146,7 @@ def rocm_unquantized_gemm_impl(
             and n <= 128
             and k > 512
             and math.ceil(k / 512) * math.ceil(m / 16) < get_cu_count()
+            and x.is_contiguous()
         )
         # k == 2880 and (m == 640 or m == 128))
     )
@@ -165,6 +166,7 @@ def rocm_unquantized_gemm_impl(
         and on_gfx9()
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
+        and x.is_contiguous()
     )
 
     if use_skinny is not True:
