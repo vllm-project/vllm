@@ -25,7 +25,7 @@ def _convert_tokens_to_string_with_added_encoders(
     # Performance improvements: avoid repeated attribute and function lookups;
     # localize frequently used objects;
 
-    sub_texts: list[str] = []
+    segments: list[tuple[str, bool]] = []
     current_sub_text: list[str] = []
     convert_tokens_to_string = tokenizer.convert_tokens_to_string
     added_vocab_set = set(tokenizer.get_added_vocab())
@@ -33,22 +33,37 @@ def _convert_tokens_to_string_with_added_encoders(
         set(tokenizer.all_special_tokens) if skip_special_tokens else ()
     )
 
+    # Added tokens that get spaces around them (special=True or in all_special_tokens)
+    special_added: set[str] = set()
+    if spaces_between_special_tokens and added_vocab_set:
+        special = set(tokenizer.all_special_tokens)
+        dec = tokenizer.added_tokens_decoder
+        special_added = (
+            {t.content for t in dec.values() if t.special or t.content in special}
+            if dec
+            else added_vocab_set
+        )
+
     for token in output_tokens:
-        # Use precomputed set for skip-special check
         if token in all_special_tokens:
             continue
         if token in added_vocab_set:
             if current_sub_text:
-                sub_texts.append(convert_tokens_to_string(current_sub_text))
+                segments.append((convert_tokens_to_string(current_sub_text), False))
                 current_sub_text.clear()
-            sub_texts.append(token)
+            segments.append((token, token in special_added))
         else:
             current_sub_text.append(token)
     if current_sub_text:
-        sub_texts.append(convert_tokens_to_string(current_sub_text))
-    if spaces_between_special_tokens:
-        return " ".join(sub_texts)
-    return "".join(sub_texts)
+        segments.append((convert_tokens_to_string(current_sub_text), False))
+
+    if spaces_between_special_tokens and segments:
+        texts, flags = zip(*segments)
+        return texts[0] + "".join(
+            (" " if (a or b) else "") + t
+            for (a, b), t in zip(zip(flags, flags[1:]), texts[1:])
+        )
+    return "".join(s[0] for s in segments)
 
 
 # 5 is an arbitrary value that should work for all

@@ -205,9 +205,11 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             if (
                 added_token_ids := getattr(self.tokenizer, "added_token_ids", None)
             ) is None:
+                added_tokens_decoder = self.tokenizer.get_added_tokens_decoder()
                 self.tokenizer.added_token_ids = added_token_ids = {
-                    tid: tok.content
-                    for tid, tok in self.tokenizer.get_added_tokens_decoder().items()
+                    tid: (tok.content if hasattr(tok, "content") else str(tok))
+                    for tid, tok in added_tokens_decoder.items()
+                    if getattr(tok, "special", True)
                 }
 
             if added_token_ids:

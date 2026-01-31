@@ -5,9 +5,17 @@ from collections.abc import Generator
 from typing import Any
 
 import pytest
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import (
+    AddedToken,
+    AutoTokenizer,
+    PreTrainedTokenizer,
+    PreTrainedTokenizerFast,
+)
 
 from vllm.sampling_params import SamplingParams
+from vllm.tokenizers.detokenizer_utils import (
+    _convert_tokens_to_string_with_added_encoders,
+)
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.detokenizer import (
@@ -240,3 +248,61 @@ def test_oov_decode(tokenizer, fast):
 
     assert decoded_text == ""
     assert out_ids == [len(tokenizer)]
+
+
+def test_detokenize_non_special_added_tokens_no_space():
+    class _DummyTokenizer:
+        def __init__(self):
+            self.added_tokens_decoder = {
+                1: AddedToken("<think>", special=False),
+                2: AddedToken("</think>", special=False),
+                3: AddedToken("<|pad|>", special=True),
+            }
+            self._added_vocab = {
+                tok.content: idx for idx, tok in self.added_tokens_decoder.items()
+            }
+            self.all_special_tokens = ["<|pad|>"]
+
+        def get_added_vocab(self):
+            return self._added_vocab
+
+        def convert_tokens_to_string(self, tokens):
+            return "".join(tokens)
+
+    tokenizer = _DummyTokenizer()
+    output_tokens = ["<think>", "ok", "</think>", "1"]
+    result = _convert_tokens_to_string_with_added_encoders(
+        tokenizer,
+        output_tokens,
+        skip_special_tokens=False,
+        spaces_between_special_tokens=True,
+    )
+    assert result == "<think>ok</think>1"
+
+
+def test_detokenize_special_added_tokens_with_space():
+    class _DummyTokenizer:
+        def __init__(self):
+            self.added_tokens_decoder = {
+                1: AddedToken("<|pad|>", special=True),
+            }
+            self._added_vocab = {
+                tok.content: idx for idx, tok in self.added_tokens_decoder.items()
+            }
+            self.all_special_tokens = ["<|pad|>"]
+
+        def get_added_vocab(self):
+            return self._added_vocab
+
+        def convert_tokens_to_string(self, tokens):
+            return "".join(tokens)
+
+    tokenizer = _DummyTokenizer()
+    output_tokens = ["<|pad|>", "<|pad|>"]
+    result = _convert_tokens_to_string_with_added_encoders(
+        tokenizer,
+        output_tokens,
+        skip_special_tokens=False,
+        spaces_between_special_tokens=True,
+    )
+    assert result == "<|pad|> <|pad|>"
