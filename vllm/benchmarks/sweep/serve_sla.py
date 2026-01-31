@@ -3,13 +3,10 @@
 import argparse
 import contextlib
 import json
-import math
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Literal, get_args
-
-from typing_extensions import assert_never
 
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -23,6 +20,15 @@ try:
     import pandas as pd
 except ImportError:
     pd = PlaceholderModule("pandas")
+
+try:
+    from scipy.interpolate import PchipInterpolator
+except ImportError:
+    PchipInterpolator = (
+        PlaceholderModule("scipy")
+        .placeholder_attr("interpolate")
+        .placeholder_attr("PchipInterpolator")
+    )
 
 
 def _get_sla_base_path(
@@ -57,6 +63,14 @@ def _get_sla_run_path(iter_path: Path, run_number: int | None):
         return iter_path / "summary.json"
 
     return iter_path / f"run={run_number}.json"
+
+
+def _iter_sla_val_paths(base_path: Path, sla_variable: str):
+    for iter_path in base_path.glob(f"{sla_variable}=*"):
+        sla_value = int(iter_path.name.removeprefix(f"{sla_variable}="))
+        summary_path = iter_path / "summary.json"
+        if summary_path.exists():
+            yield sla_value, summary_path
 
 
 def _sla_needs_server(
@@ -118,18 +132,55 @@ def run_sla(
 SLAVariable = Literal["request_rate", "max_concurrency"]
 
 
-def _estimate_sla_value(run_data: dict[str, object], sla_variable: SLAVariable):
-    request_throughput = float(run_data["request_throughput"])  # type: ignore
-    if sla_variable == "request_rate":
-        return request_throughput
-    if sla_variable == "max_concurrency":
-        mean_latency_ms = float(run_data["mean_e2el_ms"])  # type: ignore
-        return request_throughput * mean_latency_ms / 1000
+class SLAHistory(dict[int, float]):
+    def __init__(self, min_value: int, max_value: int) -> None:
+        super().__init__()
 
-    assert_never(sla_variable)
+        self.min_value = min_value
+        self.max_value = max_value
+
+    def get_xy(self) -> tuple[list[int], list[float]]:
+        xs = list[int]()
+        ys = list[float]()
+        for x, y in sorted(self.items()):
+            xs.append(x)
+            ys.append(y)
+
+        return xs, ys
+
+    def get_max_passing(self) -> float:
+        return max(
+            (val for val, margin in self.items() if margin <= 0),
+            default=self.min_value,
+        )
+
+    def get_min_failing(self) -> float:
+        return min(
+            (val for val, margin in self.items() if margin > 0),
+            default=self.max_value,
+        )
 
 
-def _estimate_sla_bounds(
+def _compute_margin(
+    sla_comb: SLASweepItem,
+    iter_data: list[dict[str, object]],
+):
+    assert iter_data, "Summary should not be empty"
+
+    iter_data_mean = {
+        k: sum(float(run_data[k]) for run_data in iter_data) / len(iter_data)  # type: ignore
+        for k in sla_comb
+    }
+
+    sla_margins = [
+        criterion.print_and_compute_margin(iter_data_mean, k)
+        for k, criterion in sla_comb.items()
+    ]
+
+    return max(sla_margins)
+
+
+def solve_sla(
     server: ServerProcess | None,
     bench_cmd: list[str],
     *,
@@ -140,17 +191,40 @@ def _estimate_sla_bounds(
     num_runs: int,
     dry_run: bool,
     sla_variable: SLAVariable,
-    init_value: int,
-    max_value: int,
+    sla_min_value: int = 1,
+    sla_max_value: int = 8192,  # The value that represents infinite QPS
 ):
     sla_data = list[dict[str, object]]()
+    history = SLAHistory(min_value=sla_min_value, max_value=sla_max_value)
 
-    val: int = init_value
-    assert val > 0
+    # Use results from previous runs
+    for past_sla_value, path in _iter_sla_val_paths(base_path, sla_variable):
+        with path.open("rb") as f:
+            past_iter_data = json.load(f)
 
-    history = dict[int, float]()
+        history[past_sla_value] = _compute_margin(sla_comb, past_iter_data)
 
-    while True:
+    # NOTE: We don't use equality here to be more robust against noisy results
+    while history.get_max_passing() + 1 < history.get_min_failing():
+        if max(history, default=sla_min_value) < sla_max_value:
+            val = sla_max_value
+        elif min(history, default=sla_max_value) > sla_min_value:
+            val = sla_min_value
+        else:
+            spl = PchipInterpolator(*history.get_xy(), extrapolate=False)
+            spl_roots = spl.solve()
+            if len(spl_roots) == 0:
+                # Fallback to binary search
+                val = int((history.get_max_passing() + history.get_min_failing()) / 2)
+            else:
+                val = int(spl_roots[0])
+
+            if val in history:
+                # Cover both sides (floor and ceil) of the root to be sure
+                # that it is indeed the target value
+                val += 1
+
+        val = max(sla_min_value, min(val, sla_max_value))
         print(f"Testing {sla_variable}: {val} req/s")
 
         iter_data = run_sla(
@@ -162,105 +236,19 @@ def _estimate_sla_bounds(
             num_runs=num_runs,
             dry_run=dry_run,
         )
+        if iter_data is None:
+            return None
 
-        assert iter_data is not None
+        margin = _compute_margin(sla_comb, iter_data)
+        if margin <= 0:
+            print(f"SLA criteria are met. ({margin=:.2f})")
+        else:
+            print(f"SLA criteria are not met. ({margin=:.2f})")
+
         sla_data.extend(iter_data)
-
-        iter_data_mean = {
-            k: sum(float(run_data[k]) for run_data in iter_data) / len(iter_data)  # type: ignore
-            for k in sla_comb
-        }
-
-        sla_margins = [
-            criterion.print_and_compute_margin(iter_data_mean, k)
-            for k, criterion in sla_comb.items()
-        ]
-        margin = max(sla_margins)
         history[val] = margin
 
-        if margin <= 0:
-            print("SLA criteria are met.")
-            val *= 2
-        else:
-            print("SLA criteria are not met.")
-            break
-
-        if val >= max_value:
-            break
-
-    max_passing = max(
-        (val for val, margin in history.items() if margin <= 0),
-        default=0,
-    )
-    min_failing = min(
-        (val for val, margin in history.items() if margin > 0),
-        default=max_value,
-    )
-
-    return sla_data, (max_passing, min_failing), history
-
-
-def _find_sla_value(
-    server: ServerProcess | None,
-    bench_cmd: list[str],
-    *,
-    serve_comb: ParameterSweepItem,
-    bench_comb: ParameterSweepItem,
-    sla_comb: SLASweepItem,
-    base_path: Path,
-    num_runs: int,
-    dry_run: bool,
-    sla_variable: SLAVariable,
-    min_value: int,
-    max_value: int,
-):
-    sla_data = list[dict[str, object]]()
-
-    left: int = min_value
-    right: int = max_value
-
-    history = dict[int, float]()
-
-    while True:
-        val = (left + right) // 2
-        print(f"Testing {sla_variable}: {val} req/s")
-
-        iter_data = run_sla(
-            server,
-            bench_cmd,
-            serve_comb=serve_comb,
-            bench_comb=bench_comb | {sla_variable: val},
-            iter_path=_get_sla_iter_path(base_path, sla_comb, sla_variable, val),
-            num_runs=num_runs,
-            dry_run=dry_run,
-        )
-
-        assert iter_data is not None
-        sla_data.extend(iter_data)
-
-        iter_data_mean = {
-            k: sum(float(run_data[k]) for run_data in iter_data) / len(iter_data)  # type: ignore
-            for k in sla_comb
-        }
-
-        sla_margins = [
-            criterion.print_and_compute_margin(iter_data_mean, k)
-            for k, criterion in sla_comb.items()
-        ]
-        margin = max(sla_margins)
-        history[val] = margin
-
-        if margin <= 0:
-            print("SLA criteria are met.")
-            left = val
-        else:
-            print("SLA criteria are not met.")
-            right = val
-
-        if right - left <= 1 and left in history:
-            break
-
-    return sla_data, left, history
+    return sla_data, history
 
 
 def search_sla(
@@ -271,7 +259,6 @@ def search_sla(
     bench_comb: ParameterSweepItem,
     sla_comb: SLASweepItem,
     sla_variable: SLAVariable,
-    sla_inf_value: int = 65536,  # The value that represents infinite QPS
     base_path: Path,
     num_runs: int,
     dry_run: bool,
@@ -279,57 +266,25 @@ def search_sla(
     print("[SLA START]")
     print(f"SLA criteria: {sla_comb.as_text()}")
 
-    sla_data_0 = run_sla(
+    result = solve_sla(
         server,
         bench_cmd,
         serve_comb=serve_comb,
-        bench_comb=bench_comb | {sla_variable: sla_inf_value},
-        iter_path=_get_sla_iter_path(base_path, sla_comb, sla_variable, sla_inf_value),
+        bench_comb=bench_comb,
+        sla_comb=sla_comb,
+        base_path=base_path,
         num_runs=num_runs,
         dry_run=dry_run,
+        sla_variable=sla_variable,
     )
-    if sla_data_0 is None:
+    if result is None:
         assert dry_run
         print("Omitting SLA search.")
         print("[SLA END]")
-        return None
+        return
 
-    sla_init_value = math.ceil(
-        sum(_estimate_sla_value(item, sla_variable) for item in sla_data_0)
-        / len(sla_data_0)
-    )
-    print(f"Initial {sla_variable} to search: {sla_init_value} req/s.")
-
-    sla_data_1, (sla_min, sla_max), _ = _estimate_sla_bounds(
-        server,
-        bench_cmd,
-        serve_comb=serve_comb,
-        bench_comb=bench_comb,
-        sla_comb=sla_comb,
-        base_path=base_path,
-        num_runs=num_runs,
-        dry_run=dry_run,
-        sla_variable=sla_variable,
-        init_value=sla_init_value,
-        max_value=sla_inf_value,
-    )
-    print(f"Range of {sla_variable} to search: [{sla_min}, {sla_max}] req/s.")
-
-    sla_data_2, sla_value, _ = _find_sla_value(
-        server,
-        bench_cmd,
-        serve_comb=serve_comb,
-        bench_comb=bench_comb,
-        sla_comb=sla_comb,
-        base_path=base_path,
-        num_runs=num_runs,
-        dry_run=dry_run,
-        sla_variable=sla_variable,
-        min_value=sla_min,
-        max_value=sla_max,
-    )
-
-    sla_data = sla_data_0 + sla_data_1 + sla_data_2
+    sla_data, sla_history = result
+    sla_value = sla_history.get_max_passing()
     print(f"Maximum {sla_variable} for SLA: {sla_value} req/s.")
 
     with _get_sla_iter_path(

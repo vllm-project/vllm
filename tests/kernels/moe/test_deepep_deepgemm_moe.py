@@ -33,7 +33,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
-from .utils import make_test_weights
+from .utils import make_dummy_moe_config, make_test_weights
 
 if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
@@ -192,6 +192,7 @@ def make_ll_modular_kernel(
         max_num_tokens=max_tokens_per_rank,
         num_dispatchers=pgi.world_size // dp_size,
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
     mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
     return mk
@@ -219,7 +220,10 @@ def make_ht_modular_kernel(
         block_shape=test_config.block_size,
     )
 
-    fused_experts = DeepGemmExperts(quant_config)
+    fused_experts = DeepGemmExperts(
+        moe_config=make_dummy_moe_config(),
+        quant_config=quant_config,
+    )
     mk = FusedMoEModularKernel(prepare_finalize=a2a, fused_experts=fused_experts)
     return mk
 
@@ -349,9 +353,6 @@ def triton_impl(
         topk_ids=topk_ids,
         inplace=False,
         quant_config=quant_config,
-        # Make sure this is set to False so we
-        # don't end up comparing the same implementation.
-        allow_deep_gemm=False,
     )
 
 

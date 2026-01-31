@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
 from vllm.benchmarks.sweep.param_sweep import ParameterSweepItem
-from vllm.benchmarks.sweep.serve_sla import _estimate_sla_bounds, _find_sla_value
+from vllm.benchmarks.sweep.serve_sla import _get_sla_run_path, solve_sla
 from vllm.benchmarks.sweep.server import ServerProcess
 from vllm.benchmarks.sweep.sla_sweep import (
     SLACriterionBase,
@@ -34,169 +35,264 @@ def _set_return_value(
         num_runs: int,
         dry_run: bool,
     ):
-        return var2metric(bench_comb)
+        iter_data = var2metric(bench_comb)
+
+        summary_path = _get_sla_run_path(iter_path, run_number=None)
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with summary_path.open("w") as f:
+            json.dump(iter_data, f, indent=4)
+
+        return iter_data
 
     return patch("vllm.benchmarks.sweep.serve_sla.run_sla", side_effect=mock_run_sla)
 
 
-def _var2metric_identity(bench_comb):
-    return [{"request_throughput": float(bench_comb["request_rate"])}]
+def _var2metric_linear():
+    def wrapped(bench_comb):
+        x = float(bench_comb["request_rate"])
+        y = x
+
+        return [{"request_throughput": y}]
+
+    return wrapped
 
 
-def _run_estimate_sla_bounds(
+def _var2metric_concave(elbow_point: float):
+    def wrapped(bench_comb):
+        x = float(bench_comb["request_rate"])
+        if x < elbow_point:
+            y = 0.5 * (x - elbow_point) + elbow_point
+        else:
+            y = 1.5 * (x - elbow_point) + elbow_point
+
+        return [{"request_throughput": y}]
+
+    return wrapped
+
+
+def _var2metric_convex(elbow_point: float):
+    def wrapped(bench_comb):
+        x = float(bench_comb["request_rate"])
+        if x < elbow_point:
+            y = 1.5 * (x - elbow_point) + elbow_point
+        else:
+            y = 0.5 * (x - elbow_point) + elbow_point
+
+        return [{"request_throughput": y}]
+
+    return wrapped
+
+
+def _var2metric_quadratic(y_intercept: float):
+    def wrapped(bench_comb):
+        x = float(bench_comb["request_rate"])
+        y = y_intercept + 0.1 * x**2
+
+        return [{"request_throughput": y}]
+
+    return wrapped
+
+
+def _var2metric_sqrt(y_intercept: float):
+    def wrapped(bench_comb):
+        x = float(bench_comb["request_rate"])
+        y = y_intercept + 10 * x**0.5
+
+        return [{"request_throughput": y}]
+
+    return wrapped
+
+
+def _run_solve_sla(
     var2metric: Callable[[ParameterSweepItem], list[dict[str, float]]],
     criterion: SLACriterionBase,
-    init_value: int,
-    max_value: int,
+    base_path: Path,
+    min_value: int = 1,
+    max_value: int = 100,
 ):
     with _set_return_value(var2metric):
-        return _estimate_sla_bounds(
+        result = solve_sla(
             server=None,
             bench_cmd=[],
             serve_comb=ParameterSweepItem(),
             bench_comb=ParameterSweepItem(),
             sla_comb=SLASweepItem({"request_throughput": criterion}),
-            base_path=Path(""),
+            base_path=base_path,
             num_runs=1,
             dry_run=False,
             sla_variable="request_rate",
-            init_value=init_value,
-            max_value=max_value,
+            sla_min_value=min_value,
+            sla_max_value=max_value,
         )
+        assert result is not None
+
+        return result
 
 
-def test_estimate_sla_bounds_le():
-    sla_data, (max_passing, min_failing), history = _run_estimate_sla_bounds(
-        _var2metric_identity,
+def test_solve_linear_sla_le(tmp_path):
+    sla_data, history = _run_solve_sla(
+        _var2metric_linear(),
         SLALessThanOrEqualTo(target=32),
-        init_value=1,
-        max_value=100,
+        tmp_path,
     )
 
-    assert max_passing == 32
-    assert min_failing == 64
+    assert history.get_max_passing() == 32
 
     assert {val: margin <= 0 for val, margin in history.items()} == {
+        100: False,
         1: True,
-        2: True,
-        4: True,
-        8: True,
-        16: True,
         32: True,
-        64: False,
+        33: False,
     }
 
 
-def test_estimate_sla_bounds_lt():
-    sla_data, (max_passing, min_failing), history = _run_estimate_sla_bounds(
-        _var2metric_identity,
+def test_solve_linear_sla_lt(tmp_path):
+    sla_data, history = _run_solve_sla(
+        _var2metric_linear(),
         SLALessThan(target=32),
-        init_value=1,
-        max_value=100,
+        tmp_path,
     )
 
-    assert max_passing == 16
-    assert min_failing == 32
+    assert history.get_max_passing() == 31
 
     assert {val: margin <= 0 for val, margin in history.items()} == {
+        100: False,
         1: True,
-        2: True,
-        4: True,
-        8: True,
-        16: True,
+        31: True,
         32: False,
     }
 
 
-def test_estimate_sla_bounds_oob():
-    sla_data, (max_passing, min_failing), history = _run_estimate_sla_bounds(
-        _var2metric_identity,
+def test_solve_linear_sla_oob(tmp_path):
+    sla_data, history = _run_solve_sla(
+        _var2metric_linear(),
         SLALessThanOrEqualTo(target=32),
-        init_value=64,
-        max_value=128,
-    )
-
-    assert max_passing == 0
-    assert min_failing == 64
-
-    assert {val: margin <= 0 for val, margin in history.items()} == {
-        64: False,
-    }
-
-
-def _run_test_find_sla_value_le(
-    var2metric: Callable[[ParameterSweepItem], list[dict[str, float]]],
-    criterion: SLACriterionBase,
-    min_value: int,
-    max_value: int,
-):
-    with _set_return_value(var2metric):
-        return _find_sla_value(
-            server=None,
-            bench_cmd=[],
-            serve_comb=ParameterSweepItem(),
-            bench_comb=ParameterSweepItem(),
-            sla_comb=SLASweepItem({"request_throughput": criterion}),
-            base_path=Path(""),
-            num_runs=1,
-            dry_run=False,
-            sla_variable="request_rate",
-            min_value=min_value,
-            max_value=max_value,
-        )
-
-
-def test_find_sla_value_le():
-    sla_data, sla_value, history = _run_test_find_sla_value_le(
-        _var2metric_identity,
-        SLALessThanOrEqualTo(target=50.0),
-        min_value=32,
-        max_value=64,
-    )
-
-    assert sla_value == 50
-    assert {val: margin <= 0 for val, margin in history.items()} == {
-        48: True,
-        56: False,
-        52: False,
-        50: True,
-        51: False,
-    }
-
-
-def test_find_sla_value_lt():
-    sla_data, sla_value, history = _run_test_find_sla_value_le(
-        _var2metric_identity,
-        SLALessThan(target=50.0),
-        min_value=32,
-        max_value=64,
-    )
-
-    assert sla_value == 49
-    assert {val: margin <= 0 for val, margin in history.items()} == {
-        48: True,
-        56: False,
-        52: False,
-        50: False,
-        49: True,
-    }
-
-
-def test_find_sla_value_oob():
-    sla_data, sla_value, history = _run_test_find_sla_value_le(
-        _var2metric_identity,
-        SLALessThanOrEqualTo(target=50.0),
+        tmp_path,
         min_value=64,
-        max_value=128,
     )
 
-    assert sla_value == 64
+    assert history.get_max_passing() == 64
+    assert history.get_min_failing() == 64
+
     assert {val: margin <= 0 for val, margin in history.items()} == {
-        96: False,
-        80: False,
-        72: False,
-        68: False,
-        66: False,
-        65: False,
+        100: False,
         64: False,
+    }
+
+
+def test_solve_concave_sla_le(tmp_path):
+    sla_data, history = _run_solve_sla(
+        _var2metric_concave(elbow_point=32),
+        SLALessThanOrEqualTo(target=24),
+        tmp_path,
+    )
+
+    assert history.get_max_passing() == 16
+
+    assert {val: margin <= 0 for val, margin in history.items()} == {
+        100: False,
+        1: True,
+        7: True,
+        13: True,
+        15: True,
+        16: True,
+        17: False,
+    }
+
+
+def test_solve_convex_sla_le(tmp_path):
+    sla_data, history = _run_solve_sla(
+        _var2metric_convex(elbow_point=32),
+        SLALessThanOrEqualTo(target=24),
+        tmp_path,
+    )
+
+    assert history.get_max_passing() == 26
+
+    assert {val: margin <= 0 for val, margin in history.items()} == {
+        100: False,
+        1: True,
+        48: False,
+        30: False,
+        24: True,
+        26: True,
+        27: False,
+    }
+
+
+def test_solve_quadratic_sla_le(tmp_path):
+    sla_data, history = _run_solve_sla(
+        _var2metric_quadratic(y_intercept=10),
+        SLALessThanOrEqualTo(target=50),
+        tmp_path,
+    )
+
+    assert history.get_max_passing() == 20
+
+    assert {val: margin <= 0 for val, margin in history.items()} == {
+        100: False,
+        1: True,
+        4: True,
+        20: True,
+        21: False,
+    }
+
+
+def test_solve_sqrt_sla_le(tmp_path):
+    sla_data, history = _run_solve_sla(
+        _var2metric_sqrt(y_intercept=10),
+        SLALessThanOrEqualTo(target=100),
+        tmp_path,
+    )
+
+    assert history.get_max_passing() == 81
+
+    assert {val: margin <= 0 for val, margin in history.items()} == {
+        100: False,
+        1: True,
+        89: False,
+        81: True,
+        82: False,
+    }
+
+
+def test_solve_reuse_history(tmp_path):
+    sla_data, history = _run_solve_sla(
+        _var2metric_linear(),
+        SLALessThanOrEqualTo(target=10),
+        tmp_path,
+        min_value=1,
+        max_value=20,
+    )
+
+    assert history.get_max_passing() == 10
+
+    assert {val: margin <= 0 for val, margin in history.items()} == {
+        20: False,
+        1: True,
+        10: True,
+        11: False,
+    }
+
+    sla_data, history = _run_solve_sla(
+        _var2metric_linear(),
+        SLALessThanOrEqualTo(target=30),
+        tmp_path,
+        min_value=21,
+        max_value=40,
+    )
+
+    assert history.get_max_passing() == 30
+
+    assert {val: margin <= 0 for val, margin in history.items()} == {
+        # Items from the past run
+        # (the margins are different because the target changed)
+        20: True,
+        1: True,
+        10: True,
+        11: True,
+        # Items from this run
+        40: False,
+        30: True,
+        31: False,
     }

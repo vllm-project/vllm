@@ -19,7 +19,7 @@ def sync_tracker():
     Fixture that patches CommonAttentionMetadata.seq_lens_cpu to detect
     lazy init syncs. Prints stack traces immediately when syncs occur.
     """
-    from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+    from vllm.v1.attention.backend import CommonAttentionMetadata
 
     # Shared counter for cross-process communication (inherited by fork)
     sync_count = multiprocessing.Value("i", 0)

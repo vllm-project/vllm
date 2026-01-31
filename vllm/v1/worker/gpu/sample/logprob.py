@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 
 import torch
 
@@ -104,6 +103,7 @@ def compute_topk_logprobs(
     logits: torch.Tensor,
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
+    cu_num_logits: list[int] | None = None,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
@@ -136,32 +136,5 @@ def compute_topk_logprobs(
         logprob_token_ids=logprob_token_ids,
         logprobs=logprobs,
         selected_token_ranks=token_ranks,
+        cu_num_generated_tokens=cu_num_logits,
     )
-
-
-def compute_prompt_logprobs(
-    prompt_token_ids: torch.Tensor,
-    prompt_hidden_states: torch.Tensor,
-    logits_fn: Callable[[torch.Tensor], torch.Tensor],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # Since materializing the full prompt logits can take too much memory,
-    # we compute it in chunks.
-    CHUNK_SIZE = 1024
-    logprobs = []
-    ranks = []
-    prompt_token_ids = prompt_token_ids.to(torch.int64)
-    for start_idx in range(0, prompt_token_ids.shape[0], CHUNK_SIZE):
-        end_idx = start_idx + CHUNK_SIZE
-        # NOTE(woosuk): logits_fn can be slow because it involves all-gather.
-        prompt_logits = logits_fn(prompt_hidden_states[start_idx:end_idx])
-        prompt_logprobs = compute_topk_logprobs(
-            prompt_logits,
-            0,  # num_logprobs
-            prompt_token_ids[start_idx:end_idx],
-        )
-        logprobs.append(prompt_logprobs.logprobs)
-        ranks.append(prompt_logprobs.selected_token_ranks)
-
-    logprobs = torch.cat(logprobs, dim=0) if len(logprobs) > 1 else logprobs[0]
-    ranks = torch.cat(ranks, dim=0) if len(ranks) > 1 else ranks[0]
-    return logprobs, ranks

@@ -4,12 +4,12 @@
 import contextlib
 import os
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import msgspec
@@ -224,6 +224,14 @@ def get_device_indices(
     return value
 
 
+def get_prompt_text(prompt: Any) -> str | None:
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, Mapping):
+        return cast(str | None, prompt.get("prompt"))
+    return None
+
+
 class CoreEngineActorManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -304,6 +312,13 @@ class CoreEngineActorManager:
             dp_vllm_config = copy.deepcopy(vllm_config)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
+
+            if dp_size > 1 and dp_vllm_config.kv_transfer_config is not None:
+                # modify the engine_id and append the local_dp_rank to it to ensure
+                # that the kv_transfer_config is unique for each DP rank.
+                dp_vllm_config.kv_transfer_config.engine_id = (
+                    f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{local_index}"
+                )
 
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
@@ -787,10 +802,7 @@ def launch_core_engines(
     local_start_index = parallel_config.data_parallel_rank_local
     dp_rank = parallel_config.data_parallel_rank
     host = parallel_config.data_parallel_master_ip
-    local_engines_only = (
-        parallel_config.data_parallel_hybrid_lb
-        or parallel_config.data_parallel_external_lb
-    )
+    local_engines_only = parallel_config.local_engines_only
 
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see

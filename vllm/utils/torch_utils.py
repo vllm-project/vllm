@@ -64,6 +64,36 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
+def is_strictly_contiguous(t: torch.Tensor) -> bool:
+    """
+    Check if tensor is contiguous AND has no degenerate strides.
+
+    A degenerate stride occurs when a dimension has size 1 but the stride
+    doesn't match the canonical contiguous layout. This can cause issues
+    in some CUDA kernels that rely on stride values for memory access.
+
+    For a C-contiguous tensor of shape (d0, d1, ..., dn), the expected
+    strides are: stride[i] = product(shape[i+1:]) for all i, with stride[-1]=1.
+
+    Example with torch.Size([16, 1, 8, 32]):
+        - Canonical strides: (256, 256, 32, 1)
+        - Degenerate strides: (256, 1, 32, 1)  # dim=1 has size=1, allowing
+                                                  # non-canonical stride in dim=0
+    """
+    if not t.is_contiguous():
+        return False
+
+    # Check that strides match canonical contiguous layout
+    shape = t.shape
+    strides = t.stride()
+    expected_stride = 1
+    for i in range(len(shape) - 1, -1, -1):
+        if strides[i] != expected_stride:
+            return False
+        expected_stride *= shape[i]
+    return True
+
+
 @contextlib.contextmanager
 def set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""
@@ -303,6 +333,8 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
 
 def create_kv_caches_with_random_flash(
@@ -583,8 +615,9 @@ def weak_ref_tensor(tensor: Any) -> Any:
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
+    This ignores 0-size tensors as those don't allocate any memory.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
         return torch.ops._C.weak_ref_tensor(tensor)
     else:
         return tensor
@@ -674,24 +707,9 @@ def is_torch_equal(target: str) -> bool:
         return Version(importlib.metadata.version("torch")) == Version(target)
 
 
-# Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
-# In particular, the FakeScalarType is not supported for earlier versions of
-# PyTorch which breaks dynamo for any ops registered using ScalarType.
-def supports_dynamo() -> bool:
-    return is_torch_equal_or_newer("2.4.0")
-
-
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
-    return (
-        is_torch_equal_or_newer("2.8.0.dev") and torch.distributed.is_xccl_available()
-    )
-
-
-# Some backends use pytorch version < 2.4.0 which doesn't
-# support `torch.library.custom_op`.
-def supports_custom_op() -> bool:
-    return hasattr(torch.library, "custom_op")
+    return torch.distributed.is_xccl_available()
 
 
 # create a library to hold the custom op
@@ -722,18 +740,6 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if not supports_custom_op():
-        from vllm.platforms import current_platform
-
-        assert not current_platform.is_cuda_alike(), (
-            "cuda platform needs torch>=2.4 to support custom op, "
-            "chances are you are using an old version of pytorch "
-            "or a custom build of pytorch. It is recommended to "
-            "use vLLM in a fresh new environment and let it install "
-            "the required dependencies."
-        )
-        return
-
     if mutates_args is None:
         mutates_args = []
 

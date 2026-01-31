@@ -14,7 +14,6 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Generic,
-    Optional,
     TypeVar,
     Union,
     overload,
@@ -229,7 +228,7 @@ def wait_for_completion_or_failure(
     api_server_manager: APIServerProcessManager,
     engine_manager: Union["CoreEngineProcManager", "CoreEngineActorManager"]
     | None = None,
-    coordinator: Optional["DPCoordinator"] = None,
+    coordinator: "DPCoordinator | None" = None,
 ) -> None:
     """Wait for all processes to complete or detect if any fail.
 

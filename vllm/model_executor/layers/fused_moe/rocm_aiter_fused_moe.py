@@ -9,10 +9,20 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
+    kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
 )
 
 
@@ -178,6 +188,9 @@ def rocm_aiter_fused_experts(
     apply_router_weight_on_input: bool = False,
     expert_map: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
+    a1q_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -205,6 +218,9 @@ def rocm_aiter_fused_experts(
         )
         assert topk_weights.shape[-1] == 1, (
             "Only support topk=1 when `apply_router_weight_on_input` is True"
+        )
+        assert num_local_tokens is None, (
+            "AITER tkw1 kernel does not support `num_local_tokens`"
         )
 
         return rocm_aiter_ops.asm_moe_tkw1(
@@ -262,24 +278,55 @@ def rocm_aiter_fused_experts(
             activation_method=activation_method,
             w1_scale=quant_config.w1_scale,
             w2_scale=quant_config.w2_scale,
-            a1_scale=quant_config.a1_scale,
+            a1_scale=quant_config.a1_scale if a1q_scale is None else a1q_scale,
             a2_scale=quant_config.a2_scale,
             doweight_stage1=apply_router_weight_on_input,
+            num_local_tokens=num_local_tokens,
+            output_dtype=output_dtype,
         )
 
 
 class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config):
-        super().__init__(quant_config)
-
     @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
-        )
+    def expects_unquantized_inputs(self) -> bool:
+        return True
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return rocm_aiter_ops.is_fused_moe_enabled()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # TODO(rob): AITER also supports MXFP4, which is not
+        # yet supported via an Oracle. Once it is, we will add
+        # MXFP4 to this list.
+        SUPPORTED_W_A = [
+            (None, None),
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ["silu", "gelu"]
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return not moe_parallel_config.use_fi_all2allv_kernels
 
     def supports_expert_map(self):
         return True
@@ -299,6 +346,7 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Workspaces are managed internally by AITER.
         workspace1 = (0,)
@@ -327,9 +375,12 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO(rob): rocm_aiter_fused_experts uses self.quant_config's
         # a_scales for static quantization. Update this to fit better
         # with the interface once all quant integrations are complete.
-        assert a1q_scale is None
         assert a2_scale == self.quant_config.a2_scale
-        assert expert_tokens_meta is None
+
+        if expert_tokens_meta is not None:
+            num_local_tokens = expert_tokens_meta.expert_num_tokens
+        else:
+            num_local_tokens = None
 
         result = rocm_aiter_fused_experts(
             hidden_states=hidden_states,
@@ -341,6 +392,8 @@ class AiterExperts(mk.FusedMoEPermuteExpertsUnpermute):
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
             quant_config=self.quant_config,
+            a1q_scale=a1q_scale,
+            num_local_tokens=num_local_tokens,
+            output_dtype=output.dtype,
         )
-        assert result.shape == output.shape
         output.copy_(result)

@@ -16,8 +16,11 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
+from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+logger = init_logger(__name__)
 
 
 class CompilerInterface:
@@ -198,9 +201,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         factors = get_inductor_factors()
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
-            :10
-        ]
+        hash_str: str = safe_hash(
+            str(factors).encode(), usedforsecurity=False
+        ).hexdigest()[:10]
         return hash_str
 
     def initialize_cache(
@@ -230,12 +233,42 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         from torch._inductor import standalone_compile
 
-        compiled_graph = standalone_compile(
-            graph,
-            example_inputs,
-            dynamic_shapes=dynamic_shapes,
-            options={"config_patches": current_config},
-        )
+        supports_aot = is_torch_equal_or_newer("2.10.0.dev")
+
+        if not supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+            logger.error(
+                "CRITICAL: VLLM_USE_MEGA_AOT_ARTIFACT "
+                "is enabled but PyTorch version does not support 'aot' "
+                "parameter in standalone_compile. This requires PyTorch "
+                "2.10.0+. Falling back to non-AOT mode."
+            )
+
+        compile_kwargs = {
+            "dynamic_shapes": dynamic_shapes,
+            "options": {
+                "config_patches": current_config,
+            },
+        }
+
+        use_aot: bool = supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT
+        # only add 'aot' parameter if both supported and enabled...
+        # this will set bundled_autograd_cache
+        # https://github.com/pytorch/pytorch/blob/9bbc5b2905c260adf41bc866a732f9c121a2828a/torch/_inductor/standalone_compile.py#L359 # noqa
+        if use_aot:
+            compile_kwargs["aot"] = True  # type: ignore[assignment]
+
+        compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
+
+        if use_aot:
+            from torch._inductor.standalone_compile import AOTCompiledArtifact
+
+            assert isinstance(compiled_graph, AOTCompiledArtifact)
+            assert hasattr(compiled_graph, "serialize")
+            # just return the compiled graph and a key
+            # since we can serialize the bytes using to_bytes
+            # and reload it using the key when reading
+            return compiled_graph, None
+
         # Save the compiled artifact to disk in the specified path
         assert key is not None
         path = os.path.join(self.cache_dir, key)
@@ -286,9 +319,9 @@ class InductorAdaptor(CompilerInterface):
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         factors = get_inductor_factors()
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()[
-            :10
-        ]
+        hash_str: str = safe_hash(
+            str(factors).encode(), usedforsecurity=False
+        ).hexdigest()[:10]
         return hash_str
 
     def initialize_cache(
@@ -342,14 +375,13 @@ class InductorAdaptor(CompilerInterface):
         # it to get the hash of the compiled graph directly.
 
         hash_str, file_path = None, None
-        from torch._inductor.codecache import FxGraphCache, compiled_fx_graph_hash
+        from torch._inductor.codecache import compiled_fx_graph_hash
 
-        if torch.__version__.startswith("2.5"):
-            original_load = FxGraphCache.load
-            original_load_name = "torch._inductor.codecache.FxGraphCache.load"
-
-            def hijack_load(*args: Any, **kwargs: Any) -> Any:
-                inductor_compiled_graph = original_load(*args, **kwargs)
+        def hijacked_compile_fx_inner(*args: Any, **kwargs: Any) -> Any:
+            output = torch._inductor.compile_fx.compile_fx_inner(*args, **kwargs)
+            nonlocal hash_str
+            inductor_compiled_graph = output
+            if inductor_compiled_graph is not None:
                 nonlocal file_path
                 compiled_fn = inductor_compiled_graph.current_callable
                 file_path = compiled_fn.__code__.co_filename  # noqa
@@ -362,44 +394,14 @@ class InductorAdaptor(CompilerInterface):
                     for cell in compiled_fn.__closure__:
                         if not callable(cell.cell_contents):
                             continue
-                        if cell.cell_contents.__code__.co_filename.startswith(
-                            self.base_cache_dir
-                        ):
-                            # this is the real file path compiled from Inductor
-                            file_path = cell.cell_contents.__code__.co_filename
+                        code = cell.cell_contents.__code__
+                        if code.co_filename.startswith(self.base_cache_dir):
+                            # this is the real file path
+                            # compiled from Inductor
+                            file_path = code.co_filename
                             break
-                return inductor_compiled_graph
-
-            hijacked_compile_fx_inner = torch._inductor.compile_fx.compile_fx_inner  # noqa
-        elif torch.__version__ >= "2.6":
-            # function renamed in 2.6
-            original_load_name = None
-
-            def hijacked_compile_fx_inner(*args: Any, **kwargs: Any) -> Any:
-                output = torch._inductor.compile_fx.compile_fx_inner(*args, **kwargs)
-                nonlocal hash_str
-                inductor_compiled_graph = output
-                if inductor_compiled_graph is not None:
-                    nonlocal file_path
-                    compiled_fn = inductor_compiled_graph.current_callable
-                    file_path = compiled_fn.__code__.co_filename  # noqa
-                    if (
-                        not file_path.startswith(self.base_cache_dir)
-                        and compiled_fn.__closure__ is not None
-                    ):
-                        # hooked in the align_inputs_from_check_idxs function
-                        # in torch/_inductor/utils.py
-                        for cell in compiled_fn.__closure__:
-                            if not callable(cell.cell_contents):
-                                continue
-                            code = cell.cell_contents.__code__
-                            if code.co_filename.startswith(self.base_cache_dir):
-                                # this is the real file path
-                                # compiled from Inductor
-                                file_path = code.co_filename
-                                break
-                    hash_str = inductor_compiled_graph._fx_graph_cache_key
-                return output
+                hash_str = inductor_compiled_graph._fx_graph_cache_key
+            return output
 
         def hijack_compiled_fx_graph_hash(*args: Any, **kwargs: Any) -> Any:
             out = compiled_fx_graph_hash(*args, **kwargs)
@@ -420,10 +422,6 @@ class InductorAdaptor(CompilerInterface):
             return AlwaysHitShapeEnv()
 
         with ExitStack() as stack:
-            # hijack to get the compiled graph itself
-            if original_load_name is not None:
-                stack.enter_context(patch(original_load_name, hijack_load))
-
             # for hijacking the hash of the compiled graph
             stack.enter_context(
                 patch(
@@ -468,20 +466,19 @@ class InductorAdaptor(CompilerInterface):
             # get hit.
             # TODO(zou3519): we're going to replace this all with
             # standalone_compile sometime.
-            if is_torch_equal_or_newer("2.6"):
-                stack.enter_context(
-                    torch._inductor.config.patch(fx_graph_remote_cache=False)
-                )
-                # InductorAdaptor (unfortunately) requires AOTAutogradCache
-                # to be turned off to run. It will fail to acquire the hash_str
-                # and error if not.
-                # StandaloneInductorAdaptor (PyTorch 2.8+) fixes this problem.
-                stack.enter_context(
-                    torch._functorch.config.patch(enable_autograd_cache=False)
-                )
-                stack.enter_context(
-                    torch._functorch.config.patch(enable_remote_autograd_cache=False)
-                )
+            stack.enter_context(
+                torch._inductor.config.patch(fx_graph_remote_cache=False)
+            )
+            # InductorAdaptor (unfortunately) requires AOTAutogradCache
+            # to be turned off to run. It will fail to acquire the hash_str
+            # and error if not.
+            # StandaloneInductorAdaptor (PyTorch 2.8+) fixes this problem.
+            stack.enter_context(
+                torch._functorch.config.patch(enable_autograd_cache=False)
+            )
+            stack.enter_context(
+                torch._functorch.config.patch(enable_remote_autograd_cache=False)
+            )
 
             compiled_graph = compile_fx(
                 graph,
@@ -541,25 +538,16 @@ class InductorAdaptor(CompilerInterface):
             # Dynamo metrics context, see method for more details.
             exit_stack.enter_context(self.metrics_context())
 
-            if torch.__version__.startswith("2.5"):
-                inductor_compiled_graph = FxGraphCache._lookup_graph(
-                    hash_str, example_inputs, True, False
-                )
-                assert inductor_compiled_graph is not None, (
-                    "Inductor cache lookup failed. Please remove"
-                    f"the cache directory and try again."  # noqa
-                )
-            elif torch.__version__ >= "2.6":
-                from torch._inductor.output_code import CompiledFxGraphConstantsWithGm
+            from torch._inductor.output_code import CompiledFxGraphConstantsWithGm
 
-                constants = CompiledFxGraphConstantsWithGm(graph)
-                inductor_compiled_graph, _ = FxGraphCache._lookup_graph(
-                    hash_str, example_inputs, True, None, constants
-                )
-                assert inductor_compiled_graph is not None, (
-                    "Inductor cache lookup failed. Please remove"
-                    f"the cache directory and try again."  # noqa
-                )
+            constants = CompiledFxGraphConstantsWithGm(graph)
+            inductor_compiled_graph, _ = FxGraphCache._lookup_graph(
+                hash_str, example_inputs, True, None, constants
+            )
+            assert inductor_compiled_graph is not None, (
+                "Inductor cache lookup failed. Please remove "
+                f"the cache directory and try again."  # noqa
+            )
 
         # Inductor calling convention (function signature):
         # f(list) -> tuple
@@ -619,7 +607,8 @@ def set_inductor_config(config: dict[str, Any], compile_range: Range) -> None:
 
 
 def set_functorch_config() -> None:
-    torch._functorch.config.bundled_autograd_cache = False
+    if not envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+        torch._functorch.config.bundled_autograd_cache = False
 
 
 class EagerAdaptor(CompilerInterface):

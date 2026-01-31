@@ -13,6 +13,8 @@ endif()
 #
 # Define environment variables for special configurations
 #
+set(ENABLE_AVX2 $ENV{VLLM_CPU_AVX2})
+set(ENABLE_AVX512 $ENV{VLLM_CPU_AVX512})
 set(ENABLE_AVX512BF16 $ENV{VLLM_CPU_AVX512BF16})
 set(ENABLE_AVX512VNNI $ENV{VLLM_CPU_AVX512VNNI})
 set(ENABLE_AMXBF16 $ENV{VLLM_CPU_AMXBF16})
@@ -103,6 +105,16 @@ else()
     find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
     find_isa(${CPUINFO} "S390" S390_FOUND)
     find_isa(${CPUINFO} "v" RVV_FOUND) # Check for RISC-V RVV support
+
+    # Support cross-compilation by allowing override via environment variables
+    if (ENABLE_AVX2)
+        set(AVX2_FOUND ON)
+        message(STATUS "AVX2 support enabled via VLLM_CPU_AVX2 environment variable")
+    endif()
+    if (ENABLE_AVX512)
+        set(AVX512_FOUND ON)
+        message(STATUS "AVX512 support enabled via VLLM_CPU_AVX512 environment variable")
+    endif()
 endif()
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
@@ -377,6 +389,12 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
             ${VLLM_EXT_SRC})
         add_compile_definitions(-DCPU_CAPABILITY_AVX512)
     endif()
+endif()
+
+if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/shm.cpp"
+        ${VLLM_EXT_SRC})
 endif()
 
 if(USE_ONEDNN)
