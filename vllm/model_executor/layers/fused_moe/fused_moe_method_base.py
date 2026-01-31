@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEExpertsModular,
-    FusedMoEPrepareAndFinalize,
+    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
@@ -68,16 +68,18 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> FusedMoEPrepareAndFinalize | None:
+    ) -> FusedMoEPrepareAndFinalizeModular | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        return maybe_make_prepare_finalize(
+        pf = maybe_make_prepare_finalize(
             self.moe, self.moe_quant_config, routing_tables
         )
+        assert pf is None or isinstance(pf, FusedMoEPrepareAndFinalizeModular)
+        return pf
 
     def select_gemm_impl(
         self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
     ) -> FusedMoEExpertsModular:
         # based on the all2all implementation, select the appropriate

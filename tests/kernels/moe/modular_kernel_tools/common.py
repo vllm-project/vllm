@@ -65,8 +65,8 @@ class Config:
     dtype: torch.dtype
     quant_config: TestMoEQuantConfig | None
 
-    prepare_finalize_type: mk.FusedMoEPrepareAndFinalizeModular
-    fused_experts_type: mk.FusedMoEExpertsModular
+    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
+    fused_experts_type: mk.FusedMoEExperts
 
     fused_moe_chunk_size: int | None
     world_size: int
