@@ -3,6 +3,7 @@
 
 import re
 from datetime import timedelta
+import pickle
 
 import torch
 from torch.distributed.distributed_c10d import _get_default_group, _update_default_pg
@@ -67,6 +68,9 @@ class P2PAFDConnector(AFDConnectorBase):
         self.dp_metadata_list: dict[int, DPMetadata] = {}
         self.a2e_pynccl: PyNcclCommunicator | None = None
         self.e2a_pynccl: PyNcclCommunicator | None = None
+        self.ffn_size: int = 0
+        self.min_size: int = 0
+        self.dst_list = []
 
     def close(self) -> None:
         """Close the connector and release resources."""
@@ -75,10 +79,14 @@ class P2PAFDConnector(AFDConnectorBase):
 
     def init_afd_connector(self) -> None:
         """Initialize the AFD connector."""
+        logger.info("jcz init_afd_connector begin")
         afd_size = self.config.afd_config.afd_extra_config.get("afd_size")
         role = self.config.afd_config.afd_role
         attn_size, ffn_size = map(int, re.match(r"(\d+)\D+(\d+)", afd_size).groups())
-        world_rank = self.rank if role == "attention" else self.rank + attn_size
+        self.world_rank = self.rank if role == "ffn" else self.rank + ffn_size
+        self.ffn_size = ffn_size
+        self.min_size = min(ffn_size, attn_size)
+        self.p2p_rank = self.rank + self.min_size if role == "attention" else self.rank
         afd_pg = init_afd_process_group(
             backend="nccl",
             init_method=(
@@ -86,15 +94,15 @@ class P2PAFDConnector(AFDConnectorBase):
                 f":{self.config.afd_config.afd_port}"
             ),
             world_size=ffn_size + attn_size,
-            rank=world_rank,
+            rank=self.world_rank,
             group_name="afd",
             timeout=timedelta(minutes=2),
         )
-
+        logger.info(f"jcz afd_pg initialized world_rank:{self.world_rank}")
         # Construct rank lists for sub groups.
         # Each group contains one attention and one ffn rank.
-        ffn_ranks = [i for i in range(ffn_size, ffn_size + attn_size)]
-        attn_ranks = [i for i in range(attn_size)]
+        ffn_ranks = [i for i in range(ffn_size)]
+        attn_ranks = [i for i in range(ffn_size, ffn_size + attn_size)]
         assert len(ffn_ranks) == len(attn_ranks), (
             "ffn_ranks and attn_ranks must have the same length"
         )
@@ -102,19 +110,22 @@ class P2PAFDConnector(AFDConnectorBase):
         with default_pg_switcher:
             sub_group_ranks = []
             for i in range(len(ffn_ranks)):
-                ranks = [attn_ranks[i], ffn_ranks[i]]
+                # ranks = [attn_ranks[i], ffn_ranks[i]]
+                ranks = [ffn_ranks[i], attn_ranks[i]]
                 sub_group_ranks.append(ranks)
             # Create two independent groups:
             # a2e_group: for attention -> expert/ffn communication (send_attn, recv_attn)
             # e2a_group: for expert/ffn -> attention communication (send_ffn, recv_ffn)
             # The communication domain (rank range) is the same, but different group_name
             # creates independent groups.
+            logger.info("jcz before self.a2e_group")
             self.a2e_group = init_model_parallel_group(
                 sub_group_ranks,
                 self.local_rank,
                 backend="nccl",
                 group_name="a2e",
             )
+            logger.info("jcz before self.e2a_group")
             self.e2a_group = init_model_parallel_group(
                 sub_group_ranks,
                 self.local_rank,
@@ -132,6 +143,36 @@ class P2PAFDConnector(AFDConnectorBase):
                 device=self.local_rank,
             )
             logger.info("jcz after a2e_pynccl and e2a_pynccl")
+        
+        # All FFN and the first min_size Attention participate in p2p communication.
+        # All FFN: world_rank in [0, ffn_size)
+        # First min_size Attention: world_rank in [ffn_size, ffn_size + min_size)
+        if self.is_vaild_rank_for_inequal_AF(self.world_rank):
+            self.p2p_pg = init_afd_process_group(
+                backend="nccl",
+                init_method=(
+                    f"tcp://{self.config.afd_config.afd_host}"
+                    f":{self.config.afd_config.afd_port}"
+                ),
+                world_size=self.ffn_size + self.min_size,
+                rank=self.p2p_rank,
+                group_name="p2p",
+                timeout=timedelta(minutes=30),
+            )
+
+        # The first min_size Attention sends metadata to multiple FFNs (1-to-many mapping).
+        # Each attn_i sends to all ffn_j where (j % min_size == i)
+        if self.is_attn_top_min_size_rank(self.world_rank):
+            local_attn_rank = self.world_rank - self.ffn_size
+            dst = local_attn_rank
+            while dst < self.ffn_size:
+                self.dst_list.append(dst)
+                dst += self.min_size
+        logger.info(
+            f"[P2P] world_rank={self.world_rank}, p2p_rank={self.p2p_rank}, min_size={self.min_size}, "
+            f"dst_list={self.dst_list}, p2p connector initialized"
+        )
+
         self._initialized = True
 
     def is_initialized(self) -> bool:
@@ -237,15 +278,11 @@ class P2PAFDConnector(AFDConnectorBase):
 
         if pynccl_comm and not pynccl_comm.disabled:
             # PyNCCL uses rank in group
-            logger.info("jcz send_hidden_states using pynccl")
+            logger.info(f"jcz send_hidden_states using pynccl dst:{dst}")
+            torch.cuda.synchronize()
             pynccl_comm.send(hidden_states, dst)
         else:
-            logger.info("jcz send_hidden_states using torch.distributed")
-            torch.distributed.send(
-                hidden_states,
-                dst=process_group.ranks[dst],
-                group=process_group.device_group,
-            )
+            raise RuntimeError("PyNCCL communicator is required but not available.")
 
     def _recv_hidden_states(
         self,
@@ -272,15 +309,11 @@ class P2PAFDConnector(AFDConnectorBase):
 
         if pynccl_comm and not pynccl_comm.disabled:
             # PyNCCL uses rank in group
-            logger.info("jcz recv_hidden_states using pynccl")
+            logger.info(f"jcz recv_hidden_states using pynccl src:{src}")
+            torch.cuda.synchronize()
             pynccl_comm.recv(hidden_states, src)
         else:
-            logger.info("jcz recv_hidden_states using torch.distributed")
-            torch.distributed.recv(
-                hidden_states,
-                src=process_group.ranks[src],
-                group=process_group.device_group,
-            )
+            raise RuntimeError("PyNCCL communicator is required but not available.")
         return hidden_states
 
     # -------------------------------------------------------------------------
@@ -295,7 +328,8 @@ class P2PAFDConnector(AFDConnectorBase):
         generated by ATTN instances to FFN.
         """
         try:
-            dst = (self.a2e_group.rank_in_group + 1) % self.a2e_group.world_size
+            dst = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
+            logger.info(f"jcz send_attn_output rank_in_group:{self.a2e_group.rank_in_group} dst:{dst} world_size:{self.a2e_group.world_size}")
             if metadata.layer_idx == 0 and metadata.stage_idx == 0:
                 self._send_metadata(metadata, hidden_states, dst, self.a2e_group)
             self._current_afd_connector_metadata = metadata
@@ -308,7 +342,7 @@ class P2PAFDConnector(AFDConnectorBase):
         Called by the ATTN side to receive MOE output intermediate tensors,
         possibly dispatching from the receiver to other GPUs.
         """
-        src = (self.e2a_group.rank_in_group - 1) % self.e2a_group.world_size
+        src = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
         stage_idx = (
             self.recv_ffn_output_counter
             % self._current_afd_connector_metadata.num_of_stages
@@ -356,6 +390,7 @@ class P2PAFDConnector(AFDConnectorBase):
         Handles receiving and possibly dispatching tensors.
         """
         src = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
+        logger.info(f"jcz recv_attn_output rank_in_group:{self.a2e_group.rank_in_group} src:{src} world_size:{self.a2e_group.world_size}")
         if self._need_recv_metadata:
             self._recv_metadata(src, self.a2e_group)
             self._need_recv_metadata = False
@@ -376,3 +411,43 @@ class P2PAFDConnector(AFDConnectorBase):
         self._current_afd_connector_metadata.layer_idx = layer_idx
         self._current_afd_connector_metadata.stage_idx = stage_idx
         return hidden_states, self._current_afd_connector_metadata
+
+    def send_is_ubatch(self, data):
+        for dst in self.dst_list:
+            object_bytes = pickle.dumps(data)
+            object_tensor_cpu = torch.frombuffer(bytearray(object_bytes), dtype=torch.uint8)
+
+            object_tensor_gpu = torch.empty(object_tensor_cpu.shape,
+                                            dtype=torch.uint8,
+                                            device="cuda")
+            object_tensor_gpu.copy_(object_tensor_cpu)
+
+            size_tensor = torch.tensor([object_tensor_cpu.numel()],
+                                        dtype=torch.long,
+                                        device="cuda")
+            logger.info(f"jcz send_is_ubatch dst:{dst} self.p2p_rank:{self.p2p_rank}")
+            torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
+            torch.distributed.send(object_tensor_gpu, dst=dst, group=self.p2p_pg)
+    
+    def recv_is_ubatch(self):
+        src = self.p2p_rank % self.min_size + self.ffn_size
+        logger.info(f"jcz recv_is_ubatch src:{src} self.p2p_rank:{self.p2p_rank}")
+
+        size_tensor = torch.empty(1, dtype=torch.long, device="cuda")
+        rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)
+        object_tensor_gpu = torch.empty(size_tensor.item(), dtype=torch.uint8, device="cuda")
+        rank_object = torch.distributed.recv(object_tensor_gpu, src=src, group=self.p2p_pg)
+
+        assert rank_object == rank_size, "Received object sender rank does not match the size sender rank."
+
+        object_tensor_cpu = object_tensor_gpu.cpu()
+        data = pickle.loads(object_tensor_cpu.numpy().tobytes())
+        return data
+
+    def is_vaild_rank_for_inequal_AF(self,rank):
+        # Only support ffn rank < attn rank
+        return ((rank >= self.ffn_size and rank < self.ffn_size + self.min_size) or rank < self.ffn_size)
+
+    def is_attn_top_min_size_rank(self,rank):
+        # Only support ffn rank < attn rank
+        return (rank >= self.ffn_size and rank < self.ffn_size + self.min_size)
