@@ -226,8 +226,6 @@ def copy_and_expand_eagle_inputs_kernel(
     total_input_tokens,  # tl.int32
     num_padding_slots_per_request,  # tl.int32
     shift_input_ids,  # tl.bool
-    max_num_tokens,  # tl.int32
-    # TODO(ben): decide if clamping needs to be implemented here or if it can be omitted
     BLOCK_SIZE_TOKENS: tl.constexpr,  # Blocks along token dim to handle prefills
 ):
     """

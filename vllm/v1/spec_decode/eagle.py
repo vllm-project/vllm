@@ -790,7 +790,6 @@ class SpecDecodeBaseProposer:
                 total_input_tokens=total_num_input_tokens,
                 num_padding_slots_per_request=self.extra_slots_per_request,
                 shift_input_ids=self.pass_hidden_states_to_model,
-                max_num_tokens=self.max_num_tokens,  # to clamp accesses for safety
                 BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
             )
             if self.pass_hidden_states_to_model:
