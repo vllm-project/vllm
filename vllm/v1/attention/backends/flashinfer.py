@@ -1107,6 +1107,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 assert paged_kv_indptr_prefill_cpu.shape[0] == num_prefills + 1
                 if self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
+                    # In Helix GQA mode (TPA > 1), Q is NOT AllGathered, so
+                    # effective dcp_world_size for head count is 1
+                    from vllm.distributed.parallel_state import is_helix_gqa_mode
+                    effective_dcp_world_size = 1 if is_helix_gqa_mode() else self.dcp_world_size
                     prefill_wrapper.plan(
                         qo_indptr_cpu=qo_indptr_prefill_cpu,
                         paged_kv_indptr_cpu=paged_kv_indptr_prefill_cpu,
@@ -1114,7 +1118,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         paged_kv_last_page_len_cpu=paged_kv_last_page_len_prefill_cpu,
                         page_size=self.page_size,
                         num_qo_heads=self.num_qo_heads,
-                        dcp_world_size=self.dcp_world_size,
+                        dcp_world_size=effective_dcp_world_size,
                         num_kv_heads=self.num_kv_heads,
                         head_dim=self.head_dim,
                         sm_scale=self.sm_scale,
@@ -1177,13 +1181,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # Use the persistent buffer with padding length,
                 # instead of the same address but chunked version
                 # in atten_metadata when using cudagraph.
+                # In Helix GQA mode (TPA > 1), Q is NOT AllGathered, so
+                # use num_qo_heads directly (not multiplied by dcp_world_size)
+                from vllm.distributed.parallel_state import is_helix_gqa_mode
+                effective_num_qo_heads = (
+                    self.num_qo_heads if is_helix_gqa_mode()
+                    else self.num_qo_heads * self.dcp_world_size
+                )
                 fast_plan_decode(
                     decode_wrapper,
                     self.paged_kv_indptr.cpu[: num_input_tokens + 1],
                     paged_kv_indices,
                     self.paged_kv_last_page_len.cpu[:num_input_tokens],
                     seq_lens_cpu[:num_input_tokens],
-                    self.num_qo_heads * self.dcp_world_size,
+                    effective_num_qo_heads,
                     self.num_kv_heads,
                     self.head_dim,
                     self.page_size,
