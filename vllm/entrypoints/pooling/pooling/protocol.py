@@ -7,7 +7,6 @@ from pydantic import Field
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
-from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ChatRequestMixin,
@@ -17,9 +16,12 @@ from vllm.entrypoints.pooling.base.protocol import (
     EncodingRequestMixin,
     PoolingBasicRequestMixin,
 )
+from vllm.logger import init_logger
 from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 
 class PoolingCompletionRequest(
@@ -43,10 +45,17 @@ class PoolingCompletionRequest(
         )
 
     def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=self.use_activation,
             dimensions=self.dimensions,
-            use_activation=get_use_activation(self),
         )
 
 
@@ -73,10 +82,17 @@ class PoolingChatRequest(
         )
 
     def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=self.use_activation,
             dimensions=self.dimensions,
-            use_activation=get_use_activation(self),
         )
 
 

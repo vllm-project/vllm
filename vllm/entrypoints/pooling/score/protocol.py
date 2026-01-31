@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 
 from vllm import PoolingParams
 from vllm.config import ModelConfig
-from vllm.config.pooler import get_use_activation
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ClassifyRequestMixin,
@@ -43,7 +42,7 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            use_activation=get_use_activation(self),
+            use_activation=self.use_activation,
         )
 
 

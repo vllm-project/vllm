@@ -233,8 +233,8 @@ class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
 
-        if pooler_config.softmax is None:
-            pooler_config.softmax = False
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
 
 
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
