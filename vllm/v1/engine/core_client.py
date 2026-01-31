@@ -6,7 +6,6 @@ import json
 import queue
 import sys
 import threading
-import time
 import uuid
 import weakref
 from abc import ABC, abstractmethod
@@ -18,9 +17,9 @@ from threading import Thread
 from typing import Any, TypeAlias, TypeVar, cast
 
 import msgspec.msgpack
+import ray
 import zmq
 import zmq.asyncio
-from ray.util.state import get_actor
 
 from vllm.config import FaultToleranceConfig, VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
@@ -846,39 +845,26 @@ class MPClient(EngineCoreClient):
             return
 
         def monitor_actors():
-            all_actors = (
-                engine_manager.local_engine_actors + engine_manager.remote_engine_actors
-            )
-            if not all_actors:
-                return
             while True:
-                for actor in all_actors[:]:
-                    actor_id = actor._actor_id.hex()
-                    if actor in engine_manager.local_engine_actors:
-                        actor_index = engine_manager.local_engine_actors.index(actor)
-                    elif actor in engine_manager.remote_engine_actors:
-                        actor_index = engine_manager.remote_engine_actors.index(
-                            actor
-                        ) + len(engine_manager.local_engine_actors)
-                    else:
-                        logger.error("Unknown actor (ID: %s)", actor_id)
-                        continue
-
-                    actor_info = get_actor(actor_id)
-                    if actor_info.state == "DEAD":
+                actor_run_refs = engine_manager.get_run_refs()
+                ref_to_index_mapping = {
+                    ref: index for index, ref in enumerate(actor_run_refs)
+                }
+                actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+                if actor_done_refs:
+                    for actor_ref in actor_done_refs:
+                        error_engine_id = ref_to_index_mapping[actor_ref]
+                        actor_index = actor_run_refs.index(actor_ref)
+                        engine_manager.get_run_refs().pop(actor_index)
                         fault_info = FaultInfo(
                             type="engine_actor dead",
-                            message=str(actor_info.death_cause),
-                            engine_id=str(actor_index),
+                            message="Engine_actor died unexpectedly.",
+                            engine_id=str(error_engine_id),
                             additional_info=None,
                         )
-                        all_actors.remove(actor)
                         engine_manager.engine_down_socket.send_multipart(
                             [b"", fault_info.serialize().encode("utf-8")]
                         )
-
-                time.sleep(3)
-                # Implements the "check once every 3 seconds" frequency control
 
         Thread(target=monitor_actors, daemon=True, name="MPClientEngineMonitor").start()
 
