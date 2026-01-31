@@ -55,6 +55,10 @@ def test_tp2_ar_rms_fp8_fusions(
 ):
     matches = matches_fn(n_layers)
 
+    if "qwen" in model_name.lower() and "-quant_fp8" in custom_ops:
+        # This is why config forces +quant_fp8 by default
+        pytest.skip("native QuantFP8 matching not supported for group quant")
+
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
@@ -73,7 +77,7 @@ def test_tp2_ar_rms_fp8_fusions(
     )
 
     matches_check = [
-        # "rms_quant_fusion", # AR+rms+quant takes precedence
+        "rms_quant_fusion",
         "act_quant_fusion",
         "norm_rope_fusion",
         "attn_quant_fusion",

@@ -100,8 +100,10 @@ qwen3_a3b = ModelFusionInfo(
 qwen3_a3b_fp8 = ModelFusionInfo(
     model_name="Qwen/Qwen3-30B-A3B-FP8",
     matches=lambda n_layers: Matches(
-        rms_quant_fusion=n_layers,  # Also broken on blackwell?
-        norm_rope_fusion=0,  # TODO broken #33295
+        rms_quant_fusion=n_layers,
+        # TODO broken on Blackwell:
+        # https://github.com/vllm-project/vllm/issues/33295
+        norm_rope_fusion=0 if is_blackwell() else n_layers,
         attn_quant_fusion=0,  # attn + group quant not supported
         ar_rms_fusion=n_layers * 2 + 1,
         sequence_parallel=n_layers * 2 + 1,

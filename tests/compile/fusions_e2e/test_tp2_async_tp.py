@@ -51,10 +51,6 @@ def test_tp2_async_tp_fp8_fusions(
 ):
     matches = matches_fn(n_layers)
 
-    if "qwen" in model_name.lower() and "-quant_fp8" in custom_ops:
-        # RMS+Quant not supported for native group QuantFP8 on Blackwell
-        matches = matches._replace(rms_quant_fusion=0)
-
     if is_blackwell():
         # Disable FlashInfer scaled_mm FP8 as it's not supported in async tp patterns
         monkeypatch.setenv("VLLM_DISABLED_KERNELS", "FlashInferFP8ScaledMMLinearKernel")

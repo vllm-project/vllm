@@ -65,10 +65,16 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
         # Now check the matches
         for match_name in matches_check:
-            # ar-rms-norm only activates in one range
-            num_ranges_activated = (
-                1 if match_name == "ar_rms_fusion" else num_compile_ranges
-            )
+            # When compiling multiple ranges, some passes only activate in some
+            if match_name == "ar_rms_fusion":
+                # ar-rms-norm only activates in one range
+                num_ranges_activated = 1
+            elif match_name == "rms_quant_fusion" and "ar_rms_fusion" in matches_check:
+                # AR+rms+quant takes precedence over rms+quant if activated.
+                num_ranges_activated = num_compile_ranges - 1
+            else:
+                num_ranges_activated = num_compile_ranges
+
             n_expected = tp_size * num_ranges_activated
 
             log_matches = log_matches_dict[match_name]
@@ -90,7 +96,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     log_holder.text,
                 )
 
-                n_expected = 2 * (num_compile_ranges - num_ranges_activated)
+                n_expected = tp_size * (num_compile_ranges - num_ranges_activated)
                 assert len(log_matches) == n_expected, (
                     f'Could not find {n_expected} "Skipping AllReduceFusionPass" '
                     f"(found {len(log_matches)}) in:\n {log_holder.text}"

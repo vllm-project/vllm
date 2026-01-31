@@ -63,8 +63,8 @@ def test_tp1_fp8_fusions(
     matches = matches_fn(n_layers)
 
     if "qwen" in model_name.lower() and "-quant_fp8" in custom_ops:
-        # RMS+Quant not supported for native group QuantFP8 on Blackwell
-        matches = matches._replace(rms_quant_fusion=0)
+        # This is why config forces +quant_fp8 by default
+        pytest.skip("native QuantFP8 matching not supported for group quant")
 
     # Reduce size of model and skip weight loading time
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
@@ -138,10 +138,7 @@ def test_tp1_fp4_fusions(
         ),
     )
 
-    matches_check = [
-        "act_quant_fusion",
-        "attn_quant_fusion",
-    ]
+    matches_check = ["act_quant_fusion", "attn_quant_fusion", "norm_rope_fusion"]
 
     run_e2e_fusion_test(
         model_name,
