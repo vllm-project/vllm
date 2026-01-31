@@ -71,6 +71,15 @@ from typing import NamedTuple
 import pytest
 import torch
 
+# IMPORTANT: Set spawn method before any CUDA initialization
+# This prevents "Cannot re-initialize CUDA in forked subprocess" errors
+import multiprocessing
+if multiprocessing.get_start_method(allow_none=True) != 'spawn':
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass  # Already set
+
 from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
 from vllm.logger import init_logger
 
@@ -209,11 +218,20 @@ MLA_CONFIGS = [
 
 def check_gpu_requirements(tp_size: int, min_compute_capability: tuple = (9, 0)):
     """Check if GPU requirements are met, skip test if not."""
+    # Check CUDA availability first
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    
     num_gpus = torch.cuda.device_count()
     if num_gpus < tp_size:
         pytest.skip(f"Need at least {tp_size} GPUs, have {num_gpus}")
     
-    cc = torch.cuda.get_device_capability()
+    # Get compute capability
+    try:
+        cc = torch.cuda.get_device_capability(0)
+    except Exception as e:
+        pytest.skip(f"Cannot get device capability: {e}")
+    
     if cc < min_compute_capability:
         pytest.skip(
             f"Need compute capability {min_compute_capability}, have {cc}"
