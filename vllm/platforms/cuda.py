@@ -249,6 +249,29 @@ class CudaPlatformBase(Platform):
                     "Forcing kv cache block size to 64 for FlashMLASparse backend."
                 )
 
+        # Restore DCP->PIECEWISE check that was accidentally removed in commit
+        # 17eb25e32. DCP is incompatible with FULL CUDA graphs because
+        # dcp_context_kv_lens tensor gets captured as static constant during
+        # graph capture, causing gibberish output during decode.
+        # Original check was in commits b91d8db87 and 0098a6e3d.
+        from vllm.config import CUDAGraphMode
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.cudagraph_mode.has_full_cudagraphs():
+            if parallel_config.decode_context_parallel_size > 1:
+                logger.warning_once(
+                    "Decode context parallel (DCP) is enabled, which is "
+                    "incompatible with full CUDA graphs. "
+                    "Overriding cudagraph_mode to PIECEWISE."
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            elif parallel_config.prefill_context_parallel_size > 1:
+                logger.warning_once(
+                    "Prefill context parallel (PCP) is enabled, which is "
+                    "incompatible with full CUDA graphs. "
+                    "Overriding cudagraph_mode to PIECEWISE."
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
         if (
