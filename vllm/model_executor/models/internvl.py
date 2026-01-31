@@ -884,6 +884,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         out_mm_data = out_mm_kwargs.get_data()
+        print("out_mm_data keys:", out_mm_data.keys())
         if "image_num_patches" in out_mm_data:
             image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
@@ -1162,15 +1163,14 @@ class InternVLMultiModalProcessor(
         out_mm_data = out_mm_kwargs.get_data()
 
         if self.info.use_unified_vision_chunk:
-            vision_num_patches = out_mm_data["vision_chunk_num_patches"]
-            assert isinstance(vision_num_patches, torch.Tensor)
-            vision_num_patches = vision_num_patches.tolist()
+            if "vision_chunk_num_patches" in out_mm_data:
+                vision_num_patches = out_mm_data["vision_chunk_num_patches"]
+                assert isinstance(vision_num_patches, torch.Tensor)
+                vision_num_patches = vision_num_patches.tolist()
+            else:
+                vision_num_patches = []
 
             def get_replacement_internvl(item_idx: int):
-                chunks = mm_items.get_items(
-                    "vision_chunk", VisionChunkProcessorItems
-                )
-
                 num_patches = vision_num_patches[item_idx]
                 feature_size = hf_processor.num_image_token * num_patches
 

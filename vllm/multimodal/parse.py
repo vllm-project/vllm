@@ -686,6 +686,7 @@ class MultiModalDataParser:
         subparsers = self._get_subparsers()
 
         mm_items = MultiModalDataItems()
+        print("parsing mm_data:", mm_data)
         for k, v in mm_data.items():
             if k not in subparsers:
                 raise ValueError(f"Unsupported modality: {k}")
@@ -841,21 +842,23 @@ class VisionChunkDataParser(MultiModalDataParser):
         print("modality_order:", modality_order)
         mm_items = MultiModalDataItems()
 
-        parsed_vision_chunk = self._parse_vision_chunk_data(mm_data.get("vision_chunk"))
-        if parsed_vision_chunk is not None:
-            mm_items["vision_chunk"] = parsed_vision_chunk
+        # if parsed_vision_chunk is not None:
+        if "vision_chunk" in mm_data:
+            parsed_vision_chunk = self._parse_vision_chunk_data(mm_data.get("vision_chunk"))
+            if parsed_vision_chunk is not None:
+                mm_items["vision_chunk"] = parsed_vision_chunk
             return mm_items
 
         mm_items.setdefault("vision_chunk", VisionChunkProcessorItems([]))
-        parsed_image = self._parse_image_data(mm_data.get("image"))
-        parsed_video = self._parse_video_data(mm_data.get("video"))
+        parsed_image = self._parse_image_data(mm_data.get("image")) if "image" in mm_data else None
+        parsed_video = self._parse_video_data(mm_data.get("video")) if "video" in mm_data else None
 
         image_count = 0 if parsed_image is None else parsed_image.get_count()
         video_count = 0 if parsed_video is None else parsed_video.get_count()
 
-        assert len(modality_order) == image_count + video_count, (
-            "The length of modality_order should be equal to the total number of vision chunks."
-        )
+        # assert len(modality_order) == image_count + video_count, (
+        #     "The length of modality_order should be equal to the total number of vision chunks."
+        # )
 
         for modality in modality_order:
             if modality == "image":

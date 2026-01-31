@@ -1043,6 +1043,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                         f"`{modality}_embeds`"
                     )
 
+        print("_to_mm_items", mm_items)
         for modality, items in mm_items.items():
             self.info.validate_num_items(modality, len(items))
 
@@ -1595,6 +1596,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             enable_hf_prompt_update=False,
         )
 
+        print("mm_missing_data_items", mm_missing_data_items)
+        # print("mm_missing_processed_data", mm_missing_processed_data)
         mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_missing_processed_data,
             self._get_mm_fields_config(
@@ -1602,6 +1605,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             ),
         )
 
+        print("mm_missing_kwargs", mm_missing_kwargs)
         mm_missing_prompt_updates = self._get_mm_prompt_updates(
             mm_missing_data_items,
             hf_processor_mm_kwargs,
