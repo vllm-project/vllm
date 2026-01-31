@@ -248,11 +248,15 @@ class Mamba2AttentionMetadataBuilder(
         if num_accepted_tokens is not None:
             num_accepted_tokens = num_accepted_tokens[:num_decodes]
 
+        assert common_attn_metadata.num_reqs == num_decodes + num_prefills
+
         # Compute seq_idx for prefill only
         if num_prefills > 0:
             assert common_attn_metadata.num_computed_tokens_cpu is not None
             prefill_num_computed_tokens_cpu = (
-                common_attn_metadata.num_computed_tokens_cpu[num_decodes:]
+                common_attn_metadata.num_computed_tokens_cpu[
+                    num_decodes : num_decodes + num_prefills
+                ]
             )
 
             has_initial_states_cpu = prefill_num_computed_tokens_cpu > 0
@@ -410,7 +414,12 @@ class Mamba2AttentionMetadataBuilder(
         num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
         m._num_computed_tokens_cpu = m.seq_lens_cpu - num_accepted_tokens.cpu()
 
-        return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
+        return self.build(
+            0,
+            m,
+            num_accepted_tokens if self.num_spec_tokens > 0 else None,
+            num_decode_draft_tokens_cpu,
+        )
 
     def update_block_table(
         self,

@@ -697,6 +697,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
+                validate_data=False,
             ).transpose(0, 1)[:num_prefill_tokens]
 
             hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(
