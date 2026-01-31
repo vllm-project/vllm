@@ -1159,7 +1159,7 @@ class Scheduler(SchedulerInterface):
                 break
 
             # Calculate the number of embeddings to schedule in the current range
-            # of scheduled encoder placholder tokens.
+            # of scheduled encoder placeholder tokens.
             start_idx_rel = max(0, num_computed_tokens - start_pos)
             end_idx_rel = min(
                 num_encoder_tokens, num_computed_tokens + num_new_tokens - start_pos
@@ -1763,6 +1763,14 @@ class Scheduler(SchedulerInterface):
 
         return True
 
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings are not reused.
+        """
+        self.encoder_cache_manager.reset()
+
     def make_stats(
         self,
         spec_decoding_stats: SpecDecodingStats | None = None,
@@ -1788,6 +1796,7 @@ class Scheduler(SchedulerInterface):
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
+            encoder_cache_usage=self._get_encoder_cache_usage(),
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
@@ -1796,6 +1805,14 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
         )
+
+    def _get_encoder_cache_usage(self) -> float:
+        """Get encoder cache usage as a fraction (0.0 to 1.0)."""
+        ecm = self.encoder_cache_manager
+        if ecm.cache_size == 0:
+            return 0.0
+        used_slots = ecm.cache_size - ecm.num_free_slots
+        return used_slots / ecm.cache_size
 
     def make_spec_decoding_stats(
         self,
