@@ -416,6 +416,7 @@ class SimilarFrameDetector:
         else:
             return video_sampled
 
+
 def is_multimodal_efs_enabled(efs_sparse_rate: float | None) -> bool:
     """Check if EFS (Efficient Frame Sampling) is enabled (valid sparse rate > 0)."""
     return efs_sparse_rate is not None and efs_sparse_rate > 0
