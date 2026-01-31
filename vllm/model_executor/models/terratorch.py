@@ -158,7 +158,7 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
                 "They are ignored for now."
             )
 
-        return self.dummy_data_generator.get_dummy_mm_data()
+        return {"image": self.dummy_data_generator.get_dummy_mm_data()}
 
 
 class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessingInfo]):
