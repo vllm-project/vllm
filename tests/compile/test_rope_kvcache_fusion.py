@@ -78,8 +78,9 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             f"Attention backend {self.attn_backend} does not support fuse_rope_kvcache."
         )
 
-    def forward(self, qkv: torch.Tensor, positions: torch.Tensor):
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+    def forward(
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, positions: torch.Tensor
+    ):
         q, k = self.rotary_emb(positions, q, k)
 
         # Instead of a full forward pass, match only the KV cache update op here
@@ -175,21 +176,29 @@ def test_rope_kvcache_fusion(
 
         T = 5
 
-        qkv = torch.randn(T, model.q_size + 2 * model.kv_size)
-        pos = torch.arange(T, dtype=torch.long, device=qkv.device)
+        q = torch.randn(T, num_heads * head_dim)
+        k = torch.randn(T, num_kv_heads * head_dim)
+        v = torch.randn(T, num_kv_heads * head_dim)
+        pos = torch.arange(T, dtype=torch.long)
 
-        qkv_unfused = qkv.clone()
+        q_unfused = q.clone()
+        k_unfused = k.clone()
+        v_unfused = v.clone()
         pos_unfused = pos.clone()
 
         with set_forward_context(None, vllm_config):
-            q_unfused, k_unfused, v_unfused, dummy = model(qkv_unfused, pos_unfused)
+            q_unfused, k_unfused, v_unfused, dummy = model(
+                q_unfused, k_unfused, v_unfused, pos_unfused
+            )
         del dummy
 
-        torch._dynamo.mark_dynamic(qkv, 0)
+        torch._dynamo.mark_dynamic(q, 0)
+        torch._dynamo.mark_dynamic(k, 0)
+        torch._dynamo.mark_dynamic(v, 0)
         torch._dynamo.mark_dynamic(pos, 0)
         with set_forward_context(None, vllm_config):
             model_fused = torch.compile(model, backend=backend)
-            q_fused, k_fused, v_fused, dummy = model_fused(qkv, pos)
+            q_fused, k_fused, v_fused, dummy = model_fused(q, k, v, pos)
         del dummy
 
         if dtype == torch.float16:

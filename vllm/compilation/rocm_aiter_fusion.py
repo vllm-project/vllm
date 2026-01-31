@@ -4,6 +4,7 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
+from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
@@ -548,22 +549,27 @@ class RopeReshapeKVCachePattern:
     def get_inputs(self) -> list[torch.Tensor]:
         # Sample inputs to help pattern tracing
         T = 5
-        qkv = empty_bf16(T, self.q_size + 2 * self.kv_size)
+        q = empty_bf16(T, self.q_size)
+        k = empty_bf16(T, self.kv_size)
+        v = empty_bf16(T, self.kv_size)
         positions = empty_i64(T)
         cos_sin_cache = empty_bf16(4096, self.head_dim)
         return [
-            qkv,
+            q,
+            k,
+            v,
             positions,
             cos_sin_cache,
         ]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
-            qkv: torch.Tensor,
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
             positions: torch.Tensor,
             cos_sin_cache: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
             q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
             q = q.view(-1, self.num_heads, self.head_dim)
             k = k.view(-1, self.num_kv_heads, self.head_dim)
@@ -574,8 +580,15 @@ class RopeReshapeKVCachePattern:
         def replacement():
             raise NotImplementedError
 
+        # NOTE: use view_to_reshape to unify view/reshape to simplify
+        # pattern and increase matching opportunities
+        def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
+            gm = pm.fwd_only(*args, **kwargs)
+            view_to_reshape(gm)
+            return gm
+
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
         )
 
 
