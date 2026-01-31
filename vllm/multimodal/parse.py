@@ -868,6 +868,5 @@ class VisionChunkDataParser(MultiModalDataParser):
                     mm_items["vision_chunk"].data.append(
                         parsed_video.data.pop(0)
                     )
-        print("mm_items:", mm_items)
 
         return mm_items
