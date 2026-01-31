@@ -280,23 +280,12 @@ async def test_stateful_multi_turn(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_streaming_types(client: OpenAI, model_name: str):
+async def test_streaming_types(
+    pairs_of_event_types: dict[str, str], client: OpenAI, model_name: str
+):
     prompts = [
         "tell me a story about a cat in 20 words",
     ]
-
-    # this links the "done" type with the "start" type
-    # so every "done" type should have a corresponding "start" type
-    # and every open block should be closed by the end of the stream
-    pairs_of_event_types = {
-        "response.completed": "response.created",
-        "response.output_item.done": "response.output_item.added",
-        "response.content_part.done": "response.content_part.added",
-        "response.output_text.done": "response.output_text.delta",
-        "response.web_search_call.done": "response.web_search_call.added",
-        "response.reasoning_text.done": "response.reasoning_text.delta",
-        "response.reasoning_part.done": "response.reasoning_part.added",
-    }
 
     for prompt in prompts:
         response = await client.responses.create(
@@ -329,19 +318,9 @@ async def test_streaming_types(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_function_calling_with_streaming_types(client: OpenAI, model_name: str):
-    # this links the "done" type with the "start" type
-    # so every "done" type should have a corresponding "start" type
-    # and every open block should be closed by the end of the stream
-    pairs_of_event_types = {
-        "response.completed": "response.created",
-        "response.output_item.done": "response.output_item.added",
-        "response.output_text.done": "response.output_text.delta",
-        "response.reasoning_text.done": "response.reasoning_text.delta",
-        "response.reasoning_part.done": "response.reasoning_part.added",
-        "response.function_call_arguments.done": "response.function_call_arguments.delta",  # noqa
-    }
-
+async def test_function_calling_with_streaming_types(
+    pairs_of_event_types: dict[str, str], client: OpenAI, model_name: str
+):
     tools = [GET_WEATHER_SCHEMA]
     input_list = [
         {
@@ -925,7 +904,7 @@ async def test_mcp_code_interpreter_streaming(client: OpenAI, model_name: str, s
         }
     ]
     input_text = (
-        "Calculate 15 * 32 using python. "
+        "Calculate 123 * 456 using python. "
         "The python interpreter is not stateful and you must print to see the output."
     )
 
@@ -1013,7 +992,7 @@ async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
     # First turn - make a calculation
     response1 = await client.responses.create(
         model=model_name,
-        input="Calculate 123 * 456 using python and print the result.",
+        input="Calculate 1234 * 4567 using python tool and print the result.",
         tools=tools,
         temperature=0.0,
         instructions=(

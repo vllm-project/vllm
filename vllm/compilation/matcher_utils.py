@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from typing import Any
 
 import torch
 from torch._higher_order_ops import auto_functionalized
@@ -20,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
@@ -37,7 +38,7 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 }
 
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
+    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
 
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
@@ -47,7 +48,7 @@ SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
 
 class MatcherCustomOp(ABC):
-    def __init__(self, enabled: bool):
+    def __init__(self, enabled: bool) -> None:
         config = get_current_vllm_config()
         self.model_dtype = config.model_config.dtype if config.model_config else None
         self.device = config.device_config.device if config.device_config else None
@@ -56,24 +57,24 @@ class MatcherCustomOp(ABC):
         self.forward = self.forward_custom if enabled else self.forward_native
 
     @abstractmethod
-    def forward_custom(self, *args, **kws):
+    def forward_custom(self, *args: Any, **kwargs: Any) -> Any:
         pass
 
     @abstractmethod
-    def forward_native(self, *args, **kws):
+    def forward_native(self, *args: Any, **kwargs: Any) -> Any:
         pass
 
-    def __call__(self, *args, **kws):
-        return self.forward(*args, **kws)
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self.forward(*args, **kwargs)
 
-    def empty(self, *args, **kws):
-        return torch.empty(*args, dtype=self.model_dtype, device=self.device, **kws)
+    def empty(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=self.model_dtype, device=self.device, **kwargs)
 
-    def empty_int64(self, *args, **kws):
-        return torch.empty(*args, dtype=torch.int64, device=self.device, **kws)
+    def empty_int64(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.int64, device=self.device, **kwargs)
 
-    def empty_f32(self, *args, **kws):
-        return torch.empty(*args, dtype=torch.float32, device=self.device, **kws)
+    def empty_f32(self, *args: Any, **kwargs: Any) -> torch.Tensor:
+        return torch.empty(*args, dtype=torch.float32, device=self.device, **kwargs)
 
     def inputs(self) -> list[torch.Tensor]:
         """Utility for inputs to the pattern"""
@@ -140,15 +141,18 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         key: torch.Tensor | None,
         cos_sin_cache: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return RotaryEmbedding.forward_static(
-            positions,
-            query,
-            key,
-            self.head_size,
-            self.rotary_dim,
-            cos_sin_cache,
-            self.is_neox,
+        result: tuple[torch.Tensor, torch.Tensor | None] = (
+            RotaryEmbedding.forward_static(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.rotary_dim,
+                cos_sin_cache,
+                self.is_neox,
+            )
         )
+        return result
 
 
 class MatcherRMSNorm(MatcherCustomOp):
@@ -157,7 +161,7 @@ class MatcherRMSNorm(MatcherCustomOp):
         epsilon: float,
         enabled: bool | None = None,
         match_rocm_aiter: bool = False,
-    ):
+    ) -> None:
         if enabled is None:
             enabled = RMSNorm.enabled()
 
@@ -169,7 +173,7 @@ class MatcherRMSNorm(MatcherCustomOp):
         if match_rocm_aiter:
             self._rmsnorm_op = rocm_aiter_ops.get_rmsnorm_op()
 
-    def inputs(self):
+    def inputs(self) -> list[torch.Tensor]:
         input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
         weight = self.empty(16)
         return [input, weight]
@@ -220,7 +224,7 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         epsilon: float,
         enabled: bool | None = None,
         match_rocm_aiter: bool = False,
-    ):
+    ) -> None:
         if enabled is None:
             enabled = RMSNorm.enabled()
 
@@ -233,7 +237,7 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         if match_rocm_aiter:
             self._rmsnorm_op = rocm_aiter_ops.get_rmsnorm_fused_add_op()
 
-    def inputs(self):
+    def inputs(self) -> list[torch.Tensor]:
         input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
         weight = self.empty(16)
         residual = self.empty(5, 16)
@@ -245,7 +249,7 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         weight: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self._rmsnorm_op(
+        return self._rmsnorm_op(  # type: ignore[no-any-return]
             x=input, residual=residual, weight=weight, variance_epsilon=self.epsilon
         )
 
@@ -274,9 +278,10 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
         weight: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return RMSNorm.forward_static(
+        result: tuple[torch.Tensor, torch.Tensor] = RMSNorm.forward_static(
             input, self.epsilon, input.size(-1), self.model_dtype, weight, residual
         )
+        return result
 
 
 class MatcherQuantFP8(MatcherCustomOp):
@@ -287,7 +292,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
         match_rocm_aiter: bool = False,
-    ):
+    ) -> None:
         if enabled is None:
             enabled = QuantFP8.enabled()
 
@@ -331,6 +336,7 @@ class MatcherQuantFP8(MatcherCustomOp):
             quant_key.scale.group_shape,
             column_major_scales=has_col_major_scales,
             use_ue8m0=is_e8m0,
+            compile_native=False,
         )
 
     def forward_rocm_aiter(
@@ -340,13 +346,13 @@ class MatcherQuantFP8(MatcherCustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         quant_key_group_shape = self.quant_key.scale.group_shape
         if quant_key_group_shape == GroupShape.PER_TOKEN:
-            return self.QUANT_OP(
+            return self.QUANT_OP(  # type: ignore[no-any-return]
                 x=input,
                 quant_dtype=self.quant_key.dtype,
                 scale=scale,
             )
         else:
-            return self.QUANT_OP(input, quant_key_group_shape.col)
+            return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
 
     def forward_custom(
         self,
@@ -400,9 +406,9 @@ class MatcherQuantFP8(MatcherCustomOp):
         input: torch.Tensor,
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.quant_fp8(input, scale)
+        return self.quant_fp8(input, scale)  # type: ignore[no-any-return]
 
-    def make_scale(self, input: torch.Tensor, transposed: bool = False):
+    def make_scale(self, input: torch.Tensor, transposed: bool = False) -> torch.Tensor:
         normalized_group_shape = _normalize_quant_group_shape(
             input, self.quant_key.scale.group_shape
         )
@@ -427,7 +433,7 @@ class MatcherQuantFP8(MatcherCustomOp):
 
 
 class MatcherSiluAndMul(MatcherCustomOp):
-    def __init__(self, enabled: bool | None = None):
+    def __init__(self, enabled: bool | None = None) -> None:
         if enabled is None:
             enabled = SiluAndMul.enabled()
         super().__init__(enabled)

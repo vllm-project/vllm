@@ -72,9 +72,6 @@ class ObservabilityConfig:
     This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
     argument."""
 
-    enable_mfu_metrics: bool = False
-    """Enable Model FLOPs Utilization (MFU) metrics."""
-
     enable_logging_iteration_details: bool = False
     """Enable detailed logging of iteration details.
     If set, vllm EngineCore will log iteration details

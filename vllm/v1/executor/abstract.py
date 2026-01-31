@@ -305,6 +305,10 @@ class Executor(ABC):
         """Reset the multi-modal cache in each worker."""
         self.collective_rpc("reset_mm_cache")
 
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache in each worker to clear cached encoder outputs."""
+        self.collective_rpc("reset_encoder_cache")
+
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")

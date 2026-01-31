@@ -4,7 +4,7 @@
 
 import ast
 from dataclasses import dataclass
-from typing import ClassVar, Optional
+from typing import ClassVar
 
 import torch
 
@@ -14,12 +14,12 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
+    AttentionMetadataBuilder,
     AttentionType,
+    CommonAttentionMetadata,
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
@@ -87,11 +87,11 @@ class TreeAttentionMetadata:
     tree_attn_bias: torch.Tensor | None = None
 
     # Cached Prefill/decode metadata.
-    _cached_prefill_metadata: Optional["TreeAttentionMetadata"] = None
-    _cached_decode_metadata: Optional["TreeAttentionMetadata"] = None
+    _cached_prefill_metadata: "TreeAttentionMetadata | None" = None
+    _cached_decode_metadata: "TreeAttentionMetadata | None" = None
 
     @property
-    def prefill_metadata(self) -> Optional["TreeAttentionMetadata"]:
+    def prefill_metadata(self) -> "TreeAttentionMetadata | None":
         if self.num_prefills == 0:
             return None
 
@@ -116,7 +116,7 @@ class TreeAttentionMetadata:
         return self._cached_prefill_metadata
 
     @property
-    def decode_metadata(self) -> Optional["TreeAttentionMetadata"]:
+    def decode_metadata(self) -> "TreeAttentionMetadata | None":
         if self.num_decode_tokens == 0:
             return None
 

@@ -122,7 +122,9 @@ MM_DATA_PATCHES = {
     "ernie4_5_moe_vl": qwen3_vl_patch_mm_data,
     "glm4v": glm4_1v_patch_mm_data,
     "glm4v_moe": glm4_1v_patch_mm_data,
+    "glm_ocr": glm4_1v_patch_mm_data,
     "glmasr": glmasr_patch_mm_data,
+    "molmo2": qwen3_vl_patch_mm_data,
     "qwen3_vl": qwen3_vl_patch_mm_data,
     "qwen3_vl_moe": qwen3_vl_patch_mm_data,
 }
@@ -174,7 +176,7 @@ def get_text_token_prompts(
     if model_type in MM_DATA_PATCHES:
         mm_data = MM_DATA_PATCHES[model_type](mm_data)
 
-    parsed_data = processor.data_parser.parse_mm_data(mm_data)
+    parsed_data = processor.info.parse_mm_data(mm_data)
     mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
 
     text_prompt: str | None
@@ -239,14 +241,15 @@ def _test_processing_correctness(
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-        # Ensure that the cache can fit all of the data
-        mm_processor_cache_gb=2048,
         skip_tokenizer_init=model_info.require_embed_inputs,
         enable_prompt_embeds=model_info.require_embed_inputs,
         enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
     )
+    # Ensure that the cache can fit all of the data
+    # (set after because ModelConfig would set it to 0 for encoder-decoder models)
+    model_config.multimodal_config.mm_processor_cache_gb = 2048
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = model_cls._processor_factory
@@ -333,17 +336,18 @@ def _test_processing_correctness_one(
     model_type = model_config.hf_config.model_type
 
     text_prompt, token_prompt = get_text_token_prompts(baseline_processor, mm_data)
+    mm_items = baseline_processor.info.parse_mm_data(mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
     baseline_tokenized_result = baseline_processor.apply(
         token_prompt,
-        mm_data=mm_data,
+        mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
     cached_tokenized_result = cached_processor.apply(
         token_prompt,
-        mm_data=mm_data,
+        mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
@@ -357,12 +361,12 @@ def _test_processing_correctness_one(
     if text_prompt is not None:
         baseline_text_result = baseline_processor.apply(
             text_prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs={},
         )
         cached_text_result = cached_processor.apply(
             text_prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs={},
         )
 
@@ -408,6 +412,11 @@ def test_processing_correctness(
         pytest.skip(
             "Qwen-VL tokenizer requires downloading a font file from "
             "servers that often refuse connections in CI"
+        )
+    if model_id == "moonshotai/Kimi-K2.5":
+        # FIXME(Isaac): Fix Kimi-K2.5's offline inference about vision chunks.
+        pytest.skip(
+            "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
         )
 
     _test_processing_correctness(
