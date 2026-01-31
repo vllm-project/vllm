@@ -643,13 +643,13 @@ class InternVLProcessor(BaseInternVLProcessor):
         text: list[str],
         vision_chunks: list[VisionChunk],
     ):
-        text = [
-            t.replace("<image>", "<vision_chunk>").replace("<video>", "<vision_chunk>")
-            for t in text
-        ]
         if len(vision_chunks) == 0:
             vision_chunk_inputs = {}
         else:
+            text = [
+                t.replace("<image>", "<vision_chunk>").replace("<video>", "<vision_chunk>")
+                for t in text
+            ]
             pixel_values_lst = []
             for chunk in vision_chunks:
                 if chunk["type"] == "image":
