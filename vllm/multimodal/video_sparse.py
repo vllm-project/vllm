@@ -1,6 +1,7 @@
-import numpy as np
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import cv2
-from typing import List, Tuple, Optional, Union
+import numpy as np
 import torch
 
 class SimilarFrameDetector:
@@ -30,8 +31,8 @@ class SimilarFrameDetector:
         self.alpha = alpha
     
     def _detect_and_convert_format(
-        self, video_data: Union[np.ndarray, torch.Tensor]
-    ) -> Tuple[torch.Tensor, str]:
+         self, video_data: np.ndarray | torch.Tensor
+     ) -> tuple[torch.Tensor, str]:
         """
         Convert input video data to unified tensor format (channels_first) and record original format.
         
@@ -91,11 +92,11 @@ class SimilarFrameDetector:
         )
 
         # Use torch interpolate if available (GPU-optimized)
-        if hasattr(torch.nn.functional, 'interpolate'):
+        if hasattr(torch.nn.functional, "interpolate"):
             downsampled = torch.nn.functional.interpolate(
                 frames, 
                 size=(new_height, new_width), 
-                mode='bilinear', 
+                mode="bilinear", 
                 align_corners=False,
             )
         else:
@@ -133,8 +134,8 @@ class SimilarFrameDetector:
             gray2 = img2[0]
         
         # Move to CPU for cv2 operations
-        gray1_np = gray1.cpu().numpy() if gray1.device.type != 'cpu' else gray1.numpy()
-        gray2_np = gray2.cpu().numpy() if gray2.device.type != 'cpu' else gray2.numpy()
+        gray1_np = gray1.cpu().numpy() if gray1.device.type != "cpu" else gray1.numpy()
+        gray2_np = gray2.cpu().numpy() if gray2.device.type != "cpu" else gray2.numpy()
 
         # SSIM constants
         C1 = (0.01 * 255) ** 2
@@ -144,12 +145,12 @@ class SimilarFrameDetector:
         mu1 = cv2.GaussianBlur(gray1_np, (11, 11), 1.5)
         mu2 = cv2.GaussianBlur(gray2_np, (11, 11), 1.5)    
 
-        mu1_sq = mu1 ** 2
-        mu2_sq = mu2 ** 2
+        mu1_sq = mu1**2
+        mu2_sq = mu2**2
         mu1_mu2 = mu1 * mu2
 
-        sigma1_sq = cv2.GaussianBlur(gray1_np ** 2, (11, 11), 1.5) - mu1_sq    
-        sigma2_sq = cv2.GaussianBlur(gray2_np ** 2, (11, 11), 1.5) - mu2_sq  
+        sigma1_sq = cv2.GaussianBlur(gray1_np**2, (11, 11), 1.5) - mu1_sq    
+        sigma2_sq = cv2.GaussianBlur(gray2_np**2, (11, 11), 1.5) - mu2_sq  
         sigma12 = cv2.GaussianBlur(gray1_np * gray2_np, (11, 11), 1.5) - mu1_mu2
 
         # Compute SSIM map and return mean value
@@ -187,7 +188,7 @@ class SimilarFrameDetector:
     
     def _select_split_points(
         self, photometric_losses: torch.Tensor, k: int
-    ) -> List[int]:
+    ) -> list[int]:
         """
         Select split points by top-k largest loss values (frame pairs with biggest changes).
         These points divide video into k segments.
@@ -202,8 +203,8 @@ class SimilarFrameDetector:
         return split_points
     
     def _create_segments(
-        self, split_points: List[int], total_frames: int
-    ) -> List[Tuple[int, int]]:
+         self, split_points: list[int], total_frames: int
+     ) -> list[tuple[int, int]]:
         """Split video frame indices into segments based on split points."""
         segments = []
         start = 0
@@ -220,8 +221,8 @@ class SimilarFrameDetector:
         return segments
     
     def _select_keyframes_from_segments(
-        self, video_data: torch.Tensor, segments: List[Tuple[int, int]]
-    ) -> Tuple[torch.Tensor, List[int]]:
+         self, video_data: torch.Tensor, segments: list[tuple[int, int]]
+     ) -> tuple[torch.Tensor, list[int]]:
         """
         Select middle frame of each segment as keyframe (representative of the segment).
         Fallback to first/last frame if no valid segments.
@@ -242,12 +243,12 @@ class SimilarFrameDetector:
             return torch.stack(selected_frames, dim=0), selected_frame_indices
         else:
             fallback_frames = [video_data[0], video_data[-1]]
-            fallback_indices = [0, video_data.shape[0]-1]
+            fallback_indices = [0, video_data.shape[0] - 1]
             return torch.stack(fallback_frames, dim=0), fallback_indices
         
     def preprocess(
-        self, videos: List[Union[torch.Tensor, Tuple]]
-    ) -> Tuple[List[torch.Tensor], bool]:
+         self, videos: list[torch.Tensor | tuple]
+     ) -> tuple[list[torch.Tensor], bool]:
         """
         Preprocess input video list: extract tensor data from tuple (if needed).
         
@@ -280,8 +281,8 @@ class SimilarFrameDetector:
             raise ValueError(f"unsupported input format.") 
 
     def frame_sampling(
-        self, video_list: List[Union[np.ndarray, torch.Tensor]]
-    ) -> Tuple[List[torch.Tensor], List[List[int]]]:
+         self, video_list: list[np.ndarray | torch.Tensor]
+     ) -> tuple[list[torch.Tensor], list[list[int]]]:
         """
         Core method: sample keyframes from video list based on photometric loss.
         
@@ -328,8 +329,8 @@ class SimilarFrameDetector:
 
             # Use downsampled frames for loss calculation (speed up)
             working_frames = (
-                self._downsample_frames(video_data) 
-                if self.use_downsampled_loss 
+                self._downsample_frames(video_data)
+                if self.use_downsampled_loss
                 else video_data
             )
 
@@ -359,8 +360,8 @@ class SimilarFrameDetector:
         return final_results, result_selected_frames_index
     
     def process_video_frames(
-        self, videos: List[Union[torch.Tensor, Tuple]]
-    ) -> Union[List[torch.Tensor], List[Tuple]]:
+         self, videos: list[torch.Tensor | tuple]
+     ) -> list[torch.Tensor] | list[tuple]:
         """
         End-to-end video frame sampling (preprocess + frame sampling + metadata update).
         
@@ -392,9 +393,9 @@ class SimilarFrameDetector:
                     if torch.is_tensor(frames_indices):
                         selected_indices = torch.tensor(
                             [
-                            frames_indices[idx].item()
-                            for idx in sampled_frames_index[i]
-                            if idx < len(frames_indices)
+                                frames_indices[idx].item()
+                                for idx in sampled_frames_index[i]
+                                if idx < len(frames_indices)
                             ]
                         )
                     else:
