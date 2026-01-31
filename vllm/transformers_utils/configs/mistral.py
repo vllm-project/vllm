@@ -204,7 +204,7 @@ def _remap_mistral_audio_args(config: dict) -> dict:
         raise NotImplementedError(f"Unsupported: {_maybe_sliding_window=}")
 
     architecture = (
-        "VoxtralStreamingGeneration"
+        "VoxtralRealtimeGeneration"
         if encoder_args.get("causal")
         else "VoxtralForConditionalGeneration"
     )
