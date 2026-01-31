@@ -1371,6 +1371,35 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
 
+    def _parse_and_validate_vision_chunk_input(
+        self, **kwargs: object
+    ) -> InternVLImageInputs | None:
+        pixel_values_flat = kwargs.pop("pixel_values_flat_vision_chunk", None)
+        image_num_patches = kwargs.pop("vision_chunk_num_patches", None)
+
+        if pixel_values_flat is None:
+            return None
+
+        image_token_id = kwargs["image_token_id"]
+        if isinstance(image_token_id, torch.Tensor):
+            image_token_id = image_token_id.flatten().unique().item()
+
+        assert isinstance(image_token_id, int)
+        self.img_context_token_id = image_token_id
+
+        if pixel_values_flat is not None:
+            expected_h = expected_w = self.config.vision_config.image_size
+            resolve_bindings = {"h": expected_h, "w": expected_w}
+
+            return InternVLImagePixelInputs(
+                type="pixel_values",
+                pixel_values_flat=pixel_values_flat,
+                num_patches=image_num_patches,
+                resolve_bindings=resolve_bindings,
+            )
+
+        raise AssertionError("This line should be unreachable.")
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> InternVLImageInputs | None:
@@ -1483,6 +1512,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
                 modalities["images"] = self._parse_and_validate_image_input(**kwargs)
             if input_key in ("pixel_values_flat_video",) and "videos" not in modalities:
                 modalities["videos"] = self._parse_and_validate_video_input(**kwargs)
+            if input_key in ("pixel_values_flat_vision_chunk",) and "vision_chunks" not in modalities:
+                modalities["vision_chunks"] = self._parse_and_validate_vision_chunk_input(**kwargs)
 
         return modalities
 
@@ -1497,6 +1528,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
+        print("modalities keys:", modalities.keys(), kwargs)
         if not modalities:
             return []
 
@@ -1515,6 +1547,10 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
                 video_input = modalities["videos"]
                 video_embeddings = self._process_vision_input(video_input)
                 multimodal_embeddings += tuple(video_embeddings)
+            if modality == "vision_chunks":
+                vision_inputs = modalities["vision_chunks"]
+                vision_embeddings = self._process_vision_input(vision_inputs)
+                multimodal_embeddings += tuple(vision_embeddings)
 
         return multimodal_embeddings
 
