@@ -31,6 +31,22 @@ class EncoderRunner:
         self.req_id_to_mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
+    def reset_mm_cache(self) -> None:
+        """
+        Clear the multi-modal cache that was used during profiling,
+        but no longer needed during inference.
+        """
+        # TODO: Implement MM budget
+        pass
+
+    def reset_encoder_cache(self) -> None:
+        """Clear the GPU-side encoder cache storing vision embeddings.
+
+        This should be called when model weights are updated to ensure
+        stale embeddings computed with old weights are not reused.
+        """
+        self.encoder_cache.clear()
+
     def add_request(self, req_id: str, mm_features: list[MultiModalFeatureSpec]):
         self.req_id_to_mm_features[req_id] = mm_features
 
