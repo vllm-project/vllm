@@ -66,7 +66,7 @@ class ChatParams:
         """The arguments to pass to `tokenizer.apply_chat_template`."""
         return merge_kwargs(
             self.chat_template_kwargs,
-            dict(chat_template=self.chat_template, return_dict=False),
+            dict(chat_template=self.chat_template),
         )
 
 

@@ -3,10 +3,9 @@
 import time
 from typing import Any, TypeAlias
 
-from pydantic import (
-    Field,
-)
+from pydantic import Field
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ChatRequestMixin,
@@ -18,12 +17,43 @@ from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 
 
+def _get_max_total_output_tokens(
+    model_config: ModelConfig,
+) -> tuple[int | None, int]:
+    max_total_tokens = model_config.max_model_len
+    pooler_config = model_config.pooler_config
+
+    if pooler_config is None:
+        return max_total_tokens, 0
+
+    if pooler_config.enable_chunked_processing:
+        return None, 0
+
+    max_embed_len = pooler_config.max_embed_len or max_total_tokens
+    max_output_tokens = max_total_tokens - max_embed_len
+    return max_total_tokens, max_output_tokens
+
+
 class EmbeddingCompletionRequest(
     PoolingBasicRequestMixin, CompletionRequestMixin, EmbedRequestMixin
 ):
-    # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/embeddings
-    pass
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        (
+            max_total_tokens,
+            max_output_tokens,
+        ) = _get_max_total_output_tokens(model_config)
+
+        return TokenizeParams(
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_model_len - max_embed_len",
+        )
 
 
 class EmbeddingChatRequest(
@@ -33,6 +63,24 @@ class EmbeddingChatRequest(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        (
+            max_total_tokens,
+            max_output_tokens,
+        ) = _get_max_total_output_tokens(model_config)
+
+        return TokenizeParams(
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_model_len - max_embed_len",
+        )
 
 
 EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest

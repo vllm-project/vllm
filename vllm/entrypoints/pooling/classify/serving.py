@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from http import HTTPStatus
-from typing import Final, cast
+from typing import Final, TypeAlias
 
 import jinja2
 import numpy as np
@@ -28,7 +27,7 @@ from vllm.pooling_params import PoolingParams
 logger = init_logger(__name__)
 
 
-ClassificationServeContext = ServeContext[ClassificationRequest]
+ClassificationServeContext: TypeAlias = ServeContext[ClassificationRequest]
 
 
 class ServingClassification(OpenAIServing):
@@ -76,34 +75,18 @@ class ServingClassification(OpenAIServing):
                 if error_check_ret:
                     return error_check_ret
 
-                _, engine_prompts = await self._preprocess_chat(
+                _, ctx.engine_prompts = await self._preprocess_chat(
                     ctx.request,
-                    self.renderer,
                     ctx.request.messages,
-                    chat_template=ctx.request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    add_generation_prompt=ctx.request.add_generation_prompt,
-                    continue_final_message=ctx.request.continue_final_message,
-                    add_special_tokens=ctx.request.add_special_tokens,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=None,
                 )
-                ctx.engine_prompts = engine_prompts
-
             elif isinstance(ctx.request, ClassificationCompletionRequest):
-                input_data = ctx.request.input
-                if input_data in (None, ""):
-                    return self.create_error_response(
-                        "Input or messages must be provided",
-                        status_code=HTTPStatus.BAD_REQUEST,
-                    )
-                if isinstance(input_data, list) and not input_data:
-                    ctx.engine_prompts = []
-                    return None
-
-                renderer = self._get_completion_renderer()
-                prompt_input = cast(str | list[str], input_data)
-                ctx.engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=prompt_input,
-                    config=self._build_render_config(ctx.request),
+                ctx.engine_prompts = await self._preprocess_completion(
+                    ctx.request,
+                    prompt_input=ctx.request.input,
+                    prompt_embeds=None,
                 )
             else:
                 return self.create_error_response("Invalid classification request type")
@@ -158,13 +141,6 @@ class ServingClassification(OpenAIServing):
             model=ctx.model_name,
             data=items,
             usage=usage,
-        )
-
-    def _build_render_config(self, request: ClassificationRequest) -> RenderConfig:
-        return RenderConfig(
-            max_length=self.max_model_len,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            add_special_tokens=request.add_special_tokens,
         )
 
     async def create_classify(

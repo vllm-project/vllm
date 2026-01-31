@@ -80,7 +80,6 @@ class OpenAIServingTokenization(OpenAIServing):
 
                 _, engine_prompts = await self._preprocess_chat(
                     request,
-                    self.renderer,
                     request.messages,
                     default_template=self.chat_template,
                     default_template_content_format=self.chat_template_content_format,
@@ -88,10 +87,10 @@ class OpenAIServingTokenization(OpenAIServing):
                     tool_dicts=tool_dicts,
                 )
             else:
-                renderer = self._get_completion_renderer()
-                engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=request.prompt,
-                    config=self._build_render_config(request),
+                engine_prompts = await self._preprocess_completion(
+                    request,
+                    prompt_input=request.prompt,
+                    prompt_embeds=None,
                 )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -133,7 +132,6 @@ class OpenAIServingTokenization(OpenAIServing):
         request_id = f"tokenize-{self._base_request_id(raw_request)}"
 
         lora_request = self._maybe_get_adapters(request)
-        tokenizer = self.renderer.get_tokenizer()
 
         self._log_inputs(
             request_id,

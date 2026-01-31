@@ -24,7 +24,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import RendererLike
+from vllm.renderers import RendererLike, merge_kwargs
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -316,20 +316,6 @@ class AsyncLLM(EngineClient):
             tokenization_kwargs = merge_kwargs(
                 tokenization_kwargs,
                 dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
-            )
-
-        if isinstance(prompt, AsyncGenerator):
-            # Streaming input case.
-            return await self._add_streaming_input_request(
-                request_id,
-                prompt,
-                params,
-                arrival_time,
-                lora_request,
-                tokenization_kwargs,
-                trace_headers,
-                priority,
-                data_parallel_rank,
             )
 
         if isinstance(prompt, AsyncGenerator):

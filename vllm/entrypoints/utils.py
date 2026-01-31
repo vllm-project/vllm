@@ -8,7 +8,7 @@ import os
 from argparse import Namespace
 from logging import Logger
 from string import Template
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import regex as re
 from fastapi import Request
@@ -18,9 +18,9 @@ from starlette.background import BackgroundTask, BackgroundTasks
 from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import EmbedsPrompt, TokensPrompt
+from vllm.inputs.parse import get_prompt_len
 from vllm.logger import current_formatter_type, init_logger
 from vllm.platforms import current_platform
-from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
@@ -34,9 +34,7 @@ if TYPE_CHECKING:
         StreamOptions,
     )
     from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-    from vllm.entrypoints.openai.responses.protocol import (
-        ResponsesRequest,
-    )
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 else:
     ChatCompletionRequest = object
     CompletionRequest = object
@@ -206,10 +204,7 @@ def get_max_tokens(
         # CompletionRequest (also a fallback for ChatCompletionRequest)
         max_tokens = getattr(request, "max_tokens", None)
 
-    input_length = length_from_prompt_token_ids_or_embeds(
-        prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
-        prompt.get("prompt_embeds"),  # type: ignore[arg-type]
-    )
+    input_length = get_prompt_len(prompt)
     default_max_tokens = max_model_len - input_length
     max_output_tokens = current_platform.get_max_output_tokens(input_length)
 
