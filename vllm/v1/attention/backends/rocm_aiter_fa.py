@@ -8,9 +8,9 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import get_cu_count
@@ -18,7 +18,6 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
-    AttentionLayer,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -716,8 +715,6 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
 
 class AiterFlashAttentionImpl(AttentionImpl):
-    forward_includes_kv_cache: bool = False
-
     def __init__(
         self,
         num_heads: int,
@@ -755,63 +752,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
                 "Encoder self-attention is not implemented for FlashAttentionImpl"
-            )
-
-    def do_kv_cache_update(
-        self,
-        layer: AttentionLayer,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AiterFlashAttentionMetadata,
-    ) -> None:
-        """Perform KV cache update separately from attention forward pass.
-
-        RocmAiterFA overrides the default implementation to support shuffle
-        KV cache layout which requires a specialized kernel.
-
-        Args:
-            layer: The attention layer instance.
-            key: Key tensor with shape [num_tokens, num_kv_heads, head_size].
-            value: Value tensor with shape [num_tokens, num_kv_heads, head_size].
-            kv_cache: The KV cache tensor.
-            attn_metadata: Attention metadata containing slot_mapping.
-        """
-        # Skip if sharing KV cache with an earlier attention layer
-        if self.kv_sharing_target_layer_name is not None:
-            return
-
-        key_cache, value_cache = kv_cache.unbind(0)
-
-        # NOTE(woosuk): Here, key and value are padded while slot_mapping
-        # is not padded. However, we don't need to do
-        # key[:num_actual_tokens] and value[:num_actual_tokens] because
-        # the reshape_and_cache op uses the slot_mapping's shape
-        # to determine the number of actual tokens.
-        if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-            # We may calculate per token quant scale in
-            # reshape_and_cache_shuffle_triton which might differ from
-            # vllm's style when shuffle layout is used.
-            reshape_and_cache_shuffle_triton(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                attn_metadata.k_scale,
-                attn_metadata.v_scale,
-            )
-        else:
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
             )
 
     def extend_for_sliding_window(
@@ -1050,10 +990,43 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
-
-        # NOTE: KV cache update is handled separately by do_kv_cache_update().
-        # The caller must invoke do_kv_cache_update() before calling forward()
-        # since forward_includes_kv_cache = False for this backend.
+        if (
+            self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
+        ):
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping
+            # is not padded. However, we don't need to do
+            # key[:num_actual_tokens] and value[:num_actual_tokens] because
+            # the reshape_and_cache_flash op uses the slot_mapping's shape
+            # to determine the number of actual tokens.
+            if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+                # We may calculate per token quant scale in
+                # reshape_and_cache_shuffle_triton which might differ from
+                # vllm's style when shuffle layout is used.
+                reshape_and_cache_shuffle_triton(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    attn_metadata.k_scale,
+                    attn_metadata.v_scale,
+                )
+            else:
+                torch.ops._C_cache_ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
         # decode:extend:prefill
         query = query[:num_actual_tokens]
