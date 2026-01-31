@@ -308,6 +308,13 @@ class FusedMoEBlock(nn.Module):
                 f"the number of experts {config.moe_num_experts}."
             )
 
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.moe_num_experts,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
+        )
         self.use_moe_router_bias = config.use_moe_router_bias
         assert self.use_moe_router_bias, "Only support use_moe_router_bias is true."
         self.routed_scaling_factor = config.moe_router_scaling_factor
@@ -350,6 +357,7 @@ class FusedMoEBlock(nn.Module):
 
         self.experts = SharedFusedMoE(
             shared_experts=self.share_expert,
+            gate=self.gate,
             num_experts=config.moe_num_experts,
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,
@@ -365,14 +373,7 @@ class FusedMoEBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
         )
-        self.gate = ReplicatedLinear(
-            config.hidden_size,
-            config.moe_num_experts,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.gate",
-        )
- 
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -742,7 +743,6 @@ class Step3p5Model(nn.Module):
                         weight_loader(param, loaded_weight)
                         loaded_params.add(local_name)
         return loaded_params
-
 
 
 class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
