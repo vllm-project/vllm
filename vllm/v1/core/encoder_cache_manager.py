@@ -372,6 +372,12 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         self.allocated: list[str] = []
         self.to_free: list[str] = []
 
+    def reset(self) -> None:
+        """Reset the encoder cache to its initial state."""
+        self.num_free_slots = self.cache_size
+        self.allocated.clear()
+        self.to_free.clear()
+
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         return False
 
