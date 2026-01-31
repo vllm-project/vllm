@@ -624,7 +624,7 @@ class GLM4VForCausalLM(
 
         return self.transformer.vision(pixel_values)
 
-    def _iter_mm_grid_thw(
+    def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, int, int, int]]:
         hf_config = self.config
@@ -651,7 +651,7 @@ class GLM4VForCausalLM(
             llm_grid_t,
             llm_grid_h,
             llm_grid_w,
-        ) in self._iter_mm_grid_thw(mm_features):
+        ) in self.iter_mm_grid_thw(mm_features):
             text_len = offset - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(
@@ -661,7 +661,8 @@ class GLM4VForCausalLM(
                 3, -1
             )
             llm_pos_ids_list.append(grid_indices + text_len + st_idx)
-            st = offset + 2 + llm_grid_t * llm_grid_h * llm_grid_w
+            # EVA2CLIPModel has embeddings for boi and eoi tokens as well
+            st = offset + 1 + llm_grid_t * llm_grid_h * llm_grid_w + 1
 
         if st < len(input_tokens):
             text_len = len(input_tokens) - st

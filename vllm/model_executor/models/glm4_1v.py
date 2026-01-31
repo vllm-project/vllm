@@ -1579,7 +1579,7 @@ class Glm4vForConditionalGeneration(
                 multimodal_embeddings += tuple(video_embeddings)
         return multimodal_embeddings
 
-    def _iter_mm_grid_thw(
+    def iter_mm_grid_thw(
         self, mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, int, int, int]]:
         hf_config = self.config
@@ -1613,7 +1613,7 @@ class Glm4vForConditionalGeneration(
             llm_grid_t,
             llm_grid_h,
             llm_grid_w,
-        ) in self._iter_mm_grid_thw(mm_features):
+        ) in self.iter_mm_grid_thw(mm_features):
             text_len = offset - st
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(
