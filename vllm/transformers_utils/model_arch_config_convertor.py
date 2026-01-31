@@ -46,8 +46,14 @@ class ModelArchConfigConvertorBase:
         self.hf_config = hf_config
         self.hf_text_config = hf_text_config
 
-    def get_architectures(self) -> list[str]:
-        return getattr(self.hf_config, "architectures", [])
+    def get_architecture(self) -> str | None:
+        architectures = getattr(self.hf_config, "architectures", None)
+        if architectures:
+            assert len(architectures) == 1, (
+                f"len(architectures) should be 1, got {len(architectures)}"
+            )
+            return architectures[0]
+        return None
 
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_hidden_layers", 0)
@@ -293,7 +299,7 @@ class ModelArchConfigConvertorBase:
 
     def convert(self) -> ModelArchitectureConfig:
         model_arch_config = ModelArchitectureConfig(
-            architectures=self.get_architectures(),
+            architecture=self.get_architecture(),
             model_type=self.hf_config.model_type,
             text_model_type=getattr(self.hf_text_config, "model_type", None),
             hidden_size=self.get_hidden_size(),
@@ -386,7 +392,7 @@ class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
         raise RuntimeError(
             "Could not determine the number of key-value attention heads "
             "from model configuration. "
-            f"Architecture: {self.get_architectures()}. "
+            f"Architecture: {self.get_architecture()}. "
             "This usually indicates an unsupported model architecture or "
             "missing configuration. "
             "Please check if your model is supported at: "

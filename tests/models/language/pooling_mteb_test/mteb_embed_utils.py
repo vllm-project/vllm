@@ -159,7 +159,9 @@ def mteb_test_embed_models(
 
         # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
-            assert model_info.architecture in model_config.architectures
+            assert (
+                model_info.architecture == model_config.model_arch_config.architecture
+            )
 
         # Confirm whether the important configs in model_config are correct.
         pooler_config = model_config.pooler_config

@@ -46,7 +46,9 @@ def wikitext_ppl_test(
 
         # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
-            assert model_info.architecture in model_config.architectures
+            assert (
+                model_info.architecture == model_config.model_arch_config.architecture
+            )
 
         max_length = min(model_config.max_model_len - 1, max_length)
         stride = max_length
