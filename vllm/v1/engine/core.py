@@ -572,6 +572,14 @@ class EngineCore:
         stale vision embeddings computed with old weights are not reused.
         Clears both the scheduler's cache manager and the GPU model runner's cache.
         """
+        # NOTE: Since this is mainly for debugging, we don't attempt to
+        # re-sync the internal caches (P0 sender, P1 receiver)
+        if self.scheduler.has_unfinished_requests():
+            logger.warning(
+                "Resetting the encoder cache when requests are "
+                "in progress may lead to desynced internal caches."
+            )
+
         # Reset the scheduler's encoder cache manager (logical state)
         self.scheduler.reset_encoder_cache()
         # Reset the GPU model runner's encoder cache (physical storage)
