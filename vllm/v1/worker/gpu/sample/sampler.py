@@ -78,6 +78,11 @@ class Sampler:
             logprobs_tensors = compute_topk_logprobs(
                 logits, max_num_logprobs, sampled, cu_num_logits
             )
+            expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
+            cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
+            logprobs_tensors = compute_topk_logprobs(
+                logits, max_num_logprobs, sampled, cu_num_logits
+            )
         else:
             logprobs_tensors = None
 
