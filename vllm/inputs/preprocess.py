@@ -259,9 +259,10 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
+        mm_items = mm_processor.info.parse_mm_data(mm_data)
         mm_input = mm_processor.apply(
             prompt,
-            mm_data,
+            mm_items,
             hf_processor_mm_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
