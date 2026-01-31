@@ -83,6 +83,10 @@ class TokenizerLike(Protocol):
     def get_added_vocab(self) -> dict[str, int]:
         raise NotImplementedError
 
+    @property
+    def added_tokens_decoder(self) -> dict[int, Any]:
+        raise NotImplementedError
+
     def encode(
         self,
         text: str,
