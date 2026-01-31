@@ -10,12 +10,13 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import TextPrompt, TokensPrompt
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
+from .params import ChatParams
 from .protocol import RendererLike
 
 logger = init_logger(__name__)
@@ -95,8 +96,8 @@ class MistralRenderer(RendererLike):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
@@ -104,25 +105,25 @@ class MistralRenderer(RendererLike):
             content_format="string",
         )
 
-        prompt_raw = safe_apply_chat_template(tokenizer, messages, **kwargs)
-
-        prompt = (
-            TextPrompt(prompt=prompt_raw)
-            if isinstance(prompt_raw, str)
-            else TokensPrompt(prompt_token_ids=prompt_raw)
+        prompt_raw = safe_apply_chat_template(
+            tokenizer,
+            messages,
+            **params.get_apply_chat_template_kwargs(),
         )
+
+        prompt = self.render_completion(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt  # type: ignore[return-value]
+        return conversation, prompt
 
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
@@ -131,17 +132,15 @@ class MistralRenderer(RendererLike):
         )
 
         prompt_raw = await self._apply_chat_template_async(
-            tokenizer, messages, **kwargs
+            tokenizer,
+            messages,
+            **params.get_apply_chat_template_kwargs(),
         )
 
-        prompt = (
-            TextPrompt(prompt=prompt_raw)
-            if isinstance(prompt_raw, str)
-            else TokensPrompt(prompt_token_ids=prompt_raw)
-        )
+        prompt = self.render_completion(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
             prompt["multi_modal_uuids"] = mm_uuids
 
-        return conversation, prompt  # type: ignore[return-value]
+        return conversation, prompt
