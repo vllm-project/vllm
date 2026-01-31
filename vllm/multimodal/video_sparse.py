@@ -276,6 +276,14 @@ class SimilarFrameDetector:
         # Sample keyframes for each video
         for video_idx, video_data in enumerate(processed_video_list):
             frame_number, channels, height, width = video_data.shape
+
+            if frame_number == 1:
+                selected_frames = video_data
+                selected_frames_index = [0]
+                result_selected_frames_index.append(selected_frames_index)
+                result_videos.append(selected_frames)
+                continue
+            
             k = self._calculate_target_frames(frame_number)
 
             # Use downsampled frames for loss calculation (speed up)
@@ -318,7 +326,14 @@ class SimilarFrameDetector:
             result = []
             for i, (_, *metadata) in enumerate(videos):
                 video_metadata = metadata[0] if metadata else {}
-
+                
+                frame_number = video_list[i].shape[0]
+                if frame_number == 1:
+                    updated_metadata = video_metadata.copy()
+                    updated_metadata['frames_indices'] = [0]
+                    result.append((video_sampled[i], updated_metadata))
+                    continue
+                
                 frames_indices = video_metadata.get('frames_indices', torch.tensor([]))
                 # Update frame indices to sampled keyframes
                 if i < len(sampled_frames_index) and len(frames_indices) > 0:
@@ -344,6 +359,6 @@ class SimilarFrameDetector:
         else:
             return video_sampled
         
-def is_multimodal_EFS_enabled(EFS_sparse_rate: Optional[float]) -> bool:
+def is_multimodal_efs_enabled(efs_sparse_rate: Optional[float]) -> bool:
     """Check if EFS (Efficient Frame Sampling) is enabled (valid sparse rate > 0)."""
-    return (EFS_sparse_rate is not None and EFS_sparse_rate > 0)
+    return (efs_sparse_rate is not None and efs_sparse_rate > 0)
