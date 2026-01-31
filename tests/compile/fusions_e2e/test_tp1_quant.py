@@ -95,8 +95,8 @@ def test_tp1_fp8_fusions(
         model_kwargs,
         attn_backend,
         compilation_config,
-        use_deepgemm,
         matches_check,
+        use_deepgemm=use_deepgemm,
     )
 
 

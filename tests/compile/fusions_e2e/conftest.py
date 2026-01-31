@@ -19,8 +19,8 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         model_kwargs: dict,
         attn_backend: AttentionBackendCase,
         compilation_config: dict,
-        use_deepgemm: bool,
         matches_check: list[str],
+        use_deepgemm: bool = False,
         tp_size: int = 1,
     ):
         monkeypatch.setenv("VLLM_USE_DEEP_GEMM", "1" if use_deepgemm else "0")
