@@ -10,7 +10,7 @@ class SimilarFrameDetector:
     Reduces redundant frames by selecting representative keyframes at a specified sparse ratio.
     """
     def __init__(
-       self,
+        self,
         sparse_ratio: float = 0.5,
         use_downsampled_loss: bool = True,
         downscale_factor: int = 4,
@@ -31,8 +31,8 @@ class SimilarFrameDetector:
         self.alpha = alpha
     
     def _detect_and_convert_format(
-         self, video_data: np.ndarray | torch.Tensor
-     ) -> tuple[torch.Tensor, str]:
+        self, video_data: np.ndarray | torch.Tensor
+    ) -> tuple[torch.Tensor, str]:
         """
         Convert input video data to unified tensor format (channels_first) and record original format.
         
@@ -87,24 +87,24 @@ class SimilarFrameDetector:
         """
         frame_number, channels, height, width = frames.shape
         new_height, new_width = (
-            height // self.downscale_factor, 
+            height // self.downscale_factor,
             width // self.downscale_factor,
         )
 
         # Use torch interpolate if available (GPU-optimized)
         if hasattr(torch.nn.functional, "interpolate"):
             downsampled = torch.nn.functional.interpolate(
-                frames, 
-                size=(new_height, new_width), 
-                mode="bilinear", 
+                frames,
+                size=(new_height, new_width),
+                mode="bilinear",
                 align_corners=False,
             )
         else:
             # Fallback to cv2 resize (CPU)
             frames_np = frames.cpu().numpy()
             downsampled = torch.zeros(
-                (frame_number, channels, new_height, new_width), 
-                dtype=torch.float32, 
+                (frame_number, channels, new_height, new_width),
+                dtype=torch.float32,
                 device=frames.device,
             )
             for f in range(frame_number):
@@ -112,7 +112,7 @@ class SimilarFrameDetector:
                 if frame.dtype != np.uint8:
                     frame = np.clip(frame, 0, 255).astype(np.uint8)
                 downsampled_frame = cv2.resize(
-                    frame, 
+                    frame,
                     (new_width, new_height),
                     interpolation=cv2.INTER_LINEAR,
                 )
@@ -143,14 +143,14 @@ class SimilarFrameDetector:
 
         # Gaussian blur for mean/variance calculation
         mu1 = cv2.GaussianBlur(gray1_np, (11, 11), 1.5)
-        mu2 = cv2.GaussianBlur(gray2_np, (11, 11), 1.5)    
+        mu2 = cv2.GaussianBlur(gray2_np, (11, 11), 1.5)
 
         mu1_sq = mu1**2
         mu2_sq = mu2**2
         mu1_mu2 = mu1 * mu2
 
-        sigma1_sq = cv2.GaussianBlur(gray1_np**2, (11, 11), 1.5) - mu1_sq    
-        sigma2_sq = cv2.GaussianBlur(gray2_np**2, (11, 11), 1.5) - mu2_sq  
+        sigma1_sq = cv2.GaussianBlur(gray1_np**2, (11, 11), 1.5) - mu1_sq
+        sigma2_sq = cv2.GaussianBlur(gray2_np**2, (11, 11), 1.5) - mu2_sq
         sigma12 = cv2.GaussianBlur(gray1_np * gray2_np, (11, 11), 1.5) - mu1_mu2
 
         # Compute SSIM map and return mean value
@@ -203,8 +203,8 @@ class SimilarFrameDetector:
         return split_points
     
     def _create_segments(
-         self, split_points: list[int], total_frames: int
-     ) -> list[tuple[int, int]]:
+        self, split_points: list[int], total_frames: int
+    ) -> list[tuple[int, int]]:
         """Split video frame indices into segments based on split points."""
         segments = []
         start = 0
@@ -221,8 +221,8 @@ class SimilarFrameDetector:
         return segments
     
     def _select_keyframes_from_segments(
-         self, video_data: torch.Tensor, segments: list[tuple[int, int]]
-     ) -> tuple[torch.Tensor, list[int]]:
+        self, video_data: torch.Tensor, segments: list[tuple[int, int]]
+    ) -> tuple[torch.Tensor, list[int]]:
         """
         Select middle frame of each segment as keyframe (representative of the segment).
         Fallback to first/last frame if no valid segments.
@@ -247,8 +247,8 @@ class SimilarFrameDetector:
             return torch.stack(fallback_frames, dim=0), fallback_indices
         
     def preprocess(
-         self, videos: list[torch.Tensor | tuple]
-     ) -> tuple[list[torch.Tensor], bool]:
+        self, videos: list[torch.Tensor | tuple]
+    ) -> tuple[list[torch.Tensor], bool]:
         """
         Preprocess input video list: extract tensor data from tuple (if needed).
         
@@ -267,22 +267,22 @@ class SimilarFrameDetector:
         if torch.is_tensor(first_element):
             return videos, processed
         elif (
-            isinstance(first_element, tuple) 
-            and len(first_element) >= 1 
+            isinstance(first_element, tuple)
+            and len(first_element) >= 1
             and torch.is_tensor(first_element[0])
-            or isinstance(first_element, tuple) 
-            and len(first_element) >= 1 
+            or isinstance(first_element, tuple)
+            and len(first_element) >= 1
             and isinstance(first_element[0], np.ndarray)
         ):
             videos_t = [item[0] for item in videos]
             processed = True
             return videos_t, processed
         else:
-            raise ValueError(f"unsupported input format.") 
+            raise ValueError("unsupported input format.")
 
     def frame_sampling(
-         self, video_list: list[np.ndarray | torch.Tensor]
-     ) -> tuple[list[torch.Tensor], list[list[int]]]:
+        self, video_list: list[np.ndarray | torch.Tensor]
+    ) -> tuple[list[torch.Tensor], list[list[int]]]:
         """
         Core method: sample keyframes from video list based on photometric loss.
         
@@ -360,8 +360,8 @@ class SimilarFrameDetector:
         return final_results, result_selected_frames_index
     
     def process_video_frames(
-         self, videos: list[torch.Tensor | tuple]
-     ) -> list[torch.Tensor] | list[tuple]:
+        self, videos: list[torch.Tensor | tuple]
+    ) -> list[torch.Tensor] | list[tuple]:
         """
         End-to-end video frame sampling (preprocess + frame sampling + metadata update).
         
