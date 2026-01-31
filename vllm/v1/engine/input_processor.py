@@ -73,11 +73,9 @@ class InputProcessor:
             self.mm_registry.supports_multimodal_inputs(self.model_config)
             and not self.model_config.skip_tokenizer_init
         ):
-            with set_default_torch_num_threads():
-                max_tokens_by_modality = (
-                    mm_registry.get_max_tokens_per_item_by_modality(self.model_config)
-                )
-
+            max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
+                self.model_config
+            )
             _, self.mm_encoder_cache_size = compute_mm_encoder_budget(
                 self.vllm_config.scheduler_config, max_tokens_by_modality
             )
