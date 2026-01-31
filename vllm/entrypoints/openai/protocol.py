@@ -1157,10 +1157,54 @@ class ScoreRequest(OpenAIBaseModel):
         return PoolingParams(additional_data=self.additional_data)
 
 
+class RerankImageURL(BaseModel):
+    """Image URL for multimodal reranking."""
+    url: str
+
+
+class RerankDocumentObject(BaseModel):
+    """
+    Document object for multimodal reranking.
+    Supports text and/or image content.
+
+    The image_url field accepts:
+    - HTTP/HTTPS URLs: "https://example.com/image.jpg"
+    - Data URLs (base64): "data:image/jpeg;base64,..."
+    - Local file paths: "file:///path/to/image.jpg"
+      (requires --allowed-local-media-path to be set)
+    - Simple file paths: "/path/to/image.jpg"
+      (automatically converted to file:// URL)
+    """
+    text: Optional[str] = None
+    image_url: Optional[Union[str, RerankImageURL]] = None
+
+    @model_validator(mode="after")
+    def validate_content(self) -> "RerankDocumentObject":
+        if self.text is None and self.image_url is None:
+            raise ValueError(
+                "At least one of 'text' or 'image_url' must be provided")
+        return self
+
+    def get_image_url_str(self) -> Optional[str]:
+        """Get the image URL as a string, converting local paths to file:// URLs."""
+        if self.image_url is None:
+            return None
+        url = (self.image_url
+               if isinstance(self.image_url, str) else self.image_url.url)
+        # Convert simple file paths to file:// URLs
+        if url.startswith("/"):
+            return f"file://{url}"
+        return url
+
+
+# Union type for documents: can be a plain string or an object with text/image
+RerankDocumentInput: TypeAlias = Union[str, RerankDocumentObject]
+
+
 class RerankRequest(OpenAIBaseModel):
     model: Optional[str] = None
-    query: str
-    documents: list[str]
+    query: Union[str, RerankDocumentObject]
+    documents: list[RerankDocumentInput]
     top_n: int = Field(default_factory=lambda: 0)
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
@@ -1184,7 +1228,9 @@ class RerankRequest(OpenAIBaseModel):
 
 
 class RerankDocument(BaseModel):
-    text: str
+    """Response document containing the original content."""
+    text: Optional[str] = None
+    image_url: Optional[str] = None
 
 
 class RerankResult(BaseModel):
