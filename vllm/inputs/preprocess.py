@@ -17,6 +17,7 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.video_sparse import SimilarFrameDetector, is_multimodal_efs_enabled
 from vllm.renderers import renderer_from_config
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.jsontree import json_iter_leaves
@@ -39,7 +40,7 @@ from .data import (
     token_inputs,
 )
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
-from vllm.multimodal.video_sparse import SimilarFrameDetector, is_multimodal_efs_enabled
+
 logger = init_logger(__name__)
 
 
@@ -690,7 +691,7 @@ class InputPreprocessor:
         """Efficient Frame Selection For Videos."""
         if (
             self.model_config 
-            and hasattr(self.model_config, 'multimodal_config') 
+            and hasattr(self.model_config, "multimodal_config") 
             and self.model_config.multimodal_config
             ):
             efs_sparse_rate = self.model_config.multimodal_config.video_sparse_rate
@@ -703,12 +704,12 @@ class InputPreprocessor:
              and isinstance(prompt["multi_modal_data"], dict)
              and "video" in prompt["multi_modal_data"]
              ):
-            videos = prompt['multi_modal_data']['video']
+            videos = prompt["multi_modal_data"]["video"]
             detector = SimilarFrameDetector(
                 sparse_ratio=(1-efs_sparse_rate)
             )
             videos = detector.process_video_frames(videos)
-            prompt['multi_modal_data']['video'] = videos
+            prompt["multi_modal_data"]["video"] = videos
         """Preprocess the input prompt."""
         res = self._preprocess(prompt, tokenization_kwargs, mm_uuids=mm_uuids)
 
