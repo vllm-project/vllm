@@ -23,6 +23,7 @@ logger = init_logger(__name__)
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     accept_output_buffer: bool = True
+    forward_includes_kv_cache_update: bool = False
 
     @staticmethod
     def get_name() -> str:
@@ -91,6 +92,46 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         self.unified_attention = unified_attention
 
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+    ) -> None:
+        """Update KV cache with new key and value tensors.
+
+        Args:
+            layer: The attention layer (for scales).
+            key: New key tensor to cache.
+            value: New value tensor to cache.
+            kv_cache: The KV cache tensor to update.
+            attn_metadata: Attention metadata containing slot_mapping.
+        """
+        if key is None or value is None:
+            # Cross attention case - skip update
+            return
+
+        if self.kv_sharing_target_layer_name is not None:
+            # Sharing KV cache with another layer - skip update
+            return
+
+        # Unbind the cache
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        # Update the cache
+        ops.reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            attn_metadata.slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -141,27 +182,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
 
         key_cache, value_cache = kv_cache.unbind(0)
-
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            ops.reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
 
         if self.kv_cache_dtype.startswith("fp8"):
             key_cache = key_cache.view(self.fp8_dtype)
