@@ -606,7 +606,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         tp_size = parallel_config.tensor_parallel_size
         if attention_tp_size != tp_size:
             # Helix GQA mode: compute heads using attention_tp_size (TPA)
-            total_heads = self.model_config.get_total_num_attention_heads()
+            total_heads = self.model_config.model_arch_config.total_num_attention_heads
             self.num_qo_heads = total_heads // attention_tp_size
         else:
             # Standard mode: use model_config
