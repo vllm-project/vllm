@@ -656,7 +656,7 @@ class InternVLProcessor(BaseInternVLProcessor):
                 if chunk["type"] == "image":
                     pixel_values = self._images_to_pixel_values_lst([chunk["image"]])[0]
                 elif chunk["type"] == "video_chunk":
-                    pixel_values = self._videos_to_pixel_values_lst([chunk["video_chunk"]])[0]
+                    pixel_values = self._images_to_pixel_values_lst([chunk["video_chunk"]])[0]
                 pixel_values_lst.append(pixel_values)
 
             vision_chunk_inputs = {
