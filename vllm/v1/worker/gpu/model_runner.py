@@ -482,15 +482,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> InputBatch:
         num_tokens = scheduler_output.total_num_scheduled_tokens
         assert num_tokens > 0
-        req_num_tokens = scheduler_output.num_scheduled_tokens
-        num_reqs = len(req_num_tokens)
+        num_tokens_per_req = scheduler_output.num_scheduled_tokens
+        num_reqs = len(num_tokens_per_req)
 
         # Decode first, then prefill.
         # batch_idx -> req_id
-        req_ids = sorted(req_num_tokens, key=req_num_tokens.get)  # type: ignore[arg-type]
-        num_scheduled_tokens = np.fromiter(
-            map(req_num_tokens.get, req_ids), dtype=np.int32, count=num_reqs
-        )
+        req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore[arg-type]
+        numtoks_iter = map(num_tokens_per_req.get, req_ids)
+        num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
         idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
         idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
