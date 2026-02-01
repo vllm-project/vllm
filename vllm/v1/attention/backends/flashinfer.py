@@ -300,20 +300,28 @@ class BatchDCPPrefillWrapper:
             value,
             return_lse=True,
         )
-        lse_query = lse_query.transpose(0, 1).contiguous()
+        # lse_query shape is [H, B] from _new_tokens.run()
 
-        # In Helix GQA mode, scatter query attention output heads to match
+        # In Helix GQA mode, query attention output has TPA-sized heads but
+        # context attention output has TP-sized heads (after All-to-All scatter).
+        # We need to scatter query attention output heads to match.
         if is_helix_gqa_mode():
             from vllm.distributed.parallel_state import get_helix_kvp_group
             kvp_group = get_helix_kvp_group()
             kvp_rank = kvp_group.rank_in_group
             kvp_size = kvp_group.world_size
+            # Scatter heads: each GPU keeps its portion
+            # output_query: [B, H_tpa, D] -> [B, H_tpa/KVP, D] = [B, H_tp, D]
+            # lse_query: [H_tpa, B] -> [H_tpa/KVP, B] = [H_tp, B]
             num_heads = output_query.shape[1]
             heads_per_rank = num_heads // kvp_size
             start_head = kvp_rank * heads_per_rank
             end_head = start_head + heads_per_rank
             output_query = output_query[:, start_head:end_head, :].contiguous()
             lse_query = lse_query[start_head:end_head, :].contiguous()
+
+        # Transpose lse_query AFTER scatter: [H, B] -> [B, H]
+        lse_query = lse_query.transpose(0, 1).contiguous()
 
         merge_attn_states(
             out,
