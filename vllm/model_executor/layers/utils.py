@@ -161,6 +161,8 @@ def rocm_unquantized_gemm_impl(
         and x.dtype in [torch.float16, torch.bfloat16]
         and (
             n >= 10
+            and k % 8 == 0
+            and m % 64 == 0
             and n <= 128
             and k > 512
             and ((k + 511) // 512)
