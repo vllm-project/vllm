@@ -210,6 +210,11 @@ class CudaPlatformBase(Platform):
                     # Fall back to CUTLASS_MLA as 2nd priority on Blackwell
                     # Also used when DCP is enabled (CUTLASS_MLA supports LSE)
                     use_cutlass_mla = True
+                    # Set the backend in AttentionConfig so it's used during
+                    # backend selection (same as FlashInferMLA case above)
+                    vllm_config.attention_config.backend = (
+                        AttentionBackendEnum.CUTLASS_MLA
+                    )
                 elif is_flashmla_dense_supported()[0]:
                     # Non-Blackwell with FlashMLA support
                     use_flashmla = True
