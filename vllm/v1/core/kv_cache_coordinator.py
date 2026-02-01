@@ -482,6 +482,9 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Simple hybrid (1 full attn + 1 other): one iteration suffices.
         # Full attn is always first if it exists. This avoids EAGLE drops
         # being applied multiple times to non-full-attn groups.
+        # FIXME (yifan): However, for complex hybrid models with multiple attn
+        # groups, we still have the EAGLE spiral block dropping problem. See
+        # discussion in issue https://github.com/vllm-project/vllm/issues/32802.
         is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
             self.attention_groups[0][0], FullAttentionSpec
         )
@@ -528,9 +531,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         if isinstance(spec, FullAttentionSpec):
             num_blocks = hit_length // spec.block_size
             for group_id in group_ids:
-                blocks = hit_blocks_by_group[group_id]
-                if blocks is not None:
-                    del blocks[num_blocks:]
+                if (blks := hit_blocks_by_group[group_id]) is not None:
+                    del blks[num_blocks:]
 
         return tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
