@@ -542,6 +542,7 @@ class FlashAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
+        **kwargs
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
