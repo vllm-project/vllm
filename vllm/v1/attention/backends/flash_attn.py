@@ -542,11 +542,12 @@ class FlashAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
-        **kwargs
+        **kwargs,
     ) -> None:
         if kwargs:
             logger.warning(
-                f"Unused kwargs for FlashAttentionImpl: {list(kwargs.keys())}")
+                f"Unused kwargs for FlashAttentionImpl: {list(kwargs.keys())}"
+            )
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
