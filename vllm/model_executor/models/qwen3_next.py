@@ -309,6 +309,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             prefix=f"{prefix}.in_proj_ba",
         )
         self.aux_stream = aux_stream()
+        if self.aux_stream:
+            self.in_proj_event = torch.cuda.Event()
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -506,18 +508,18 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         """
         Parallel input projection of qkvz and ba by using CUDA streams.
         """
-        event0 = torch.cuda.Event()
-        event1 = torch.cuda.Event()
-
-        event0.record()
+        # Launch the first projection on the default stream.
         projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
 
+        # Launch the second projection on the auxiliary stream.
         with torch.cuda.stream(self.aux_stream):
-            event0.wait()
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
-            event1.record()
+            self.in_proj_event.record()
 
-        event1.wait()
+        # Wait for the auxiliary stream to finish.
+        # The default stream will implicitly wait for the first projection before
+        # the result is used.
+        self.in_proj_event.wait()
         return projected_states_qkvz, projected_states_ba
 
     def _forward_core(
