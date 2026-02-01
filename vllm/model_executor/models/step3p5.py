@@ -889,6 +889,8 @@ def get_spec_layer_idx_from_weight_name(
     ):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"layers.{layer_idx + i}."):
+            if weight_name.startswith(
+                f"layers.{layer_idx + i}."  # Step3p5Model
+            ) or weight_name.startswith(f"model.layers.{layer_idx + i}."):  # Step3p5MTP
                 return layer_idx + i
     return None

@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -43,24 +43,18 @@ class SharedHead(nn.Module):
 class Step3p5AMultiTokenPredictorLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        vllm_config: VllmConfig,
         prefix: str,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         self.enorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.hnorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
         self.mtp_block = Step3p5DecoderLayer(
-            model_config,
-            parallel_config=parallel_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config,
             prefix=f"{prefix}.mtp_block",
         )
 
@@ -98,12 +92,8 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): Step3p5AMultiTokenPredictorLayer(
-                    config,
+                    vllm_config,
                     f"{prefix}.layers.{idx}",
-                    model_config=vllm_config.model_config,
-                    parallel_config=vllm_config.parallel_config,
-                    cache_config=vllm_config.cache_config,
-                    quant_config=vllm_config.quant_config,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
