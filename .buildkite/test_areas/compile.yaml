@@ -32,6 +32,9 @@ steps:
 
 - label: Distributed Compile Tests (2xH100)
   timeout_in_minutes: 20
+  working_dir: "/vllm-workspace/"
+  device: h100
+  num_devices: 2
   source_file_dependencies:
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/compilation/
