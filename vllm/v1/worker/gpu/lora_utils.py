@@ -38,6 +38,7 @@ class LoraState:
 
         active_lora_requests: set[LoRARequest] = set()
         for req_id in req_ids:
-            if (lora_request := self.lora_requests.get(req_id)) is not None:
+            lora_request = self.lora_requests.get(req_id)
+            if lora_request is not None:
                 active_lora_requests.add(lora_request)
         return prompt_lora_mapping, token_lora_mapping, active_lora_requests

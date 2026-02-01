@@ -78,7 +78,7 @@ def compute_token_logprobs(
     batch_size, vocab_size = logits.shape
     token_ids = token_ids.to(torch.int64)
     num_logprobs = token_ids.shape[1]
-    logprobs = logits.new_empty((batch_size, num_logprobs))
+    logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
     _topk_log_softmax_kernel[(batch_size,)](
         logprobs,
         logits,
