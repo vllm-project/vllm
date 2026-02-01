@@ -211,14 +211,13 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
-        # --- ADD THIS BLOCK ---
         if cache_dtype == "int8":
-            # We can log a message here if we want to be verbose,
-            # or just pass. For now, let's just allow it.
-            pass
-        # ----------------------
-
-        if cache_dtype.startswith("fp8"):
+            logger.info(
+                "Using int8 data type to store kv cache. It reduces the GPU "
+                "memory footprint and may boost performance. This is an "
+                "experimental feature and may impact accuracy."
+            )
+        elif cache_dtype.startswith("fp8"):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
