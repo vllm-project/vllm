@@ -31,6 +31,22 @@ class EncoderRunner:
         self.req_id_to_mm_features: dict[str, list[MultiModalFeatureSpec]] = {}
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
+    def reset_mm_cache(self) -> None:
+        """
+        Clear the multi-modal cache that was used during profiling,
+        but no longer needed during inference.
+        """
+        # TODO: Implement MM budget for encoder dummy run
+        pass
+
+    def reset_encoder_cache(self) -> None:
+        """Clear the GPU-side encoder cache storing vision embeddings.
+
+        This should be called when model weights are updated to ensure
+        stale embeddings computed with old weights are not reused.
+        """
+        self.encoder_cache.clear()
+
     def add_request(self, req_id: str, mm_features: list[MultiModalFeatureSpec]):
         self.req_id_to_mm_features[req_id] = mm_features
 
@@ -43,9 +59,9 @@ class EncoderRunner:
     def prepare_mm_inputs(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
-    ) -> tuple[list[str], list[MultiModalKwargsItem]]:
+    ) -> tuple[list[str], list[tuple[str, MultiModalKwargsItem]]]:
         mm_hashes: list[str] = []
-        mm_kwargs: list[MultiModalKwargsItem] = []
+        mm_kwargs: list[tuple[str, MultiModalKwargsItem]] = []
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             mm_features = self.req_id_to_mm_features[req_id]
             for mm_input_id in encoder_input_ids:
@@ -53,7 +69,8 @@ class EncoderRunner:
                 if mm_feature.data is None:
                     continue
                 mm_hashes.append(mm_feature.identifier)
-                mm_kwargs.append(mm_feature.data)
+                mm_kwargs.append((mm_feature.modality, mm_feature.data))
+
         return mm_hashes, mm_kwargs
 
     @torch.inference_mode()
@@ -61,7 +78,7 @@ class EncoderRunner:
         self,
         model: SupportsMultiModal,
         mm_hashes: list[str],
-        mm_kwargs: list[MultiModalKwargsItem],
+        mm_kwargs: list[tuple[str, MultiModalKwargsItem]],
     ) -> list[torch.Tensor]:
         if not mm_hashes:
             return []

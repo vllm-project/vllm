@@ -644,6 +644,15 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
 
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.get_target_channels(),
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     @property
     def skip_prompt_length_check(self) -> bool:
         return True  # Because the encoder prompt is padded
@@ -693,17 +702,10 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
 
 
 class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate,
-            target_channels=self.info.get_target_channels(),
-        )
-
     def create_encoder_prompt(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
     ) -> str | list[int]:
         # Strictly speaking, whisper encoder only accept audio features.
         # We create a dummy encoder prompt here which will be padded to
