@@ -657,6 +657,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
         "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
     ),
+    "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.0.0.dev"
+    ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BeeForConditionalGeneration": _HfExamplesInfo(
@@ -870,6 +873,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B", trust_remote_code=True
     ),
+    "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
+        "FreedomIntelligence/openPangu-VL-7B",
+        trust_remote_code=True,
+        max_model_len=4096,
+        enforce_eager=True,
+    ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
         trust_remote_code=True,
@@ -980,7 +989,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # disable this temporarily until we support HF format
         is_available_online=False,
     ),
-    "VoxtralStreamingGeneration": _HfExamplesInfo(
+    "VoxtralRealtimeGeneration": _HfExamplesInfo(
         "<place-holder>",
         # disable this temporarily until we support HF format
         is_available_online=False,
