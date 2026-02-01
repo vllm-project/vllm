@@ -952,6 +952,30 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Kimi-VL
+def run_kimi_k25(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "vision_chunk"
+
+    prompts = [
+        "<|im_user|>user<|media_begin|>image<|media_content|>"
+        f"<|media_pad|><|media_end|>{question}<|im_end|>"
+        "<|im_assistant|>assistant<|im_middle|>"
+        for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # LightOnOCR
 def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2152,6 +2176,19 @@ def get_multi_modal_input(args):
             "questions": vid_questions,
         }
 
+    if args.modality == "vision_chunk":
+        # Input vision chunks and question
+        image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
+        vision_chunk_questions = [
+            "What is the content of this image chunk?",
+            "Describe the content of this image chunk in detail.",
+        ]
+
+        return {
+            "data": {"type": "image", "image": image},
+            "questions": vision_chunk_questions,
+        }
+
     msg = f"Modality {args.modality} is not supported."
     raise ValueError(msg)
 
@@ -2234,7 +2271,7 @@ def parse_args():
         "--modality",
         type=str,
         default="image",
-        choices=["image", "video"],
+        choices=["image", "video", "vision_chunk"],
         help="Modality of the input.",
     )
     parser.add_argument(
@@ -2311,7 +2348,7 @@ def main(args):
     req_data = model_example_map[model](questions, modality)
 
     # Disable other modalities to save memory
-    default_limits = {"image": 0, "video": 0, "audio": 0}
+    default_limits = {"image": 0, "video": 0, "audio": 0, "vision_chunk": 0}
     req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
         req_data.engine_args.limit_mm_per_prompt or {}
     )
