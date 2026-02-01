@@ -75,7 +75,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import aux_stream, direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -308,6 +308,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             quant_config=quant_config,
             prefix=f"{prefix}.in_proj_ba",
         )
+        self.aux_stream = aux_stream()
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -453,8 +454,13 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        if not torch.compiler.is_compiling() and self.aux_stream is not None:
+            projected_states_qkvz, projected_states_ba = self._in_proj_parallel(
+                hidden_states
+            )
+        else:
+            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            projected_states_ba, _ = self.in_proj_ba(hidden_states)
         query, key, value, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
@@ -493,6 +499,26 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def _in_proj_parallel(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Parallel input projection of qkvz and ba by using CUDA streams.
+        """
+        event0 = torch.cuda.Event()
+        event1 = torch.cuda.Event()
+
+        event0.record()
+        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
+
+        with torch.cuda.stream(self.aux_stream):
+            event0.wait()
+            projected_states_ba, _ = self.in_proj_ba(hidden_states)
+            event1.record()
+
+        event1.wait()
+        return projected_states_qkvz, projected_states_ba
 
     def _forward_core(
         self,
