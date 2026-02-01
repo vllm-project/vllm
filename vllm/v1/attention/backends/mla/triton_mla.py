@@ -11,12 +11,14 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
+    MLACommonMetadataBuilder,
 )
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     is_quantized_kv_cache,
@@ -24,6 +26,12 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 logger = init_logger(__name__)
+
+
+class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
 
 
 class TritonMLABackend(MLACommonBackend):
@@ -36,6 +44,10 @@ class TritonMLABackend(MLACommonBackend):
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
+
+    @staticmethod
+    def get_builder_cls() -> type["TritonMLAMetadataBuilder"]:
+        return TritonMLAMetadataBuilder
 
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
@@ -134,8 +146,14 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         )
         lse = torch.zeros(B, q_num_heads, dtype=q.dtype, device=q.device)
 
-        # For batch invariance, use only 1 split to ensure deterministic reduction
-        num_kv_splits = 1 if vllm_is_batch_invariant() else 4
+        if vllm_is_batch_invariant():
+            num_kv_splits = 1
+        else:
+            properties = torch.cuda.get_device_properties(q.device)
+            num_sms = properties.multi_processor_count
+            num_heads_k = 1
+            heads_per_64 = (q_num_heads + 63) // 64
+            num_kv_splits = min(max(num_sms // heads_per_64, 1), 16)
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(
