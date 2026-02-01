@@ -14,24 +14,22 @@ from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
 from .params import ChatParams
-from .protocol import RendererLike
+from .protocol import BaseRenderer
 
 logger = init_logger(__name__)
 
 
-class TerratorchRenderer(RendererLike):
+class TerratorchRenderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
         config: "ModelConfig",
         tokenizer_kwargs: dict[str, Any],
-    ) -> "RendererLike":
+    ) -> "BaseRenderer":
         return cls(config)
 
     def __init__(self, config: ModelConfig) -> None:
-        super().__init__()
-
-        self.config = config
+        super().__init__(config)
 
         if not config.skip_tokenizer_init:
             raise ValueError("Terratorch renderer requires `skip_tokenizer_init=True`")
