@@ -327,27 +327,29 @@ def _fwd_grouped_kernel_stage1(
             )
             kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
             offs_buf_k = (
-                kv_loc[None, :] * stride_buf_kbs
+                kv_loc[:, None] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
-                + offs_d[:, None]
+                + offs_d[None, :]
             )
             k = tl.load(
                 K_Buffer + offs_buf_k,
-                mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
+                mask=(offs_n[:, None] < split_kv_end) & (mask_d[None, :]),
                 other=0.0,
             )
+            k = k.T
             qk = tl.dot(q, k.to(q.dtype))
             if BLOCK_DPE > 0:
                 offs_buf_kpe = (
-                    kv_loc[None, :] * stride_buf_kbs
+                    kv_loc[:, None] * stride_buf_kbs
                     + cur_kv_head * stride_buf_kh
-                    + offs_dpe[:, None]
+                    + offs_dpe[None, :]
                 )
                 kpe = tl.load(
                     K_Buffer + offs_buf_kpe,
-                    mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
+                    mask=(offs_n[:, None] < split_kv_end) & (mask_dpe[None, :]),
                     other=0.0,
                 )
+                kpe = kpe.T
                 qk += tl.dot(qpe, kpe.to(qpe.dtype))
             qk *= sm_scale
 
