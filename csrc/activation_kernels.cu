@@ -286,7 +286,7 @@ packed_gelu_tanh_kernel(const packed_t& val) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();             \
   if (use_vec) {                                                            \
     dim3 block(std::min(d / vec_size, 1024));                               \
-    if (cc_major >= 10) {                                                   \
+    if (cc_major >= 10 && num_tokens >= 128) {                              \
       VLLM_DISPATCH_FLOATING_TYPES(dtype, "act_and_mul_kernel", [&] {       \
         vllm::act_and_mul_kernel<                                           \
             scalar_t, typename vllm::PackedTraits<scalar_t>::packed_t,      \
@@ -504,7 +504,7 @@ __global__ void swigluoai_and_mul_kernel(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
   if (use_vec) {                                                               \
     dim3 block(std::min(d / vec_size, 1024));                                  \
-    if (cc_major >= 10) {                                                      \
+    if (cc_major >= 10 && num_tokens >= 128) {                                 \
       VLLM_DISPATCH_FLOATING_TYPES(                                            \
           dtype, "act_and_mul_kernel_with_param", [&] {                        \
             vllm::act_and_mul_kernel_with_param<                               \
@@ -636,7 +636,7 @@ __global__ void activation_kernel(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();               \
   if (use_vec) {                                                              \
     dim3 block(std::min(d / vec_size, 1024));                                 \
-    if (cc_major >= 10) {                                                     \
+    if (cc_major >= 10 && num_tokens >= 128) {                                \
       VLLM_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {          \
         vllm::activation_kernel<                                              \
             scalar_t, vllm::PackedTraits<scalar_t>::packed_t,                 \
