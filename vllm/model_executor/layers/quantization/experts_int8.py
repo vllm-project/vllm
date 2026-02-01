@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -65,7 +65,7 @@ class ExpertsInt8Config(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
