@@ -1129,8 +1129,11 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         if is_gguf_weight:
             output_dim = getattr(param, "output_dim", None)
-            shard_size = loaded_weight.size(output_dim) // self.tp_size
-            start_idx = self.tp_rank * shard_size
+            # Use _qkv_tp_rank/size for Helix GQA support
+            qkv_tp_size = getattr(self, "_qkv_tp_size", self.tp_size)
+            qkv_tp_rank = getattr(self, "_qkv_tp_rank", self.tp_rank)
+            shard_size = loaded_weight.size(output_dim) // qkv_tp_size
+            start_idx = qkv_tp_rank * shard_size
 
             if loaded_shard_id is not None:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
@@ -1278,10 +1281,13 @@ class QKVParallelLinear(ColumnParallelLinear):
                 )
 
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
+            # Use _qkv_tp_rank for weight loading (supports Helix GQA where
+            # multiple TP ranks share the same attention weights)
+            qkv_tp_rank = getattr(self, "_qkv_tp_rank", self.tp_rank)
             if loaded_shard_id == "q":
-                shard_rank = self.tp_rank
+                shard_rank = qkv_tp_rank
             else:
-                shard_rank = self.tp_rank // self.num_kv_head_replicas
+                shard_rank = qkv_tp_rank // self.num_kv_head_replicas
             start_idx = shard_rank * shard_size
 
             if not is_sharded_weight:
