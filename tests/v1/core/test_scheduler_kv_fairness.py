@@ -22,15 +22,6 @@ def test_waiting_kv_blocked_request_does_not_block_lighter_request():
     scheduler.add_request(heavy)
     scheduler.add_request(light)
 
-    empty_blocks = scheduler.kv_cache_manager.empty_kv_cache_blocks
-
-    def _allocate_slots(request, *args, **kwargs):
-        if request.request_id == "heavy":
-            return None
-        return empty_blocks
-
-    scheduler.kv_cache_manager.allocate_slots = _allocate_slots  # type: ignore[method-assign]
-
     output = scheduler.schedule()
     scheduled_ids = [req.req_id for req in output.scheduled_new_reqs]
     assert scheduled_ids == ["light"]
