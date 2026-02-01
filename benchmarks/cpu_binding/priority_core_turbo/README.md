@@ -10,7 +10,7 @@ This is particularly effective for **GPU-accelerated vLLM inference**, where a s
 Running these threads on **High-Priority (HP) cores** improves GPU utilization, TTFT, and tail latency.
 
 Validated platforms:
-- **Intel® Xeon® 6960P**
+- **Intel® Xeon® 6776P**
 
 ## How PCT Works 
 
