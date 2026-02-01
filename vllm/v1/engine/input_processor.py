@@ -29,7 +29,7 @@ from vllm.multimodal.parse import ModalityDataItems, MultiModalDataItems
 from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import RendererLike
+from vllm.renderers import BaseRenderer
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -84,7 +84,7 @@ class InputProcessor:
         return self.input_preprocessor.get_tokenizer()
 
     @property
-    def renderer(self) -> RendererLike:
+    def renderer(self) -> BaseRenderer:
         return self.input_preprocessor.renderer
 
     def _validate_logprobs(
@@ -200,7 +200,7 @@ class InputProcessor:
 
     def _parse_mm_items(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
         mm_processor = self.input_preprocessor._get_mm_processor()
-        return mm_processor.data_parser.parse_mm_data(mm_data)
+        return mm_processor.info.parse_mm_data(mm_data)
 
     def _validate_singleton_mm_uuids(self, prompt: SingletonPrompt) -> None:
         if isinstance(prompt, str):
