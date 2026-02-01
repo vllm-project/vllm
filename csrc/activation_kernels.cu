@@ -144,10 +144,10 @@ template <typename scalar_t, typename packed_t,
           scalar_t (*ACT_FN)(const scalar_t&),
           packed_t (*PACKED_ACT_FN)(const packed_t&), bool act_first,
           bool use_vec, bool use_256b = false>
-__global__ void __maxnreg__(32)
-    act_and_mul_kernel(scalar_t* __restrict__ out,          // [..., d]
-                       const scalar_t* __restrict__ input,  // [..., 2, d]
-                       const int d) {
+__global__ void act_and_mul_kernel(
+    scalar_t* __restrict__ out,          // [..., d]
+    const scalar_t* __restrict__ input,  // [..., 2, d]
+    const int d) {
   const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
   scalar_t* out_ptr = out + blockIdx.x * d;
@@ -368,10 +368,9 @@ template <typename scalar_t, typename packed_t,
           scalar_t (*ACT_FN)(const scalar_t&, const float),
           packed_t (*PACKED_ACT_FN)(const packed_t&, const float), bool use_vec,
           bool use_256b = false>
-__global__ void __maxnreg__(32)
-    act_and_mul_kernel_with_param(scalar_t* __restrict__ out,
-                                  const scalar_t* __restrict__ input,
-                                  const int d, const float param) {
+__global__ void act_and_mul_kernel_with_param(
+    scalar_t* __restrict__ out, const scalar_t* __restrict__ input, const int d,
+    const float param) {
   const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
   scalar_t* out_ptr = out + blockIdx.x * d;
@@ -575,10 +574,10 @@ template <typename scalar_t, typename packed_t,
           scalar_t (*ACT_FN)(const scalar_t&),
           packed_t (*PACKED_ACT_FN)(const packed_t&), bool use_vec,
           bool use_256b = false>
-__global__ void __maxnreg__(32)
-    activation_kernel(scalar_t* __restrict__ out,          // [..., d]
-                      const scalar_t* __restrict__ input,  // [..., d]
-                      const int d) {
+__global__ void activation_kernel(
+    scalar_t* __restrict__ out,          // [..., d]
+    const scalar_t* __restrict__ input,  // [..., d]
+    const int d) {
   const scalar_t* in_ptr = input + blockIdx.x * d;
   scalar_t* out_ptr = out + blockIdx.x * d;
 
