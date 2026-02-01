@@ -602,7 +602,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # get_num_attention_heads uses TP, so we need to correct for Helix.
         from vllm.distributed.parallel_state import get_attention_tp_world_size
         attention_tp_size = get_attention_tp_world_size()
-        tp_size = self.parallel_config.tensor_parallel_size
+        parallel_config = self.vllm_config.parallel_config
+        tp_size = parallel_config.tensor_parallel_size
         if attention_tp_size != tp_size:
             # Helix GQA mode: compute heads using attention_tp_size (TPA)
             total_heads = self.model_config.get_total_num_attention_heads()
@@ -610,7 +611,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             # Standard mode: use model_config
             self.num_qo_heads = self.model_config.get_num_attention_heads(
-                self.vllm_config.parallel_config
+                parallel_config
             )
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
