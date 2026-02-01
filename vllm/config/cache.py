@@ -23,6 +23,7 @@ BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal[
     "auto",
     "bfloat16",
+    "int8",
     "fp8",
     "fp8_e4m3",
     "fp8_e5m2",
@@ -210,6 +211,13 @@ class CacheConfig:
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
+        # --- ADD THIS BLOCK ---
+        if cache_dtype == "int8":
+            # We can log a message here if we want to be verbose, 
+            # or just pass. For now, let's just allow it.
+            pass
+        # ----------------------
+
         if cache_dtype.startswith("fp8"):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
