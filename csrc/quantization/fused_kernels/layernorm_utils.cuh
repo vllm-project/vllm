@@ -587,4 +587,45 @@ __device__ __forceinline__ PackedVec<Type> compute_rms_norm(
   return result;
 }
 
+// Compute fused add for packed vectors: in_vec + res_vec
+// Both addition and result are in high precision (BF16/FP16).
+// __hadd2 is overloaded for both half2 and __nv_bfloat162 (SM80+).
+template <class Type>
+__device__ __forceinline__ PackedVec<Type> compute_packed_fused_add(
+    const PackedVec<Type>& in_vec, const PackedVec<Type>& res_vec) {
+  PackedVec<Type> result{};
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
+    result.elts[i] = __hadd2(in_vec.elts[i], res_vec.elts[i]);
+  }
+  return result;
+}
+
+// Compute sum of squares for a PackedVec after fused add: (in_vec + res_vec)
+// Returns sum of squares and updates result with the added values.
+template <class Type>
+__device__ __forceinline__ float compute_packed_fused_add_sum_squares(
+    const PackedVec<Type>& in_vec, const PackedVec<Type>& res_vec,
+    PackedVec<Type>& result) {
+  float sum = 0.0f;
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
+    float2 in_fp2, res_fp2;
+    if constexpr (std::is_same_v<Type, half>) {
+      in_fp2 = __half22float2(in_vec.elts[i]);
+      res_fp2 = __half22float2(res_vec.elts[i]);
+      float2 added = make_float2(in_fp2.x + res_fp2.x, in_fp2.y + res_fp2.y);
+      result.elts[i] = __float22half2_rn(added);
+      sum += added.x * added.x + added.y * added.y;
+    } else {
+      in_fp2 = __bfloat1622float2(in_vec.elts[i]);
+      res_fp2 = __bfloat1622float2(res_vec.elts[i]);
+      float2 added = make_float2(in_fp2.x + res_fp2.x, in_fp2.y + res_fp2.y);
+      result.elts[i] = __float22bfloat162_rn(added);
+      sum += added.x * added.x + added.y * added.y;
+    }
+  }
+  return sum;
+}
+
 }  // namespace vllm

@@ -122,6 +122,15 @@ if rms_norm_nvfp4_quant_supported:
         torch.ops._C.rms_norm_nvfp4_quant.default
     )  # noqa: E501
 
+# Check if fused_add_rms_norm_nvfp4_quant is available
+fused_add_rms_norm_nvfp4_quant_supported = current_platform.is_cuda() and hasattr(
+    torch.ops._C, "fused_add_rms_norm_nvfp4_quant"
+)
+if fused_add_rms_norm_nvfp4_quant_supported:
+    FUSED_OPS[FusedRMSQuantKey(kNvfp4Dynamic, True)] = (
+        torch.ops._C.fused_add_rms_norm_nvfp4_quant.default
+    )  # noqa: E501
+
 
 class RMSNormQuantPattern:
     def __init__(
@@ -569,6 +578,79 @@ class RMSNormNvfp4QuantPattern:
         )
 
 
+class FusedAddRMSNormNvfp4QuantPattern:
+    """
+    Fusion pattern for FusedAddRMSNorm + NVFP4 quantization.
+    """
+
+    def __init__(self, epsilon: float) -> None:
+        self.epsilon = epsilon
+        config = get_current_vllm_config()
+        self.model_dtype = config.model_config.dtype if config.model_config else None
+        self.fused_add_rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
+        self.QUANT_OP = QUANT_OPS[kNvfp4Dynamic]
+        self.FUSED_OP = FUSED_OPS[FusedRMSQuantKey(kNvfp4Dynamic, True)]
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # Use fused_add_rmsnorm_matcher.inputs() for [input, weight, residual]
+        rms_inputs = self.fused_add_rmsnorm_matcher.inputs()
+        input_ = rms_inputs[0]
+        weight = rms_inputs[1]
+        residual = rms_inputs[2]
+        result = torch.empty(5, 32, dtype=FP4_DTYPE, device="cuda")
+        output_scale = empty_i32(128, 4)
+        input_scale = empty_fp32(1, 1)
+        return [result, output_scale, input_, weight, residual, input_scale]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            result: torch.Tensor,
+            output_scale: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            input_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result_rms, residual = self.fused_add_rmsnorm_matcher(
+                input, weight, residual
+            )
+            at = auto_functionalized(
+                self.QUANT_OP,
+                output=result,
+                input=result_rms,
+                output_scale=output_scale,
+                input_scale=input_scale,
+                is_sf_swizzled_layout=True,
+            )
+            return at[1], at[2], residual
+
+        def replacement(
+            result: torch.Tensor,
+            output_scale: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            input_scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            input = input.to(dtype=self.model_dtype)
+            at = auto_functionalized(
+                self.FUSED_OP,
+                result=result,
+                result_scale=output_scale,
+                input=input,
+                residual=residual,
+                weight=weight,
+                input_scale=input_scale,
+                epsilon=self.epsilon,
+            )
+            # result, result_scale, residual
+            return at[1], at[2], at[3]
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
 class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses rms_norm & quant custom ops into a fused rms_norm_quant op.
@@ -629,6 +711,11 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             if rms_norm_nvfp4_quant_supported:
                 # Fuse rms_norm + nvfp4 quant
                 RMSNormNvfp4QuantPattern(epsilon).register(self.patterns)
+
+            # Register fused_add_rms_norm + NVFP4 pattern if supported
+            if fused_add_rms_norm_nvfp4_quant_supported:
+                # Fuse fused_add_rms_norm + nvfp4 quant
+                FusedAddRMSNormNvfp4QuantPattern(epsilon).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

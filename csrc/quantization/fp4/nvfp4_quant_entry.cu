@@ -59,6 +59,14 @@ void rms_norm_nvfp4_quant_sm1xxa(torch::Tensor& output,
                                  torch::Tensor& input_scale, double epsilon);
 #endif
 
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+void fused_add_rms_norm_nvfp4_quant_sm1xxa(
+    torch::Tensor& output, torch::Tensor& output_scale, torch::Tensor& input,
+    torch::Tensor& residual, torch::Tensor& weight, torch::Tensor& input_scale,
+    double epsilon);
+#endif
+
 void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
                       torch::Tensor& output_sf, torch::Tensor const& input_sf,
                       bool is_sf_swizzled_layout) {
@@ -120,4 +128,17 @@ void rms_norm_nvfp4_quant(torch::Tensor& output, torch::Tensor& output_scale,
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(false,
                               "No compiled rms_norm nvfp4 quantization kernel");
+}
+
+void fused_add_rms_norm_nvfp4_quant(
+    torch::Tensor& output, torch::Tensor& output_scale, torch::Tensor& input,
+    torch::Tensor& residual, torch::Tensor& weight, torch::Tensor& input_scale,
+    double epsilon) {
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+  return fused_add_rms_norm_nvfp4_quant_sm1xxa(
+      output, output_scale, input, residual, weight, input_scale, epsilon);
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "No compiled fused_add_rms_norm nvfp4 quantization kernel");
 }
