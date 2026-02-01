@@ -544,6 +544,9 @@ class FlashAttentionImpl(AttentionImpl):
         sinks: torch.Tensor | None = None,
         **kwargs
     ) -> None:
+        if kwargs:
+            logger.warning(
+                f"Unused kwargs for FlashAttentionImpl: {list(kwargs.keys())}")
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
