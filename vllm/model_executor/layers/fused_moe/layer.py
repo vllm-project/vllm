@@ -44,9 +44,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer,
-)
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -522,18 +519,6 @@ class FusedMoE(CustomOp):
 
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
-
-        self.capture: Callable[[torch.Tensor], None] | None = None
-        if (
-            self.vllm_config.model_config is not None
-            and self.vllm_config.model_config.enable_return_routed_experts
-        ):
-            # In dummy runs, the capturer is not initialized.
-            capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
-                self.capture = lambda topk_ids: capturer.capture(
-                    self.layer_id, topk_ids
-                )
 
         self.router = create_fused_moe_router(
             top_k=top_k,
@@ -1138,6 +1123,11 @@ class FusedMoE(CustomOp):
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
 
+        # is_transposed: if the dim to shard the weight
+        # should be flipped. Required by GPTQ, compressed-tensors
+        # should be whatever dimension intermediate_size_per_partition is
+        is_transposed = getattr(param, "is_transposed", False)
+
         # compressed-tensors checkpoints with packed weights are stored flipped
         # TODO (mgoin): check self.quant_method.quant_config.quant_format
         # against known CompressionFormat enum values that have this quality
@@ -1145,7 +1135,10 @@ class FusedMoE(CustomOp):
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
-            loaded_weight = loaded_weight.t().contiguous()
+            if is_transposed:
+                loaded_weight = loaded_weight.t().contiguous()
+            else:
+                loaded_weight = loaded_weight
 
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but got {shard_id}.")
@@ -1183,10 +1176,6 @@ class FusedMoE(CustomOp):
                 )
             return True if return_success else None
 
-        # is_transposed: if the dim to shard the weight
-        # should be flipped. Required by GPTQ, compressed-tensors
-        # should be whatever dimension intermediate_size_per_partition is
-        is_transposed = getattr(param, "is_transposed", False)
         shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
         if is_transposed:
             shard_dim = int(not shard_dim)
@@ -1684,9 +1673,6 @@ class FusedMoE(CustomOp):
                     router_logits=staged_router_logits,
                 )
 
-                if self.capture is not None:
-                    self.capture(topk_ids)
-
                 final_hidden_states = self.quant_method.apply(
                     layer=self,
                     x=staged_hidden_states,
@@ -1878,9 +1864,6 @@ class FusedMoE(CustomOp):
                     hidden_states=x_orig,
                     router_logits=router_logits,
                 )
-
-                if self.capture is not None:
-                    self.capture(topk_ids)
 
                 final_hidden_states = self.quant_method.apply(
                     layer=self,
