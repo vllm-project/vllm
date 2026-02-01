@@ -339,10 +339,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
 
     def reset_mm_cache(self) -> None:
-        self.encoder_runner.reset_mm_cache()
+        if self.supports_mm_inputs:
+            self.encoder_runner.reset_mm_cache()
 
     def reset_encoder_cache(self) -> None:
-        self.encoder_runner.reset_encoder_cache()
+        if self.supports_mm_inputs:
+            self.encoder_runner.reset_encoder_cache()
 
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         # SP is not supported yet.
