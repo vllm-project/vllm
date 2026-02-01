@@ -57,6 +57,7 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
+    flatten_chat_text_content,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
@@ -1967,6 +1968,23 @@ class OpenAIServingChat(OpenAIServing):
         # for more info: see comment in `maybe_serialize_tool_calls`
         maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
 
+        # Extract system/developer message content as instructions.
+        # HuggingFace apply_chat_template puts system/developer content
+        # in the developer message's "# Instructions" section.
+        instructions_content: str | None = None
+        other_messages = []
+        for msg in request.messages:
+            msg_dict = msg if isinstance(msg, dict) else msg.model_dump()
+            role = msg_dict.get("role")
+            content = msg_dict.get("content", "")
+            if role in ("system", "developer"):
+                if instructions_content is None:
+                    text = flatten_chat_text_content(content)  # type: ignore[arg-type]
+                    if text:
+                        instructions_content = text
+            else:
+                other_messages.append(msg)
+
         # Add system message.
         # NOTE: In Chat Completion API, browsing is enabled by default
         # if the model supports it. TODO: Support browsing.
@@ -1980,15 +1998,16 @@ class OpenAIServingChat(OpenAIServing):
         )
         messages.append(sys_msg)
 
-        # Add developer message.
-        if request.tools:
+        # Add developer message with instructions.
+        if instructions_content or request.tools:
             dev_msg = get_developer_message(
-                tools=request.tools if should_include_tools else None  # type: ignore[arg-type]
+                instructions=instructions_content,
+                tools=request.tools if should_include_tools else None,  # type: ignore[arg-type]
             )
             messages.append(dev_msg)
 
-        # Add user message.
-        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
+        # Add remaining messages (excluding system/developer already processed).
+        messages.extend(parse_chat_inputs_to_harmony_messages(other_messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)

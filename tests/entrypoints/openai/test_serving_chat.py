@@ -1617,6 +1617,159 @@ class TestServingChatWithHarmony:
             ],
         )
 
+    @pytest.mark.asyncio
+    async def test_system_message_in_developer_instructions(
+        self, serving_chat, weather_tools
+    ):
+        system_content = "You are a helpful weather assistant."
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": "What's the weather in Tokyo?"},
+        ]
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME, messages=messages, tools=weather_tools
+        )
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
+
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {"role": "developer", "tool_definitions": ["get_weather"]},
+                {"role": "user", "content": messages[1]["content"]},
+            ],
+        )
+
+        dev_msg = input_messages[1]
+        dev_instructions = dev_msg.content[0].instructions
+        assert dev_instructions is not None, (
+            "Developer message should have instructions"
+        )
+        assert system_content in dev_instructions, (
+            f"System content '{system_content}' should be in developer "
+            f"message instructions, but got: {dev_instructions[:200]}..."
+        )
+
+    @pytest.mark.asyncio
+    async def test_developer_message_in_developer_instructions(
+        self, serving_chat, weather_tools
+    ):
+        developer_content = "Always respond in English."
+        messages: list[dict[str, Any]] = [
+            {"role": "developer", "content": developer_content},
+            {"role": "user", "content": "Hello"},
+        ]
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME, messages=messages, tools=weather_tools
+        )
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
+
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {"role": "developer", "tool_definitions": ["get_weather"]},
+                {"role": "user", "content": messages[1]["content"]},
+            ],
+        )
+
+        dev_msg = input_messages[1]
+        dev_instructions = dev_msg.content[0].instructions
+        assert dev_instructions is not None, (
+            "Developer message should have instructions"
+        )
+        assert developer_content in dev_instructions, (
+            f"Developer content '{developer_content}' should be in developer "
+            f"message instructions, but got: {dev_instructions}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_system_and_developer_first_content_wins(
+        self, serving_chat, weather_tools
+    ):
+        system_content = "System instructions here."
+        developer_content = "Developer instructions here."
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_content},
+            {"role": "developer", "content": developer_content},
+            {"role": "user", "content": "Hello"},
+        ]
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME, messages=messages, tools=weather_tools
+        )
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
+
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {"role": "developer", "tool_definitions": ["get_weather"]},
+                {"role": "user", "content": messages[2]["content"]},
+            ],
+        )
+
+        dev_msg = input_messages[1]
+        dev_instructions = dev_msg.content[0].instructions
+        assert dev_instructions is not None
+        assert system_content in dev_instructions, (
+            "First message (system) content should be in instructions"
+        )
+        assert developer_content not in dev_instructions, (
+            "Second message (developer) content should NOT be in instructions"
+        )
+
+    @pytest.mark.asyncio
+    async def test_empty_system_content_ignored(self, serving_chat, weather_tools):
+        actual_content = "Actual instructions."
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": ""},
+            {"role": "developer", "content": actual_content},
+            {"role": "user", "content": "Hello"},
+        ]
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME, messages=messages, tools=weather_tools
+        )
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
+
+        dev_msg = input_messages[1]
+        dev_instructions = dev_msg.content[0].instructions
+        assert dev_instructions is not None
+        assert actual_content in dev_instructions, (
+            "Non-empty developer content should be in instructions "
+            "when system content is empty"
+        )
+
+    @pytest.mark.asyncio
+    async def test_instructions_without_tools(self, serving_chat):
+        system_content = "You are a helpful assistant."
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": "Hello"},
+        ]
+
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=None)
+        input_messages, _ = serving_chat._make_request_with_harmony(req)
+
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {"role": "developer"},
+                {"role": "user", "content": messages[1]["content"]},
+            ],
+        )
+
+        dev_msg = input_messages[1]
+        dev_instructions = dev_msg.content[0].instructions
+        assert dev_instructions is not None
+        assert system_content in dev_instructions, (
+            "System content should be in developer instructions even without tools"
+        )
+
 
 @pytest.mark.asyncio
 async def test_tool_choice_validation_without_parser():
