@@ -21,12 +21,7 @@ else:
     MultiModalUUIDDict = object
 
 
-class TextPrompt(TypedDict):
-    """Schema for a text prompt."""
-
-    prompt: str
-    """The input text to be tokenized before passing to the model."""
-
+class _CommonKeys(TypedDict):
     multi_modal_data: NotRequired[MultiModalDataDict | None]
     """
     Optional multi-modal data to pass to the model,
@@ -56,7 +51,14 @@ class TextPrompt(TypedDict):
     """
 
 
-class TokensPrompt(TypedDict):
+class TextPrompt(_CommonKeys):
+    """Schema for a text prompt."""
+
+    prompt: str
+    """The input text to be tokenized before passing to the model."""
+
+
+class TokensPrompt(_CommonKeys):
     """Schema for a tokenized prompt."""
 
     prompt_token_ids: list[int]
@@ -68,47 +70,15 @@ class TokensPrompt(TypedDict):
     token_type_ids: NotRequired[list[int]]
     """A list of token type IDs to pass to the cross encoder model."""
 
-    multi_modal_data: NotRequired[MultiModalDataDict | None]
-    """
-    Optional multi-modal data to pass to the model,
-    if the model supports it.
-    """
 
-    mm_processor_kwargs: NotRequired[dict[str, Any] | None]
-    """
-    Optional multi-modal processor kwargs to be forwarded to the
-    multimodal input mapper & processor. Note that if multiple modalities
-    have registered mappers etc for the model being considered, we attempt
-    to pass the mm_processor_kwargs to each of them.
-    """
-
-    multi_modal_uuids: NotRequired[MultiModalUUIDDict]
-    """
-    Optional user-specified UUIDs for multimodal items, mapped by modality.
-    Lists must match the number of items per modality and may contain `None`.
-    For `None` entries, the hasher will compute IDs automatically; non-None
-    entries override the default hashes for caching.
-    """
-
-    cache_salt: NotRequired[str]
-    """
-    Optional cache salt to be used for prefix caching.
-    """
-
-
-class EmbedsPrompt(TypedDict):
+class EmbedsPrompt(_CommonKeys):
     """Schema for a prompt provided via token embeddings."""
 
     prompt_embeds: torch.Tensor
     """The embeddings of the prompt."""
 
-    cache_salt: NotRequired[str]
-    """
-    Optional cache salt to be used for prefix caching.
-    """
 
-
-class DataPrompt(TypedDict):
+class DataPrompt(_CommonKeys):
     """Represents generic inputs handled by IO processor plugins."""
 
     data: Any
@@ -197,7 +167,7 @@ class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     mm_processor_kwargs: NotRequired[dict[str, Any]]
 
 
-PromptType: TypeAlias = SingletonPrompt | ExplicitEncoderDecoderPrompt
+PromptType: TypeAlias = SingletonPrompt | ExplicitEncoderDecoderPrompt[Any, Any]
 """
 Set of possible schemas for an LLM input, including
 both decoder-only and encoder/decoder input types:

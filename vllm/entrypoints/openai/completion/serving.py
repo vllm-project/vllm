@@ -32,7 +32,6 @@ from vllm.entrypoints.openai.engine.serving import (
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, TokensPrompt, is_embeds_prompt
@@ -111,11 +110,10 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         try:
-            renderer = self._get_completion_renderer()
-            engine_prompts = await renderer.render_prompt_and_embeds(
-                prompt_or_prompts=request.prompt,
+            engine_prompts = await self._preprocess_completion(
+                request,
+                prompt_input=request.prompt,
                 prompt_embeds=request.prompt_embeds,
-                config=self._build_render_config(request),
             )
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -203,10 +201,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     else await self._get_trace_headers(raw_request.headers)
                 )
 
-                # Mypy inconsistently requires this second cast in different
-                # environments. It shouldn't be necessary (redundant from above)
-                # but pre-commit in CI fails without it.
-                engine_prompt = cast(EmbedsPrompt | TokensPrompt, engine_prompt)
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.beam_search(
                         prompt=engine_prompt,
@@ -216,11 +210,15 @@ class OpenAIServingCompletion(OpenAIServing):
                         trace_headers=trace_headers,
                     )
                 else:
-                    engine_request, tokenization_kwargs = await self._process_inputs(
+                    tok_params = request.build_tok_params(self.model_config)
+                    tokenization_kwargs = tok_params.get_encode_kwargs()
+
+                    engine_request = self.input_processor.process_inputs(
                         request_id_item,
                         engine_prompt,
                         sampling_params,
                         lora_request=lora_request,
+                        tokenization_kwargs=tokenization_kwargs,
                         trace_headers=trace_headers,
                         priority=request.priority,
                         data_parallel_rank=data_parallel_rank,
@@ -708,27 +706,4 @@ class OpenAIServingCompletion(OpenAIServing):
             token_logprobs=out_token_logprobs,
             tokens=out_tokens,
             top_logprobs=out_top_logprobs,
-        )
-
-    def _build_render_config(
-        self,
-        request: CompletionRequest,
-        max_input_length: int | None = None,
-    ) -> RenderConfig:
-        # Validate max_tokens before using it
-        if request.max_tokens is not None and request.max_tokens > self.max_model_len:
-            raise VLLMValidationError(
-                f"'max_tokens' ({request.max_tokens}) cannot be greater than "
-                f"the model's maximum context length ({self.max_model_len}).",
-                parameter="max_tokens",
-                value=request.max_tokens,
-            )
-
-        max_input_tokens_len = self.max_model_len - (request.max_tokens or 0)
-        return RenderConfig(
-            max_length=max_input_tokens_len,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            add_special_tokens=request.add_special_tokens,
-            cache_salt=request.cache_salt,
-            needs_detokenization=bool(request.echo and not request.return_token_ids),
         )
