@@ -955,4 +955,4 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return async_output.get_output()
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return self.draft_tokens_handler.take_draft_tokens()
+        return self.draft_tokens_handler.get_draft_tokens()

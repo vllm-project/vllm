@@ -23,7 +23,8 @@ class DraftTokensHandler:
         if not input_batch.has_structured_output_reqs:
             # No draft token validation needs to be performed by
             # the scheduler for this batch.
-            self.req_ids = []
+            if self.req_ids:
+                self.req_ids = []
             self.draft_tokens_np = None
             return
 
@@ -31,12 +32,12 @@ class DraftTokensHandler:
         # draft tokens back to the scheduler for grammar validation.
         self.req_ids = input_batch.req_ids
         current_stream = torch.cuda.current_stream(self.device)
+        self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
-            self.copy_stream.wait_stream(current_stream)
             self.draft_tokens_np = async_copy_to_np(draft_tokens)
             self.copy_event.record()
 
-    def take_draft_tokens(self) -> DraftTokenIds | None:
+    def get_draft_tokens(self) -> DraftTokenIds | None:
         if self.draft_tokens_np is None:
             return None
 
