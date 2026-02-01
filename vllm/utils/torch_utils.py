@@ -107,7 +107,8 @@ def set_default_torch_num_threads(num_threads: int | None = None):
     """
     Sets the default number of threads for PyTorch to the given value.
 
-    `None` means using the value of the environment variable `OMP_NUM_THREADS`.
+    `None` means using the value of the environment variable `OMP_NUM_THREADS`
+    (or `1` if that is not available).
     """
     if num_threads is None:
         num_threads = 1
