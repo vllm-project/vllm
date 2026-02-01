@@ -103,7 +103,7 @@ def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, seed, bias_mode):
     cu_count = get_cu_count()
 
     if (((m + 15) // 16) * ((k + 511) // 512)) * (
-        1 if (m <= 16) else (2 if (m <= 32) else 4)
+        1 if (n <= 16) else (2 if (n <= 32) else 4)
     ) > cu_count * 4:
         pytest.skip("Too large for wvSplitKrc")
 

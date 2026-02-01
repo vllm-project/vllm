@@ -165,7 +165,7 @@ def rocm_unquantized_gemm_impl(
             and k > 512
             and ((k + 511) // 512)
             * ((m + 15) // 16)
-            * (1 if (m <= 16) else (2 if (m <= 32) else 4))
+            * (1 if (n <= 16) else (2 if (n <= 32) else 4))
             < cu_count * 4
             and x.is_contiguous()
         )
