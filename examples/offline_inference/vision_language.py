@@ -2091,7 +2091,7 @@ model_example_map = {
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
-    "kimi_k2_vl": run_kimi_k25,
+    "kimi_k25": run_kimi_k25,
     "lightonocr": run_lightonocr,
     "lfm2_vl": run_lfm2_vl,
     "llama4": run_llama4,
