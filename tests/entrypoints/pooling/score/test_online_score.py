@@ -247,7 +247,7 @@ class TestModel:
             },
         )
         assert score_response.status_code == 400
-        assert "Please, select a smaller truncation size." in score_response.text
+        assert "Please request a smaller truncation size." in score_response.text
 
     def test_invocations(self, server: RemoteOpenAIServer, model: dict[str, Any]):
         queries = "What is the capital of France?"
