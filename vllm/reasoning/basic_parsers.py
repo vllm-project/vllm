@@ -177,16 +177,21 @@ class BaseThinkingReasoningParser(ReasoningParser):
             return reasoning, final_content
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        """Count tokens that fall within start/end thinking markers."""
+        """Count tokens that fall within start/end thinking markers.
+
+        Uses a depth counter so nested spans are handled safely and stray end
+        tokens do not drive the counter negative.
+        """
         count = 0
-        in_reasoning = False
+        depth = 0
         for token_id in token_ids:
             if token_id == self.start_token_id:
-                in_reasoning = True
+                depth += 1
                 continue
             if token_id == self.end_token_id:
-                in_reasoning = False
+                if depth > 0:
+                    depth -= 1
                 continue
-            if in_reasoning:
+            if depth > 0:
                 count += 1
         return count

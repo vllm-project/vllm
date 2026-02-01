@@ -175,6 +175,15 @@ class TestBaseThinkingReasoningParserMethods:
         token_ids = [0, start, 11, 12, end, 99]
         assert parser.count_reasoning_tokens(token_ids) == 2
 
+    def test_count_reasoning_tokens_nested(self, test_tokenizer):
+        """Ensure nested thinking spans count all inner tokens safely."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        s = parser.start_token_id
+        e = parser.end_token_id
+        token_ids = [s, 1, s, 2, e, 3, e]
+        # Tokens 1,2,3 are inside reasoning (depth>0) => 3 tokens
+        assert parser.count_reasoning_tokens(token_ids) == 3
+
     def test_extract_content_ids(self, test_tokenizer):
         """Test the extract_content_ids method."""
         parser = TestThinkingReasoningParser(test_tokenizer)
