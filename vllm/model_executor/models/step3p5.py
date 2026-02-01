@@ -410,9 +410,6 @@ class FusedMoEBlock(nn.Module):
         if self.share_expert is None:
             assert shared_output is None
 
-        if self.share_expert is None:
-            assert shared_output is None
-
         if self.share_expert is not None:
             assert shared_output is not None
             final_hidden_states += shared_output
