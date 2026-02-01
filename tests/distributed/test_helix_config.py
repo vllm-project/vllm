@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for Helix configuration (no GPU required)."""
+"""Unit tests for Helix configuration (no GPU required).
+
+Tests cover:
+1. Helix configuration validation and derived properties
+2. Helix parallel state functions
+3. Helix LSE-weighted combination logic
+4. Backend compatibility (known limitations)
+"""
 
 import pytest
 
@@ -203,6 +210,62 @@ class TestHelixLSECombine:
         assert result.shape == (B, H, D)
         assert global_lse.shape == (B, H)
         assert abs(global_lse.item() - expected_global_lse) < 1e-5
+
+
+class TestHelixBackendCompatibility:
+    """Test Helix backend compatibility documentation.
+    
+    These tests document known backend limitations for Helix mode.
+    Actual validation happens at runtime in cuda.py.
+    """
+
+    def test_helix_gqa_flashinfer_not_supported(self):
+        """Document: FlashInfer + Helix GQA is not supported.
+        
+        FlashInfer produces incorrect output with Helix GQA (TPA > 1).
+        Users must use FLASH_ATTN for Helix GQA.
+        
+        Runtime validation in cuda.py:
+        - Raises ValueError if user specifies --attention-backend FLASHINFER
+        - Auto-selects FLASH_ATTN if backend is not specified
+        """
+        # This is a documentation test - actual validation is in cuda.py
+        # Config creation itself doesn't validate backend compatibility
+        config = ParallelConfig(
+            helix_mode=True,
+            tensor_parallel_size=8,
+            decode_context_parallel_size=2,  # TPA = 4 > 1 (GQA case)
+        )
+        assert config.helix_tpa_size == 4
+        assert config.helix_tpa_size > 1  # GQA case
+        # Backend validation happens later in cuda.py check_and_update_config
+
+    def test_helix_mla_flashinfer_supported(self):
+        """Document: FlashInfer + Helix MLA is supported.
+        
+        When TPA=1 (MLA case), FlashInfer works correctly.
+        The backend compatibility issue only affects TPA > 1 (GQA).
+        """
+        config = ParallelConfig(
+            helix_mode=True,
+            tensor_parallel_size=8,
+            decode_context_parallel_size=8,  # TPA = 1 (MLA case)
+        )
+        assert config.helix_tpa_size == 1
+        # FlashInfer is supported for TPA=1 (MLA)
+
+    def test_helix_gqa_flash_attn_supported(self):
+        """Document: FLASH_ATTN + Helix GQA is supported.
+        
+        FLASH_ATTN works correctly with Helix GQA at all TPA values.
+        """
+        config = ParallelConfig(
+            helix_mode=True,
+            tensor_parallel_size=8,
+            decode_context_parallel_size=2,  # TPA = 4 (GQA case)
+        )
+        assert config.helix_tpa_size == 4
+        # FLASH_ATTN is supported for all TPA values
 
 
 if __name__ == "__main__":

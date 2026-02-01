@@ -11,6 +11,27 @@ Helix decouples attention parallelism (TPA) from FFN parallelism (TP):
 
 **Key benefit**: Eliminates KV cache duplication for long-context decoding scenarios.
 
+## Backend Compatibility
+
+### GQA Models (Llama, Nemotron, Qwen, etc.)
+
+| Backend | Standard TP | Standard DCP | Helix GQA |
+|---------|-------------|--------------|-----------|
+| FLASH_ATTN | ✓ | ✓ | ✓ |
+| FLASHINFER | ✓ | ✓ | ✗ (known limitation) |
+
+**Note**: FlashInfer + Helix GQA produces incorrect output. Use `--attention-backend FLASH_ATTN` for Helix GQA.
+
+### MLA Models (DeepSeek, etc.)
+
+| Backend | Hopper | Blackwell | DCP Support | Helix MLA |
+|---------|--------|-----------|-------------|-----------|
+| FLASHMLA | ✓ | ✗ | ✓ | ✓ |
+| CUTLASS_MLA | ✓ | ✓ | ✓ | ✓ |
+| FLASHINFER_MLA | ✓ | ✓ | ✗ (no LSE) | ✗ |
+
+**Note**: On Blackwell with DCP enabled, vLLM auto-selects CUTLASS_MLA (FlashInferMLA lacks LSE support required for DCP).
+
 ## Modes of Operation
 
 ### 1. Standard DCP (`--helix-mode` NOT set)
@@ -43,59 +64,7 @@ KVP = DCP
 Communication: Local Q (no AllGather) → Compute → All-to-All + LSE Reduce
 ```
 
-## Code Path Analysis
-
-### Configuration Flow
-
-```
-helix_mode=False                    → Standard DCP
-helix_mode=True + use_mla=True      → Helix MLA (TPA=1)
-helix_mode=True + use_mla=False     → Helix GQA (TPA>1)
-```
-
-### Detailed Code Paths
-
-#### Standard DCP (`helix_mode=False`)
-
-| Component | Behavior |
-|-----------|----------|
-| Groups | DCP group only |
-| `is_helix_gqa_mode()` | False |
-| `get_attention_tp_world_size()` | Returns full TP size |
-| `get_attention_tp_rank()` | Returns full TP rank |
-| Flash Attn | AllGather Q → `cp_lse_ag_out_rs()` |
-| FlashInfer | AllGather Q → `cp_lse_ag_out_rs()` |
-| MLA Backend | AllGather Q → `cp_lse_ag_out_rs()` |
-| QKVParallelLinear | Standard TP distribution |
-| Attention layer | `num_output_heads = num_heads` |
-
-#### Helix MLA (`helix_mode=True`, TPA=1)
-
-| Component | Behavior |
-|-----------|----------|
-| Groups | DCP group, `_HELIX_KVP=None` (falls back to DCP) |
-| `is_helix_gqa_mode()` | False |
-| `get_attention_tp_world_size()` | Returns full TP size |
-| `get_attention_tp_rank()` | Returns full TP rank |
-| Flash Attn | AllGather Q → `helix_alltoall_lse_reduce()` |
-| FlashInfer | AllGather Q → `helix_alltoall_lse_reduce()` |
-| MLA Backend | AllGather Q → `helix_alltoall_lse_reduce()` |
-| QKVParallelLinear | Standard TP (MLA has different architecture) |
-| Attention layer | `num_output_heads = num_heads` |
-
-#### Helix GQA (`helix_mode=True`, TPA>1)
-
-| Component | Behavior |
-|-----------|----------|
-| Groups | DCP group + `_HELIX_KVP` group |
-| `is_helix_gqa_mode()` | True |
-| `get_attention_tp_world_size()` | Returns TPA size |
-| `get_attention_tp_rank()` | Returns TPA rank (`tp_rank // kvp_size`) |
-| Flash Attn | Local Q (no AllGather) → `helix_alltoall_lse_reduce()` + head scatter |
-| FlashInfer | Local Q (no AllGather) → `helix_alltoall_lse_reduce()` + head scatter |
-| QKVParallelLinear | TPA-based distribution (KVP ranks share weights) |
-| LlamaAttention | TPA-based head distribution |
-| Attention layer | `num_output_heads = num_heads // KVP_SIZE` |
+**Important**: Use `--attention-backend FLASH_ATTN` for Helix GQA. FlashInfer is not supported.
 
 ## Usage
 
@@ -118,10 +87,12 @@ vllm serve <model> \
 
 ```bash
 # TP=8, DCP=2 → TPA=4, KVP=2
+# Must use FLASH_ATTN (FlashInfer not supported for Helix GQA)
 vllm serve nvidia/Llama-3.1-Nemotron-Nano-8B-v1 \
     --tensor-parallel-size 8 \
     --decode-context-parallel-size 2 \
     --helix-mode \
+    --attention-backend FLASH_ATTN \
     --cp-kv-cache-interleave-size 16
 ```
 
@@ -133,7 +104,6 @@ vllm serve deepseek-ai/DeepSeek-V2-Lite-Chat \
     --tensor-parallel-size 8 \
     --decode-context-parallel-size 8 \
     --helix-mode \
-    --attention-backend FLASHMLA \
     --cp-kv-cache-interleave-size 64 \
     --trust-remote-code
 ```
@@ -151,23 +121,20 @@ vllm serve deepseek-ai/DeepSeek-V2-Lite-Chat \
 - TPA=1 is only valid for MLA models (where effective K=1)
 - GQA models cannot use TPA=1 due to Q-KV head binding issues
 
+### Backend Constraints
+
+- **Helix GQA**: Requires `FLASH_ATTN` backend (FlashInfer not supported)
+- **Helix MLA on Blackwell**: Auto-selects `CUTLASS_MLA` (FlashInferMLA lacks DCP support)
+
+## Known Limitations
+
+1. **FlashInfer + Helix GQA**: Produces incorrect output. Root cause under investigation. Workaround: use `--attention-backend FLASH_ATTN`.
+
+2. **Standard DCP + GQA**: Requires `TP > num_kv_heads`. For example, Llama-3.1-8B has 8 KV heads, so standard DCP needs TP > 8 (i.e., 16+ GPUs). Helix removes this constraint.
+
+3. **FlashInferMLA + DCP**: FlashInferMLA doesn't return LSE for decode, which is required for DCP. On Blackwell, vLLM auto-selects CUTLASS_MLA when DCP is enabled.
+
 ## Testing
-
-### Run Functional Tests
-
-```bash
-# All functional tests
-pytest tests/distributed/test_helix_functional.py -v -s
-
-# Specific test classes
-pytest tests/distributed/test_helix_functional.py::TestHelixGQA -v -s
-pytest tests/distributed/test_helix_functional.py::TestHelixMLA -v -s
-pytest tests/distributed/test_helix_functional.py::TestStandardDCP -v -s
-pytest tests/distributed/test_helix_functional.py::TestHelixVsDCPConsistency -v -s
-
-# Quick smoke test
-pytest tests/distributed/test_helix_functional.py::TestQuickSmoke -v -s
-```
 
 ### Run Unit Tests (No GPU Required)
 
@@ -175,10 +142,20 @@ pytest tests/distributed/test_helix_functional.py::TestQuickSmoke -v -s
 pytest tests/distributed/test_helix_config.py -v
 ```
 
-### Run Integration Tests (GSM8K Evaluation)
+### Standalone Functional Test Script
+
+For comprehensive functional testing, use the standalone test script in Docker:
 
 ```bash
-pytest tests/distributed/test_helix_parallel.py -v -s
+# Run all tests
+./test_helix.sh --all
+
+# Run specific suite
+./test_helix.sh --suite helix-gqa
+./test_helix.sh --suite helix-mla
+
+# List available suites
+./test_helix.sh --list
 ```
 
 ## Requirements
@@ -186,3 +163,4 @@ pytest tests/distributed/test_helix_parallel.py -v -s
 - 4+ GPUs with compute capability 9.0+ (Hopper/Blackwell)
 - vLLM with Helix support
 - For MLA models: `--trust-remote-code` flag
+- For Helix GQA: `--attention-backend FLASH_ATTN` (FlashInfer not supported)
