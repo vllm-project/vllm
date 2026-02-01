@@ -19,6 +19,7 @@ from typing import IO, Any
 import filelock
 import huggingface_hub.constants
 import numpy as np
+import regex as re
 import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
@@ -682,7 +683,12 @@ def safetensors_weights_iterator(
         loading_desc += " (eager)"
 
     leftover_state_dict: dict[str, torch.Tensor] = {}
-
+    hf_weights_files.sort(
+        key=lambda f: [
+            int(s) if s.isdigit() else s
+            for s in re.split(r"(\d+)", os.path.basename(f))
+        ]
+    )
     for st_file in tqdm(
         hf_weights_files,
         desc=loading_desc,
