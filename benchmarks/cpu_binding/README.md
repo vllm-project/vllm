@@ -5,7 +5,7 @@ To improve memory-access coherence and release CPUs to other CPU-only workloads,
 Using the automatically generated `docker-compose.override.yml` file can make sure vLLM uses higher frequencies cores and release idle CPUs to other CPU-only workloads.
 The following procedure explains the process.
 
-The Xeon processors currently validated for this setup are: Intel Xeon 6960P.
+The Xeon processors currently validated for this setup are: Intel Xeon 6776P.
 
 ## 0. (Optional) Enable Priority Core Turbo
    
