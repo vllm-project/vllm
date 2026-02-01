@@ -587,13 +587,10 @@ class SpecDecodeBaseProposer:
                 ],
                 out_slot_mapping=self._slot_mapping_buffer[:batch_size],
             )
-            exceeds_max_model_len = (positions_1d + 1) >= self.max_model_len
             clamped_positions_1d = self._eagle_step_clamped_positions_buffer[
                 :batch_size
             ]
-            common_attn_metadata.slot_mapping = self._slot_mapping_buffer[
-                :batch_size
-            ]
+            common_attn_metadata.slot_mapping = self._slot_mapping_buffer[:batch_size]
             # Update position buffers for model forward and next iteration.
             if self.uses_mrope:
                 clamped_positions = clamped_positions_1d.unsqueeze(0).expand(

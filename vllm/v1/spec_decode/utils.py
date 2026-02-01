@@ -50,9 +50,7 @@ def eagle_step_slot_mapping_metadata_kernel(
     block_number = clamped_position // block_size
     block_number = tl.minimum(block_number, n_blocks_per_req - 1)
 
-    block_id = tl.load(
-        block_table_ptr + req_idx * block_table_stride + block_number
-    )
+    block_id = tl.load(block_table_ptr + req_idx * block_table_stride + block_number)
     slot_id = block_id * block_size + (clamped_position % block_size)
     slot_id = tl.where(exceeds_max, PAD_ID, slot_id)
 
