@@ -16,7 +16,7 @@ steps:
   - pytest -v -s distributed/test_shm_storage.py
 
 - label: Distributed (2 GPUs)
-  timeout_in_minutes: 90
+  timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
@@ -133,6 +133,7 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
 
 - label: Distributed Tests (2 GPUs)(H100)
+  timeout_in_minutes: 15
   device: h100
   optional: true
   working_dir: "/vllm-workspace/"

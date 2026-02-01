@@ -18,7 +18,7 @@ steps:
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: PyTorch Fullgraph Smoke Test
-  timeout_in_minutes: 30
+  timeout_in_minutes: 35
   source_file_dependencies:
   - vllm/
   - tests/compile

@@ -3,7 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Sequence Parallel Tests (2 GPUs)
-  timeout_in_minutes: 20
+  timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
@@ -18,7 +18,7 @@ steps:
   - pytest -v -s tests/distributed/test_sequence_parallel.py
 
 - label: Sequence Parallel Tests (2xH100)
-  timeout_in_minutes: 30
+  timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
   device: h100
   optional: true
@@ -28,7 +28,7 @@ steps:
   - pytest -v -s tests/distributed/test_sequence_parallel.py
 
 - label: Distributed Compile Unit Tests (2xH100)
-  timeout_in_minutes: 20
+  timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
@@ -43,8 +43,8 @@ steps:
   - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
   - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
 
-- label: Fusion and Compile Tests (B200)
-  timeout_in_minutes: 40
+- label: Fusion and Compile Unit Tests (B200)
+  timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: b200
   source_file_dependencies:
@@ -69,7 +69,7 @@ steps:
     - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
 
 - label: Fusion E2E Quick (H100)
-  timeout_in_minutes: 20 # ~18 mins
+  timeout_in_minutes: 15
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 1
@@ -87,7 +87,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3"
 
 - label: Fusion E2E Quick (B200)
-  timeout_in_minutes: 20 # ~18 mins
+  timeout_in_minutes: 15
   working_dir: "/vllm-workspace/"
   device: b200
   num_devices: 1
@@ -105,7 +105,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and qwen3"
 
 - label: Fusion E2E Config Sweep (B200)
-  timeout_in_minutes: 30 # ~24 mins
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200
   num_devices: 1
@@ -125,7 +125,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
 - label: Fusion E2E TP2 AR-RMS Quick (H100)
-  timeout_in_minutes: 20 # ~18 mins
+  timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
@@ -141,7 +141,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
 
 - label: Fusion E2E TP2 AR-RMS Quick (B200)
-  timeout_in_minutes: 20 # ~18 mins
+  timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: b200
   num_devices: 2
@@ -157,7 +157,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
 
 - label: Fusion E2E TP2 AR-RMS Config Sweep (B200)
-  timeout_in_minutes: 40 # ~30 mins
+  timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   device: b200
   num_devices: 2
@@ -177,7 +177,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "llama-3"
 
 - label: Fusion E2E TP2 AsyncTP Quick (H100)
-  timeout_in_minutes: 20 # ~18 mins
+  timeout_in_minutes: 15 # ~18 mins
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
@@ -197,7 +197,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
 
 - label: Fusion E2E TP2 AsyncTP Quick (B200)
-  timeout_in_minutes: 20 # ~18 mins
+  timeout_in_minutes: 15
   working_dir: "/vllm-workspace/"
   device: b200
   num_devices: 2
@@ -217,7 +217,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
 
 - label: Fusion E2E TP2 AsyncTP Config Sweep (B200)
-  timeout_in_minutes: 40 # ~40 mins
+  timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   device: b200
   num_devices: 2
