@@ -219,14 +219,6 @@ def _remap_mistral_audio_args(config: dict) -> dict:
     else:
         block_pool_size = 1
 
-    _maybe_sliding_window = encoder_args.get("ragged_attention", None)
-    if _maybe_sliding_window is None:
-        sliding_window = None
-    elif _maybe_sliding_window.isdigit():
-        sliding_window = int(_maybe_sliding_window)
-    else:
-        raise NotImplementedError(f"Unsupported: {_maybe_sliding_window=}")
-
     architecture = (
         "VoxtralRealtimeGeneration"
         if encoder_args.get("causal")
@@ -253,7 +245,7 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             max_source_positions=encoder_args["max_source_positions"],
             is_encoder_decoder=False,  # Override WhisperConfig default
             is_causal=encoder_args.get("causal", False),
-            sliding_window=sliding_window,
+            sliding_window=encoder_args.get("sliding_window", None),
             block_pool_size=block_pool_size,
             pos_embed=encoder_args.get("pos_embed", "sinusoidal"),
             # only needed for RoPE
