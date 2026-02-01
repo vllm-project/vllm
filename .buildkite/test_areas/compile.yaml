@@ -13,11 +13,9 @@ steps:
   - vllm/v1/worker/
   - vllm/v1/cudagraph_dispatcher.py
   - tests/distributed/test_sequence_parallel.py
-  - tests/compile/distributed/test_sequence_parallelism.py
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -v -s tests/distributed/test_sequence_parallel.py
-  - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
 
 - label: Sequence Parallel Tests (2xH100)
   timeout_in_minutes: 30
@@ -28,21 +26,21 @@ steps:
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -v -s tests/distributed/test_sequence_parallel.py
-  - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
 
-- label: Distributed Compile Tests (2xH100)
+- label: Distributed Compile Unit Tests (2xH100)
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
   source_file_dependencies:
-  - vllm/v1/attention/backends/flashinfer.py
   - vllm/compilation/
   - vllm/model_executor/layers
   - tests/compile/distributed/test_fusion_all_reduce.py
+  - tests/compile/distributed/test_sequence_parallelism.py
   - tests/compile/distributed/test_async_tp.py
   commands:
   - pytest -v -s tests/compile/distributed/test_fusion_all_reduce.py
+  - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
   - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
 
 - label: Fusion and Compile Tests (B200)
