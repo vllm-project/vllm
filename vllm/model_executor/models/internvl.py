@@ -130,6 +130,7 @@ class InternVLVideoEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor | list[torch.Tensor], TensorShape("n", "f", "h")]
 
 
+InternVLVisionChunkPixelInputs = InternVLImagePixelInputs
 InternVLVideoInputs: TypeAlias = InternVLVideoPixelInputs | InternVLVideoEmbeddingInputs
 
 
@@ -1111,10 +1112,15 @@ class InternVLMultiModalProcessor(
             prompt, mm_data, mm_kwargs, tok_kwargs
         )
 
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
         if self.info.use_unified_vision_chunk:
+            image_token_id = hf_processor.image_token_id
+            # Since there may be extra tokens in the feature placeholders,
+            # we need to pass the image token ID to the model to select the
+            # tokens to merge from the vision encoder outputs
+            processed_outputs["vision_chunk_token_id"] = torch.tensor(image_token_id)
             return processed_outputs
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
         if (
             self.info.supports_video
             and (video_token_id := hf_processor.video_token_id) is not None
@@ -1128,12 +1134,18 @@ class InternVLMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         if self.info.use_unified_vision_chunk:
+            vision_num_patches = hf_inputs.get("vision_chunk_num_patches", torch.empty(0))
+            num_chunks = len(vision_num_patches)
             return dict(
-                pixel_values_vision_chunk=MultiModalFieldConfig.flat_from_sizes(
+                pixel_values_flat_vision_chunk=MultiModalFieldConfig.flat_from_sizes(
                     "vision_chunk",
-                    hf_inputs.get("vision_chunk_num_patches", torch.empty(0)),
+                    vision_num_patches,
                 ),
                 vision_chunk_num_patches=MultiModalFieldConfig.batched("vision_chunk"),
+                vision_chunk_token_id=MultiModalFieldConfig.shared(
+                    "vision_chunk",
+                    num_chunks,
+                ),
             )
 
         image_fields = super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs)
@@ -1182,9 +1194,10 @@ class InternVLMultiModalProcessor(
             return [
                 PromptReplacement(
                     modality="vision_chunk",
-                    target="<vision_chunk>",
+                    target=token,
                     replacement=get_replacement_internvl,
                 )
+                for token in ("<image>", "<video>", "<vision_chunk>")
             ]
 
         prompt_repl = super()._get_prompt_updates(
@@ -1380,18 +1393,18 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         if pixel_values_flat is None:
             return None
 
-        image_token_id = kwargs["image_token_id"]
-        if isinstance(image_token_id, torch.Tensor):
-            image_token_id = image_token_id.flatten().unique().item()
+        vision_chunk_token_id = kwargs["vision_chunk_token_id"]
+        if isinstance(vision_chunk_token_id, torch.Tensor):
+            vision_chunk_token_id = vision_chunk_token_id.flatten().unique().item()
 
-        assert isinstance(image_token_id, int)
-        self.img_context_token_id = image_token_id
+        assert isinstance(vision_chunk_token_id, int)
+        self.img_context_token_id = vision_chunk_token_id
 
         if pixel_values_flat is not None:
             expected_h = expected_w = self.config.vision_config.image_size
             resolve_bindings = {"h": expected_h, "w": expected_w}
 
-            return InternVLImagePixelInputs(
+            return InternVLVisionChunkPixelInputs(
                 type="pixel_values",
                 pixel_values_flat=pixel_values_flat,
                 num_patches=image_num_patches,
@@ -1528,7 +1541,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
-        print("modalities keys:", modalities.keys(), kwargs)
         if not modalities:
             return []
 
