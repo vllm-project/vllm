@@ -6,7 +6,7 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+from vllm.platforms import current_platform, is_blackwell_cuda
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
@@ -169,10 +169,7 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
 
     flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
     if flashinfer_moe_backend in backend_map:
-        if (
-            flashinfer_moe_backend == "latency"
-            and not current_platform.is_device_capability_family(100)
-        ):
+        if flashinfer_moe_backend == "latency" and not is_blackwell_cuda():
             logger.info_once(
                 "Flashinfer TRTLLM MOE backend is only supported on "
                 "SM100 and later, using CUTLASS backend instead",

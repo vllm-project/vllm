@@ -276,4 +276,27 @@ def __setattr__(name: str, value):
         raise AttributeError(f"No attribute named '{name}' exists in {__name__}.")
 
 
-__all__ = ["Platform", "PlatformEnum", "current_platform", "CpuArchEnum", "_init_trace"]
+def is_blackwell_cuda() -> bool:
+    """Check if running on a Blackwell-family CUDA GPU (SM100/110/120).
+
+    This includes:
+    - SM100: Data center Blackwell (B100, B200)
+    - SM110: Future Blackwell variant
+    - SM120: Consumer Blackwell (RTX 5090)
+    - SM121: DGX Spark (GB10)
+    """
+    # Access current_platform via __getattr__ by using globals()
+    p = __getattr__("current_platform")
+    return p.is_cuda() and any(
+        p.is_device_capability_family(sm) for sm in (100, 110, 120)
+    )
+
+
+__all__ = [
+    "Platform",
+    "PlatformEnum",
+    "current_platform",
+    "CpuArchEnum",
+    "_init_trace",
+    "is_blackwell_cuda",
+]

@@ -22,7 +22,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
     kNvfp4Static,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import is_blackwell_cuda
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
@@ -42,9 +42,8 @@ __all__ = [
 
 
 def _supports_current_device() -> bool:
-    """Supports only Blackwell-family GPUs."""
-    p = current_platform
-    return p.is_cuda() and p.is_device_capability_family(100)
+    """Supports Blackwell-family GPUs (SM100/110/120)."""
+    return is_blackwell_cuda()
 
 
 def _supports_no_act_and_mul() -> bool:
