@@ -67,7 +67,6 @@ from .minicpmv import (
     _MAX_FRAMES_PER_VIDEO,
     MiniCPMV2_6,
     MiniCPMV4_5,
-    MiniCPMVBaseModel,
     MiniCPMVDummyInputsBuilder,
     MiniCPMVMultiModalDataParser,
     MiniCPMVMultiModalProcessor,
@@ -320,7 +319,8 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         if (audios := mm_data.get("audios")) is None:
             return {}
 
-        parsed_audios = self.data_parser.parse_mm_data({"audio": audios}).get_items(
+        mm_items = self.info.parse_mm_data({"audio": audios}, validate=False)
+        parsed_audios = mm_items.get_items(
             "audio", (MiniCPMOAudioEmbeddingItems, AudioProcessorItems)
         )
 
@@ -781,8 +781,7 @@ class MiniCPMO2_6(MiniCPMOBaseModel, MiniCPMV2_6):
     """MiniCPM-O 2.6 model with Qwen2 backbone."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        MiniCPMVBaseModel.__init__(self, vllm_config=vllm_config, prefix=prefix)
-        self.version = (2, 6)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         with self._mark_tower_model(vllm_config, "audio"):
             self.apm = self.init_audio_module(
@@ -794,8 +793,7 @@ class MiniCPMO4_5(MiniCPMOBaseModel, MiniCPMV4_5):
     """MiniCPM-O 4.5 model with Qwen3 backbone."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        MiniCPMVBaseModel.__init__(self, vllm_config=vllm_config, prefix=prefix)
-        self.version = (4, 5)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         with self._mark_tower_model(vllm_config, "audio"):
             self.apm = self.init_audio_module(
@@ -827,8 +825,15 @@ class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
 
         # Determine version from config
         if hasattr(config, "version"):
-            version = str(config.version).split(".")
-            version = tuple([int(x) for x in version])
+            try:
+                version_str = str(config.version)
+                version_parts = version_str.split(".")
+                version = tuple(int(x) for x in version_parts[:2])
+            except (ValueError, TypeError):
+                raise ValueError(
+                    f"Invalid model version format in config: {config.version}. "
+                    "Expected a dot-separated version string like '4.5'."
+                )
         else:
             # Default to 2.6 for backward compatibility
             version = (2, 6)
