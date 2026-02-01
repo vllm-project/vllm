@@ -386,6 +386,33 @@ class W8A8BlockFp8LinearOp:
             else None
         )
 
+    def _pad_k_to_block_size(
+        self,
+        input_2d: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Pad K dimension to multiple of block size if needed.
+
+        This handles models like DeepSeek-V2-Lite where intermediate_size
+        (10944) is not divisible by the block size (128).
+        """
+        block_k = self.act_quant_group_shape.col
+        k = input_2d.shape[-1]
+        if k % block_k != 0:
+            pad_k = block_k - (k % block_k)
+            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
+            weight = torch.nn.functional.pad(weight, (0, pad_k))
+            # Pad weight scale for the new K blocks
+            orig_k_blocks = triton.cdiv(k, block_k)
+            new_k_blocks = triton.cdiv(k + pad_k, block_k)
+            extra_k_blocks = new_k_blocks - orig_k_blocks
+            if extra_k_blocks > 0:
+                weight_scale = torch.nn.functional.pad(
+                    weight_scale, (0, extra_k_blocks)
+                )
+        return input_2d, weight, weight_scale
+
     def apply(
         self,
         input: torch.Tensor,
@@ -426,6 +453,10 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
+        input_2d, weight, weight_scale = self._pad_k_to_block_size(
+            input_2d, weight, weight_scale
+        )
+
         if DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0:
             q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
                 input_2d,
@@ -454,6 +485,11 @@ class W8A8BlockFp8LinearOp:
     ) -> torch.Tensor:
         assert input_scale is None
         assert self.input_quant_op is not None
+
+        input_2d, weight, weight_scale = self._pad_k_to_block_size(
+            input_2d, weight, weight_scale
+        )
+
         q_input, input_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
             return torch.ops.vllm.padded_cutlass(
@@ -525,6 +561,11 @@ class W8A8BlockFp8LinearOp:
     ) -> torch.Tensor:
         assert input_scale is None
         assert self.input_quant_op is not None
+
+        input_2d, weight, weight_scale = self._pad_k_to_block_size(
+            input_2d, weight, weight_scale
+        )
+
         q_input, input_scale = self.input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             q_input,
@@ -547,6 +588,10 @@ class W8A8BlockFp8LinearOp:
         This backend uses TensorRT-LLM's FP8 block-scale GEMM kernels
         and supports FP8+FP8 (W8A8 full quantization) on SM90+ (Hopper).
         """
+        input_2d, weight, weight_scale = self._pad_k_to_block_size(
+            input_2d, weight, weight_scale
+        )
+
         # Now call FlashInfer with BF16 input + FP8 weight, input will be
         # quantized with FlashInfer kernel (W8A8)
         output = torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
@@ -1445,16 +1490,14 @@ def validate_fp8_block_shape(
             f"is not divisible by weight quantization block_k = {block_k}."
         )
 
-    # Required by column parallel or enabling merged weights
+    # Required by column parallel with tensor parallelism.
+    # When TP > 1, each partition must be divisible by block size for proper
+    # slicing. For merged matrices without TP (e.g., gate_up_proj), partitions
+    # are logical only - the kernel treats them as a single matrix and handles
+    # partial blocks correctly via ceiling division in scale tensor sizing.
     is_tp_split = tp_size > 1 and output_size // sum(output_partition_sizes) == tp_size
-    is_merged_gemm = len(output_partition_sizes) > 1
-    if is_tp_split or is_merged_gemm:
-        sizes_to_check = output_partition_sizes
-        if not is_tp_split and is_merged_gemm:
-            # In case of merged matrices, we allow the last
-            # matrix to not be a multiple of block size
-            sizes_to_check = output_partition_sizes[:-1]
-        for output_partition_size in sizes_to_check:
+    if is_tp_split:
+        for output_partition_size in output_partition_sizes:
             if output_partition_size % block_n != 0:
                 raise ValueError(
                     f"Weight output_partition_size = "
