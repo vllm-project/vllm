@@ -718,7 +718,11 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    break
+                    # NOTE: Mitigates head-of-line blocking under KV cache pressure.
+                    # See: https://github.com/vllm-project/vllm/issues/31731
+                    request = self.waiting.pop_request()
+                    skipped_waiting_requests.prepend_request(request)
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
