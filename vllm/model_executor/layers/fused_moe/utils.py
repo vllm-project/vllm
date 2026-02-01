@@ -359,9 +359,10 @@ def apply_moe_activation(
     elif activation == "swigluoai":
         torch.ops._C.swigluoai_and_mul(output, input)
     elif activation == "swiglustep":
-        from vllm.model_executor.layers.activation import swiglustep_and_mul_out
+        from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
 
-        swiglustep_and_mul_out(output, input)
+        swiglustep_and_mul_triton(output, input)
+
     # Activations without gated multiplication
     elif activation == SILU_NO_MUL:
         output.copy_(F.silu(input))

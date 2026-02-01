@@ -17,29 +17,61 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.collection_utils import LazyDict
 
 logger = init_logger(__name__)
 
 
-def swiglustep_and_mul_out(
-    out: torch.Tensor,
-    x: torch.Tensor,
-    limit: float = 7.0,
-) -> torch.Tensor:
-    """Out-variant of swiglustep activation.
+@triton.jit
+def _swiglustep_and_mul_kernel(
+    o_ptr,
+    o_stride,
+    x_ptr,
+    x_stride,
+    limit: tl.constexpr,
+    d: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    i = tl.program_id(axis=0).to(tl.int64)
+    j = tl.program_id(axis=1)
+    o_row_ptr = o_ptr + o_stride * i
+    x_row_ptr = x_ptr + x_stride * i
+    offsets = j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < d
 
-    Writes into `out`:
-      silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
-    """
-    # Prefer the fused custom op when available (CUDA); fallback to PyTorch ops
-    # otherwise.
-    gate, up = x.chunk(2, dim=-1)
-    gate = F.silu(gate)
-    gate = gate.clamp(max=limit)
-    up = up.clamp(min=-limit, max=limit)
-    out.copy_(gate * up)
-    return out
+    gate = tl.load(x_row_ptr + offsets, mask=mask).to(tl.float32)
+    up = tl.load(x_row_ptr + offsets + d, mask=mask).to(tl.float32)
+
+    gate_silu = tl.sigmoid(gate) * gate
+    gate_clamped = tl.minimum(gate_silu, limit)
+    up_clamped = tl.minimum(tl.maximum(up, -limit), limit)
+
+    result = gate_clamped * up_clamped
+    result = result.to(x_ptr.dtype.element_ty)
+    tl.store(o_row_ptr + offsets, result, mask=mask)
+
+
+def swiglustep_and_mul_triton(
+    output: torch.Tensor, input: torch.Tensor, limit: float = 7.0
+):
+    b, n = input.shape
+    assert input.ndim == 2
+    assert n % 2 == 0
+    d = n // 2
+
+    def grid(meta):
+        return (b, triton.cdiv(d, meta["BLOCK_SIZE"]))
+
+    _swiglustep_and_mul_kernel[grid](
+        output,
+        output.stride(0),
+        input,
+        input.stride(0),
+        limit=limit,
+        d=d,
+        BLOCK_SIZE=1024,
+    )
 
 
 # --8<-- [start:fatrelu_and_mul]
@@ -355,7 +387,7 @@ class SwigluStepAndMul(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        swiglustep_and_mul_out(out, x, self.limit)
+        swiglustep_and_mul_triton(out, x, self.limit)
         return out
 
     def extra_repr(self) -> str:

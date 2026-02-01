@@ -341,11 +341,13 @@ class FusedMoEBlock(nn.Module):
         assert self.need_fp32_gate, (
             "Router logits must use FP32 precision for numerical stability."
         )
-        layer_idx = int(prefix.split("layers.")[1].split(".")[0])
+
         activation = "silu"
         swiglu_limits = config.swiglu_limits or []
         swiglu_limit = (
-            swiglu_limits[layer_idx] if layer_idx < len(swiglu_limits) else None
+            swiglu_limits[self.layer_idx]
+            if self.layer_idx < len(swiglu_limits)
+            else None
         )
         if swiglu_limit not in (None, 0):
             swiglu_limit = float(swiglu_limit)
@@ -353,9 +355,9 @@ class FusedMoEBlock(nn.Module):
                 "Swiglu limit in fused moe block only suport 7.0 now."
             )
             activation = "swiglustep"
-            logger.info(
+            logger.debug(
                 "step3p5 layer_idx: %s, activation: %s, limit: %s",
-                layer_idx,
+                self.layer_idx,
                 activation,
                 swiglu_limit,
             )
@@ -369,7 +371,8 @@ class FusedMoEBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.share_expert",
         )
-
+        if get_tensor_model_parallel_rank() == 0:
+            print(f"{self.layer_idx}: moe activation=={activation}")
         self.experts = SharedFusedMoE(
             shared_experts=self.share_expert,
             gate=self.gate,
