@@ -11,7 +11,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import RendererLike
+from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
@@ -28,7 +28,7 @@ class EngineClient(ABC):
 
     @property
     @abstractmethod
-    def renderer(self) -> RendererLike: ...
+    def renderer(self) -> BaseRenderer: ...
 
     @property
     @abstractmethod

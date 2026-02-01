@@ -7,7 +7,7 @@ from vllm.logger import init_logger
 from vllm.tokenizers.registry import tokenizer_args_from_config
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
-from .protocol import RendererLike
+from .protocol import BaseRenderer
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -43,7 +43,7 @@ class RendererRegistry:
 
         return None
 
-    def load_renderer_cls(self, renderer_mode: str) -> type[RendererLike]:
+    def load_renderer_cls(self, renderer_mode: str) -> type[BaseRenderer]:
         if renderer_mode not in self.renderers:
             raise ValueError(f"No renderer registered for {renderer_mode=!r}.")
 
@@ -57,7 +57,7 @@ class RendererRegistry:
         renderer_mode: str,
         config: "ModelConfig",
         tokenizer_kwargs: dict[str, Any],
-    ) -> RendererLike:
+    ) -> BaseRenderer:
         renderer_cls = self.load_renderer_cls(renderer_mode)
         return renderer_cls.from_config(config, tokenizer_kwargs)
 

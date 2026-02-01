@@ -34,7 +34,7 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.func_utils import supports_kw
 
 from .params import ChatParams
-from .protocol import RendererLike
+from .protocol import BaseRenderer
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
@@ -584,13 +584,13 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
-class HfRenderer(RendererLike):
+class HfRenderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "RendererLike":
+    ) -> "BaseRenderer":
         return cls(config, tokenizer_kwargs)
 
     def __init__(
@@ -598,9 +598,8 @@ class HfRenderer(RendererLike):
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
-        super().__init__()
+        super().__init__(config)
 
-        self.config = config
         self.use_unified_vision_chunk = getattr(
             config.hf_config, "use_unified_vision_chunk", False
         )

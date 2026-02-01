@@ -17,7 +17,7 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
 from .params import ChatParams
-from .protocol import RendererLike
+from .protocol import BaseRenderer
 
 logger = init_logger(__name__)
 
@@ -49,13 +49,13 @@ def safe_apply_chat_template(
         raise ValueError(str(e)) from e
 
 
-class MistralRenderer(RendererLike):
+class MistralRenderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "RendererLike":
+    ) -> "BaseRenderer":
         return cls(config, tokenizer_kwargs)
 
     def __init__(
@@ -63,9 +63,7 @@ class MistralRenderer(RendererLike):
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
-        super().__init__()
-
-        self.config = config
+        super().__init__(config)
 
         if config.skip_tokenizer_init:
             tokenizer = None
