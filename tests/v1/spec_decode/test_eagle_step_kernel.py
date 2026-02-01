@@ -40,9 +40,7 @@ def _reference_eagle_step_slot_mapping(
     slot_mapping = torch.where(
         exceeds_max, torch.full_like(slot_mapping, PADDING_SLOT_ID), slot_mapping
     )
-    new_seq_lens = torch.where(
-        exceeds_max, torch.ones_like(seq_lens), seq_lens + 1
-    )
+    new_seq_lens = torch.where(exceeds_max, torch.ones_like(seq_lens), seq_lens + 1)
     new_seq_lens = new_seq_lens.clamp(max=max_model_len)
     return clamped_positions, slot_mapping, new_seq_lens
 
@@ -61,9 +59,7 @@ def test_eagle_step_slot_mapping_kernel():
     block_table_tensor = torch.randint(
         0, 1000, (batch_size, n_blocks_per_req), dtype=torch.int32, device=device
     )
-    seq_lens = torch.randint(
-        1, 100, (batch_size,), dtype=torch.int32, device=device
-    )
+    seq_lens = torch.randint(1, 100, (batch_size,), dtype=torch.int32, device=device)
 
     ref_clamped, ref_slot, ref_seq_lens = _reference_eagle_step_slot_mapping(
         positions_1d.clone(),
@@ -103,9 +99,7 @@ def test_eagle_step_slot_mapping_kernel_exceeds_max():
     max_model_len = 100
     n_blocks_per_req = (max_model_len + block_size - 1) // block_size
 
-    positions_1d = torch.tensor(
-        [50, 98, 99, 100], dtype=torch.int64, device=device
-    )
+    positions_1d = torch.tensor([50, 98, 99, 100], dtype=torch.int64, device=device)
     block_table_tensor = torch.randint(
         0, 100, (batch_size, n_blocks_per_req), dtype=torch.int32, device=device
     )
