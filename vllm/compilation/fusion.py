@@ -528,10 +528,12 @@ class RMSNormNvfp4QuantPattern:
     def get_inputs(self) -> list[torch.Tensor]:
         # Use rmsnorm_matcher.inputs() to respect model dtype (bf16 or fp16)
         rms_inputs = self.rmsnorm_matcher.inputs()  # [input, weight]
-        input_ = rms_inputs[0]
-        weight = rms_inputs[1]
-        result = torch.empty(5, 32, dtype=FP4_DTYPE, device="cuda")
-        output_scale = empty_i32(128, 4)
+        input_ = rms_inputs[0]  # (5, 16)
+        weight = rms_inputs[1]  # (16,)
+        hidden_size = input_.shape[1]
+        # FP4 packs 2 values per uint8, so output cols = hidden_size / 2
+        result = torch.empty(5, hidden_size // 2, dtype=FP4_DTYPE, device="cuda")
+        output_scale = empty_i32(128, 1)
         input_scale = empty_fp32(1, 1)
         return [result, output_scale, input_, weight, input_scale]
 
@@ -594,11 +596,13 @@ class FusedAddRMSNormNvfp4QuantPattern:
     def get_inputs(self) -> list[torch.Tensor]:
         # Use fused_add_rmsnorm_matcher.inputs() for [input, weight, residual]
         rms_inputs = self.fused_add_rmsnorm_matcher.inputs()
-        input_ = rms_inputs[0]
-        weight = rms_inputs[1]
-        residual = rms_inputs[2]
-        result = torch.empty(5, 32, dtype=FP4_DTYPE, device="cuda")
-        output_scale = empty_i32(128, 4)
+        input_ = rms_inputs[0]  # (5, 16)
+        weight = rms_inputs[1]  # (16,)
+        residual = rms_inputs[2]  # (5, 16)
+        hidden_size = input_.shape[1]
+        # FP4 packs 2 values per uint8, so output cols = hidden_size / 2
+        result = torch.empty(5, hidden_size // 2, dtype=FP4_DTYPE, device="cuda")
+        output_scale = empty_i32(128, 1)
         input_scale = empty_fp32(1, 1)
         return [result, output_scale, input_, weight, residual, input_scale]
 
@@ -708,14 +712,15 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
                             ).register(self.patterns)
 
             # Register NVFP4 patterns if supported
-            if rms_norm_nvfp4_quant_supported:
-                # Fuse rms_norm + nvfp4 quant
-                RMSNormNvfp4QuantPattern(epsilon).register(self.patterns)
-
-            # Register fused_add_rms_norm + NVFP4 pattern if supported
+            # Make sure fused_add pattern is registered before simple rms_norm,
+            # as the latter is a subset of the former in torch ops
             if fused_add_rms_norm_nvfp4_quant_supported:
                 # Fuse fused_add_rms_norm + nvfp4 quant
                 FusedAddRMSNormNvfp4QuantPattern(epsilon).register(self.patterns)
+
+            if rms_norm_nvfp4_quant_supported:
+                # Fuse rms_norm + nvfp4 quant
+                RMSNormNvfp4QuantPattern(epsilon).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
@@ -735,4 +740,5 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             FusedAddRMSNormDynamicQuantPattern,
             FusedAddRMSNormGroupQuantPattern,
             RMSNormNvfp4QuantPattern,
+            FusedAddRMSNormNvfp4QuantPattern,
         )
