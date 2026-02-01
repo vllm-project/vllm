@@ -1937,7 +1937,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
                     (kFp8StaticChannelSym, kFp8DynamicTokenSym),
                     (kFp8StaticTensorSym, kFp8DynamicTokenSym),
                     (kFp8StaticTensorSym, kFp8StaticTensorSym),
-                (kFp8StaticTensorSym, kFp8DynamicTensorSym),]
+                    (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+                ]
             )
         return (weight_key, activation_key) in SUPPORTED_W_A
 
