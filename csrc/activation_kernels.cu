@@ -279,8 +279,8 @@ packed_gelu_tanh_kernel(const packed_t& val) {
   }                                                                         \
   dim3 grid(num_tokens);                                                    \
   int cc_major = at::cuda::getCurrentDeviceProperties()->major;             \
-  int arch_support_vec = cc_major < 10 ? 16 : 32;                           \
-  int vec_size = arch_support_vec / at::elementSize(dtype);                 \
+  int support_vec = (cc_major >= 10 && num_tokens >= 128) ? 32 : 16;        \
+  int vec_size = support_vec / at::elementSize(dtype);                      \
   const bool use_vec = (d % vec_size == 0);                                 \
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));         \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();             \
@@ -497,8 +497,8 @@ __global__ void swigluoai_and_mul_kernel(
   }                                                                            \
   dim3 grid(num_tokens);                                                       \
   int cc_major = at::cuda::getCurrentDeviceProperties()->major;                \
-  int arch_support_vec = cc_major < 10 ? 16 : 32;                              \
-  int vec_size = arch_support_vec / at::elementSize(dtype);                    \
+  int support_vec = (cc_major >= 10 && num_tokens >= 128) ? 32 : 16;           \
+  int vec_size = support_vec / at::elementSize(dtype);                         \
   const bool use_vec = (d % vec_size == 0);                                    \
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
@@ -629,8 +629,8 @@ __global__ void activation_kernel(
   }                                                                           \
   dim3 grid(num_tokens);                                                      \
   int cc_major = at::cuda::getCurrentDeviceProperties()->major;               \
-  int arch_support_vec = cc_major < 10 ? 16 : 32;                             \
-  int vec_size = arch_support_vec / at::elementSize(dtype);                   \
+  int support_vec = (cc_major >= 10 && num_tokens >= 128) ? 32 : 16;          \
+  int vec_size = support_vec / at::elementSize(dtype);                        \
   const bool use_vec = (d % vec_size == 0);                                   \
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));           \
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();               \
