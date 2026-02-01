@@ -479,6 +479,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_length = max_cache_hit_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
 
+        # Simple hybrid (1 full attn + 1 other): one iteration suffices.
+        # Full attn is always first if it exists. This avoids EAGLE drops
+        # being applied multiple times to non-full-attn groups.
+        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
+            self.attention_groups[0][0], FullAttentionSpec
+        )
+
         while True:
             curr_hit_length = hit_length
 
@@ -495,10 +502,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     # the last iteration.
                     num_blocks = curr_hit_length // spec.block_size
                     curr_hit_length = num_blocks * spec.block_size
-                    for group_id in group_ids:
-                        blocks = hit_blocks_by_group[group_id]
-                        assert blocks is not None
-                        del blocks[num_blocks:]
                 else:
                     hit_blocks = manager_cls.find_longest_cache_hit(
                         block_hashes=_get_block_hashes(spec),
@@ -513,10 +516,21 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     for group_id, blocks in zip(group_ids, hit_blocks):
                         hit_blocks_by_group[group_id] = blocks
 
-            if curr_hit_length < hit_length:
-                hit_length = curr_hit_length
-            else:
+            if curr_hit_length >= hit_length:
                 break
+            hit_length = curr_hit_length
+            # Simple hybrid: exit after one iteration
+            if is_simple_hybrid:
+                break
+
+        # Truncate full attention blocks to final hit_length (if present)
+        spec, group_ids, _ = self.attention_groups[0]
+        if isinstance(spec, FullAttentionSpec):
+            num_blocks = hit_length // spec.block_size
+            for group_id in group_ids:
+                blocks = hit_blocks_by_group[group_id]
+                if blocks is not None:
+                    del blocks[num_blocks:]
 
         return tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
