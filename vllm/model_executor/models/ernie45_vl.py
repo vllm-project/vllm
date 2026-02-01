@@ -42,7 +42,7 @@ from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
+from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -793,6 +793,12 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
 
+    def get_data_parser(self):
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None}
 
@@ -947,11 +953,6 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
 
 
 class Ernie4_5VLMultiModalProcessor(BaseMultiModalProcessor[Ernie4_5_VLProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return MultiModalDataParser(
-            video_needs_metadata=True,
-        )
-
     def _pixel_values_norm(
         self,
         pixel_values: torch.Tensor,

@@ -1302,7 +1302,7 @@ def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
         indices.append(idx)
         prompt = (
             "```python\n# We set a number of variables, "
-            + f"x{idx} will be important later\n"
+            f"x{idx} will be important later\n"
         )
         ln = random.randint(*ln_range)
         for k in range(30, ln):
