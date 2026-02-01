@@ -167,6 +167,14 @@ class TestBaseThinkingReasoningParserMethods:
             is False
         )
 
+    def test_count_reasoning_tokens(self, test_tokenizer):
+        """Count tokens between start/end markers."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        start = parser.start_token_id
+        end = parser.end_token_id
+        token_ids = [0, start, 11, 12, end, 99]
+        assert parser.count_reasoning_tokens(token_ids) == 2
+
     def test_extract_content_ids(self, test_tokenizer):
         """Test the extract_content_ids method."""
         parser = TestThinkingReasoningParser(test_tokenizer)

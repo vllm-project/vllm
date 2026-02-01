@@ -175,3 +175,18 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # If generation stops right after end-of-think, return null content
             final_content = content or None
             return reasoning, final_content
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count tokens that fall within start/end thinking markers."""
+        count = 0
+        in_reasoning = False
+        for token_id in token_ids:
+            if token_id == self.start_token_id:
+                in_reasoning = True
+                continue
+            if token_id == self.end_token_id:
+                in_reasoning = False
+                continue
+            if in_reasoning:
+                count += 1
+        return count
