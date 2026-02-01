@@ -371,8 +371,6 @@ class FusedMoEBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.share_expert",
         )
-        if get_tensor_model_parallel_rank() == 0:
-            print(f"{self.layer_idx}: moe activation=={activation}")
         self.experts = SharedFusedMoE(
             shared_experts=self.share_expert,
             gate=self.gate,
