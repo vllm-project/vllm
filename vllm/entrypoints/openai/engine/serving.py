@@ -286,10 +286,6 @@ class OpenAIServing:
             raise TypeError(f"{reasoning_parser_name=} has not been registered") from e
         return parser
 
-    async def reset_mm_cache(self) -> None:
-        self.input_processor.clear_mm_cache()
-        await self.engine_client.reset_mm_cache()
-
     async def beam_search(
         self,
         prompt: PromptType,
