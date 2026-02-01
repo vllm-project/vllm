@@ -259,6 +259,35 @@ class CudaPlatformBase(Platform):
                     "Forcing kv cache block size to 64 for FlashMLASparse backend."
                 )
 
+        # Check for FlashInfer + Helix GQA incompatibility
+        # FlashInfer produces gibberish output with Helix GQA mode (TPA > 1).
+        # Root cause is under investigation. For now, prevent this combination.
+        if parallel_config.helix_mode and parallel_config.decode_context_parallel_size > 1:
+            # Check if this is GQA (TPA > 1) by checking if TP/DCP > 1
+            tp_size = parallel_config.tensor_parallel_size
+            dcp_size = parallel_config.decode_context_parallel_size
+            tpa_size = tp_size // dcp_size
+            is_helix_gqa = tpa_size > 1  # GQA has TPA > 1, MLA has TPA = 1
+
+            if is_helix_gqa:
+                backend = vllm_config.attention_config.backend
+                if backend == AttentionBackendEnum.FLASHINFER:
+                    # User explicitly requested FlashInfer - block it
+                    raise ValueError(
+                        "FlashInfer backend is not supported with Helix GQA mode "
+                        f"(TP={tp_size}, DCP={dcp_size}, TPA={tpa_size}). "
+                        "FlashInfer produces incorrect output in this configuration. "
+                        "Please use FlashAttn instead: --attention-backend FLASH_ATTN"
+                    )
+                elif backend is None:
+                    # Auto-selection: force FlashAttn to avoid FlashInfer
+                    logger.info(
+                        "Helix GQA mode detected (TPA=%d). Forcing FLASH_ATTN backend "
+                        "(FlashInfer produces incorrect output in this configuration).",
+                        tpa_size
+                    )
+                    vllm_config.attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+
         # Restore DCP->PIECEWISE check that was accidentally removed in commit
         # 17eb25e32. DCP is incompatible with FULL CUDA graphs because
         # dcp_context_kv_lens tensor gets captured as static constant during
