@@ -521,7 +521,7 @@ def flashinfer_scaled_fp4_mm(
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
 
-    if backend == "cutlass":
+    if backend in ("cutlass", "cudnn"):
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
