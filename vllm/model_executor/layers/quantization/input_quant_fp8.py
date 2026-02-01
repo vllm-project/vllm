@@ -64,7 +64,8 @@ class QuantFP8(CustomOp):
         self.num_token_padding = num_token_padding
         self.column_major_scales = column_major_scales
         self.tma_aligned_scales = tma_aligned_scales
-        self.use_ue8m0 = use_ue8m0
+        self.use_ue8m0 = is_deep_gemm_e8m0_used() if use_ue8m0 is None else use_ue8m0
+        self.use_deep_gemm_supported = is_deep_gemm_supported()
 
         self.use_aiter = rocm_aiter_ops.is_linear_fp8_enabled()
 
