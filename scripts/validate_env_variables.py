@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Validation script for vllm/envs/_variables.py
+"""Validation script for vllm/envs_impl/_variables.py
 
 This script validates that:
-1. No direct imports of vllm.envs._variables exist in the codebase
-   (except in envs/__init__.py which needs it for TYPE_CHECKING)
+1. No direct imports of vllm.envs_impl._variables exist in the codebase
+   (except in envs_impl/__init__.py which needs it for TYPE_CHECKING)
 2. All variables in _variables.py have valid type annotations (no Any allowed)
 3. Default values match their declared types (basic check)
 
@@ -21,8 +21,8 @@ from pathlib import Path
 class DirectImportChecker(ast.NodeVisitor):
     """AST visitor to check for direct imports of _variables module.
 
-    Direct imports of vllm.envs._variables are not allowed anywhere,
-    including in TYPE_CHECKING blocks (except in envs/__init__.py).
+    Direct imports of vllm.envs_impl._variables are not allowed anywhere,
+    including in TYPE_CHECKING blocks (except in envs_impl/__init__.py).
     """
 
     def __init__(self, filename: str):
@@ -32,25 +32,25 @@ class DirectImportChecker(ast.NodeVisitor):
     def visit_Import(self, node: ast.Import) -> None:
         """Check Import nodes for direct imports of _variables."""
         for alias in node.names:
-            if alias.name == "vllm.envs._variables" or alias.name.startswith(
-                "vllm.envs._variables."
+            if alias.name == "vllm.envs_impl._variables" or alias.name.startswith(
+                "vllm.envs_impl._variables."
             ):
                 self.errors.append(
                     f"{self.filename}:{node.lineno}: "
-                    f"Direct import of vllm.envs._variables is not allowed. "
+                    f"Direct import of vllm.envs_impl._variables is not allowed. "
                     f"Use 'import vllm.envs as envs' instead."
                 )
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         """Check ImportFrom nodes for direct imports of _variables."""
-        # Check absolute imports (e.g., from vllm.envs._variables import X)
+        # Check absolute imports (e.g., from vllm.envs_impl._variables import X)
         if node.module and (
-            node.module == "vllm.envs._variables"
-            or node.module.startswith("vllm.envs._variables.")
+            node.module == "vllm.envs_impl._variables"
+            or node.module.startswith("vllm.envs_impl._variables.")
         ):
             self.errors.append(
                 f"{self.filename}:{node.lineno}: "
-                f"Direct import from vllm.envs._variables is not allowed. "
+                f"Direct import from vllm.envs_impl._variables is not allowed. "
                 f"Use 'import vllm.envs as envs' instead."
             )
 
@@ -89,8 +89,9 @@ def check_no_direct_imports(vllm_root: Path) -> list[str]:
 
     # Check all Python files
     for py_file in vllm_root.rglob("*.py"):
-        # Skip envs/__init__.py - it's allowed to import _variables for TYPE_CHECKING
-        if py_file.name == "__init__.py" and py_file.parent.name == "envs":
+        # Skip envs_impl/__init__.py - it's allowed to import
+        # _variables for TYPE_CHECKING
+        if py_file.name == "__init__.py" and py_file.parent.name == "envs_impl":
             continue
 
         # Skip _variables.py itself
@@ -278,7 +279,7 @@ def main() -> int:
     # Find vllm root directory
     script_dir = Path(__file__).parent
     vllm_root = script_dir.parent / "vllm"
-    variables_file = vllm_root / "envs" / "_variables.py"
+    variables_file = vllm_root / "envs_impl" / "_variables.py"
 
     if not variables_file.exists():
         print(f"Error: {variables_file} not found")

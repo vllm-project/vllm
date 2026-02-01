@@ -34,8 +34,8 @@ from typing import (
 )
 
 # Import the variables module for accessing defaults and type hints
-from vllm.envs import _variables
-from vllm.envs.utils import (
+from vllm.envs_impl import _variables
+from vllm.envs_impl.utils import (
     EnvFactory,
     is_type_with_args,
     parse_list,
@@ -46,7 +46,7 @@ from vllm.envs.utils import (
 if TYPE_CHECKING:
     # For type checkers and IDEs, import all variable declarations directly
     # This provides full type information and autocomplete
-    from vllm.envs._variables import *  # noqa: F403
+    from vllm.envs_impl._variables import *  # noqa: F403  # type: ignore[assignment]
 
 # Get type hints from _variables module for runtime type conversion
 _type_hints = get_type_hints(_variables)
@@ -370,4 +370,4 @@ class _EnvsModuleWrapper:
 
 # Replace this module with the wrapper to enable 'in' operator support
 _this_module = sys.modules[__name__]
-sys.modules[__name__] = _EnvsModuleWrapper(_this_module)
+sys.modules[__name__] = _EnvsModuleWrapper(_this_module)  # type: ignore[assignment]

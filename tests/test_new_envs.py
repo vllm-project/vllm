@@ -18,8 +18,6 @@ import os
 import sys
 from pathlib import Path
 
-# Add vllm to path (relative to this script's location)
-# This script is in tests/, so parent is the repo root
 repo_root = Path(__file__).parent.parent
 sys.path.insert(0, str(repo_root))
 
@@ -126,12 +124,12 @@ def test_lazy_defaults():
         del os.environ["VLLM_CACHE_ROOT"]
 
     # Reload
-    if "vllm.envs" in sys.modules:
-        del sys.modules["vllm.envs"]
-    if "vllm.envs._variables" in sys.modules:
-        del sys.modules["vllm.envs._variables"]
-    if "vllm.envs.utils" in sys.modules:
-        del sys.modules["vllm.envs.utils"]
+    if "vllm.envs_impl" in sys.modules:
+        del sys.modules["vllm.envs_impl"]
+    if "vllm.envs_impl._variables" in sys.modules:
+        del sys.modules["vllm.envs_impl._variables"]
+    if "vllm.envs_impl.utils" in sys.modules:
+        del sys.modules["vllm.envs_impl.utils"]
 
     import vllm.envs as envs
 

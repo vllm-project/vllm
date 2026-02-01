@@ -6,12 +6,12 @@
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, TypeVar, Union, get_args, get_origin
+from typing import Any, Generic, TypeVar, Union, get_args, get_origin
 
 T = TypeVar("T")
 
 
-class EnvFactory:
+class EnvFactory(Generic[T]):
     """Factory for environment variable parsing with custom logic.
 
     This allows specifying both a default value and a custom parser function
