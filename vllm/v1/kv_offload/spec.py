@@ -39,6 +39,10 @@ class OffloadingSpec(ABC):
         self.offloaded_block_size = int(
             self.extra_config.get("block_size", self.gpu_block_size)
         )
+        self.preemptions_only_mode = (
+            str(self.extra_config.get("preemptions_only_mode", "false")).lower()
+            == "true"
+        )
 
         assert self.offloaded_block_size % self.gpu_block_size == 0
 

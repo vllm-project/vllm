@@ -148,11 +148,16 @@ class TransferSummary:
 
 class RequestRunner:
     def __init__(
-        self, offloaded_block_size: int, gpu_block_size: int, num_gpu_blocks: int
+        self,
+        offloaded_block_size: int,
+        gpu_block_size: int,
+        num_gpu_blocks: int,
+        preemptions_only_mode: bool,
     ):
         self.offloaded_block_size: int = offloaded_block_size
         self.gpu_block_size: int = gpu_block_size
         self.num_gpu_blocks: int = num_gpu_blocks
+        self.preemptions_only_mode = preemptions_only_mode
 
         self.req_id: int = -1
 
@@ -166,6 +171,7 @@ class RequestRunner:
                 "spec_name": "MockOffloadingSpec",
                 "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",  # noqa: E501
                 "block_size": offloaded_block_size,
+                "preemptions_only_mode": preemptions_only_mode,
             },
         )
 
@@ -323,7 +329,8 @@ class RequestRunner:
 
             if scheduler_output.preempted_req_ids:
                 self.worker_connector.handle_preemptions(
-                    scheduler_output.preempted_req_ids
+                    scheduler_output.preempted_req_ids,
+                    scheduler_output.kv_connector_metadata,
                 )
 
             self.worker_connector.bind_connector_metadata(kv_connector_metadata)
@@ -443,11 +450,17 @@ class RequestRunner:
 def request_runner():
     runners = []
 
-    def runner_factory(offloaded_block_size, gpu_block_size, num_gpu_blocks):
+    def runner_factory(
+        offloaded_block_size,
+        gpu_block_size,
+        num_gpu_blocks,
+        preemptions_only_mode=False,
+    ):
         runner = RequestRunner(
             offloaded_block_size=offloaded_block_size,
             gpu_block_size=gpu_block_size,
             num_gpu_blocks=num_gpu_blocks,
+            preemptions_only_mode=preemptions_only_mode,
         )
         runners.append(runner)
         return runner
@@ -728,6 +741,78 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner):
 
     # second request will use the GPU prefix cache
     assert transfer_jobs == list(runner.offloading_spec.handler.transfer_specs)
+
+
+def test_preemptions_only_mode(request_runner):
+    offloaded_block_size = 12
+    gpu_block_size = 4
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=gpu_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        preemptions_only_mode=True,
+    )
+
+    free_block_queue = runner.scheduler.kv_cache_manager.block_pool.free_block_queue
+    num_free_blocks_empty = free_block_queue.num_free_blocks
+
+    # 2 blocks, should not lookup, nor store
+    # blocks = [0, 1, 2], [3, 4, 5]
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.run(decoded_tokens=[0])
+    runner.manager.lookup.assert_not_called()
+    runner.manager.prepare_store.assert_not_called()
+
+    # decode 2 more blocks - 1 gpu block, adding [6, 7, 8], [9, 10] blocks
+    runner.run(decoded_tokens=[0] * (2 * offloaded_block_size - gpu_block_size))
+    runner.manager.prepare_store.assert_not_called()
+
+    # simulate KV cache running out of space
+    free_block_queue.num_free_blocks = 0
+
+    # request should be preempted now
+    # expect storing of [0, 1, 2], [3, 4, 5], [6, 7, 8]
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output(block_hashes)
+    )
+    runner.manager.lookup.return_value = 3
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=False,
+        expected_flushed_gpu_block_indexes=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+        expected_stored_gpu_block_indexes=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+    )
+
+    # verify request has 3 protected (from eviction) blocks
+    req_statuses = runner.scheduler_connector.connector_scheduler._req_status.values()
+    assert len(req_statuses) == 1
+    req_status = list(req_statuses)[0]
+    assert len(req_status.protected_block_hashes) == 3
+
+    # restore KV cache space and reset GPU prefix cache
+    free_block_queue.num_free_blocks = num_free_blocks_empty
+    runner.scheduler.reset_prefix_cache()
+
+    # request should now return from preemption
+    # re-load [0, ..., 8] from the CPU and NOT store [9, 10, 11]
+    runner.manager.lookup.return_value = 3
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output(block_hashes)
+    )
+    runner.run(
+        decoded_tokens=[0] * gpu_block_size,
+        expected_loaded_gpu_block_indexes=(0, 1, 2, 3, 4, 5, 6, 7, 8),
+    )
+    runner.manager.prepare_store.assert_not_called()
+
+    # check that request blocks are no longer protected from eviction
+    assert not req_status.protected_block_hashes
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+    runner.manager.prepare_store.assert_not_called()
+    assert not runner.scheduler.requests
 
 
 class TestOffloadingConnectorStats:

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any
 
@@ -127,6 +127,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         super().__init__(vllm_config, role, kv_cache_config)
 
         spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
+        self.preemptions_only_mode = spec.preemptions_only_mode
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
@@ -145,9 +146,12 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(
+        self, preempted_req_ids: set[str], connector_metadata: KVConnectorMetadata
+    ):
         assert self.connector_worker is not None
-        self.connector_worker.handle_preemptions(preempted_req_ids)
+        assert isinstance(connector_metadata, OffloadingConnectorMetadata)
+        self.connector_worker.handle_preemptions(preempted_req_ids, connector_metadata)
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
@@ -169,6 +173,9 @@ class OffloadingConnector(KVConnectorBase_V1):
     def wait_for_save(self):
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
+        if self.preemptions_only_mode:
+            # in preemptions-only mode, we only store upon preemptions
+            return
         self.connector_worker.prepare_store_kv(self._connector_metadata)
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -241,27 +248,44 @@ class OffloadingConnector(KVConnectorBase_V1):
         )
 
 
+@dataclass
+class RequestStatus:
+    req: Request
+    # number of computed tokens (assuming new tokens)
+    num_computed_tokens: int = 0
+    # list of GPU block IDs
+    block_ids: list[int] = field(default_factory=list)
+    # request blocks are stored in order
+    # index of next block (of size offloaded_block_size) to offload
+    next_stored_block_idx: int = 0
+    # block hashes that are protected from an eviction
+    # by a dummy prepare_load call
+    # used in preemption_only_mode for protecting preempted requests
+    # blocks from getting evicted
+    protected_block_hashes: tuple[BlockHash, ...] = ()
+
+
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
     def __init__(self, spec: OffloadingSpec):
         self.gpu_block_size = spec.gpu_block_size
         self.offloaded_block_size = spec.offloaded_block_size
+        self.preemptions_only_mode = spec.preemptions_only_mode
         self.block_size_factor = self.offloaded_block_size // self.gpu_block_size
         self.manager: OffloadingManager = spec.get_manager()
 
-        self._requests: dict[ReqId, Request] = {}
+        self._req_status: dict[ReqId, RequestStatus] = {}
         # list of GPU block IDs per request
-        self._request_block_ids: dict[ReqId, list[int]] = {}
-        # requests to load for the current scheduler step
         self._reqs_to_load: dict[ReqId, TransferSpec] = {}
-        # request blocks are stored in order
-        # index of next block (of size offloaded_block_size) to offload
-        self._next_stored_block_idx: dict[ReqId, int] = {}
-        # if GPU prefix caching is enabled,
+
         # track loaded blocks to avoid redundant loads
+        prevent_redundant_loads = (
+            spec.vllm_config.cache_config.enable_prefix_caching
+            and not self.preemptions_only_mode
+        )
         self._blocks_being_loaded: set[BlockHash] | None = (
-            set() if spec.vllm_config.cache_config.enable_prefix_caching else None
+            set() if prevent_redundant_loads else None
         )
 
         # request ID -> set(block hashes being stored/load)
@@ -303,6 +327,13 @@ class OffloadingConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
+        if request.request_id not in self._req_status:
+            self._req_status[request.request_id] = RequestStatus(request)
+
+        if self.preemptions_only_mode and not request.num_preemptions:
+            # in preemptions-only mode we only load preempted requests
+            return 0, False
+
         num_blocks = request.num_tokens // self.offloaded_block_size
 
         assert len(request.block_hashes) // self.block_size_factor == num_blocks
@@ -358,10 +389,6 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
-        self._requests[request.request_id] = request
-        # the block ids are updated in _get_reqs_to_store
-        self._request_block_ids[request.request_id] = []
-
         if num_external_tokens == 0:
             return
 
@@ -394,83 +421,111 @@ class OffloadingConnectorScheduler:
         )
 
         self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
+        self._req_status[request.request_id].next_stored_block_idx = num_blocks
         req_blocks_being_loaded = self._reqs_being_loaded[request.request_id]
         req_blocks_being_loaded.update(block_hashes)
-        self._next_stored_block_idx[request.request_id] = num_blocks
 
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.update(req_blocks_being_loaded)
 
-    def _get_reqs_to_store(self, scheduler_output: SchedulerOutput):
+        if self.preemptions_only_mode:
+            req_status = self._req_status[request.request_id]
+            protected_block_hashes = req_status.protected_block_hashes
+            if protected_block_hashes:
+                # request is resumed from preemption, unprotect blocks
+                self.manager.complete_load(protected_block_hashes)
+                req_status.protected_block_hashes = ()
+
+    def _get_reqs_to_store(
+        self, scheduler_output: SchedulerOutput
+    ) -> dict[ReqId, TransferSpec]:
         reqs_to_store: dict[ReqId, TransferSpec] = {}
         # iterate over both new and cached requests
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
+            # update request status
+            req_status = self._req_status[req_id]
+
             if preempted:
-                self._request_block_ids[req_id] = []
+                req_status.block_ids = []
 
             if new_block_id_groups:
                 new_block_ids = new_block_id_groups[0]
-                self._request_block_ids[req_id] += new_block_ids
+                req_status.block_ids += new_block_ids
 
-            block_ids = self._request_block_ids[req_id]
-
-            req = self._requests[req_id]
-            new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            total_tokens = req.num_computed_tokens + new_tokens
-            num_blocks = total_tokens // self.offloaded_block_size
-            start_block_idx = self._next_stored_block_idx.get(req_id, 0)
-            num_new_blocks = num_blocks - start_block_idx
-
-            if num_new_blocks <= 0:
-                continue
-
-            # NOTE: In async scheduling, placeholders may temporarily make
-            # len(req.block_hashes) < num_blocks * self.block_size_factor.
-
-            new_block_hashes = self._get_block_hashes(
-                req, start_idx=start_block_idx, end_idx=num_blocks
+            req_status.num_computed_tokens = (
+                req_status.req.num_computed_tokens
+                + scheduler_output.num_scheduled_tokens[req_id]
             )
-            store_output = self.manager.prepare_store(new_block_hashes)
-            if store_output is None:
-                logger.warning(
-                    "Request %s: cannot store %s blocks", req_id, num_new_blocks
-                )
-                continue
 
-            self._next_stored_block_idx[req_id] = num_blocks
+            # request is running, try storing if not in preemption-only mode
+            if not self.preemptions_only_mode:
+                transfer_spec = self._maybe_store_request(req_status)
+                if transfer_spec:
+                    reqs_to_store[req_id] = transfer_spec
 
-            if not store_output.block_hashes_to_store:
-                continue
-            block_hashes_to_store = set(store_output.block_hashes_to_store)
-
-            block_hashes = self._get_block_hashes(req, end_idx=num_blocks)
-            self.manager.touch(block_hashes)
-
-            new_block_hashes = self._get_block_hashes(
-                req, start_idx=start_block_idx, end_idx=num_blocks
-            )
-            dst_spec = store_output.store_spec
-            src_block_ids: list[int] = []
-            for idx, blk_hash in enumerate(new_block_hashes):
-                if blk_hash not in block_hashes_to_store:
-                    continue
-                offloaded_block_idx = start_block_idx + idx
-                gpu_block_idx = offloaded_block_idx * self.block_size_factor
-                for i in range(self.block_size_factor):
-                    src_block_ids.append(block_ids[gpu_block_idx + i])
-            src_spec = GPULoadStoreSpec(src_block_ids)
-
-            reqs_to_store[req_id] = (src_spec, dst_spec)
-            self._reqs_being_stored[req_id] |= block_hashes_to_store
-
-            logger.debug(
-                "Request %s offloading %s blocks starting from block #%d",
-                req_id,
-                len(block_hashes_to_store),
-                start_block_idx,
-            )
+        if self.preemptions_only_mode and scheduler_output.preempted_req_ids:
+            # in preemptions-only mode, we only try to store preempted requests
+            for req_id in scheduler_output.preempted_req_ids:
+                transfer_spec = self._maybe_store_request(self._req_status[req_id])
+                if transfer_spec:
+                    reqs_to_store[req_id] = transfer_spec
 
         return reqs_to_store
+
+    def _maybe_store_request(self, req_status: RequestStatus) -> TransferSpec | None:
+        num_blocks = req_status.num_computed_tokens // self.offloaded_block_size
+        start_block_idx = req_status.next_stored_block_idx
+        num_new_blocks = num_blocks - start_block_idx
+
+        if num_new_blocks <= 0:
+            return None
+
+        # NOTE: In async scheduling, placeholders may temporarily make
+        # len(req.block_hashes) < num_blocks * self.block_size_factor.
+
+        req = req_status.req
+        req_id = req.request_id
+        new_block_hashes = self._get_block_hashes(
+            req, start_idx=start_block_idx, end_idx=num_blocks
+        )
+        store_output = self.manager.prepare_store(new_block_hashes)
+        if store_output is None:
+            logger.debug("Request %s: cannot store %s blocks", req_id, num_new_blocks)
+            return None
+
+        req_status.next_stored_block_idx = num_blocks
+
+        if not store_output.block_hashes_to_store:
+            return None
+        block_hashes_to_store = set(store_output.block_hashes_to_store)
+
+        block_hashes = self._get_block_hashes(req, end_idx=num_blocks)
+        self.manager.touch(block_hashes)
+
+        new_block_hashes = self._get_block_hashes(
+            req, start_idx=start_block_idx, end_idx=num_blocks
+        )
+        dst_spec = store_output.store_spec
+        block_ids = req_status.block_ids
+        src_block_ids: list[int] = []
+        for idx, blk_hash in enumerate(new_block_hashes):
+            if blk_hash not in block_hashes_to_store:
+                continue
+            offloaded_block_idx = start_block_idx + idx
+            gpu_block_idx = offloaded_block_idx * self.block_size_factor
+            for i in range(self.block_size_factor):
+                src_block_ids.append(block_ids[gpu_block_idx + i])
+        src_spec = GPULoadStoreSpec(src_block_ids)
+
+        logger.debug(
+            "Request %s offloading %s blocks starting from block #%d",
+            req_id,
+            len(block_hashes_to_store),
+            start_block_idx,
+        )
+
+        self._reqs_being_stored[req_id] |= block_hashes_to_store
+        return src_spec, dst_spec
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -488,6 +543,18 @@ class OffloadingConnectorScheduler:
             if block_hashes:
                 self.manager.complete_store(block_hashes)
                 block_hashes.clear()
+
+            if self.preemptions_only_mode:
+                # protect block hashes from being evicted until request is resumed
+                req_status = self._req_status[req_id]
+                num_blocks = self.manager.lookup(self._get_block_hashes(req_status.req))
+                assert num_blocks is not None
+                if num_blocks > 0:
+                    block_hashes_to_protect = tuple(
+                        self._get_block_hashes(req_status.req, 0, num_blocks)
+                    )
+                    self.manager.prepare_load(block_hashes_to_protect)
+                    req_status.protected_block_hashes = block_hashes_to_protect
 
         return meta
 
@@ -527,9 +594,10 @@ class OffloadingConnectorScheduler:
             returned by the engine.
         """
         req_id = request.request_id
-        self._requests.pop(req_id, None)
-        self._request_block_ids.pop(req_id, None)
-        self._next_stored_block_idx.pop(req_id, None)
+        req_status = self._req_status.pop(req_id, None)
+        if req_status is not None and req_status.protected_block_hashes:
+            assert self.preemptions_only_mode
+            self.manager.complete_load(req_status.protected_block_hashes)
 
         request_being_stored = req_id in self._reqs_being_stored
         return request_being_stored, None
@@ -610,7 +678,14 @@ class OffloadingConnectorWorker:
         attn_backends = {cross_layer_name: attn_backend}
         self._register_handlers(kv_caches, attn_backends)
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(
+        self, preempted_req_ids: set[str], metadata: OffloadingConnectorMetadata
+    ):
+        if self.spec.preemptions_only_mode:
+            # in preemptions-only mode stores are only triggered here upon preemption
+            # this will add store jobs to self._unsubmitted_store_jobs
+            self.prepare_store_kv(metadata)
+
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success
