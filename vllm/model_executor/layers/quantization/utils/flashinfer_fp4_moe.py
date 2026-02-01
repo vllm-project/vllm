@@ -144,6 +144,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     hidden_size,
     intermediate_size,
     num_experts,
+    is_act_and_mul: bool = True,
 ):
     from flashinfer import nvfp4_block_scale_interleave
     from flashinfer.fused_moe.core import (
@@ -155,14 +156,18 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     """Prepare quantized weights for kernel (done offline with weights)."""
     epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
 
+    # For gated MLPs (is_act_and_mul=True), w13 contains [w1, w3] merged (2x).
+    # For non-gated MLPs (is_act_and_mul=False), w13 contains only w1 (1x).
+    w13_multiplier = 2 if is_act_and_mul else 1
+
     # Convert quantized weights to proper formats
     gemm1_weights_fp4 = gemm1_weights.view(torch.float8_e4m3fn).reshape(
-        num_experts, 2 * intermediate_size, hidden_size // 2
+        num_experts, w13_multiplier * intermediate_size, hidden_size // 2
     )  # packed fp4
     gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
         torch.float8_e4m3fn
     ).reshape(
-        num_experts, 2 * intermediate_size, hidden_size // 16
+        num_experts, w13_multiplier * intermediate_size, hidden_size // 16
     )  # fp8 scaling factors
 
     gemm2_weights_fp4 = gemm2_weights.view(torch.float8_e4m3fn).reshape(
@@ -178,26 +183,42 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     gemm2_scales_fp4_shuffled = []
     for i in range(num_experts):
         # Calculate the permute indices for the following:
-        # 1. Reorder rows of W1 and scales for fused gated activation
+        # 1. Reorder rows of W1 and scales for fused gated activation (gated MLPs)
         # 2. Shuffle weights and scaling factors for transposed mma output
-        # for both w3_w1 and w2 weights and scale factors
-        permute_indices = _maybe_get_cached_w3_w1_permute_indices(
-            _cache_permute_indices,
-            gemm1_weights_fp4[i].view(torch.uint8),
-            epilogue_tile_m,
-        )
+        # For gated MLPs: use w3_w1 permutation (interleaves gate and up proj)
+        # For non-gated MLPs: use w2 permutation (no interleaving needed)
+        if is_act_and_mul:
+            permute_indices = _maybe_get_cached_w3_w1_permute_indices(
+                _cache_permute_indices,
+                gemm1_weights_fp4[i].view(torch.uint8),
+                epilogue_tile_m,
+            )
+        else:
+            permute_indices = get_w2_permute_indices_with_cache(
+                _cache_permute_indices,
+                gemm1_weights_fp4[i].view(torch.uint8),
+                epilogue_tile_m,
+            )
         gemm1_weights_fp4_shuffled.append(
             gemm1_weights_fp4[i]
             .view(torch.uint8)[permute_indices.to(gemm1_weights_fp4.device)]
             .contiguous()
         )
 
-        permute_sf_indices = _maybe_get_cached_w3_w1_permute_indices(
-            _cache_permute_indices,
-            gemm1_scales_linear_fp4[i].view(torch.uint8),
-            epilogue_tile_m,
-            num_elts_per_sf=16,
-        )
+        if is_act_and_mul:
+            permute_sf_indices = _maybe_get_cached_w3_w1_permute_indices(
+                _cache_permute_indices,
+                gemm1_scales_linear_fp4[i].view(torch.uint8),
+                epilogue_tile_m,
+                num_elts_per_sf=16,
+            )
+        else:
+            permute_sf_indices = get_w2_permute_indices_with_cache(
+                _cache_permute_indices,
+                gemm1_scales_linear_fp4[i].view(torch.uint8),
+                epilogue_tile_m,
+                num_elts_per_sf=16,
+            )
         gemm1_scales_fp4_shuffled.append(
             nvfp4_block_scale_interleave(
                 gemm1_scales_linear_fp4[i]
@@ -240,7 +261,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     gemm1_scales_fp4_shuffled = (
         torch.stack(gemm1_scales_fp4_shuffled)
         .view(torch.float8_e4m3fn)
-        .reshape(num_experts, 2 * intermediate_size, hidden_size // 16)
+        .reshape(num_experts, w13_multiplier * intermediate_size, hidden_size // 16)
     )
 
     gemm2_weights_fp4_shuffled = torch.stack(gemm2_weights_fp4_shuffled)
@@ -499,8 +520,9 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             w13_scale,
             w2_scale,
             w2.size(-2),  # hidden_size
-            w13.size(-2) // 2,  # intermediate_size
+            w13.size(-2) // (2 if is_act_and_mul else 1),  # intermediate_size
             w13.size(0),  # num_experts
+            is_act_and_mul=is_act_and_mul,
         )
 
         # We do not need to make this a parameter, because
