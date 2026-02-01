@@ -154,11 +154,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
-        state = {"pass_config": self.pass_config.compile_factors(), "passes": []}
-        for pass_ in self.passes:
-            state["passes"].append(pass_.uuid())
-        state["passes"].append(self.post_cleanup.uuid())
-        state["passes"].append(self.fix_functionalization.uuid())
+        passes: list[str] = [pass_.uuid() for pass_ in self.passes]
+        passes.append(self.post_cleanup.uuid())
+        passes.append(self.fix_functionalization.uuid())
+        state = {"pass_config": self.pass_config.compile_factors(), "passes": passes}
 
         # Include the compile range in the uuid to ensure that inductor
         # recompiles the graph for the new dynamic compile range.

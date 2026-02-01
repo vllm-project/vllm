@@ -41,7 +41,7 @@ from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import CompileFactors, SupportsCompileFactors, config
+from .utils import CompileFactors, SupportsCompileFactors, config, hash_factors
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -306,6 +306,10 @@ class VllmConfig:
             factors["additional"] = {}
 
         return factors
+
+    def compute_hash(self) -> str:
+        """Return a stable hash of the compilation-relevant factors."""
+        return hash_factors(self.compile_factors())
 
     @property
     def needs_dp_coordinator(self) -> bool:
