@@ -97,7 +97,7 @@ class TestData:
     ) -> "TestData":
         is_gated = activation != "relu2_no_mul"
 
-        hidden_states = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+        hidden_states = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 6
         w13 = torch.randn(
             (e, (2 * n) if is_gated else n, k), device="cuda", dtype=torch.bfloat16
         )
@@ -140,6 +140,7 @@ class TestData:
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
         layer.local_num_experts = e
+        layer.activation = activation
 
         return TestData(
             hidden_states=hidden_states,
@@ -156,12 +157,14 @@ class TestData:
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("activation", ["silu", "relu2_no_mul"])
 def test_flashinfer_per_tensor_moe_fp8_no_graph(
     m: int,
     n: int,
     k: int,
     e: int,
     topk: int,
+    activation: str,
     monkeypatch,
 ):
     if not current_platform.has_device_capability(100):
@@ -169,7 +172,9 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
     set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
-        td = TestData.make_moe_tensors_8bit(m, k, n, e, is_trtllm=True)
+        td = TestData.make_moe_tensors_8bit(
+            m, k, n, e, is_trtllm=True, activation=activation
+        )
 
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
         topk_weights, topk_ids = Llama4MoE.custom_routing_function(
@@ -194,7 +199,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=False,
-            activation="silu",
+            activation=activation,
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=True,

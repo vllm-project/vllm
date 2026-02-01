@@ -262,6 +262,7 @@ def fi_trtllm_fp8_per_tensor_moe(
     use_routing_scales_on_input: bool,
     routing_method_type: int,
     routed_scaling_factor: float = 1.0,
+    activation_type: int = 7,
 ) -> torch.Tensor:
     num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
@@ -273,7 +274,10 @@ def fi_trtllm_fp8_per_tensor_moe(
         per_act_token_quant=False,
     )
 
-    from vllm.utils.flashinfer import flashinfer_trtllm_fp8_per_tensor_scale_moe
+    from vllm.utils.flashinfer import (
+        FlashinferActivationType,
+        flashinfer_trtllm_fp8_per_tensor_scale_moe,
+    )
 
     return flashinfer_trtllm_fp8_per_tensor_scale_moe(
         routing_logits=routing_logits,
@@ -294,6 +298,7 @@ def fi_trtllm_fp8_per_tensor_moe(
         routed_scaling_factor=routed_scaling_factor,
         use_routing_scales_on_input=use_routing_scales_on_input,
         routing_method_type=routing_method_type,
+        activation_type=FlashinferActivationType(activation_type),
     )
 
 
