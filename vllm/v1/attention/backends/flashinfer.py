@@ -258,7 +258,6 @@ class BatchDCPPrefillWrapper:
                 lse_context_tmp,
                 get_helix_kvp_group(),
                 return_lse=True,
-                is_lse_base_on_e=False,  # FlashInfer uses log2, not ln
             )
         else:
             # Standard DCP or Helix MLA: AllGather Q, then compute
@@ -281,7 +280,6 @@ class BatchDCPPrefillWrapper:
                     lse_context_tmp,
                     get_helix_kvp_group(),
                     return_lse=True,
-                    is_lse_base_on_e=False,  # FlashInfer uses log2, not ln
                 )
             else:
                 # Standard DCP: AllGather + ReduceScatter
@@ -1121,32 +1119,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 assert paged_kv_indptr_prefill_cpu.shape[0] == num_prefills + 1
                 if self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
-                    # For Helix GQA: model produces TPA-based heads, so we need
-                    # to pass the TPA-based count with dcp_world_size=1.
-                    # For standard DCP: model produces TP-based heads, so we
-                    # pass TP-based count with actual dcp_world_size.
-                    from vllm.distributed.parallel_state import (
-                        is_helix_gqa_mode,
-                        get_attention_tp_world_size,
-                    )
-                    if is_helix_gqa_mode():
-                        # TPA-based head count, no multiplication needed
-                        tpa_size = get_attention_tp_world_size()
-                        total_heads = self.model_config.model_arch_config.total_num_attention_heads
-                        effective_num_qo_heads = total_heads // tpa_size
-                        effective_dcp_world_size = 1
-                    else:
-                        # TP-based head count, multiply by dcp_world_size
-                        effective_num_qo_heads = self.num_qo_heads
-                        effective_dcp_world_size = self.dcp_world_size
                     prefill_wrapper.plan(
                         qo_indptr_cpu=qo_indptr_prefill_cpu,
                         paged_kv_indptr_cpu=paged_kv_indptr_prefill_cpu,
                         paged_kv_indices=paged_kv_indices,
                         paged_kv_last_page_len_cpu=paged_kv_last_page_len_prefill_cpu,
                         page_size=self.page_size,
-                        num_qo_heads=effective_num_qo_heads,
-                        dcp_world_size=effective_dcp_world_size,
+                        num_qo_heads=self.num_qo_heads,
+                        dcp_world_size=self.dcp_world_size,
                         num_kv_heads=self.num_kv_heads,
                         head_dim=self.head_dim,
                         sm_scale=self.sm_scale,
@@ -1209,27 +1189,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # Use the persistent buffer with padding length,
                 # instead of the same address but chunked version
                 # in atten_metadata when using cudagraph.
-                # For Helix GQA: model produces TPA-based heads (e.g., 8 for TPA=4)
-                # For standard DCP: model produces TP-based heads, then AllGathered
-                from vllm.distributed.parallel_state import (
-                    is_helix_gqa_mode,
-                    get_attention_tp_world_size,
-                )
-                if is_helix_gqa_mode():
-                    # TPA-based head count (model uses TPA for sharding)
-                    tpa_size = get_attention_tp_world_size()
-                    total_heads = self.model_config.model_arch_config.total_num_attention_heads
-                    effective_num_qo_heads = total_heads // tpa_size
-                else:
-                    # TP-based, then AllGathered across DCP
-                    effective_num_qo_heads = self.num_qo_heads * self.dcp_world_size
                 fast_plan_decode(
                     decode_wrapper,
                     self.paged_kv_indptr.cpu[: num_input_tokens + 1],
                     paged_kv_indices,
                     self.paged_kv_last_page_len.cpu[:num_input_tokens],
                     seq_lens_cpu[:num_input_tokens],
-                    effective_num_qo_heads,
+                    self.num_qo_heads * self.dcp_world_size,
                     self.num_kv_heads,
                     self.head_dim,
                     self.page_size,
@@ -1632,7 +1598,6 @@ class FlashInferImpl(AttentionImpl):
                             output_tmp,
                             lse,
                             get_helix_kvp_group(),
-                            is_lse_base_on_e=False,  # FlashInfer uses log2, not ln
                         )
                     else:
                         # Standard DCP or Helix MLA: AllGather Q
@@ -1661,7 +1626,6 @@ class FlashInferImpl(AttentionImpl):
                                 output_tmp,
                                 lse,
                                 get_helix_kvp_group(),
-                                is_lse_base_on_e=False,  # FlashInfer uses log2, not ln
                             )
                         else:
                             # Standard DCP: AllGather + ReduceScatter
