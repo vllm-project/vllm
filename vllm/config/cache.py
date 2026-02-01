@@ -213,7 +213,7 @@ class CacheConfig:
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
         # --- ADD THIS BLOCK ---
         if cache_dtype == "int8":
-            # We can log a message here if we want to be verbose, 
+            # We can log a message here if we want to be verbose,
             # or just pass. For now, let's just allow it.
             pass
         # ----------------------
