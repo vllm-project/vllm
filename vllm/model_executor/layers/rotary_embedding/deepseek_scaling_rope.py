@@ -76,7 +76,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
                 2,
                 dtype=torch.float,
                 # NOTE(catswe): for tpu, allocates on cpu as xla currently lacks support for 'aten::empty.memory_format'
-                device="cpu" if current_platform.is_tpu() else current_platform.device_type,
+                device="cpu"
+                if current_platform.is_tpu()
+                else current_platform.device_type,
             )
             / self.rotary_dim
         )
