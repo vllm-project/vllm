@@ -598,21 +598,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.dcp_kv_cache_interleave_size = 1
         self.use_dcp = self.dcp_world_size > 1
 
-        # In Helix GQA mode (TPA > 1), model uses TPA for head sharding, not TP.
-        # get_num_attention_heads uses TP, so we need to correct for Helix.
-        from vllm.distributed.parallel_state import get_attention_tp_world_size
-        attention_tp_size = get_attention_tp_world_size()
-        parallel_config = self.vllm_config.parallel_config
-        tp_size = parallel_config.tensor_parallel_size
-        if attention_tp_size != tp_size:
-            # Helix GQA mode: compute heads using attention_tp_size (TPA)
-            total_heads = self.model_config.model_arch_config.total_num_attention_heads
-            self.num_qo_heads = total_heads // attention_tp_size
-        else:
-            # Standard mode: use model_config
-            self.num_qo_heads = self.model_config.get_num_attention_heads(
-                parallel_config
-            )
+        # Use TP-based head count (same as internal repo).
+        # The actual head count adjustment for Helix GQA happens during build()
+        # by multiplying with dcp_world_size or using effective values.
+        # This avoids timing issues with _HELIX_TPA_SIZE initialization.
+        self.num_qo_heads = self.model_config.get_num_attention_heads(
+            self.vllm_config.parallel_config
+        )
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
@@ -1119,17 +1111,31 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 assert paged_kv_indptr_prefill_cpu.shape[0] == num_prefills + 1
                 if self.use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
-                    # In Helix GQA mode (TPA > 1), Q is NOT AllGathered, so
-                    # effective dcp_world_size for head count is 1
-                    from vllm.distributed.parallel_state import is_helix_gqa_mode
-                    effective_dcp_world_size = 1 if is_helix_gqa_mode() else self.dcp_world_size
+                    # For Helix GQA: model produces TPA-based heads, so we need
+                    # to pass the TPA-based count with dcp_world_size=1.
+                    # For standard DCP: model produces TP-based heads, so we
+                    # pass TP-based count with actual dcp_world_size.
+                    from vllm.distributed.parallel_state import (
+                        is_helix_gqa_mode,
+                        get_attention_tp_world_size,
+                    )
+                    if is_helix_gqa_mode():
+                        # TPA-based head count, no multiplication needed
+                        tpa_size = get_attention_tp_world_size()
+                        total_heads = self.model_config.model_arch_config.total_num_attention_heads
+                        effective_num_qo_heads = total_heads // tpa_size
+                        effective_dcp_world_size = 1
+                    else:
+                        # TP-based head count, multiply by dcp_world_size
+                        effective_num_qo_heads = self.num_qo_heads
+                        effective_dcp_world_size = self.dcp_world_size
                     prefill_wrapper.plan(
                         qo_indptr_cpu=qo_indptr_prefill_cpu,
                         paged_kv_indptr_cpu=paged_kv_indptr_prefill_cpu,
                         paged_kv_indices=paged_kv_indices,
                         paged_kv_last_page_len_cpu=paged_kv_last_page_len_prefill_cpu,
                         page_size=self.page_size,
-                        num_qo_heads=self.num_qo_heads,
+                        num_qo_heads=effective_num_qo_heads,
                         dcp_world_size=effective_dcp_world_size,
                         num_kv_heads=self.num_kv_heads,
                         head_dim=self.head_dim,
@@ -1193,13 +1199,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # Use the persistent buffer with padding length,
                 # instead of the same address but chunked version
                 # in atten_metadata when using cudagraph.
-                # In Helix GQA mode (TPA > 1), Q is NOT AllGathered, so
-                # use num_qo_heads directly (not multiplied by dcp_world_size)
-                from vllm.distributed.parallel_state import is_helix_gqa_mode
-                effective_num_qo_heads = (
-                    self.num_qo_heads if is_helix_gqa_mode()
-                    else self.num_qo_heads * self.dcp_world_size
+                # For Helix GQA: model produces TPA-based heads (e.g., 8 for TPA=4)
+                # For standard DCP: model produces TP-based heads, then AllGathered
+                from vllm.distributed.parallel_state import (
+                    is_helix_gqa_mode,
+                    get_attention_tp_world_size,
                 )
+                if is_helix_gqa_mode():
+                    # TPA-based head count (model uses TPA for sharding)
+                    tpa_size = get_attention_tp_world_size()
+                    total_heads = self.model_config.model_arch_config.total_num_attention_heads
+                    effective_num_qo_heads = total_heads // tpa_size
+                else:
+                    # TP-based, then AllGathered across DCP
+                    effective_num_qo_heads = self.num_qo_heads * self.dcp_world_size
                 fast_plan_decode(
                     decode_wrapper,
                     self.paged_kv_indptr.cpu[: num_input_tokens + 1],
