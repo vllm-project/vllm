@@ -129,6 +129,9 @@ def _fused_moe_lora_kernel(
     lora_id = virtual_expert_id // num_experts
     expert_id = virtual_expert_id % num_experts
 
+    if lora_id >= max_loras:
+        return
+
     # get a_ptr, b_ptr, c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
     cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))

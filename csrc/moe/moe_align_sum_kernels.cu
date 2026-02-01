@@ -533,6 +533,7 @@ template <typename scalar_t>
 __global__ void moe_lora_count_and_sort_kernel(
     const scalar_t* __restrict__ topk_ids,
     const int32_t* __restrict__ token_lora_mapping,
+    const int32_t* __restrict__ adapter_enabled,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ cumsum_buffer,
     const int32_t* __restrict__ expert_map, size_t numel, int32_t num_experts,
     int32_t num_virtual_experts, int32_t max_loras,
@@ -547,7 +548,7 @@ __global__ void moe_lora_count_and_sort_kernel(
     int32_t token_idx = (int32_t)(i / topk_num);
     int32_t lora = token_lora_mapping[token_idx];
 
-    if (lora < 0 || lora >= max_loras) continue;
+    if (lora < 0 || lora >= max_loras || adapter_enabled[lora] == 0) continue;
 
     if (has_expert_map) {
       expert = expert_map[expert];
@@ -818,6 +819,7 @@ void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
         sort_kernel<<<gridDims, block_threads, 0, stream>>>(
             topk_ids.data_ptr<scalar_t>(),
             token_lora_mapping.data_ptr<int32_t>(),
+            adapter_enabled.data_ptr<int32_t>(),
             sorted_token_ids.data_ptr<int32_t>(),
             cumsum_buffer.data_ptr<int32_t>(), expert_map.data_ptr<int32_t>(),
             (size_t)topk_ids.numel(), (int32_t)num_experts,
