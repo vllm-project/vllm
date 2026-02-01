@@ -110,13 +110,18 @@ def set_default_torch_num_threads(num_threads: int | None = None):
     `None` means using the value of the environment variable `OMP_NUM_THREADS`.
     """
     if num_threads is None:
+        num_threads = 1
+
         try:
             num_threads = int(os.environ["OMP_NUM_THREADS"])
-        except (KeyError, ValueError):
-            num_threads = 1
+        except KeyError:
             logger.debug_once(
-                "OMP_NUM_THREADS is not set or is invalid; "
-                "defaulting Torch threads to %d.",
+                "OMP_NUM_THREADS is not set; defaulting Torch threads to %d.",
+                num_threads,
+            )
+        except ValueError:
+            logger.warning_once(
+                "OMP_NUM_THREADS is invalid; defaulting Torch threads to %d.",
                 num_threads,
             )
 
