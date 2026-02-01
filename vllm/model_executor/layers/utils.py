@@ -149,8 +149,7 @@ def rocm_unquantized_gemm_impl(
     m = weight.shape[0]
     k = weight.shape[1]
 
-    import math
-
+    cu_count = get_cu_count()
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
@@ -161,16 +160,17 @@ def rocm_unquantized_gemm_impl(
         and on_gfx950()
         and x.dtype in [torch.float16, torch.bfloat16]
         and (
-            n >= 16
+            n >= 10
             and n <= 128
             and k > 512
-            and math.ceil(k / 512) * math.ceil(m / 16) < get_cu_count()
+            and ((k + 511) // 512)
+            * ((m + 15) // 16)
+            * (1 if (m <= 16) else (2 if (m <= 32) else 4))
+            < cu_count * 4
             and x.is_contiguous()
         )
-        # k == 2880 and (m == 640 or m == 128))
     )
     if use_skinny_reduce_counting:
-        cu_count = get_cu_count()
         x_view = x.reshape(-1, x.size(-1))
         out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])

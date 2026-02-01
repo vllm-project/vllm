@@ -45,30 +45,26 @@ NKM_FACTORS_WVSPLITK = [
     (4, 256, 8),
 ]
 
-NKM_FACTORS_WVSPLITKRC = [
-    (16, 2880, 128),
-    (16, 2880, 640),
-    (17, 2880, 128),
-    (17, 2880, 640),
-    (25, 2880, 128),
-    (25, 2880, 640),
-    (31, 2880, 128),
-    (31, 2880, 640),
-    (32, 2880, 128),
-    (32, 2880, 640),
-    (40, 2880, 128),
-    (40, 2880, 640),
-    (60, 2880, 128),
-    (60, 2880, 640),
-    (64, 2880, 128),
-    (64, 2880, 640),
-    (81, 2880, 128),
-    (81, 2880, 640),
-    (98, 2880, 128),
-    (98, 2880, 640),
-    (128, 2880, 128),
-    (128, 2880, 640),
+N_FACTORS_WVSPLITKRC = [
+    13,
+    16,
+    17,
+    25,
+    29,
+    31,
+    32,
+    41,
+    51,
+    64,
+    71,
+    81,
+    91,
+    103,
+    117,
+    128,
 ]
+K_FACTORS_WVSPLITKRC = [2880, 3072 + 16 * 8]
+M_FACTORS_WVSPLITKRC = [128, 256, 640]
 
 NKM_FACTORS_WVSPLITK_FP8 = [
     # FP8-specific cases with K % 16 == 0
@@ -94,7 +90,9 @@ def pad_weights_fp8(weight):
     return F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
 
 
-@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITKRC)
+@pytest.mark.parametrize("n", N_FACTORS_WVSPLITKRC)
+@pytest.mark.parametrize("k", K_FACTORS_WVSPLITKRC)
+@pytest.mark.parametrize("m", M_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("bias_mode", BIAS_MODES)
@@ -103,6 +101,11 @@ def pad_weights_fp8(weight):
 def test_rocm_wvsplitkrc_kernel(n, k, m, dtype, seed, bias_mode):
     torch.manual_seed(seed)
     cu_count = get_cu_count()
+
+    if (((m + 15) // 16) * ((k + 511) // 512)) * (
+        1 if (m <= 16) else (2 if (m <= 32) else 4)
+    ) > cu_count * 4:
+        pytest.skip("Too large for wvSplitKrc")
 
     xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
     A = (torch.rand(n, k, dtype=dtype, device="cuda") - 0.5) * xavier
