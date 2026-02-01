@@ -892,16 +892,8 @@ def test_prefill_hybrid_model_combinations_eagle(
     spec_types: list[str], expect_hit_length: int
 ):
     """
-    Test prefix caching with hybrid models containing various combinations of
-    KV cache spec types.
-
-    This unified test covers:
-    - Various combinations (full attn + other attn types)
-    - Varying number of groups (2, 3, or 4)
-    - 0, 1, or 2 full attention groups in the combination
-    - Two sliding_window attn groups with different window sizes
-    - Interleaved group IDs (full attn and other types alternating)
-    - Mamba spec with other attention types
+    Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
+    More complex hybrid models with EAGLE are not yet supported (see issue #32802).
     """
     block_size = 16
     num_groups = len(spec_types)
@@ -948,6 +940,9 @@ def test_prefill_hybrid_model_combinations_eagle(
     # Should hit cached blocks for all groups
     assert num_computed_tokens == expect_hit_length * block_size
     assert len(computed_blocks.blocks) == num_groups
+    # Verify each group has the correct number of computed blocks
+    for block_per_group in computed_blocks.blocks:
+        assert len(block_per_group) == expect_hit_length
 
     # Allocate and verify blocks for second request
     blocks = manager.allocate_slots(
