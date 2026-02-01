@@ -741,6 +741,7 @@ class AsyncLLM(EngineClient):
         if clear_cache:
             await self.reset_prefix_cache()
             await self.reset_mm_cache()
+            await self.reset_encoder_cache()
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
