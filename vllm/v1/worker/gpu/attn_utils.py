@@ -133,12 +133,11 @@ def init_kv_cache(
 
 
 def build_slot_mappings_by_layer(
-    slot_mappings: torch.Tensor,
-    kv_cache_config: KVCacheConfig,
+    slot_mappings: torch.Tensor, kv_cache_config: KVCacheConfig
 ) -> dict[str, torch.Tensor]:
     slot_mappings_by_layer: dict[str, torch.Tensor] = {}
-    for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-        slot_mapping = slot_mappings[i]
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+    for slot_mapping, kv_cache_group in zip(slot_mappings, kv_cache_groups):
         for layer_name in kv_cache_group.layer_names:
             slot_mappings_by_layer[layer_name] = slot_mapping
     return slot_mappings_by_layer

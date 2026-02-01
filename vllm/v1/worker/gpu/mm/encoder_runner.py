@@ -54,8 +54,7 @@ class EncoderRunner:
         self.req_id_to_mm_features.pop(req_id, None)
 
     def prepare_mm_inputs(
-        self,
-        scheduled_encoder_inputs: dict[str, list[int]],
+        self, scheduled_encoder_inputs: dict[str, list[int]]
     ) -> tuple[list[str], list[tuple[str, MultiModalKwargsItem]]]:
         mm_hashes: list[str] = []
         mm_kwargs: list[tuple[str, MultiModalKwargsItem]] = []
@@ -116,10 +115,7 @@ class EncoderRunner:
 
         mm_embeds: list[torch.Tensor] = []
         is_mm_embed = torch.zeros(
-            total_num_scheduled_tokens,
-            dtype=torch.bool,
-            device="cpu",
-            pin_memory=True,
+            total_num_scheduled_tokens, dtype=torch.bool, device="cpu", pin_memory=True
         )
         for i, req_id in enumerate(req_ids):
             if not is_prefilling[i]:
