@@ -29,7 +29,11 @@ def test_processor_override(
     image = Image.new("RGB", size=(364, 364))
     mm_data = {"image": [image] * num_imgs}
 
-    processed_inputs = processor.apply(prompt, mm_data, {})
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
     image_placeholders = processed_inputs["mm_placeholders"]["image"]
 
     assert len(image_placeholders) == num_imgs
@@ -46,7 +50,11 @@ def _validate_image_prompt_replacements_one(
     mm_data = {"image": [image] * num_imgs}
 
     try:
-        processed_inputs = processor.apply(prompt, mm_data, {})
+        processed_inputs = processor.apply(
+            prompt,
+            mm_items=processor.info.parse_mm_data(mm_data),
+            hf_processor_mm_kwargs={},
+        )
 
         image_placeholders = processed_inputs["mm_placeholders"]["image"]
         assert len(image_placeholders) == num_imgs
