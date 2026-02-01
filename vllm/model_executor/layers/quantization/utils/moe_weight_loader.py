@@ -236,7 +236,7 @@ class MoeOnlineWeightLoader:
             # If we have loaded all elements, call quantization
             target_loaded_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
             if layer._loaded_numel == target_loaded_numel:
-                self._on_all_weights_loaded(layer)
+                self.process_weights_after_loading(layer)
 
                 # Delete the bookkeeping
                 del layer._loaded_numel
@@ -248,9 +248,6 @@ class MoeOnlineWeightLoader:
             return res
 
         return patched_weight_loader
-
-    def _on_all_weights_loaded(self, layer: Module) -> None:
-        self.process_weights_after_loading(layer)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):

@@ -4,6 +4,9 @@
 from typing import Any, Optional
 
 import torch
+
+from vllm.logger import init_logger
+
 from torch.nn import Module
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -29,6 +32,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.moe_weight_loader import (
     MoeOnlineWeightLoader,
 )
+
+
+logger = init_logger(__name__)
 
 
 class ExpertsInt8Config(QuantizationConfig):
@@ -193,6 +199,13 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                 experts,
                 shared_experts=None,
                 moe_parallel_config=self.moe.moe_parallel_config,
+            )
+
+            logger.info_once(
+                "Selected %s for %s",
+                type(experts).__name__,
+                type(self).__name__,
+                scope="global",
             )
 
     def get_fused_moe_quant_config(self, layer: Module) -> FusedMoEQuantConfig | None:
