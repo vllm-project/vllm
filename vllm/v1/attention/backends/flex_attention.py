@@ -75,6 +75,7 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
 
 class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    forward_includes_kv_cache_update: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,
@@ -762,8 +763,6 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
 
 
 class FlexAttentionImpl(AttentionImpl):
-    forward_includes_kv_cache: bool = False
-
     sliding_window: int | None
     alibi_slopes: torch.Tensor | None
     logits_soft_cap: float | None
@@ -912,7 +911,7 @@ class FlexAttentionImpl(AttentionImpl):
 
             # NOTE: KV cache update is handled separately by do_kv_cache_update().
             # The caller must invoke do_kv_cache_update() before calling forward()
-            # since forward_includes_kv_cache = False for this backend.
+            # since forward_includes_kv_cache_update = False for this backend.
 
             # View out the block_size dim
             key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)

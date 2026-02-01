@@ -279,6 +279,7 @@ class BatchDCPPrefillWrapper:
 
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    forward_includes_kv_cache_update: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -1126,7 +1127,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
 class FlashInferImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
-    forward_includes_kv_cache: bool = False
 
     def __init__(
         self,
@@ -1335,7 +1335,7 @@ class FlashInferImpl(AttentionImpl):
 
         # NOTE: KV cache update is handled separately by do_kv_cache_update().
         # The caller must invoke do_kv_cache_update() before calling forward()
-        # since forward_includes_kv_cache = False for this backend.
+        # since forward_includes_kv_cache_update = False for this backend.
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]

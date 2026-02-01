@@ -604,11 +604,6 @@ class AttentionImpl(ABC, Generic[T]):
     kv_cache_dtype: str
     kv_sharing_target_layer_name: str | int | None
 
-    # Whether the forward method includes KV cache update.
-    # When False, the KV cache update is handled separately via do_kv_cache_update().
-    # This allows for better performance optimizations and independent scheduling.
-    forward_includes_kv_cache: bool = True
-
     # Whether the attention impl can return the softmax lse for decode.
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False

@@ -35,7 +35,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
     fp8_gemm_nt,
-    get_tma_aligned_size,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
@@ -379,7 +378,6 @@ class W8A8BlockFp8LinearOp:
                 False,
                 self.act_quant_group_shape,
                 column_major_scales=True,
-                tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
                 use_ue8m0=self.use_deep_gemm_e8m0,
             )
             if self.is_deep_gemm_supported
@@ -426,24 +424,6 @@ class W8A8BlockFp8LinearOp:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
     ) -> torch.Tensor:
-        # Pad K dimension to multiple of block size if needed.
-        # This handles models like DeepSeek-V2-Lite where intermediate_size
-        # (10944) is not divisible by the block size (128).
-        block_k = self.act_quant_group_shape.col
-        k = input_2d.shape[-1]
-        if k % block_k != 0:
-            pad_k = block_k - (k % block_k)
-            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
-            weight = torch.nn.functional.pad(weight, (0, pad_k))
-            # Pad weight scale for the new K blocks
-            orig_k_blocks = triton.cdiv(k, block_k)
-            new_k_blocks = triton.cdiv(k + pad_k, block_k)
-            extra_k_blocks = new_k_blocks - orig_k_blocks
-            if extra_k_blocks > 0:
-                weight_scale = torch.nn.functional.pad(
-                    weight_scale, (0, extra_k_blocks)
-                )
-
         if DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0:
             q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
                 input_2d,
@@ -565,22 +545,6 @@ class W8A8BlockFp8LinearOp:
         This backend uses TensorRT-LLM's FP8 block-scale GEMM kernels
         and supports FP8+FP8 (W8A8 full quantization) on SM90+ (Hopper).
         """
-        # Pad K dimension to multiple of block size if needed.
-        block_k = self.act_quant_group_shape.col
-        k = input_2d.shape[-1]
-        if k % block_k != 0:
-            pad_k = block_k - (k % block_k)
-            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
-            weight = torch.nn.functional.pad(weight, (0, pad_k))
-            # Pad weight scale for the new K blocks
-            orig_k_blocks = triton.cdiv(k, block_k)
-            new_k_blocks = triton.cdiv(k + pad_k, block_k)
-            extra_k_blocks = new_k_blocks - orig_k_blocks
-            if extra_k_blocks > 0:
-                weight_scale = torch.nn.functional.pad(
-                    weight_scale, (0, extra_k_blocks)
-                )
-
         # Now call FlashInfer with BF16 input + FP8 weight, input will be
         # quantized with FlashInfer kernel (W8A8)
         output = torch.ops.vllm.flashinfer_fp8_blockscale_gemm(
@@ -904,7 +868,6 @@ def per_token_group_quant_fp8(
     eps: float = 1e-10,
     dtype: torch.dtype | None = None,
     column_major_scales: bool = False,
-    tma_aligned_scales: bool = False,
     out_q: torch.Tensor | None = None,
     use_ue8m0: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -915,10 +878,9 @@ def per_token_group_quant_fp8(
         x: The input tensor with ndim >= 2.
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
-        dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
+        dtype: The dype of output tensor. Note that only `torch.float8_e4m3fn`
         is supported for now.
         column_major_scales: Outputs scales in column major.
-        tma_aligned_scales: Outputs scales in TMA-aligned layout.
         out_q: Optional output tensor. If not provided, function will create.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
@@ -942,24 +904,8 @@ def per_token_group_quant_fp8(
 
     # Allocate the scale tensor in either row- or column-major format.
     if column_major_scales:
-        if tma_aligned_scales:
-            m = x.shape[-2]
-            sf_k = x.shape[-1] // group_size
-            tma_aligned_m = get_tma_aligned_size(m, 4)
-            shape = x.shape[:-2] + (m, sf_k)
-            stride = (
-                (1, tma_aligned_m)
-                if x.dim() == 2
-                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
-            )
-            x_s = torch.empty_strided(
-                shape, stride, device=x.device, dtype=torch.float32
-            )
-        else:
-            shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
-            x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(
-                -1, -2
-            )
+        shape = (x.shape[-1] // group_size,) + x.shape[:-1]
+        x_s = torch.empty(shape, device=x.device, dtype=torch.float32).permute(-1, -2)
     else:
         shape = x.shape[:-1] + (x.shape[-1] // group_size,)
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
