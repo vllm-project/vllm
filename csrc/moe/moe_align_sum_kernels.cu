@@ -79,22 +79,17 @@ __global__ void batched_moe_align_block_size_kernel(
 }  // namespace batched_moe_align_block_size
 
 template <typename scalar_t>
-__device__ void _moe_align_block_size(
+__global__ void moe_align_block_size_kernel(
     const scalar_t* __restrict__ topk_ids,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
     int32_t* __restrict__ total_tokens_post_pad,
     int32_t* __restrict__ expert_map, int32_t num_experts,
     int32_t padded_num_experts, int32_t experts_per_warp, int32_t block_size,
     size_t numel, int32_t* __restrict__ cumsum, int32_t max_num_tokens_padded,
-    int32_t max_num_m_blocks, int32_t model_offset, int32_t inactive_expert_id,
-    int32_t topk_num, int32_t* token_mask, bool has_expert_map) {
+    int32_t topk_num, bool has_expert_map) {
   extern __shared__ int32_t shared_counts[];
 
-  // Compute input buffer offsets. Typically these will all be 0, except when
-  // using Multi LoRA.
-  int sorted_token_ids_offset = max_num_tokens_padded * model_offset;
-  int expert_ids_offset = max_num_m_blocks * model_offset;
-  int cumsum_offset = (num_experts + 1) * model_offset;
+  const int32_t max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size);
 
   // Use separate threadblocks to fill sorted_token_ids.
   // This is safe since the current kernel does not use sorted_token_ids.
@@ -102,7 +97,7 @@ __device__ void _moe_align_block_size(
     // Initialize sorted_token_ids with numel
     for (size_t it = threadIdx.x; it < max_num_tokens_padded;
          it += blockDim.x) {
-      sorted_token_ids[sorted_token_ids_offset + it] = numel;
+      sorted_token_ids[it] = numel;
     }
     return;
   }
@@ -133,9 +128,7 @@ __device__ void _moe_align_block_size(
     }
     int warp_idx = expert_id / experts_per_warp;
     int expert_offset = expert_id % experts_per_warp;
-    int mask = token_mask == nullptr ? 1 : token_mask[i / topk_num];
-    atomicAdd(&shared_counts[warp_idx * experts_per_warp + expert_offset],
-              mask);
+    atomicAdd(&shared_counts[warp_idx * experts_per_warp + expert_offset], 1);
   }
 
   __syncthreads();
@@ -156,43 +149,38 @@ __device__ void _moe_align_block_size(
   int cumsum_val;
   BlockScan(temp_storage).ExclusiveSum(expert_count, cumsum_val);
   if (expert_id <= num_experts) {
-    cumsum[cumsum_offset + expert_id] = cumsum_val;
+    cumsum[expert_id] = cumsum_val;
   }
 
   if (expert_id == num_experts) {
-    total_tokens_post_pad[model_offset] = cumsum_val;
+    total_tokens_post_pad[0] = cumsum_val;
   }
 
   __syncthreads();
 
   if (threadIdx.x < num_experts) {
-    for (int i = cumsum[cumsum_offset + threadIdx.x];
-         i < cumsum[cumsum_offset + threadIdx.x + 1]; i += block_size) {
-      expert_ids[expert_ids_offset + i / block_size] = threadIdx.x;
+    for (int i = cumsum[threadIdx.x]; i < cumsum[threadIdx.x + 1];
+         i += block_size) {
+      expert_ids[i / block_size] = threadIdx.x;
     }
   }
 
   // Fill remaining expert_ids with 0
-  const size_t fill_start_idx =
-      cumsum[cumsum_offset + num_experts] / block_size + threadIdx.x;
+  const size_t fill_start_idx = cumsum[num_experts] / block_size + threadIdx.x;
   for (size_t i = fill_start_idx; i < max_num_m_blocks; i += blockDim.x) {
-    expert_ids[expert_ids_offset + i] = inactive_expert_id;
+    expert_ids[i] = 0;
   }
 }
 
 template <typename scalar_t, int32_t fill_threads>
-__device__ void _moe_align_block_size_small_batch_expert(
+__global__ void moe_align_block_size_small_batch_expert_kernel(
     const scalar_t* __restrict__ topk_ids,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
     int32_t* __restrict__ total_tokens_post_pad,
     int32_t* __restrict__ expert_map, int32_t num_experts, int32_t block_size,
-    size_t numel, int32_t max_num_tokens_padded, int32_t max_num_m_blocks,
-    int32_t inactive_expert_id, int32_t model_offset, int32_t topk_num,
-    int32_t* token_mask, bool has_expert_map) {
-  // Compute input buffer offsets. Typically these will all be 0, except when
-  // using Multi LoRA.
-  int sorted_token_ids_offset = max_num_tokens_padded * model_offset;
-  int expert_ids_offset = max_num_m_blocks * model_offset;
+    size_t numel, int32_t max_num_tokens_padded, int32_t topk_num,
+    bool has_expert_map) {
+  const int32_t max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size);
 
   // Use an additional group of threads to fill sorted_token_ids.
   // Since the current kernel will use sorted_token_ids afterward,
@@ -202,7 +190,7 @@ __device__ void _moe_align_block_size_small_batch_expert(
     // Initialize sorted_token_ids with numel
     for (size_t it = threadIdx.x; it < max_num_tokens_padded;
          it += fill_threads) {
-      sorted_token_ids[sorted_token_ids_offset + it] = numel;
+      sorted_token_ids[it] = numel;
     }
     // Three __syncthreads() corresponding to the other threads
     __syncthreads();
@@ -229,8 +217,7 @@ __device__ void _moe_align_block_size_small_batch_expert(
       // filter invalid expert
       if (expert_id == -1) continue;
     }
-    int mask = token_mask == nullptr ? 1 : token_mask[i / topk_num];
-    tokens_cnts[(tid + 1) * num_experts + expert_id] += mask;
+    ++tokens_cnts[(tid + 1) * num_experts + expert_id];
   }
 
   __syncthreads();
@@ -253,22 +240,21 @@ __device__ void _moe_align_block_size_small_batch_expert(
           CEILDIV(tokens_cnts[stride * num_experts + i - 1], block_size) *
               block_size;
     }
-    total_tokens_post_pad[model_offset] =
-        static_cast<int32_t>(cumsum[num_experts]);
+    total_tokens_post_pad[0] = static_cast<int32_t>(cumsum[num_experts]);
   }
 
   __syncthreads();
 
   if (tid < num_experts) {
     for (int i = cumsum[tid]; i < cumsum[tid + 1]; i += block_size) {
-      expert_ids[expert_ids_offset + i / block_size] = tid;
+      expert_ids[i / block_size] = tid;
     }
   }
 
   // Fill remaining expert_ids with 0
   const size_t fill_start_idx = cumsum[num_experts] / block_size + tid;
   for (size_t i = fill_start_idx; i < max_num_m_blocks; i += stride) {
-    expert_ids[expert_ids_offset + i] = inactive_expert_id;
+    expert_ids[i] = 0;
   }
 
   for (size_t i = tid; i < numel; i += stride) {
@@ -281,20 +267,17 @@ __device__ void _moe_align_block_size_small_batch_expert(
     int32_t rank_post_pad =
         tokens_cnts[tid * num_experts + expert_id] + cumsum[expert_id];
 
-    if (token_mask == nullptr || token_mask[i / topk_num]) {
-      sorted_token_ids[sorted_token_ids_offset + rank_post_pad] = i;
-      ++tokens_cnts[tid * num_experts + expert_id];
-    }
+    sorted_token_ids[rank_post_pad] = i;
+    ++tokens_cnts[tid * num_experts + expert_id];
   }
 }
 
 template <typename scalar_t>
-__device__ void _count_and_sort_expert_tokens(
+__global__ void count_and_sort_expert_tokens_kernel(
     const scalar_t* __restrict__ topk_ids,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ cumsum_buffer,
     int32_t* __restrict__ expert_map, size_t numel, int32_t num_experts,
-    int32_t max_num_tokens_padded, int32_t* __restrict__ token_mask,
-    int32_t model_offset, int32_t topk_num, bool has_expert_map) {
+    int32_t max_num_tokens_padded, int32_t topk_num, bool has_expert_map) {
   const size_t tid = blockIdx.y * blockDim.x + threadIdx.x;
   const size_t stride = blockDim.x * gridDim.y;
 
@@ -310,40 +293,9 @@ __device__ void _count_and_sort_expert_tokens(
       if (expert_id == -1) continue;
     }
 
-    if (token_mask == nullptr || token_mask[i / topk_num]) {
-      int32_t rank_post_pad = atomicAdd(
-          &cumsum_buffer[(model_offset * (num_experts + 1)) + expert_id], 1);
-      sorted_token_ids[max_num_tokens_padded * model_offset + rank_post_pad] =
-          i;
-    }
+    int32_t rank_post_pad = atomicAdd(&cumsum_buffer[expert_id], 1);
+    sorted_token_ids[rank_post_pad] = i;
   }
-}
-
-template <typename scalar_t>
-__global__ void moe_align_block_size_kernel(
-    const scalar_t* __restrict__ topk_ids,
-    int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
-    int32_t* __restrict__ total_tokens_post_pad,
-    int32_t* __restrict__ expert_map, int32_t num_experts,
-    int32_t padded_num_experts, int32_t experts_per_warp, int32_t block_size,
-    size_t numel, int32_t* __restrict__ cumsum, int32_t max_num_tokens_padded,
-    int32_t topk_num, bool has_expert_map) {
-  _moe_align_block_size(
-      topk_ids, sorted_token_ids, expert_ids, total_tokens_post_pad, expert_map,
-      num_experts, padded_num_experts, experts_per_warp, block_size, numel,
-      cumsum, max_num_tokens_padded, CEILDIV(max_num_tokens_padded, block_size),
-      0, 0, topk_num, nullptr, has_expert_map);
-}
-
-template <typename scalar_t>
-__global__ void count_and_sort_expert_tokens_kernel(
-    const scalar_t* __restrict__ topk_ids,
-    int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ cumsum_buffer,
-    int32_t* __restrict__ expert_map, size_t numel, int32_t num_experts,
-    int32_t max_num_tokens_padded, int32_t topk_num, bool has_expert_map) {
-  _count_and_sort_expert_tokens(
-      topk_ids, sorted_token_ids, cumsum_buffer, expert_map, numel, num_experts,
-      max_num_tokens_padded, nullptr, 0, topk_num, has_expert_map);
 }
 
 template <typename scalar_t, int TOPK>
@@ -360,21 +312,6 @@ __global__ void moe_sum_kernel(
     }
     out[token_idx * d + idx] = x;
   }
-}
-
-template <typename scalar_t, int32_t fill_threads>
-__global__ void moe_align_block_size_small_batch_expert_kernel(
-    const scalar_t* __restrict__ topk_ids,
-    int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
-    int32_t* __restrict__ total_tokens_post_pad,
-    int32_t* __restrict__ expert_map, int32_t num_experts, int32_t block_size,
-    size_t numel, int32_t max_num_tokens_padded, int32_t topk_num,
-    bool has_expert_map) {
-  _moe_align_block_size_small_batch_expert<scalar_t, fill_threads>(
-      topk_ids, sorted_token_ids, expert_ids, total_tokens_post_pad, expert_map,
-      num_experts, block_size, numel, max_num_tokens_padded,
-      CEILDIV(max_num_tokens_padded, block_size), 0, 0, topk_num, nullptr,
-      has_expert_map);
 }
 
 template <typename scalar_t>
