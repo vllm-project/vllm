@@ -15,18 +15,18 @@ from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
 
 from .params import ChatParams
-from .protocol import RendererLike
+from .protocol import BaseRenderer
 
 logger = init_logger(__name__)
 
 
-class DeepseekV32Renderer(RendererLike):
+class DeepseekV32Renderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "RendererLike":
+    ) -> "BaseRenderer":
         return cls(config, tokenizer_kwargs)
 
     def __init__(
@@ -34,9 +34,7 @@ class DeepseekV32Renderer(RendererLike):
         config: ModelConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
-        super().__init__()
-
-        self.config = config
+        super().__init__(config)
 
         if config.skip_tokenizer_init:
             tokenizer = None

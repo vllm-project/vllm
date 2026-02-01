@@ -717,6 +717,10 @@ class GPUModelRunner(
                 self.effective_drafter_max_model_len = self.max_model_len
 
     def reset_mm_cache(self) -> None:
+        """
+        Clear the multi-modal cache that was used during profiling,
+        but no longer needed during inference.
+        """
         if self.mm_budget:
             self.mm_budget.reset_cache()
 
