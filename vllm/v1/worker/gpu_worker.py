@@ -532,9 +532,60 @@ class Worker(WorkerBase):
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
 
+        # Run determinism warmup iterations if batch invariance mode is enabled.
+        # This ensures that CUDA graphs and JIT kernels are fully compiled,
+        # providing deterministic output from the first real request.
+        self._run_determinism_warmup()
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+    def _run_determinism_warmup(self) -> None:
+        """Run determinism warmup iterations for batch-invariant mode.
+
+        When VLLM_BATCH_INVARIANT=1 is enabled, the first few inference requests
+        may produce different results due to CUDA graph compilation, JIT kernel
+        optimization, and cache warming effects.
+
+        This method runs multiple forward passes to ensure all CUDA graphs are
+        compiled and caches are warmed, providing deterministic output from the
+        first real request.
+
+        The number of warmup iterations is controlled by the environment variable
+        VLLM_DETERMINISM_WARMUP_ITERATIONS (default: 3 when batch invariance is
+        enabled, 0 otherwise).
+        """
+        from vllm.model_executor.layers.batch_invariant import (
+            get_determinism_warmup_iterations,
+            run_determinism_warmup,
+            vllm_is_batch_invariant,
+        )
+
+        if not vllm_is_batch_invariant():
+            return
+
+        num_iterations = get_determinism_warmup_iterations()
+        if num_iterations <= 0:
+            return
+
+        # Use a representative token count for warmup
+        # This exercises the model with a typical batch size
+        warmup_num_tokens = min(
+            self.scheduler_config.max_num_seqs,
+            self.scheduler_config.max_num_batched_tokens,
+            128,  # Reasonable default for warmup
+        )
+
+        def dummy_run_fn():
+            self.model_runner._dummy_run(
+                num_tokens=warmup_num_tokens,
+                skip_eplb=True,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            )
+            torch.cuda.synchronize()
+
+        run_determinism_warmup(dummy_run_fn, num_iterations)
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
