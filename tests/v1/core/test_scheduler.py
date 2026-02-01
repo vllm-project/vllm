@@ -3390,17 +3390,18 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
 # ==============================================================================
 
 
-def test_prepend_skipped_requests_order():
+def test_skipped_requests_fcfs_order():
+    """Test that skipped requests preserve FCFS order by going to the tail."""
     scheduler = create_scheduler(max_num_seqs=1, use_kv_connector=True)
     requests = create_requests(num_requests=4)
     for request in requests:
         scheduler.add_request(request)
 
-    # 4 requests waiting, capture their order
-    expected_waiting_reqs = list(scheduler.waiting)
+    # 4 requests waiting: [req_0, req_1, req_2, req_3]
+    initial_waiting_reqs = list(scheduler.waiting)
 
     # simulate first 2 waiting requests are waiting for remote KVs
-    for req in expected_waiting_reqs[:2]:
+    for req in initial_waiting_reqs[:2]:
         req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
 
     # schedule step
@@ -3408,8 +3409,16 @@ def test_prepend_skipped_requests_order():
     # and the fourth waiting
     scheduler.schedule()
 
-    # pop the third request which is expected to be running
-    expected_waiting_reqs.pop(2)
+    # With FCFS ordering, skipped requests go to the tail:
+    # - req_0 and req_1 were skipped (WAITING_FOR_REMOTE_KVS)
+    # - req_2 is now running
+    # - req_3 never got processed (max_num_seqs=1)
+    # Final waiting order: [req_3, req_0, req_1]
+    expected_waiting_reqs = [
+        initial_waiting_reqs[3],  # req_3 stayed in waiting
+        initial_waiting_reqs[0],  # req_0 skipped -> added to tail
+        initial_waiting_reqs[1],  # req_1 skipped -> added to tail
+    ]
 
-    # verify waiting order is preserved
+    # verify FCFS order is preserved (skipped requests at tail)
     assert list(scheduler.waiting) == expected_waiting_reqs

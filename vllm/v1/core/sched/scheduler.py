@@ -550,7 +550,7 @@ class Scheduler(SchedulerInterface):
                             request.request_id,
                         )
                         self.waiting.pop_request()
-                        skipped_waiting_requests.prepend_request(request)
+                        skipped_waiting_requests.add_request(request)
                         continue
 
                 # Skip request if the structured output request is still waiting
@@ -561,14 +561,14 @@ class Scheduler(SchedulerInterface):
                         request.status = RequestStatus.WAITING
                     else:
                         self.waiting.pop_request()
-                        skipped_waiting_requests.prepend_request(request)
+                        skipped_waiting_requests.add_request(request)
                         continue
 
                 # Streaming: skip request if still waiting for next streaming req.
                 if request.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
                     assert not request.streaming_queue
                     self.waiting.pop_request()
-                    skipped_waiting_requests.prepend_request(request)
+                    skipped_waiting_requests.add_request(request)
                     continue
 
                 # Check that adding the request still respects the max_loras
@@ -583,7 +583,7 @@ class Scheduler(SchedulerInterface):
                 ):
                     # Scheduling would exceed max_loras, skip.
                     self.waiting.pop_request()
-                    skipped_waiting_requests.prepend_request(request)
+                    skipped_waiting_requests.add_request(request)
                     continue
 
                 num_external_computed_tokens = 0
@@ -609,7 +609,7 @@ class Scheduler(SchedulerInterface):
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
                             self.waiting.pop_request()
-                            skipped_waiting_requests.prepend_request(request)
+                            skipped_waiting_requests.add_request(request)
                             continue
 
                         request.num_external_computed_tokens = ext_tokens
@@ -721,7 +721,7 @@ class Scheduler(SchedulerInterface):
                     # NOTE: Mitigates head-of-line blocking under KV cache pressure.
                     # See: https://github.com/vllm-project/vllm/issues/31731
                     request = self.waiting.pop_request()
-                    skipped_waiting_requests.prepend_request(request)
+                    skipped_waiting_requests.add_request(request)
                     continue
 
                 # KVTransfer: the connector uses this info to determine
@@ -741,7 +741,7 @@ class Scheduler(SchedulerInterface):
                 if load_kv_async:
                     # If loading async, allocate memory and put request
                     # into the WAITING_FOR_REMOTE_KV state.
-                    skipped_waiting_requests.prepend_request(request)
+                    skipped_waiting_requests.add_request(request)
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
@@ -786,9 +786,10 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.allocate(request, i)
                         if self.ec_connector is not None:
                             self.ec_connector.update_state_after_alloc(request, i)
-        # Put back any skipped requests at the head of the waiting queue
+        # Put back any skipped requests at the tail of the waiting queue
         if skipped_waiting_requests:
-            self.waiting.prepend_requests(skipped_waiting_requests)
+            for request in skipped_waiting_requests:
+                self.waiting.add_request(request)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
