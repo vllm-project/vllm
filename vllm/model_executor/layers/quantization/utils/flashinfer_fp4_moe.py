@@ -8,7 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
 from vllm.platforms import current_platform
