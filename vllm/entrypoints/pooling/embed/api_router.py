@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib.util
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, Request
@@ -15,6 +16,13 @@ from vllm.entrypoints.pooling.embed.protocol import (
 )
 from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
+
+if importlib.util.find_spec("orjson") is not None:
+    from fastapi.responses import ORJSONResponse
+
+    _RESPONSE_CLASS = ORJSONResponse
+else:
+    _RESPONSE_CLASS = JSONResponse
 
 router = APIRouter()
 
@@ -54,7 +62,7 @@ async def create_embedding(
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, EmbeddingResponse):
-        return JSONResponse(content=generator.model_dump())
+        return _RESPONSE_CLASS(content=generator.model_dump())
     elif isinstance(generator, EmbeddingBytesResponse):
         return StreamingResponse(
             content=generator.content,
