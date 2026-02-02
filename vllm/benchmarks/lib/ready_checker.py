@@ -66,7 +66,7 @@ async def wait_for_endpoint(
                     pbar.close()
                     return output
                 else:
-                    logger.warning("Endpoint is not ready. Error='%s'", output.error)
+                    logger.debug("Endpoint is not ready. Error='%s'", output.error)
             except aiohttp.ClientConnectorError:
                 pass
 
