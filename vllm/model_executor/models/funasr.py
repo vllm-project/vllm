@@ -96,10 +96,10 @@ class LayerNorm(torch.nn.LayerNorm):
 class EncoderLayerSANM(nn.Module):
     def __init__(
         self,
-        in_size,
-        size,
-        self_attn,
-        feed_forward,
+        in_size: int,
+        size: int,
+        self_attn: nn.Module,
+        feed_forward: nn.Module,
         normalize_before=True,
     ):
         super().__init__()
@@ -113,8 +113,8 @@ class EncoderLayerSANM(nn.Module):
 
     def forward(
         self,
-        hidden_states,
-        mask,
+        hidden_states: torch.Tensor,
+        mask: torch.Tensor | None = None,
         cache=None,
         mask_shfit_chunk=None,
         mask_att_chunk_encoder=None,
@@ -147,11 +147,11 @@ class EncoderLayerSANM(nn.Module):
 class MultiHeadedAttentionSANM(nn.Module):
     def __init__(
         self,
-        n_head,
-        in_feat,
-        n_feat,
-        kernel_size,
-        sanm_shift=0,
+        n_head: int,
+        in_feat: int,
+        n_feat: int,
+        kernel_size: int,
+        sanm_shift: int = 0,
     ):
         super().__init__()
         assert n_feat % n_head == 0
@@ -180,7 +180,12 @@ class MultiHeadedAttentionSANM(nn.Module):
         right_padding = kernel_size - 1 - left_padding
         self.pad_fn = nn.ConstantPad1d((left_padding, right_padding), 0.0)
 
-    def forward_fsmn(self, inputs, mask, mask_shfit_chunk=None):
+    def forward_fsmn(
+        self,
+        inputs: torch.Tensor,
+        mask: torch.Tensor,
+        mask_shfit_chunk: torch.Tensor = None,
+    ):
         b, t, d = inputs.size()
         if mask is not None:
             mask = torch.reshape(mask, (b, -1, 1))
@@ -197,7 +202,7 @@ class MultiHeadedAttentionSANM(nn.Module):
             x = x * mask
         return x
 
-    def forward_qkv(self, x):
+    def forward_qkv(self, x: torch.Tensor):
         b, t, d = x.size()
         q_k_v, _ = self.linear_q_k_v(x)
         q, k, v = torch.split(q_k_v, int(self.h * self.d_k), dim=-1)
@@ -213,7 +218,13 @@ class MultiHeadedAttentionSANM(nn.Module):
 
         return q_h, k_h, v_h, v
 
-    def forward_attention(self, value, scores, mask, mask_att_chunk_encoder=None):
+    def forward_attention(
+        self,
+        value: torch.Tensor,
+        scores: torch.Tensor,
+        mask: torch.Tensor,
+        mask_att_chunk_encoder: torch.Tensor = None,
+    ):
         n_batch = value.size(0)
         if mask is not None:
             if mask_att_chunk_encoder is not None:
@@ -239,7 +250,11 @@ class MultiHeadedAttentionSANM(nn.Module):
         return out
 
     def forward(
-        self, hidden_states, mask, mask_shfit_chunk=None, mask_att_chunk_encoder=None
+        self,
+        hidden_states: torch.Tensor,
+        mask: torch.Tensor,
+        mask_shfit_chunk: torch.Tensor = None,
+        mask_att_chunk_encoder: torch.Tensor = None,
     ):
         q_h, k_h, v_h, v = self.forward_qkv(hidden_states)
         fsmn_memory = self.forward_fsmn(v, mask, mask_shfit_chunk)
@@ -276,7 +291,7 @@ class SinusoidalPositionEncoder(torch.nn.Module):
         encoding = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=2)
         return encoding.type(dtype)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor):
         batch_size, timesteps, input_dim = hidden_states.size()
         positions = torch.arange(1, timesteps + 1, device=hidden_states.device)[None, :]
         position_encoding = self.encode(positions, input_dim, hidden_states.dtype).to(
@@ -408,8 +423,8 @@ class SenseVoiceEncoderSmall(nn.Module):
         return xs_pad, olens
 
 
-class PositionwiseFeedForward(torch.nn.Module):
-    def __init__(self, idim, hidden_units):
+class PositionwiseFeedForward(nn.Module):
+    def __init__(self, idim: int, hidden_units: int):
         super().__init__()
         self.w_1 = ColumnParallelLinear(
             input_size=idim,
@@ -423,7 +438,7 @@ class PositionwiseFeedForward(torch.nn.Module):
         )
         self.activation = _ACTIVATION_REGISTRY["relu"]
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor):
         hidden_states, _ = self.w_1(hidden_states)
         hidden_states = self.activation(hidden_states)
         hidden_states, _ = self.w_2(hidden_states)
@@ -433,9 +448,9 @@ class PositionwiseFeedForward(torch.nn.Module):
 class EncoderLayer(nn.Module):
     def __init__(
         self,
-        size,
-        self_attn,
-        feed_forward,
+        size: int,
+        self_attn: nn.Module,
+        feed_forward: nn.Module,
     ):
         super().__init__()
         self.self_attn = self_attn
@@ -443,7 +458,7 @@ class EncoderLayer(nn.Module):
         self.norm1 = LayerNorm(size)
         self.norm2 = LayerNorm(size)
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor):
         residual = hidden_states
         hidden_states = self.norm1(hidden_states)
         hidden_states = residual + self.self_attn(hidden_states, None, None)
@@ -570,7 +585,7 @@ class Transformer(nn.Module):
                 ]
             )
 
-    def forward(self, hidden_states, ilens=None):
+    def forward(self, hidden_states: torch.Tensor, ilens: int = 0):
         batch_size, seq_len, dim = hidden_states.size()
         chunk_num = (seq_len - 1) // self.k + 1
         pad_num = chunk_num * self.k - seq_len
