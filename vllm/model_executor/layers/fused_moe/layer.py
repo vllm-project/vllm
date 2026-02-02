@@ -28,7 +28,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -274,8 +274,8 @@ def maybe_roundup_hidden_size(
 
 
 # --8<-- [start:fused_moe]
-@CustomOp.register("fused_moe")
-class FusedMoE(CustomOp):
+@PluggableLayer.register("fused_moe")
+class FusedMoE(PluggableLayer):
     """FusedMoE layer for MoE models.
 
     This layer contains both MergedColumnParallel weights (gate_up_proj /
@@ -1571,7 +1571,7 @@ class FusedMoE(CustomOp):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
-    def forward_native(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1656,13 +1656,6 @@ class FusedMoE(CustomOp):
         return (
             self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
         )
-
-    def forward_cuda(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_native(hidden_states, router_logits)
 
     def forward_impl_chunked(
         self,
@@ -2084,7 +2077,7 @@ def moe_forward_shared(
     self = get_layer_from_name(layer_name)
     assert self.shared_experts is not None
 
-    # Set here because torch.compile skips forward_native() setup code
+    # Set here because torch.compile skips forward() setup code
     # and calls this op directly. forward_impl() reads from this var.
     with self._set_shared_experts_input(shared_experts_input):
         return self.forward_impl(hidden_states, router_logits)
