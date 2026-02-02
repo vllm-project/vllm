@@ -1008,6 +1008,7 @@ def _get_kv_cache_groups_uniform_page_size(
     memory per block is the same for all groups.
 
     Args:
+        vllm_config: The global VllmConfig
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
     Returns:
         The generated KVCacheGroupSpecs
