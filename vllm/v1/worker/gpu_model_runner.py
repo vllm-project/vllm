@@ -1708,6 +1708,43 @@ class GPUModelRunner(
         self.ngram_context.copy_to_gpu(num_reqs)
         return self.ngram_context.gpu[:num_reqs]
 
+    def _maybe_add_ngram_kwargs(
+        self,
+        model_kwargs: dict[str, Any],
+        *,
+        num_reqs: int,
+        is_first_rank: bool,
+        is_encoder_decoder: bool,
+        use_dummy_context: bool,
+        query_start_loc: torch.Tensor | None = None,
+        num_scheduled_tokens: np.ndarray | None = None,
+    ) -> None:
+        if not self.uses_ngram_embedding or not is_first_rank or is_encoder_decoder:
+            return
+        if query_start_loc is None:
+            if num_scheduled_tokens is None:
+                raise RuntimeError("query_start_loc is required for N-gram input.")
+            cu_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
+            last = int(cu_num_tokens[-1]) if num_reqs > 0 else 0
+            self.query_start_loc.np[0] = 0
+            if num_reqs > 0:
+                self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
+            self.query_start_loc.np[num_reqs + 1 :].fill(last)
+            self.query_start_loc.copy_to_gpu()
+            query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
+        model_kwargs["query_start_loc"] = query_start_loc
+        if self.ngram_context_len <= 0:
+            return
+        if use_dummy_context:
+            model_kwargs["ngram_context"] = torch.full(
+                (num_reqs, self.ngram_context_len),
+                self.ngram_eos_token_id,
+                device=self.device,
+                dtype=torch.int32,
+            )
+        else:
+            model_kwargs["ngram_context"] = self._prepare_ngram_context(num_reqs)
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -2854,10 +2891,14 @@ class GPUModelRunner(
             inputs_embeds = None
             model_kwargs = self._init_model_kwargs()
 
-        if self.uses_ngram_embedding and is_first_rank and not is_encoder_decoder:
-            ngram_context = self._prepare_ngram_context(num_reqs)
-            model_kwargs["query_start_loc"] = self.query_start_loc.gpu[: num_reqs + 1]
-            model_kwargs["ngram_context"] = ngram_context
+        self._maybe_add_ngram_kwargs(
+            model_kwargs,
+            num_reqs=num_reqs,
+            is_first_rank=is_first_rank,
+            is_encoder_decoder=is_encoder_decoder,
+            use_dummy_context=False,
+            query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
+        )
 
         if self.uses_mrope:
             positions = self.mrope_positions.gpu[:, :num_input_tokens]
@@ -4850,6 +4891,15 @@ class GPUModelRunner(
             else:
                 input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
+
+            self._maybe_add_ngram_kwargs(
+                model_kwargs,
+                num_reqs=num_reqs,
+                is_first_rank=get_pp_group().is_first_rank,
+                is_encoder_decoder=self.model_config.is_encoder_decoder,
+                use_dummy_context=True,
+                num_scheduled_tokens=num_scheduled_tokens,
+            )
 
             if self.uses_mrope:
                 positions = self.mrope_positions.gpu[:, :num_tokens_padded]
