@@ -116,7 +116,7 @@ class TestModel(torch.nn.Module):
         self,
         hidden_size: int,
         eps: float,
-        force_kernel: FP8ScaledMMLinearKernel | None,
+        force_kernel: type[FP8ScaledMMLinearKernel] | None,
         group_shape: GroupShape,
         use_aiter_fusion: bool = False,
         use_aiter_quant: bool = False,
@@ -155,7 +155,7 @@ class TestModel(torch.nn.Module):
             self.enable_quant_fp8_custom_op = (
                 False
                 if use_aiter_quant
-                else self.fp8_linear_layers[0].linear_op.input_quant_op.enabled()
+                else self.fp8_linear_layers[0].kernel.input_quant_op.enabled()
             )
 
         else:
