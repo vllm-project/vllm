@@ -179,7 +179,7 @@ def is_supported_config_trtllm_bf16(
 
 def flashinfer_fused_moe_blockscale_fp8(
     routing_logits: torch.Tensor,
-    routing_bias: torch.Tensor,
+    routing_bias: torch.Tensor | None,
     x: torch.Tensor,
     w13_weight: torch.Tensor,
     w13_weight_scale_inv: torch.Tensor,
@@ -210,6 +210,9 @@ def flashinfer_fused_moe_blockscale_fp8(
     if routing_method_type == RoutingMethodType.DeepSeekV3:
         routing_logits = routing_logits.to(torch.float32)
 
+    if routing_bias is not None:
+        routing_bias = routing_bias.to(x.dtype)
+
     a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
     # NOTE: scales of hidden states have to be transposed!
     a_sf_t = a_sf.t().contiguous()
@@ -237,7 +240,7 @@ def flashinfer_fused_moe_blockscale_fp8(
 
 def flashinfer_fused_moe_blockscale_fp8_fake(
     routing_logits: torch.Tensor,
-    routing_bias: torch.Tensor,
+    routing_bias: torch.Tensor | None,
     x: torch.Tensor,
     w13_weight: torch.Tensor,
     w13_weight_scale_inv: torch.Tensor,

@@ -1026,14 +1026,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         if self.block_quant:
             import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
-            e_score_correction_bias = (
-                layer.e_score_correction_bias.to(x.dtype)
-                if layer.e_score_correction_bias is not None
-                else None
-            )
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
                 routing_logits=router_logits,
-                routing_bias=e_score_correction_bias,
+                routing_bias=layer.e_score_correction_bias,
                 x=x,
                 w13_weight=layer.w13_weight,
                 w13_weight_scale_inv=layer.w13_weight_scale,
