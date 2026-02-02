@@ -82,12 +82,13 @@ NKM_FACTORS_WVSPLITK_FP8 = [
     (1, 14336, 1024),
     (2, 24576, 2048),
     (4, 32768, 28672),
+    (4, 32768 * 2, 28672),
 ]
 
 SEEDS = [0]
 
 
-def pad_weights_fp8(weight):
+def pad_fp8(weight):
     num_pad = 256 // weight.element_size()
     import torch.nn.functional as F
 
@@ -198,12 +199,14 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("padded_a", [False, True])
+@pytest.mark.parametrize("padded_b", [False, True])
+@pytest.mark.parametrize("biased", [False, True])
 @pytest.mark.skipif(
     not (current_platform.is_rocm() and current_platform.supports_fp8()),
     reason="only test for rocm fp8",
 )
-def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed, padded):
+def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed, padded_a, padded_b, biased):
     torch.manual_seed(seed)
 
     A = torch.rand(n, k, device="cuda") - 0.5
@@ -211,56 +214,16 @@ def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed, padded):
 
     A, scale_a = ref_dynamic_per_tensor_fp8_quant(A)
     B, scale_b = ref_dynamic_per_tensor_fp8_quant(B)
-    if padded:
-        B = pad_weights_fp8(B)
+    if padded_b:
+        B = pad_fp8(B)
+    if padded_a:
+        A = pad_fp8(A)
 
-    ref_out = torch._scaled_mm(
-        A, B.t(), out_dtype=dtype, scale_a=scale_a, scale_b=scale_b
-    )
-    out = ops.wvSplitKQ(
-        B,
-        A,
-        dtype,
-        scale_a,
-        scale_b,
-        get_cu_count(),
-    )
-
-    assert torch.allclose(out, ref_out, rtol=0.01)
-
-
-@pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("padded", [False, True])
-@pytest.mark.skipif(
-    not (current_platform.is_rocm() and current_platform.supports_fp8()),
-    reason="only test for rocm fp8",
-)
-def test_rocm_wvsplitk_fp8_bias1D_kernel(n, k, m, dtype, seed, padded):
-    torch.manual_seed(seed)
-
-    xavier = math.sqrt(2 / k)  # normalize to avoid large output-bias deltas
-    A = (torch.rand(n, k, device="cuda") - 0.5) * xavier
-    B = (torch.rand(m, k, device="cuda") - 0.5) * xavier
-    BIAS = torch.rand(m, dtype=dtype, device="cuda") - 0.5
-
-    A, scale_a = ref_dynamic_per_tensor_fp8_quant(A)
-    B, scale_b = ref_dynamic_per_tensor_fp8_quant(B)
-    if padded:
-        B = pad_weights_fp8(B)
+    BIAS = None if (not biased) else (torch.rand(m, dtype=dtype, device="cuda") - 0.5)
 
     ref_out = torch._scaled_mm(
         A, B.t(), out_dtype=dtype, scale_a=scale_a, scale_b=scale_b, bias=BIAS
     )
-    out = ops.wvSplitKQ(
-        B,
-        A,
-        dtype,
-        scale_a,
-        scale_b,
-        get_cu_count(),
-        BIAS,
-    )
+    out = ops.wvSplitKQ(B, A, dtype, scale_a, scale_b, get_cu_count(), BIAS)
 
     assert torch.allclose(out, ref_out, rtol=0.01)
