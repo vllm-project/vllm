@@ -95,4 +95,4 @@ albumentations==1.4.6
 # Pin transformers version
 transformers==4.57.3
 # Pin HF Hub version
-huggingface-hub==0.36.0
+huggingface-hub==0.36.1
