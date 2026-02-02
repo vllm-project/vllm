@@ -460,14 +460,17 @@ class ServingScores(OpenAIServing):
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
 
-            if isinstance(documents[idx], str):
-                document = RerankDocument(text=documents[idx])
+            document = documents[idx]
+            if isinstance(document, str):
+                rerank_document = RerankDocument(text=document)
             else:
-                document = RerankDocument(multi_modal=documents[idx].get("content", []))
+                rerank_document = RerankDocument(
+                    multi_modal=document.get("content", [])
+                )
 
             result = RerankResult(
                 index=idx,
-                document=document,
+                document=rerank_document,
                 relevance_score=classify_res.outputs.score,
             )
             results.append(result)
