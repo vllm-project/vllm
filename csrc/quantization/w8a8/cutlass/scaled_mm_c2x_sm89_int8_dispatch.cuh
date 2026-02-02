@@ -48,7 +48,7 @@ struct sm89_int8_config_default {
       using TileShape = cutlass::gemm::GemmShape<128, 128, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 5>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -56,7 +56,7 @@ struct sm89_int8_config_default {
       using TileShape = cutlass::gemm::GemmShape<256, 128, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 3>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -64,7 +64,7 @@ struct sm89_int8_config_default {
       using TileShape = cutlass::gemm::GemmShape<128, 128, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 5>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -72,7 +72,7 @@ struct sm89_int8_config_default {
       using TileShape = cutlass::gemm::GemmShape<256, 128, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 3>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -104,7 +104,7 @@ struct sm89_int8_config_M256 {
       using TileShape = cutlass::gemm::GemmShape<64, 128, 128>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 3>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -112,7 +112,7 @@ struct sm89_int8_config_M256 {
       using TileShape = cutlass::gemm::GemmShape<128, 128, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 5>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -120,7 +120,7 @@ struct sm89_int8_config_M256 {
       using TileShape = cutlass::gemm::GemmShape<256, 128, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 3>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -128,7 +128,7 @@ struct sm89_int8_config_M256 {
       using TileShape = cutlass::gemm::GemmShape<128, 128, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 5>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -160,7 +160,7 @@ struct sm89_int8_config_M128 {
       using WarpShape = cutlass::gemm::GemmShape<64, 64, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 3>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -169,7 +169,7 @@ struct sm89_int8_config_M128 {
       using WarpShape = cutlass::gemm::GemmShape<64, 64, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 5>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -178,7 +178,7 @@ struct sm89_int8_config_M128 {
       using WarpShape = cutlass::gemm::GemmShape<32, 64, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 5>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -210,7 +210,7 @@ struct sm89_int8_config_M64 {
       using WarpShape = cutlass::gemm::GemmShape<32, 64, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 5>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -219,7 +219,7 @@ struct sm89_int8_config_M64 {
       using WarpShape = cutlass::gemm::GemmShape<64, 64, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 3>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -251,7 +251,7 @@ struct sm89_int8_config_M32 {
       using WarpShape = cutlass::gemm::GemmShape<16, 64, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 5>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -260,7 +260,7 @@ struct sm89_int8_config_M32 {
       using WarpShape = cutlass::gemm::GemmShape<32, 64, 64>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 4>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -292,7 +292,7 @@ struct sm89_int8_config_M16 {
       using TileShape = cutlass::gemm::GemmShape<16, 64, 128>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 5>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
@@ -300,7 +300,7 @@ struct sm89_int8_config_M16 {
       using TileShape = cutlass::gemm::GemmShape<16, 128, 128>;
 
       return vllm::fallback_cutlass_gemm_caller<
-          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, vllm::enable_sm89_to_sm90,
+          vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
                                 InstructionShape, 4>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);

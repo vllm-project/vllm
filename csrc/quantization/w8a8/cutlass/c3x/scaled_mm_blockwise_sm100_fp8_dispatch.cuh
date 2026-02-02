@@ -123,7 +123,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
           MainloopScheduler
       >::CollectiveOp>;
 
-  using KernelType = enable_sm100_only<cutlass::gemm::kernel::GemmUniversal<
+  using KernelType = enable_sm100f_only<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue>>;
 
   struct GemmKernel : public KernelType {};
