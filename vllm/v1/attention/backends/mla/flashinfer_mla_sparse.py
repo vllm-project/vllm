@@ -19,7 +19,6 @@ import numpy as np
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -355,7 +354,7 @@ class FlashInferMLASparseImpl(MLACommonBaseImpl[FlashInferMLASparseMetadata]):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
-    def _forward_decode(
+    def forward_mqa(
         self,
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
@@ -428,71 +427,3 @@ class FlashInferMLASparseImpl(MLACommonBaseImpl[FlashInferMLASparseMetadata]):
         o = o.view(-1, o.shape[-2], o.shape[-1])
 
         return o, None
-
-    def forward(
-        self,
-        layer: AttentionLayer,
-        q: torch.Tensor,
-        k_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: FlashInferMLASparseMetadata | None,
-        output: torch.Tensor | None = None,
-        output_scale: torch.Tensor | None = None,
-        output_block_scale: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Forward pass for FlashInfer MLA Sparse attention."""
-        assert output is not None, "Output tensor must be provided."
-
-        if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError(
-                "Fused output quantization is not yet supported for "
-                "FlashInferMLASparseImpl"
-            )
-
-        if attn_metadata is None:
-            # Dummy run
-            return output.fill_(0)
-
-        num_actual_toks = attn_metadata.num_actual_tokens
-
-        # Slice inputs to actual token count (may be padded for CUDA graphs)
-        q = q[:num_actual_toks, ...]
-        k_c_normed = k_c_normed[:num_actual_toks, ...]
-        k_pe = k_pe[:num_actual_toks, ...]
-
-        assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_actual_toks]
-
-        # Compute ql_nope = q_nope @ W_UK^T for decode-style MLA
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        # (B, N, P) -> (N, B, P)
-        q_nope = q_nope.transpose(0, 1)
-        # (N, B, P) x (N, P, L) -> (N, B, L)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T)
-        # (N, B, L) -> (B, N, L)
-        ql_nope = ql_nope.transpose(0, 1)
-
-        q = torch.cat([ql_nope, q_pe], dim=-1)
-
-        # Write to KV cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=layer._k_scale,
-            )
-
-        attn_out, _ = self._forward_decode(
-            q,
-            kv_cache,
-            topk_indices,
-            attn_metadata,
-            layer,
-        )
-
-        self._v_up_proj(attn_out, out=output[:num_actual_toks])
-        return output
