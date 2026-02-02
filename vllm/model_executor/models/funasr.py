@@ -249,7 +249,7 @@ class MultiHeadedAttentionSANM(nn.Module):
 
 
 class SinusoidalPositionEncoder(torch.nn.Module):
-    def __init__(self, d_model=80, dropout_rate=0.1):
+    def __init__(self, d_model=80):
         super().__init__()
 
     def encode(
@@ -275,12 +275,14 @@ class SinusoidalPositionEncoder(torch.nn.Module):
         encoding = torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=2)
         return encoding.type(dtype)
 
-    def forward(self, x):
-        batch_size, timesteps, input_dim = x.size()
-        positions = torch.arange(1, timesteps + 1, device=x.device)[None, :]
-        position_encoding = self.encode(positions, input_dim, x.dtype).to(x.device)
+    def forward(self, hidden_states):
+        batch_size, timesteps, input_dim = hidden_states.size()
+        positions = torch.arange(1, timesteps + 1, device=hidden_states.device)[None, :]
+        position_encoding = self.encode(positions, input_dim, hidden_states.dtype).to(
+            hidden_states.device
+        )
 
-        return x + position_encoding
+        return hidden_states + position_encoding
 
 
 class SenseVoiceEncoderSmall(nn.Module):
