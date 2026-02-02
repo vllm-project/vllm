@@ -59,7 +59,14 @@ class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8BlockPara
         )
 
     @classmethod
-    def can_implement(cls, config):
+    def can_implement(cls, config: Fp8BlockMMScaledConfig):
+        act_quant_key = config.activation_quant_key
+        if act_quant_key.scale.static:
+            return (
+                False,
+                "Only dynamic per token group activation quantization is supported.",
+            )
+
         return True, None
 
     @classmethod
