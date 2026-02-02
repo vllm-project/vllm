@@ -580,7 +580,7 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
-    fail_on_environ_validation: bool = True
+    fail_on_environ_validation: bool = False
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1206,7 +1206,7 @@ class EngineArgs:
             "--fail-on-environ-validation",
             help="If set, the engine will raise an error if "
             "environment validation fails.",
-            default=True,
+            default=False,
             action=argparse.BooleanOptionalAction,
         )
         return parser
