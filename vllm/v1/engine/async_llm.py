@@ -154,6 +154,7 @@ class AsyncLLM(EngineClient):
         # Pause / resume state for async RL workflows.
         self._pause_cond = asyncio.Condition()
         self._paused = False
+        self._client_count = client_count
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -589,6 +590,11 @@ class AsyncLLM(EngineClient):
 
         """
 
+        if self._client_count > 1:
+            raise NotImplementedError(
+                "pause_generation is not supported with --api-server-count > 1"
+            )
+
         async with self._pause_cond:
             if self._paused:
                 return
@@ -623,6 +629,11 @@ class AsyncLLM(EngineClient):
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
+
+        if self._client_count > 1:
+            raise NotImplementedError(
+                "resume_generation is not supported with --api-server-count > 1"
+            )
 
         async with self._pause_cond:
             await self.engine_core.resume_scheduler_async()

@@ -385,20 +385,6 @@ class EngineCore:
         )
         self._iteration_index += 1
 
-    def _check_pause_state(self) -> tuple[dict[int, EngineCoreOutputs], bool] | None:
-        """Check and handle scheduler pause state.
-
-        Returns:
-            None if not paused and processing should continue.
-            A tuple of (outputs, model_executed=False) if paused or pause was
-            just acknowledged.
-        """
-        # If paused, don't schedule any work.
-        if self._scheduler_paused:
-            return {}, False
-
-        return None
-
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -406,8 +392,9 @@ class EngineCore:
         was executed.
         """
 
-        if (pause_result := self._check_pause_state()) is not None:
-            return pause_result
+        # If paused, don't schedule any work.
+        if self._scheduler_paused:
+            return {}, False
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
@@ -459,8 +446,9 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-        if (pause_result := self._check_pause_state()) is not None:
-            return pause_result
+        # If paused, don't schedule any work.
+        if self._scheduler_paused:
+            return {}, False
 
         batch_queue = self.batch_queue
         assert batch_queue is not None
