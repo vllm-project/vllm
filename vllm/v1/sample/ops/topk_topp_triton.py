@@ -201,7 +201,7 @@ def _topk_topp_kernel(
                         # Check if any of the pivots satisfy termination condition
                         if (
                             k_pivots_num_0 >= k
-                            and k_pivots_num_0 - (min_larger_0 * num_min_larger_0) < k
+                            and k_pivots_num_0 - num_min_larger_0 < k
                         ):
                             k_pivot = k_pivot_0
                             k_pivots_num = k_pivots_num_0
@@ -209,7 +209,7 @@ def _topk_topp_kernel(
                             num_min_larger = num_min_larger_0
                         if (
                             k_pivots_num_1 >= k
-                            and k_pivots_num_1 - (min_larger_1 * num_min_larger_1) < k
+                            and k_pivots_num_1 - num_min_larger_1 < k
                         ):
                             k_pivot = k_pivot_1
                             k_pivots_num = k_pivots_num_1
