@@ -747,11 +747,11 @@ class Worker(WorkerBase):
             try:
                 while not self._ffn_shutdown_event.is_set():
                     # Execute FFN computation
-                    logger.info("jcz before recv_is_ubatch")
-                    is_ubatch = self.model_runner.connector.recv_is_ubatch()
-                    logger.info(f"jcz after recv_is_ubatch is_ubatch:{is_ubatch}")
+                    logger.info("jcz before recv_dp_metadata_list")
+                    dp_metadata_list = self.model_runner.connector.recv_dp_metadata_list()
+                    logger.info(f"jcz after recv_dp_metadata_list dp_metadata_list:{dp_metadata_list}")
                     self.model_runner.execute_model(scheduler_output=None,
-                                                    is_ubatch=is_ubatch)
+                                                    dp_metadata_list=dp_metadata_list)
             except Exception as e:
                 logger.error("FFN worker loop error: %s", e)
                 raise

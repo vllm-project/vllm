@@ -48,7 +48,9 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import (
     AFDMetadata,
     BatchDescriptor,
+    DPMetadata,
     set_forward_context,
+    get_forward_context
 )
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping, LoRAMappingType
@@ -3585,14 +3587,6 @@ class GPUModelRunner(
 
         afd_metadata = self._build_afd_metadata(ubatch_slices_padded, num_tokens_unpadded)
 
-        # send is_ubatch to ffn side
-        is_ubatch = True if ubatch_slices_padded else False
-        # to support inequal AF,[ffn_size,ffn_size + min_size) send
-        if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
-            logger.info(f'jcz self.afd_connector.rank in prepare input is {self.afd_connector.world_rank}')
-            self.afd_connector.send_is_ubatch(is_ubatch)
-        logger.info(f'jcz send is_ubatch in prepare input is {is_ubatch}')
-
         self.profiler.step()
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -3616,6 +3610,30 @@ class GPUModelRunner(
                 logger.info(f"input_ids: {input_ids.shape}")
             if inputs_embeds is not None:
                 logger.info(f"inputs_embeds: {inputs_embeds.shape}")
+            
+            # Build dp_metadata_list
+            dp_metadata_list = {}
+            if ubatch_slices_padded is not None:
+                for idx, ubatch_slice in enumerate(ubatch_slices_padded):
+                    dp_size = self.vllm_config.parallel_config.data_parallel_size
+                    ubatch_num_tokens_across_dp = torch.tensor(
+                        [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
+                    )
+                    dp_metadata_list[idx] = DPMetadata.make(
+                        self.vllm_config.parallel_config,
+                        ubatch_slice.num_tokens,
+                        ubatch_num_tokens_across_dp,
+                    )
+            else:
+                dp_metadata_list[0] = get_forward_context().dp_metadata
+
+            # to support inequal AF,[ffn_size,ffn_size + min_size) send
+            logger.info(f"jcz is_attn_top_min_size_rank:{self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank)}")
+            if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
+                logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
+                self.afd_connector.send_dp_metadata_list(dp_metadata_list)
+            logger.info(f'jcz send dp_metadata_list in prepare input')
+
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -4935,15 +4953,6 @@ class GPUModelRunner(
                 ubatch_slices_padded, num_tokens_unpadded
             )
 
-            # send is_ubatch to ffn side
-            is_ubatch = True if ubatch_slices_padded else False
-            # to support inequal AF,[ffn_size,ffn_size + min_size) send
-            logger.info(f"jcz is_attn_top_min_size_rank:{self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank)}")
-            if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
-                logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
-                self.afd_connector.send_is_ubatch(is_ubatch)
-            logger.info(f'jcz send is_ubatch in prepare input is {is_ubatch}')
-
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),
                 set_forward_context(
@@ -4958,6 +4967,28 @@ class GPUModelRunner(
                     afd_metadata=afd_metadata,
                 ),
             ):
+                # Build dp_metadata_list
+                dp_metadata_list = {}
+                if ubatch_slices_padded is not None:
+                    for idx, ubatch_slice in enumerate(ubatch_slices_padded):
+                        dp_size = self.vllm_config.parallel_config.data_parallel_size
+                        ubatch_num_tokens_across_dp = torch.tensor(
+                            [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
+                        )
+                        dp_metadata_list[idx] = DPMetadata.make(
+                            self.vllm_config.parallel_config,
+                            ubatch_slice.num_tokens,
+                            ubatch_num_tokens_across_dp,
+                        )
+                else:
+                    dp_metadata_list[0] = get_forward_context().dp_metadata
+
+                # to support inequal AF,[ffn_size,ffn_size + min_size) send
+                logger.info(f"jcz is_attn_top_min_size_rank:{self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank)}")
+                if self.afd_connector and self.afd_connector.is_attn_top_min_size_rank(self.afd_connector.world_rank):
+                    logger.info(f'jcz self.afd_connector.world_rank in prepare input is {self.afd_connector.world_rank}')
+                    self.afd_connector.send_dp_metadata_list(dp_metadata_list)
+                logger.info(f'jcz send dp_metadata_list in prepare input')
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
