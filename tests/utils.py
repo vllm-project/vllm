@@ -1410,7 +1410,7 @@ class TestFP8Layer(torch.nn.Module):
 # TODO: Drop TestBlockFP8Layer in favour of a unified TestFP8Layer
 # after refactoring W8A8BlockFp8LinearOp.
 # https://github.com/vllm-project/vllm/issues/31818
-class TestBlockFP8Layer:
+class TestBlockFP8Layer(torch.nn.Module):
     """
     Test helper for blockwise FP8 linear operations. Creates random weights
     and scales for block scaled linear layers.
@@ -1442,17 +1442,17 @@ class TestBlockFP8Layer:
         if transpose_weights:
             self.weight = self.weight.t()
 
-        self.linear_op = init_fp8_block_scaled_linear_kernel(
+        self.kernel = init_fp8_block_scaled_linear_kernel(
             weight_quant_key=weight_quant_key,
             activation_quant_key=activation_quant_key,
             out_dtype=out_dtype,
             module_name=self.__class__.__name__,
         )
 
-    def __call__(
+    def is_quant_fp8_enabled(self) -> bool:
+        return self.kernel.input_quant_op.enabled()
+
+    def forward(
         self, y: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        return self.linear_op.apply(self, y, bias)
-
-    def is_quant_fp8_enabled(self) -> bool:
-        return self.linear_op.input_quant_op.enabled()
+        return self.kernel.apply(self, y, bias)
