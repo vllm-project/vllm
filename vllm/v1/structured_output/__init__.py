@@ -322,7 +322,7 @@ class StructuredOutputManager:
         delta_from = request.num_computed_tokens - request.num_output_placeholders
         all_token_ids = request.all_token_ids
         if self.reasoner.is_reasoning_end_streaming(
-            all_token_ids, all_token_ids[delta_from:]
+            all_token_ids, itertools.islice(all_token_ids, max(delta_from, 0), None)
         ):
             # Reasoning just ended, so we shouldn't advance til
             # next pass
