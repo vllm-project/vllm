@@ -332,6 +332,7 @@ class OpenAIServingChat(OpenAIServing):
         """
         # Streaming response
         tokenizer = self.renderer.tokenizer
+        assert tokenizer is not None
         reasoning_parser: ReasoningParser | None = None
         try:
             if self.reasoning_parser_cls:
@@ -431,8 +432,6 @@ class OpenAIServingChat(OpenAIServing):
                         trace_headers=trace_headers,
                     )
                 else:
-                    reasoning_ended = None
-
                     tok_params = request.build_tok_params(self.model_config)
                     tokenization_kwargs = tok_params.get_encode_kwargs()
 
@@ -446,9 +445,10 @@ class OpenAIServingChat(OpenAIServing):
                         priority=request.priority,
                         data_parallel_rank=data_parallel_rank,
                     )
+                    reasoning_ended = None
                     if reasoning_parser:
                         reasoning_ended = reasoning_parser.is_reasoning_end(
-                            engine_request.prompt_token_ids  # type: ignore[attr-defined]
+                            engine_request.prompt_token_ids or []  # type: ignore[attr-defined]
                         )
                         engine_request.reasoning_ended = reasoning_ended
                     generator = self.engine_client.generate(
@@ -469,8 +469,6 @@ class OpenAIServingChat(OpenAIServing):
 
         assert len(generators) == 1
         (result_generator,) = generators
-
-        assert tokenizer is not None
 
         if request.stream:
             return self.chat_completion_stream_generator(
