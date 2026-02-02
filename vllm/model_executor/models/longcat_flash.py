@@ -60,9 +60,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_loader import (
-    ModelWithCustomWeightLoading,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 from vllm.sequence import IntermediateTensors
@@ -1019,7 +1016,6 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 @ignore_torch_compile
 class LongcatFlashNgramForCausalLM(
     LongcatFlashForCausalLM,
-    ModelWithCustomWeightLoading,
 ):
     """Flash model for causal LM with N-gram embeddings."""
 
@@ -1097,13 +1093,24 @@ class LongcatFlashNgramForCausalLM(
         expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
         params_dict = dict(self.named_parameters())
+        alias_to_param: dict[str, torch.nn.Parameter] = {}
         param_aliases: dict[int, list[str]] = {}
-        for param_name, param in params_dict.items():
+        for param_name, param in self.named_parameters(remove_duplicate=False):
+            alias_to_param[param_name] = param
             param_aliases.setdefault(id(param), []).append(param_name)
+        canonical_name_by_id = {id(param): name for name, param in params_dict.items()}
 
         def _mark_loaded(param: torch.nn.Parameter) -> None:
             for alias in param_aliases.get(id(param), ()):
                 loaded_params.add(alias)
+
+        def _canonical_name(name: str) -> str | None:
+            if name in params_dict:
+                return name
+            param = alias_to_param.get(name)
+            if param is None:
+                return None
+            return canonical_name_by_id.get(id(param), name)
 
         def _insert_mla_attn(name: str) -> str | None:
             token = ".self_attn."
@@ -1117,20 +1124,25 @@ class LongcatFlashNgramForCausalLM(
             return f"{prefix}{token}{idx}.mla_attn.{tail}"
 
         def _resolve_param_name(name: str) -> str | None:
-            if name in params_dict:
-                return name
+            resolved = _canonical_name(name)
+            if resolved is not None:
+                return resolved
             if ".self_attn." in name and ".mla_attn." not in name:
                 alt = _insert_mla_attn(name)
-                if alt is not None and alt in params_dict:
-                    return alt
+                if alt is not None:
+                    resolved = _canonical_name(alt)
+                    if resolved is not None:
+                        return resolved
             if ".mla_attn." in name:
                 alt = name.replace(".mla_attn.", ".")
-                if alt in params_dict:
-                    return alt
+                resolved = _canonical_name(alt)
+                if resolved is not None:
+                    return resolved
             if ".mlp.gate." in name:
                 alt = name.replace(".mlp.gate.", ".mlp.router.")
-                if alt in params_dict:
-                    return alt
+                resolved = _canonical_name(alt)
+                if resolved is not None:
+                    return resolved
             return None
 
         for name, loaded_weight in weights:
