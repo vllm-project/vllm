@@ -289,10 +289,6 @@ class CUDAGraphWrapper:
 
             compilation_counter.num_cudagraph_captured += 1
 
-            # Save input addresses for debugging/replay verification
-            if self.is_debugging_mode:
-                entry.input_addresses = input_addresses
-
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly
             # manage the memory during cuda graph capture
