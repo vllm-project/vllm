@@ -336,21 +336,18 @@ def _is_symint_placeholder(node: fx.Node) -> bool:
     """Check if a node is a SymInt placeholder (from torch.compile + mark_dynamic)."""
     if node.op != "placeholder":
         return False
-<<<<<<< HEAD
-    
+
     if not hasattr(torch.ops.aten, "sym_size"):
         return False
-    
+
     # Handle both torch.ops.aten.sym_size.int and sym_size.default
     return node.target in (
         torch.ops.aten.sym_size,
         torch.ops.aten.sym_size.int,
         torch.ops.aten.sym_size.default,
     )
-=======
     example_value = node.meta.get("example_value")
     return example_value is not None and isinstance(example_value, torch.SymInt)
->>>>>>> e726e436c (Modify the test for scenario with torch.tensor())
 
 
 def _find_tensor_for_symint(

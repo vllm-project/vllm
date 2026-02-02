@@ -12,11 +12,10 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from vllm.compilation.backends import (
     split_graph,
 )
-from vllm.compilation.fx_utils import find_op_nodes
+from vllm.compilation.fx_utils import find_op_nodes, is_func
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
-from vllm.compilation.fx_utils import find_op_nodes, is_func
 
 
 @pytest.fixture
@@ -198,7 +197,6 @@ def test_consecutive_ops_in_split():
     assert [node.op for node in splitting_gm.graph.nodes] == ["placeholder"] + 2 * [
         "call_function"
     ] + ["output"]
-
 
 
 def test_sym_size_moved_across_split_boundary():
