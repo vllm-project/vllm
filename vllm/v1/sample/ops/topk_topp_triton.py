@@ -117,7 +117,7 @@ def _topk_topp_kernel(
                 percentile = tl.cast(k / VOCAB_SIZE * 200, tl.uint32)
                 percentile = tl.minimum(percentile, 199)
                 sigma = tl.load(PERCENTILE_TO_STD_TABLE + percentile)
-                sigma = sigma + tl.abs(sigma) * -0.25
+                sigma = sigma + tl.abs(sigma) * -0.2
                 outlier_pivot = avg_logit + std_logit * sigma
                 num_outliers = tl.zeros((), dtype=tl.uint32)
 
@@ -151,20 +151,15 @@ def _topk_topp_kernel(
                         (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC, tl.int32
                     )
                     while k_pivot == float("inf"):
-                        k_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
+                        k_pivot_0 = (max_range - min_range) * 1.0 / 3.0 + min_range
                         k_pivots_num_0 = tl.zeros((), dtype=tl.uint32)
                         min_larger_0 = float("inf")
                         num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
 
-                        k_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                        k_pivot_1 = (max_range - min_range) * 2.0 / 3.0 + min_range
                         k_pivots_num_1 = tl.zeros((), dtype=tl.uint32)
                         min_larger_1 = float("inf")
                         num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
-
-                        k_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
-                        k_pivots_num_2 = tl.zeros((), dtype=tl.uint32)
-                        min_larger_2 = float("inf")
-                        num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
 
                         # First pass: Calculate k_pivots_num and min_larger
                         for i in range(0, search_iters):
@@ -176,11 +171,9 @@ def _topk_topp_kernel(
 
                             k_pivots_num_0 += tl.sum(logits_blk2 > k_pivot_0)
                             k_pivots_num_1 += tl.sum(logits_blk2 > k_pivot_1)
-                            k_pivots_num_2 += tl.sum(logits_blk2 > k_pivot_2)
 
                             min_larger_0 = tl.minimum(min_larger_0, tl.min(logits_blk2))
                             min_larger_1 = tl.minimum(min_larger_1, tl.min(logits_blk2))
-                            min_larger_2 = tl.minimum(min_larger_2, tl.min(logits_blk2))
 
                         # Second pass: Calculate num_min_larger
                         for i in range(0, search_iters):
@@ -190,9 +183,8 @@ def _topk_topp_kernel(
                                 BUFFER_ROW + offs_n, mask=mask_n_2, other=-float("inf")
                             )
 
-                            num_min_larger_0 += tl.sum(tl.abs(logits_blk2 - min_larger_0) < 1e-15)
-                            num_min_larger_1 += tl.sum(tl.abs(logits_blk2 - min_larger_1) < 1e-15)
-                            num_min_larger_2 += tl.sum(tl.abs(logits_blk2 - min_larger_2) < 1e-15)
+                            num_min_larger_0 += tl.sum(tl.abs(logits_blk2 - min_larger_0) < 1e-9)
+                            num_min_larger_1 += tl.sum(tl.abs(logits_blk2 - min_larger_1) < 1e-9)
 
                         # Check if any of the pivots satisfy termination condition
                         if k_pivots_num_0 >= k:
@@ -207,17 +199,9 @@ def _topk_topp_kernel(
                                 k_pivots_num = k_pivots_num_1
                                 min_larger = min_larger_1
                                 num_min_larger = num_min_larger_1
-                        if k_pivots_num_2 >= k:
-                            if k_pivots_num_2 - (min_larger_2 * num_min_larger_2) < k:
-                                k_pivot = k_pivot_2
-                                k_pivots_num = k_pivots_num_2
-                                min_larger = min_larger_2
-                                num_min_larger = num_min_larger_2
                         
                         # Update range
-                        if k_pivots_num_2 > k:
-                            min_range = k_pivot_2
-                        elif k_pivots_num_1 > k:
+                        if k_pivots_num_1 > k:
                             min_range = k_pivot_1
                         elif k_pivots_num_0 > k:
                             min_range = k_pivot_0
@@ -226,11 +210,8 @@ def _topk_topp_kernel(
                             max_range = k_pivot_0
                         elif k_pivots_num_1 < k:
                             max_range = k_pivot_1
-                        elif k_pivots_num_2 < k:
-                            max_range = k_pivot_2
-
                         num_iters += 1
-                        if num_iters >= 24 or tl.abs(min_range - max_range) < 1e-15:
+                        if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-9:
                             k_pivot = (max_range + min_range) / 2.0
                 else:
                     # If top-k outlier gathering failed, search whole logit space
@@ -247,11 +228,6 @@ def _topk_topp_kernel(
                         min_larger_1 = float("inf")
                         num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
 
-                        k_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
-                        k_pivots_num_2 = tl.zeros((), dtype=tl.uint32)
-                        min_larger_2 = float("inf")
-                        num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
-
                         # First pass: Calculate k_pivots_num and min_larger
                         for i in range(0, NUM_TILES):
                             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -262,11 +238,9 @@ def _topk_topp_kernel(
 
                             k_pivots_num_0 += tl.sum(logits_blk2 > k_pivot_0)
                             k_pivots_num_1 += tl.sum(logits_blk2 > k_pivot_1)
-                            k_pivots_num_2 += tl.sum(logits_blk2 > k_pivot_2)
 
                             min_larger_0 = tl.minimum(min_larger_0, tl.min(logits_blk2))
                             min_larger_1 = tl.minimum(min_larger_1, tl.min(logits_blk2))
-                            min_larger_2 = tl.minimum(min_larger_2, tl.min(logits_blk2))
 
                         # Second pass: Calculate num_min_larger
                         for i in range(0, NUM_TILES):
@@ -276,9 +250,8 @@ def _topk_topp_kernel(
                                 LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
                             )
 
-                            num_min_larger_0 += tl.sum(tl.abs(logits_blk2 - min_larger_0) < 1e-15)
-                            num_min_larger_1 += tl.sum(tl.abs(logits_blk2 - min_larger_1) < 1e-15)
-                            num_min_larger_2 += tl.sum(tl.abs(logits_blk2 - min_larger_2) < 1e-15)
+                            num_min_larger_0 += tl.sum(tl.abs(logits_blk2 - min_larger_0) < 1e-9)
+                            num_min_larger_1 += tl.sum(tl.abs(logits_blk2 - min_larger_1) < 1e-9)
 
                         # Check if any of the pivots satisfy termination condition
                         if k_pivots_num_0 >= k:
@@ -293,17 +266,9 @@ def _topk_topp_kernel(
                                 k_pivots_num = k_pivots_num_1
                                 min_larger = min_larger_1
                                 num_min_larger = num_min_larger_1
-                        if k_pivots_num_2 >= k:
-                            if k_pivots_num_2 - (min_larger_2 * num_min_larger_2) < k:
-                                k_pivot = k_pivot_2
-                                k_pivots_num = k_pivots_num_2
-                                min_larger = min_larger_2
-                                num_min_larger = num_min_larger_2
 
                         # Update range                    
-                        if k_pivots_num_2 > k:
-                            min_range = k_pivot_2
-                        elif k_pivots_num_1 > k:
+                        if k_pivots_num_1 > k:
                             min_range = k_pivot_1
                         elif k_pivots_num_0 > k:
                             min_range = k_pivot_0
@@ -312,11 +277,9 @@ def _topk_topp_kernel(
                             max_range = k_pivot_0
                         elif k_pivots_num_1 < k:
                             max_range = k_pivot_1
-                        elif k_pivots_num_2 < k:
-                            max_range = k_pivot_2
 
                         num_iters += 1
-                        if num_iters >= 24 or tl.abs(min_range - max_range) < 1e-15:
+                        if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-9:
                             k_pivot = (max_range + min_range) / 2.0
 
                 duplicate_logit = min_larger
@@ -353,7 +316,7 @@ def _topk_topp_kernel(
 
                                 # Duplicate logit handling
                                 if num_keep < num_duplicate_logit:
-                                    duplicate_mask = tl.abs(probs_blk - duplicate_logit) < 1e-15
+                                    duplicate_mask = tl.abs(probs_blk - duplicate_logit) < 1e-9
                                     duplicate_count = tl.cumsum(duplicate_mask) + num_kept
                                     duplicate_keep_mask = (duplicate_count <= num_keep) & duplicate_mask
                                     duplicate_remove_mask = duplicate_mask & ~duplicate_keep_mask
@@ -392,7 +355,7 @@ def _topk_topp_kernel(
                                 outlier_mask = (probs_blk > min_logit) & mask_n
 
                                 # Duplicate logit handling
-                                duplicate_mask = tl.abs(probs_blk - duplicate_logit) < 1e-15
+                                duplicate_mask = tl.abs(probs_blk - duplicate_logit) < 1e-9
                                 duplicate_count = tl.cumsum(duplicate_mask) + num_kept
                                 duplicate_keep_mask = (duplicate_count <= num_keep) & duplicate_mask
                                 duplicate_remove_mask = duplicate_mask & ~duplicate_keep_mask
@@ -435,21 +398,15 @@ def _topk_topp_kernel(
                         
                         # Fifth passes: Search for p_pivot
                         while p_pivot == 1.0:
-                            p_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
+                            p_pivot_0 = (max_range - min_range) * 1.0 / 3.0 + min_range
                             p_pivots_sum_0 = 0.0
                             min_larger_0 = 1.0
                             num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
                             
-                            p_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                            p_pivot_1 = (max_range - min_range) * 2.0 / 3.0 + min_range
                             p_pivots_sum_1 = 0.0
                             min_larger_1 = 1.0
                             num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
-
-                            p_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
-                            p_pivots_sum_2 = 0.0
-                            min_larger_2 = 1.0
-                            num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
-
 
                             # First pass: Calculate p_pivots_sum and min_larger
                             for i in range(0, search_iters):
@@ -465,28 +422,16 @@ def _topk_topp_kernel(
                                 masked_larger_1 = tl.where(probs_blk > p_pivot_1, probs_blk, 1.0)
                                 min_larger_1 = tl.minimum(min_larger_1, tl.min(masked_larger_1))
 
-                                p_pivots_sum_2 += tl.sum(probs_blk * (probs_blk > p_pivot_2))
-                                masked_larger_2 = tl.where(probs_blk > p_pivot_2, probs_blk, 1.0)
-                                min_larger_2 = tl.minimum(min_larger_2, tl.min(masked_larger_2))
-
-
                             # Second pass: Calculate num_min_larger
                             for i in range(0, search_iters):
                                 offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
                                 mask_n_2 = offs_n < search_range
                                 probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0)
 
-                                num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-15)
-                                num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-15)
-                                num_min_larger_2 += tl.sum(tl.abs(probs_blk - min_larger_2) < 1e-15)
+                                num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-9)
+                                num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-9)
 
                             # Check if any of the pivots satisfy termination condition
-                            if p_pivots_sum_2 >= p:
-                                if p_pivots_sum_2 - (min_larger_2 * num_min_larger_2) < p:
-                                    p_pivot = p_pivot_2
-                                    min_larger_prob = min_larger_2
-                                    num_min_larger = num_min_larger_2
-                                    p_pivots_sum = p_pivots_sum_2
                             if p_pivots_sum_1 >= p:
                                 if p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p:
                                     p_pivot = p_pivot_1
@@ -501,9 +446,7 @@ def _topk_topp_kernel(
                                     p_pivots_sum = p_pivots_sum_0
                             
                             # Update range
-                            if p_pivots_sum_2 > p:
-                                min_range = p_pivot_2
-                            elif p_pivots_sum_1 > p:
+                            if p_pivots_sum_1 > p:
                                 min_range = p_pivot_1
                             elif p_pivots_sum_0 > p:
                                 min_range = p_pivot_0
@@ -512,11 +455,9 @@ def _topk_topp_kernel(
                                 max_range = p_pivot_0
                             elif p_pivots_sum_1 < p:
                                 max_range = p_pivot_1
-                            elif p_pivots_sum_2 < p:
-                                max_range = p_pivot_2
 
                             num_iters += 1
-                            if (max_range - min_range) < 1e-15 or num_iters >= 24:
+                            if (max_range - min_range) < 1e-9 or num_iters >= 18:
                                 p_pivot = (max_range + min_range) / 2.0
 
                         duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_logit
@@ -559,7 +500,7 @@ def _topk_topp_kernel(
                 idx = tl.cast(p * 200, tl.int32)
                 idx = tl.maximum(0, tl.minimum(idx, 199))
                 sigma = tl.load(NORMAL_CDF_TO_SIGMA_TABLE + idx)
-                sigma = sigma + tl.abs(sigma) * -0.25
+                sigma = sigma + tl.abs(sigma) * -0.2
                 outlier_pivot = avg_logit + std_logit * sigma
 
                 outlier_prob = tl.exp(outlier_pivot - max_sample) / sum_exp_logits
@@ -601,21 +542,15 @@ def _topk_topp_kernel(
                         (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC, tl.int32)
 
                     while p_pivot == 1.0:
-                        p_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
+                        p_pivot_0 = (max_range - min_range) * 1.0 / 3.0 + min_range
                         p_pivots_sum_0 = 0.0
                         min_larger_0 = 1.0
                         num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
                         
-                        p_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                        p_pivot_1 = (max_range - min_range) * 2.0 / 3.0 + min_range
                         p_pivots_sum_1 = 0.0
                         min_larger_1 = 1.0
                         num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
-
-                        p_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
-                        p_pivots_sum_2 = 0.0
-                        min_larger_2 = 1.0
-                        num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
-
 
                         # First pass: Calculate p_pivots_sum and min_larger
                         for i in range(0, search_iters):
@@ -631,28 +566,16 @@ def _topk_topp_kernel(
                             masked_larger_1 = tl.where(probs_blk > p_pivot_1, probs_blk, 1.0)
                             min_larger_1 = tl.minimum(min_larger_1, tl.min(masked_larger_1))
 
-                            p_pivots_sum_2 += tl.sum(probs_blk * (probs_blk > p_pivot_2))
-                            masked_larger_2 = tl.where(probs_blk > p_pivot_2, probs_blk, 1.0)
-                            min_larger_2 = tl.minimum(min_larger_2, tl.min(masked_larger_2))
-
-
                         # Second pass: Calculate num_min_larger
                         for i in range(0, search_iters):
                             offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
                             mask_n_2 = offs_n < search_range
                             probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0)
 
-                            num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-15)
-                            num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-15)
-                            num_min_larger_2 += tl.sum(tl.abs(probs_blk - min_larger_2) < 1e-15)
+                            num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-9)
+                            num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-9)
 
                         # Check if any of the pivots satisfy termination condition
-                        if p_pivots_sum_2 >= p:
-                            if p_pivots_sum_2 - (min_larger_2 * num_min_larger_2) < p:
-                                p_pivot = p_pivot_2
-                                min_larger_prob = min_larger_2
-                                num_min_larger = num_min_larger_2
-                                p_pivots_sum = p_pivots_sum_2
                         if p_pivots_sum_1 >= p:
                             if p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p:
                                 p_pivot = p_pivot_1
@@ -667,9 +590,7 @@ def _topk_topp_kernel(
                                 p_pivots_sum = p_pivots_sum_0
                         
                         # Update range
-                        if p_pivots_sum_2 > p:
-                            min_range = p_pivot_2
-                        elif p_pivots_sum_1 > p:
+                        if p_pivots_sum_1 > p:
                             min_range = p_pivot_1
                         elif p_pivots_sum_0 > p:
                             min_range = p_pivot_0
@@ -678,11 +599,9 @@ def _topk_topp_kernel(
                             max_range = p_pivot_0
                         elif p_pivots_sum_1 < p:
                             max_range = p_pivot_1
-                        elif p_pivots_sum_2 < p:
-                            max_range = p_pivot_2
 
                         num_iters += 1
-                        if (max_range - min_range) < 1e-15 or num_iters >= 24:
+                        if (max_range - min_range) < 1e-9 or num_iters >= 18:
                             p_pivot = (max_range + min_range) / 2.0
                 else:
                     # Re-populate the buffer with full softmax probabilities
@@ -696,20 +615,15 @@ def _topk_topp_kernel(
                         tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n)
                         
                     while p_pivot == 1.0:
-                        p_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
+                        p_pivot_0 = (max_range - min_range) * 1.0 / 3.0 + min_range
                         p_pivots_sum_0 = 0.0
                         min_larger_0 = 1.0
                         num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
                         
-                        p_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                        p_pivot_1 = (max_range - min_range) * 2.0 / 3.0 + min_range
                         p_pivots_sum_1 = 0.0
                         min_larger_1 = 1.0
                         num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
-
-                        p_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
-                        p_pivots_sum_2 = 0.0
-                        min_larger_2 = 1.0
-                        num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
 
 
                         # First pass: Calculate p_pivots_sum and min_larger
@@ -726,28 +640,16 @@ def _topk_topp_kernel(
                             masked_larger_1 = tl.where(probs_blk > p_pivot_1, probs_blk, 1.0)
                             min_larger_1 = tl.minimum(min_larger_1, tl.min(masked_larger_1))
 
-                            p_pivots_sum_2 += tl.sum(probs_blk * (probs_blk > p_pivot_2))
-                            masked_larger_2 = tl.where(probs_blk > p_pivot_2, probs_blk, 1.0)
-                            min_larger_2 = tl.minimum(min_larger_2, tl.min(masked_larger_2))
-
-
                         # Second pass: Calculate num_min_larger
                         for i in range(0, NUM_TILES):
                             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                             mask_n = offs_n < VOCAB_SIZE
                             probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n, other=0.0)
 
-                            num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-15)
-                            num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-15)
-                            num_min_larger_2 += tl.sum(tl.abs(probs_blk - min_larger_2) < 1e-15)
+                            num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-9)
+                            num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-9)
 
                         # Check if any of the pivots satisfy termination condition
-                        if p_pivots_sum_2 >= p:
-                            if p_pivots_sum_2 - (min_larger_2 * num_min_larger_2) < p:
-                                p_pivot = p_pivot_2
-                                min_larger_prob = min_larger_2
-                                num_min_larger = num_min_larger_2
-                                p_pivots_sum = p_pivots_sum_2
                         if p_pivots_sum_1 >= p:
                             if p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p:
                                 p_pivot = p_pivot_1
@@ -762,9 +664,7 @@ def _topk_topp_kernel(
                                 p_pivots_sum = p_pivots_sum_0
                         
                         # Update range
-                        if p_pivots_sum_2 > p:
-                            min_range = p_pivot_2
-                        elif p_pivots_sum_1 > p:
+                        if p_pivots_sum_1 > p:
                             min_range = p_pivot_1
                         elif p_pivots_sum_0 > p:
                             min_range = p_pivot_0
@@ -773,11 +673,9 @@ def _topk_topp_kernel(
                             max_range = p_pivot_0
                         elif p_pivots_sum_1 < p:
                             max_range = p_pivot_1
-                        elif p_pivots_sum_2 < p:
-                            max_range = p_pivot_2
 
                         num_iters += 1
-                        if (max_range - min_range) < 1e-15 or num_iters >= 24:
+                        if (max_range - min_range) < 1e-9 or num_iters >= 18:
                             p_pivot = (max_range + min_range) / 2.0
 
                 duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_logit
@@ -798,7 +696,7 @@ def _topk_topp_kernel(
 
                 # Duplicate logit handling
                 if num_keep < num_duplicate_logit:
-                    duplicate_mask = (tl.abs(logits_blk - duplicate_logit) < 1e-15) & mask_n
+                    duplicate_mask = (tl.abs(logits_blk - duplicate_logit) < 1e-9) & mask_n
                     duplicate_count = tl.cumsum(duplicate_mask) + num_kept
                     duplicate_keep_mask = (duplicate_count <= num_duplicate_logit) & duplicate_mask
                     duplicate_remove_mask = duplicate_mask & ~duplicate_keep_mask
