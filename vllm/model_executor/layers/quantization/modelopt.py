@@ -913,7 +913,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for FlashInfer TRTLLM FP8 MoE Backend."
             )
-        assert isinstance(self.moe_kernel, mk.FusedMoEKernelMonolithic)
+        assert isinstance(self.moe_kernel, mk.FusedMoEKMonolithicKernel)
         return self.moe_kernel(
             x,
             layer.w13_weight,
@@ -1437,7 +1437,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(self.moe_kernel, mk.FusedMoEKernelMonolithic)
+        assert isinstance(self.moe_kernel, mk.FusedMoEKMonolithicKernel)
         return self.moe_kernel(
             x,
             layer.w13_weight,

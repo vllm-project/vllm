@@ -216,7 +216,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             quant_config=quant_config,
         )
 
-        kernel = mk.FusedMoEKernelModular.make_mk(
+        kernel = mk.FusedMoEKernel.make_mk(
             MoEPrepareAndFinalizeNoEPMonolithic(),
             FlashInferTrtLlmFp8Experts(
                 moe_config=td.layer.moe,
@@ -318,7 +318,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             routing_method=RoutingMethodType.TopK,
         )
 
-        kernel = mk.FusedMoEKernelModular.make_mk(
+        kernel = mk.FusedMoEKernel.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
                 moe_config=moe_config,

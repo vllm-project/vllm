@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
     is_valid_flashinfer_cutlass_fused_moe,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernelModular
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
@@ -105,7 +105,7 @@ def test_flashinfer_fp4_moe_no_graph(
             routing_method=RoutingMethodType.TopK,
         )
 
-        flashinfer_experts = FusedMoEKernelModular(
+        flashinfer_experts = FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
         )

@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernelModular
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
@@ -106,7 +106,7 @@ def batched_moe(
         a2_scale=a2_scale,
     )
 
-    fused_experts = FusedMoEKernelModular(
+    fused_experts = FusedMoEModularKernel(
         BatchedPrepareAndFinalize(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),
@@ -147,7 +147,7 @@ def naive_batched_moe(
         a2_scale=a2_scale,
     )
 
-    fused_experts = FusedMoEKernelModular(
+    fused_experts = FusedMoEModularKernel(
         BatchedPrepareAndFinalize(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),

@@ -12,7 +12,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize,
     BatchedTritonExperts,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernelModular
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.utils.deep_gemm import calc_diff, is_deep_gemm_supported
 
 from .test_deepgemm import make_block_quant_fp8_weights
@@ -74,7 +74,7 @@ def test_batched_deepgemm_vs_triton(
         quant_config=quant_config,
         moe_config=make_dummy_moe_config(),
     )
-    mk_triton = FusedMoEKernelModular(prep_finalize, triton_experts)
+    mk_triton = FusedMoEModularKernel(prep_finalize, triton_experts)
 
     out_triton = mk_triton(
         hidden_states=a,
@@ -93,7 +93,7 @@ def test_batched_deepgemm_vs_triton(
         quant_config=quant_config,
         moe_config=make_dummy_moe_config(),
     )
-    mk_deepgemm = FusedMoEKernelModular(prep_finalize, deepgemm_experts)
+    mk_deepgemm = FusedMoEModularKernel(prep_finalize, deepgemm_experts)
 
     out_deepgemm = mk_deepgemm(
         hidden_states=a,

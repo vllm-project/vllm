@@ -89,7 +89,7 @@ def test_cutlass_fp4_moe_no_graph(
             w2_scale=w2_blockscale,
         )
 
-        kernel = mk.FusedMoEKernelModular.make_mk(
+        kernel = mk.FusedMoEKernel.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp4(
                 moe_config=make_dummy_moe_config(),

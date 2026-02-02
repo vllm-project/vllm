@@ -575,7 +575,7 @@ def make_modular_kernel(
     config: Config,
     vllm_config: VllmConfig,
     quant_config: FusedMoEQuantConfig,
-) -> mk.FusedMoEKernelModular:
+) -> mk.FusedMoEModularKernel:
     def next_power_of_2(x):
         import math
 
@@ -620,7 +620,7 @@ def make_modular_kernel(
         config.N,
     )
 
-    modular_kernel = mk.FusedMoEKernelModular.make_mk(
+    modular_kernel = mk.FusedMoEKernel.make_mk(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
     )

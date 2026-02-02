@@ -63,7 +63,7 @@ logger = init_logger(__name__)
 #   Some FusedMoEExpertsModular implementations may choose to do
 #   the weight application and/or reduction. The class communicates this
 #   to [Finalize] via a TopKWeightAndReduce object.
-# * FusedMoEKernelModular - an interface class that combines a
+# * FusedMoEModularKernel - an interface class that combines a
 #   FusedMoEPrepareAndFinalizeModular and a FusedMoEExpertsModular to
 #   provide the standard fused MoE kernel interface.
 # * TopKWeightAndReduce - A TopKWeightAndReduce implementation chosen
@@ -986,7 +986,7 @@ class FusedMoEKernel(torch.nn.Module):
         if isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
         ) and isinstance(fused_experts, FusedMoEExpertsMonolithic):
-            return FusedMoEKernelMonolithic(
+            return FusedMoEKMonolithicKernel(
                 prepare_finalize,
                 fused_experts,
                 shared_experts,
@@ -995,7 +995,7 @@ class FusedMoEKernel(torch.nn.Module):
         elif isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeModular
         ) and isinstance(fused_experts, FusedMoEExpertsModular):
-            return FusedMoEKernelModular(
+            return FusedMoEModularKernel(
                 prepare_finalize,
                 fused_experts,
                 shared_experts,
@@ -1030,7 +1030,7 @@ class FusedMoEKernel(torch.nn.Module):
 
 
 @final
-class FusedMoEKernelModular(FusedMoEKernel):
+class FusedMoEModularKernel(FusedMoEKernel):
     """
     This class combines a FusedMoEPrepareAndFinalizeModular instance and
     a FusedMoEExpertsModular to provide an interface that
@@ -1092,7 +1092,7 @@ class FusedMoEKernelModular(FusedMoEKernel):
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
         # Force worst-case allocation in profiling run for
-        # "mk.FusedMoEKernelModular.Standard" formats where this is only bounded
+        # "mk.FusedMoEModularKernel.Standard" formats where this is only bounded
         # by `VLLM_FUSED_MOE_CHUNK_SIZE` and may not be seen during profiling with
         # DP+EP due to the random token routing.
         is_profile_run = (
@@ -1563,7 +1563,7 @@ class FusedMoEKernelModular(FusedMoEKernel):
 
 
 @final
-class FusedMoEKernelMonolithic(FusedMoEKernel):
+class FusedMoEKMonolithicKernel(FusedMoEKernel):
     def forward(
         self,
         hidden_states: torch.Tensor,

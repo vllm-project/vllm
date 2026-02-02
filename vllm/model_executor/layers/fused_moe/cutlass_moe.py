@@ -1149,7 +1149,7 @@ def cutlass_moe_w4a8_fp8(
 
     num_experts = global_num_experts if global_num_experts != -1 else w1_q.size(0)
 
-    fn = mk.FusedMoEKernelModular.make_mk(
+    fn = mk.FusedMoEKernel.make_mk(
         MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsW4A8Fp8(
             out_dtype=a.dtype,
