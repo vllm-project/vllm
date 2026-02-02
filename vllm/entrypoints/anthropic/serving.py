@@ -117,10 +117,25 @@ class AnthropicServingMessages(OpenAIServingChat):
                     if block.type == "text" and block.text:
                         content_parts.append({"type": "text", "text": block.text})
                     elif block.type == "image" and block.source:
+                        # Handle Anthropic image format:
+                        # - base64: {"type": "base64", "media_type": "...", "data": "..."}
+                        # - url: {"type": "url", "url": "..."}
+                        source_type = block.source.get("type", "")
+                        if source_type == "url":
+                            # URL-based image
+                            image_url = block.source.get("url", "")
+                        elif source_type == "base64":
+                            # Base64-encoded image - construct data URL
+                            media_type = block.source.get("media_type", "image/jpeg")
+                            base64_data = block.source.get("data", "")
+                            image_url = f"data:{media_type};base64,{base64_data}"
+                        else:
+                            # Fallback for legacy format where data contains the URL directly
+                            image_url = block.source.get("data", "")
                         content_parts.append(
                             {
                                 "type": "image_url",
-                                "image_url": {"url": block.source.get("data", "")},
+                                "image_url": {"url": image_url},
                             }
                         )
                     elif block.type == "tool_use":
