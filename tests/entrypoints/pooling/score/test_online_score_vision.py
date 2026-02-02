@@ -33,6 +33,11 @@ documents = [
     },
 ]
 
+TEXT_VS_TEXT = 0.10040374100208282
+TEXT_VS_IMAGE = 0.74134361743927
+TEXT_VS_TEXT_PLUS_IMAGE = 0.5298863053321838
+TOL = 0.05
+
 
 @pytest.fixture(scope="module")
 def server():
@@ -65,7 +70,8 @@ def test_score_api_queries_str_documents_str(server: RemoteOpenAIServer):
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.data[0].score == pytest.approx(0.10040374100208282, rel=0.1)
+    assert score.usage.prompt_tokens == 81
+    assert score.data[0].score == pytest.approx(TEXT_VS_TEXT, rel=TOL)
 
 
 def test_score_api_queries_str_documents_text_content(server: RemoteOpenAIServer):
@@ -83,7 +89,8 @@ def test_score_api_queries_str_documents_text_content(server: RemoteOpenAIServer
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.data[0].score == pytest.approx(0.10418888181447983, rel=0.1)
+    assert score.usage.prompt_tokens == 81
+    assert score.data[0].score == pytest.approx(TEXT_VS_TEXT, rel=TOL)
 
 
 def test_score_api_queries_str_documents_image_url_content(server: RemoteOpenAIServer):
@@ -101,7 +108,8 @@ def test_score_api_queries_str_documents_image_url_content(server: RemoteOpenAIS
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.data[0].score == pytest.approx(0.74134361743927, rel=0.1)
+    assert score.usage.prompt_tokens == 99
+    assert score.data[0].score == pytest.approx(TEXT_VS_IMAGE, rel=TOL)
 
 
 def test_score_api_queries_str_documents_image_base64_content(
@@ -121,7 +129,8 @@ def test_score_api_queries_str_documents_image_base64_content(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.data[0].score == pytest.approx(0.74134361743927, rel=0.1)
+    assert score.usage.prompt_tokens == 99
+    assert score.data[0].score == pytest.approx(TEXT_VS_IMAGE, rel=TOL)
 
 
 def test_score_api_queries_str_documents_image_url_plus_text_content(
@@ -141,7 +150,8 @@ def test_score_api_queries_str_documents_image_url_plus_text_content(
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 1
-    assert score.data[0].score == pytest.approx(0.5200872421264648, rel=0.1)
+    assert score.usage.prompt_tokens == 108
+    assert score.data[0].score == pytest.approx(TEXT_VS_TEXT_PLUS_IMAGE, rel=TOL)
 
 
 def test_score_api_queries_str_documents_list(server: RemoteOpenAIServer):
@@ -164,10 +174,11 @@ def test_score_api_queries_str_documents_list(server: RemoteOpenAIServer):
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 4
-    assert score.data[0].score == pytest.approx(0.10040374100208282, rel=0.1)
-    assert score.data[1].score == pytest.approx(0.10418888181447983, rel=0.1)
-    assert score.data[2].score == pytest.approx(0.74134361743927, rel=0.1)
-    assert score.data[3].score == pytest.approx(0.5200872421264648, rel=0.1)
+    assert score.usage.prompt_tokens == 369
+    assert score.data[0].score == pytest.approx(TEXT_VS_TEXT, rel=TOL)
+    assert score.data[1].score == pytest.approx(TEXT_VS_TEXT, rel=TOL)
+    assert score.data[2].score == pytest.approx(TEXT_VS_IMAGE, rel=TOL)
+    assert score.data[3].score == pytest.approx(TEXT_VS_TEXT_PLUS_IMAGE, rel=TOL)
 
 
 def test_rerank_api_queries_str_documents_list(server: RemoteOpenAIServer):
@@ -190,7 +201,15 @@ def test_rerank_api_queries_str_documents_list(server: RemoteOpenAIServer):
     assert rerank.id is not None
     assert rerank.model is not None
     assert rerank.usage is not None
-    assert len(rerank.results) == 3
+    assert len(rerank.results) == 4
+
+    rerank.results.sort(key=lambda x: x.index)
+    assert rerank.results[0].relevance_score == pytest.approx(TEXT_VS_TEXT, rel=TOL)
+    assert rerank.results[1].relevance_score == pytest.approx(TEXT_VS_TEXT, rel=TOL)
+    assert rerank.results[2].relevance_score == pytest.approx(TEXT_VS_IMAGE, rel=TOL)
+    assert rerank.results[3].relevance_score == pytest.approx(
+        TEXT_VS_TEXT_PLUS_IMAGE, rel=TOL
+    )
 
 
 def test_score_api_queries_list_documents_list(server: RemoteOpenAIServer):
@@ -213,7 +232,8 @@ def test_score_api_queries_list_documents_list(server: RemoteOpenAIServer):
     assert score.id is not None
     assert score.data is not None
     assert len(score.data) == 4
-    assert score.data[0].score == pytest.approx(0.10040374100208282, rel=0.1)
-    assert score.data[1].score == pytest.approx(0.10418888181447983, rel=0.1)
-    assert score.data[2].score == pytest.approx(0.74134361743927, rel=0.1)
-    assert score.data[3].score == pytest.approx(0.5200872421264648, rel=0.1)
+    assert score.usage.prompt_tokens == 369
+    assert score.data[0].score == pytest.approx(TEXT_VS_TEXT, rel=TOL)
+    assert score.data[1].score == pytest.approx(TEXT_VS_TEXT, rel=TOL)
+    assert score.data[2].score == pytest.approx(TEXT_VS_IMAGE, rel=TOL)
+    assert score.data[3].score == pytest.approx(TEXT_VS_TEXT_PLUS_IMAGE, rel=TOL)

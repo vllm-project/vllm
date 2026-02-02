@@ -272,7 +272,6 @@ class ServingScores(OpenAIServing):
         data_2: list[ScoreData],
     ) -> tuple[str, TokensPrompt]:
         model_config = self.model_config
-
         full_prompt, engine_prompt = get_score_prompt(
             model_config=model_config,
             data_1=data_1,
@@ -330,7 +329,7 @@ class ServingScores(OpenAIServing):
                             f"MultiModalParam is not supported for "
                             f"{self.model_config.architecture}"
                         )
-                    out.append(d.get("content"))
+                    out.append(d.get("content", []))
             return out
 
         data_1 = _validate_mm_score_input(data_1)
@@ -406,15 +405,6 @@ class ServingScores(OpenAIServing):
 
         request_id = f"rerank-{self._base_request_id(raw_request)}"
         documents = request.documents
-        top_n = (
-            request.top_n
-            if request.top_n > 0
-            else (
-                len(documents)
-                if isinstance(documents, list)
-                else len(documents["content"])
-            )
-        )
 
         try:
             final_res_batch = await self._run_scoring(
@@ -426,6 +416,8 @@ class ServingScores(OpenAIServing):
             )
             if isinstance(final_res_batch, ErrorResponse):
                 return final_res_batch
+
+            top_n = request.top_n if request.top_n > 0 else len(final_res_batch)
 
             return self.request_output_to_rerank_response(
                 final_res_batch,
@@ -480,22 +472,29 @@ class ServingScores(OpenAIServing):
         final_res_batch: list[PoolingRequestOutput],
         request_id: str,
         model_name: str,
-        documents: list[str] | ScoreMultiModalParam,
+        documents: ScoreInputs,
         top_n: int,
     ) -> RerankResponse:
         """
         Convert the output of do_rank to a RerankResponse
         """
+
+        if not isinstance(documents, list):
+            documents = [documents]
+
         results: list[RerankResult] = []
         num_prompt_tokens = 0
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
 
+            if isinstance(documents[idx], str):
+                document = RerankDocument(text=documents[idx])
+            else:
+                document = RerankDocument(multi_modal=documents[idx].get("content", []))
+
             result = RerankResult(
                 index=idx,
-                document=RerankDocument(text=documents[idx])
-                if isinstance(documents, list)
-                else RerankDocument(multi_modal=documents["content"][idx]),
+                document=document,
                 relevance_score=classify_res.outputs.score,
             )
             results.append(result)
