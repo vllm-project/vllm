@@ -1208,7 +1208,7 @@ class FlashInferImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashInferMetadata,
+        slot_mapping: torch.Tensor,
     ) -> None:
         """Perform KV cache update separately from attention forward pass.
 
@@ -1220,7 +1220,7 @@ class FlashInferImpl(AttentionImpl):
             key: Key tensor with shape [num_tokens, num_kv_heads, head_size].
             value: Value tensor with shape [num_tokens, num_kv_heads, head_size].
             kv_cache: The KV cache tensor.
-            attn_metadata: Attention metadata containing slot_mapping.
+            slot_mapping: Slot mapping tensor from forward context.
         """
         # Skip if sharing KV cache with an earlier attention layer
         if self.kv_sharing_target_layer_name is not None:
@@ -1236,7 +1236,7 @@ class FlashInferImpl(AttentionImpl):
             value,
             kv_cache[:, 0],
             kv_cache[:, 1],
-            attn_metadata.slot_mapping,
+            slot_mapping,
             self.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,

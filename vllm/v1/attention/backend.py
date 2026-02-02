@@ -717,7 +717,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: T,
+        slot_mapping: torch.Tensor,
     ) -> None:
         """Perform KV cache update separately from attention forward pass.
 
@@ -731,16 +731,13 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
             key: Key tensor with shape [num_tokens, num_kv_heads, head_size].
             value: Value tensor with shape [num_tokens, num_kv_heads, head_size].
             kv_cache: The KV cache tensor.
-            attn_metadata: Attention metadata containing slot_mapping, or
-                           slot_mapping tensor directly.
+            slot_mapping: Slot mapping tensor from forward context.
         """
         # Skip if sharing KV cache with an earlier attention layer
         if self.kv_sharing_target_layer_name is not None:
             return
 
         key_cache, value_cache = kv_cache.unbind(0)
-
-        slot_mapping = attn_metadata.slot_mapping
 
         # Default implementation using the standard reshape_and_cache_flash op.
         # NOTE(woosuk): Here, key and value are padded while slot_mapping is
