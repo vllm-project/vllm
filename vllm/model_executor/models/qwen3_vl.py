@@ -1015,6 +1015,25 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             video_items.append(video_item)
         return video_items
 
+    def _calculate_patch_size(self, patches: int) -> tuple[int, int]:
+        vision_config = self.info.get_hf_config().vision_config
+        merge_size = vision_config.spatial_merge_size
+
+        assert patches % (merge_size * merge_size) == 0, (
+            f"Qwen3-VL: Number of patches ({patches}) must be multiple of "
+            f"merge_size squared ({merge_size}^2)"
+        )
+        h_patches = merge_size
+        w_patches = patches // merge_size
+        return h_patches, w_patches
+
+    def _get_img_feature_dim(self) -> int:
+        vision_config = self.info.get_hf_config().vision_config
+        in_channels = vision_config.in_channels
+        temporal_patch_size = vision_config.temporal_patch_size
+        patch_size = vision_config.patch_size
+        return in_channels * temporal_patch_size * patch_size * patch_size
+
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
     def _call_hf_processor(
@@ -1517,7 +1536,7 @@ class Qwen3VLForConditionalGeneration(
     def _process_image_input(
         self,
         image_input: Qwen2_5_VLImageInputs,
-        cudagraph_dispatcher: Any | None = None,
+        mm_cudagraph_manager: Any | None = None,
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
@@ -1538,7 +1557,7 @@ class Qwen3VLForConditionalGeneration(
                         pixel_values,
                         grid_thw_list,
                         rope_type="rope_3d",
-                        cudagraph_dispatcher=cudagraph_dispatcher,
+                        mm_cudagraph_manager=mm_cudagraph_manager,
                     )
                 else:
                     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
@@ -1551,7 +1570,7 @@ class Qwen3VLForConditionalGeneration(
     def _process_video_input(
         self,
         video_input: Qwen2_5_VLVideoInputs,
-        cudagraph_dispatcher: Any | None = None,
+        mm_cudagraph_manager: Any | None = None,
     ) -> tuple[torch.Tensor, ...]:
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
@@ -1573,7 +1592,7 @@ class Qwen3VLForConditionalGeneration(
                         pixel_values_videos,
                         grid_thw_list,
                         rope_type="rope_3d",
-                        cudagraph_dispatcher=cudagraph_dispatcher,
+                        mm_cudagraph_manager=mm_cudagraph_manager,
                     )
                 else:
                     video_embeds = self.visual(
@@ -2022,7 +2041,7 @@ class Qwen3VLForConditionalGeneration(
         return torch.from_numpy(llm_positions), mrope_position_delta
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
-        cudagraph_dispatcher = kwargs.pop("cudagraph_dispatcher", None)
+        mm_cudagraph_manager = kwargs.pop("mm_cudagraph_manager", None)
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return None
@@ -2037,7 +2056,7 @@ class Qwen3VLForConditionalGeneration(
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 image_embeddings = self._process_image_input(
-                    multimodal_input, cudagraph_dispatcher=cudagraph_dispatcher
+                    multimodal_input, mm_cudagraph_manager=mm_cudagraph_manager
                 )
                 if self.is_multimodal_pruning_enabled:
                     image_embeddings = self._postprocess_image_embeds_evs(
@@ -2046,7 +2065,7 @@ class Qwen3VLForConditionalGeneration(
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
                 video_embeddings = self._process_video_input(
-                    multimodal_input, cudagraph_dispatcher=cudagraph_dispatcher
+                    multimodal_input, mm_cudagraph_manager=mm_cudagraph_manager
                 )
                 if self.is_multimodal_pruning_enabled:
                     video_embeddings = self._postprocess_video_embeds_evs(

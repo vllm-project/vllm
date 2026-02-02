@@ -25,7 +25,7 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.worker.mm_cudagraph import MMEncoderCudagraphManager
 
 logger = init_logger(__name__)
 
@@ -394,7 +394,7 @@ def run_dp_sharded_mrope_vision_model(
     grid_thw_list: list[list[int]],
     *,
     rope_type: Literal["rope_3d", "rope_2d"],
-    cudagraph_dispatcher: CudagraphDispatcher | None = None,
+    mm_cudagraph_manager: MMEncoderCudagraphManager | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Run a vision model with data parallelism (DP) sharding.
     The function will shard the input image tensor on the
@@ -470,12 +470,10 @@ def run_dp_sharded_mrope_vision_model(
         embed_dim_reduction_factor = (
             vision_model.merge_kernel_size[0] * vision_model.merge_kernel_size[1]
         )
-        merge_size = vision_model.merge_kernel_size[0]
     else:
         embed_dim_reduction_factor = (
             vision_model.spatial_merge_size * vision_model.spatial_merge_size
         )
-        merge_size = vision_model.spatial_merge_size
 
     # Find the max length across all ranks
     # The output embedding of every DP rank has to be
@@ -484,40 +482,24 @@ def run_dp_sharded_mrope_vision_model(
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
-    vllm_config = get_current_vllm_config()
-
     # Context setup
-    if cudagraph_dispatcher is not None:
-        dispatcher = cudagraph_dispatcher
-    else:
-        dispatcher = CudagraphDispatcher(vllm_config)
+    vllm_config = get_current_vllm_config()
     cudagraph_runtime_mode = CUDAGraphMode.NONE
     batch_descriptor = None
 
-    if (
-        vllm_config
-        and vllm_config.compilation_config.mm_encoder_cudagraph_capture_sizes
-    ):
-        current_input_len = pixel_values_local.shape[0]
-        cudagraph_runtime_mode, batch_descriptor = dispatcher.dispatch(
-            num_tokens=current_input_len,
-            uniform_decode=False,
-            has_lora=False,
-            disable_full=False,
-            is_mm_encoder=True,
-        )
-        target_input_len = batch_descriptor.num_tokens
-
-        # Pad pixel_values_local for CUDA graph if needed
-        if current_input_len < target_input_len:
-            padding_size = target_input_len - current_input_len
-            padding = torch.zeros(
-                (padding_size, pixel_values_local.shape[1]),
-                device=pixel_values_local.device,
-                dtype=pixel_values_local.dtype,
-            )
-            pixel_values_local = torch.cat([pixel_values_local, padding], dim=0)
-            local_grid_thw_list.append([1, merge_size, padding_size // merge_size])
+    if mm_cudagraph_manager is not None:
+        mm_groups: dict[str, torch.Tensor | list] = {
+            "pixel_values": pixel_values_local,
+            "image_grid_thw": local_grid_thw_list,
+        }
+        (
+            cudagraph_runtime_mode,
+            batch_descriptor,
+            _,
+            mm_groups,
+        ) = mm_cudagraph_manager.dispatch_and_pad_mm_input(mm_groups)
+        pixel_values_local = mm_groups["pixel_values"]
+        local_grid_thw_list = mm_groups["image_grid_thw"]
 
     with set_forward_context(
         None,

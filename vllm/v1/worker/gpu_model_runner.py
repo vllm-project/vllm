@@ -171,6 +171,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.mm_cudagraph import MMEncoderCudagraphManager
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -553,15 +554,6 @@ class GPUModelRunner(
             self.cudagraph_batch_sizes = sorted(
                 self.compilation_config.cudagraph_capture_sizes
             )
-        # self.mm_encoder_cudagraph_batch_sizes sorts in ascending order.
-        self.mm_encoder_cudagraph_batch_sizes: list[int] | None = None
-        if (
-            self.compilation_config.mm_encoder_cudagraph_capture_sizes
-            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            self.mm_encoder_cudagraph_batch_sizes = sorted(
-                self.compilation_config.mm_encoder_cudagraph_capture_sizes
-            )
 
         # Cache the device properties.
         self._init_device_properties()
@@ -659,6 +651,18 @@ class GPUModelRunner(
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
+
+        # MM encoder CUDA graph manager for ViT piecewise CUDA graph.
+        self.mm_cudagraph_manager: MMEncoderCudagraphManager | None = None
+        if self.supports_mm_inputs:
+            processor = self.mm_registry.create_processor(self.model_config)
+            dummy_inputs_builder = processor.dummy_inputs
+            self.mm_cudagraph_manager = MMEncoderCudagraphManager(
+                self.vllm_config,
+                self.cudagraph_dispatcher,
+                self.device,
+                dummy_inputs_builder,
+            )
 
         self.mm_budget = (
             MultiModalBudget(self.vllm_config, self.mm_registry)
@@ -2430,72 +2434,26 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
-                is_vit_dp_mode = (
-                    getattr(
-                        self.model_config.multimodal_config, "mm_encoder_tp_mode", None
-                    )
-                    == "data"
-                    and self.parallel_config.tensor_parallel_size > 1
-                )
+                mm_mgr = self.mm_cudagraph_manager
+                is_vit_dp_mode = mm_mgr.is_vit_dp_mode if mm_mgr else False
+
                 if not is_vit_dp_mode:
                     original_num_imgs = -1
-                    padded_num_tokens = -1
 
                     # Default values for non-mm_encoder cudagraph case
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
                     batch_descriptor = None
                     if (
-                        self.mm_encoder_cudagraph_batch_sizes
+                        mm_mgr is not None
+                        and mm_mgr.enabled
                         and "pixel_values" in mm_kwargs_group
                     ):
-                        pixel_values = cast(
-                            torch.Tensor, mm_kwargs_group["pixel_values"]
-                        )
-                        num_tokens = pixel_values.shape[0]
-
-                        # get batch_descriptor from dispatcher
-                        cudagraph_runtime_mode, batch_descriptor = (
-                            self.cudagraph_dispatcher.dispatch(
-                                num_tokens=num_tokens,
-                                uniform_decode=False,
-                                has_lora=False,
-                                disable_full=False,
-                                is_mm_encoder=True,
-                            )
-                        )
-                        padded_num_tokens = batch_descriptor.num_tokens
-
-                        if padded_num_tokens > num_tokens:
-                            padding_amount = padded_num_tokens - num_tokens
-                            padding_tensor = torch.zeros(
-                                (padding_amount, pixel_values.shape[1]),
-                                dtype=pixel_values.dtype,
-                                device=pixel_values.device,
-                            )
-                            mm_kwargs_group["pixel_values"] = torch.cat(
-                                [pixel_values, padding_tensor], dim=0
-                            )
-
-                            # Update image_grid_thw to account for padding
-                            if "image_grid_thw" in mm_kwargs_group:
-                                image_grid_thw = cast(
-                                    torch.Tensor, mm_kwargs_group["image_grid_thw"]
-                                )
-                                original_num_imgs = image_grid_thw.shape[0]
-
-                                # Treat padding as a new virtual image.
-                                # Assuming a fixed patch size where height = merge_size
-                                h_patches, w_patches = self._get_dummy_h_w_patches(
-                                    padding_amount
-                                )
-                                padding_grid_info = torch.tensor(
-                                    [[1, h_patches, w_patches]],
-                                    dtype=image_grid_thw.dtype,
-                                    device=image_grid_thw.device,
-                                )
-                                mm_kwargs_group["image_grid_thw"] = torch.cat(
-                                    [image_grid_thw, padding_grid_info], dim=0
-                                )
+                        (
+                            cudagraph_runtime_mode,
+                            batch_descriptor,
+                            original_num_imgs,
+                            mm_kwargs_group,
+                        ) = mm_mgr.dispatch_and_pad_mm_input(mm_kwargs_group)
 
                     with (
                         set_forward_context(
@@ -2519,9 +2477,7 @@ class GPUModelRunner(
                             should_time, mm_lora_refs, current_item_idx, num_items
                         ),
                     ):
-                        mm_kwargs_group["cudagraph_dispatcher"] = (
-                            self.cudagraph_dispatcher
-                        )
+                        mm_kwargs_group["mm_cudagraph_manager"] = mm_mgr
                         curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -4666,43 +4622,6 @@ class GPUModelRunner(
             yield
             inputs_embeds.fill_(0)
 
-    def _get_dummy_h_w_patches(self, patches: int):
-        vision_config = self.model_config.hf_config.vision_config
-        if hasattr(vision_config, "spatial_merge_size"):
-            merge_size = vision_config.spatial_merge_size
-        elif hasattr(vision_config, "merge_kernel_size"):
-            merge_size = vision_config.merge_kernel_size[0]
-        else:
-            merge_size = 1
-
-        assert patches % (merge_size * merge_size) == 0, (
-            "Number of patches must be multiple of merge_size squared"
-        )
-        h_patches = merge_size
-        w_patches = patches // merge_size
-        return h_patches, w_patches
-
-    def _get_dummy_mm_encoder_input(
-        self, num_image_tokens: int, img_feature_dim: int
-    ) -> BatchedTensorInputs:
-        """Dummy data for profiling and precompiling mm_encoder."""
-
-        # The first dimension of pixel_values corresponds
-        # to the total number of patches.
-        pixel_values = torch.zeros(
-            (num_image_tokens, img_feature_dim), dtype=self.dtype, device=self.device
-        )
-
-        h_patches, w_patches = self._get_dummy_h_w_patches(num_image_tokens)
-        image_grid_thw = torch.tensor(
-            [[1, h_patches, w_patches]], dtype=torch.long, device=self.device
-        )
-
-        return {
-            "pixel_values": pixel_values,
-            "image_grid_thw": image_grid_thw,
-        }
-
     def _get_mm_dummy_batch(
         self,
         modality: str,
@@ -5231,50 +5150,6 @@ class GPUModelRunner(
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
-    @torch.inference_mode()
-    def _dummy_mm_encoder_run(
-        self,
-        compilation_cases: list[int],
-    ) -> None:
-        self.vllm_config.in_mm_encoder_tracing = True
-        tmp_dummy_mm_inputs = self._get_mm_dummy_batch(
-            "video",
-            1,
-        )
-        img_feature_dim = cast(
-            torch.Tensor, tmp_dummy_mm_inputs["pixel_values_videos"]
-        ).shape[1]
-
-        if is_global_first_rank():
-            compilation_cases = tqdm(
-                compilation_cases,
-                disable=not self.load_config.use_tqdm_on_load,
-                desc="Capturing mm_encoder CUDA graphs (PIECEWISE)",
-            )
-
-        for capture_size in compilation_cases:
-            dummy_mm_inputs = self._get_dummy_mm_encoder_input(
-                capture_size, img_feature_dim
-            )
-            cudagraph_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
-                num_tokens=capture_size,
-                uniform_decode=False,
-                has_lora=False,
-                disable_full=False,
-                is_mm_encoder=True,
-            )
-            with (
-                set_forward_context(
-                    None,
-                    self.vllm_config,
-                    num_tokens=capture_size,
-                    cudagraph_runtime_mode=cudagraph_mode,
-                    batch_descriptor=batch_descriptor,
-                ),
-            ):
-                self.model.embed_multimodal(**dummy_mm_inputs)
-        self.vllm_config.in_mm_encoder_tracing = False
-
     def profile_run(self) -> None:
         self.vllm_config.in_mm_encoder_tracing = True
         # Profile with multimodal encoder & encoder cache.
@@ -5386,6 +5261,14 @@ class GPUModelRunner(
                     batch_descriptors=batch_descs,
                     cudagraph_runtime_mode=runtime_mode,
                 )
+            # Capture MM encoder CUDA graphs if enabled
+            if self.mm_cudagraph_manager is not None:
+                for runtime_mode, _ in self.cudagraph_dispatcher.get_capture_descs(
+                    is_mm_encoder=True
+                ):
+                    self.mm_cudagraph_manager.capture(
+                        model=self.model, cudagraph_mode=runtime_mode
+                    )
 
             torch.cuda.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -5489,15 +5372,6 @@ class GPUModelRunner(
                 num_active_loras=num_active_loras,
                 is_graph_capturing=True,
             )
-        if (
-            cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
-            and self.supports_mm_inputs
-        ):
-            mm_encoder_capture_sizes = self.mm_encoder_cudagraph_batch_sizes
-            if mm_encoder_capture_sizes:
-                compilation_cases_mm_encoder = list(reversed(mm_encoder_capture_sizes))
-                self._dummy_mm_encoder_run(compilation_cases_mm_encoder)
-
         self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:

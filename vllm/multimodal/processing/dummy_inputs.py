@@ -7,6 +7,7 @@ from typing import Generic, TypeVar
 
 import numpy as np
 import numpy.typing as npt
+import torch
 from PIL import Image
 
 from vllm.config.multimodal import (
@@ -199,3 +200,52 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                 height = min(height, overrides.height)
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         return [video] * num_videos
+
+    @abstractmethod
+    def _get_img_feature_dim(self) -> int:
+        """
+        Get the image feature dimension for MM encoder CUDA graph capture.
+
+        Returns:
+            The image feature dimension.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _calculate_patch_size(self, patches: int) -> tuple[int, int]:
+        """
+        Calculate the patch grid size (height, width) from the total number of
+        patches.
+        """
+        raise NotImplementedError
+
+    def get_dummy_mm_encoder_input(
+        self,
+        num_patches: int,
+    ) -> "dict[str, torch.Tensor]":
+        """
+        Get dummy MM encoder input for CUDA graph capture or padding.
+
+        Args:
+            num_patches: Number of patches (tokens) for the dummy input
+
+        Returns:
+            dict with pixel_values and image_grid_thw
+        """
+        img_feature_dim = self._get_img_feature_dim()
+
+        dtype = self.info.ctx.model_config.dtype
+
+        h_patches, w_patches = self._calculate_patch_size(num_patches)
+
+        pixel_values = torch.zeros(
+            (num_patches, img_feature_dim), dtype=dtype, device="cuda"
+        )
+        grid_thw_list = torch.tensor(
+            [[1, h_patches, w_patches]], dtype=torch.long, device="cpu"
+        )
+
+        return {
+            "pixel_values": pixel_values,
+            "image_grid_thw": grid_thw_list,
+        }
