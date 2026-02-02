@@ -968,7 +968,6 @@ class FunASRForConditionalGeneration(
 
         self.model = FunASRModel(
             vllm_config=vllm_config,
-            # prefix=prefix,
             prefix=maybe_prefix(prefix, "model"),
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
