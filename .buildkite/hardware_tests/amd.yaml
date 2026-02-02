@@ -1,4 +1,4 @@
-group: AMD
+group: Hardware - AMD
 steps:
   - label: "AMD: :docker: build image"
     key: image-build-amd
