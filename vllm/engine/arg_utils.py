@@ -60,6 +60,7 @@ from vllm.config.cache import (
     BlockSize,
     CacheDType,
     KVOffloadingBackend,
+    MambaCacheMode,
     MambaDType,
     PrefixCachingHashAlgo,
 )
@@ -556,6 +557,7 @@ class EngineArgs:
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
+    mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -938,6 +940,9 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-block-size", **cache_kwargs["mamba_block_size"]
+        )
+        cache_group.add_argument(
+            "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
@@ -1384,16 +1389,6 @@ class EngineArgs:
             # global layers in interleaved sliding window models.
             sliding_window = model_config.get_sliding_window()
 
-        # Note(hc): In the current implementation of decode context
-        # parallel(DCP), tp_size needs to be divisible by dcp_size,
-        # because the world size does not change by dcp, it simply
-        # reuses the GPUs of TP group, and split one TP group into
-        # tp_size//dcp_size DCP groups.
-        assert self.tensor_parallel_size % self.decode_context_parallel_size == 0, (
-            f"tp_size={self.tensor_parallel_size} must be divisible by"
-            f"dcp_size={self.decode_context_parallel_size}."
-        )
-
         # Resolve "auto" kv_cache_dtype to actual value from model config
         resolved_cache_dtype = resolve_kv_cache_dtype_string(
             self.kv_cache_dtype, model_config
@@ -1416,6 +1411,7 @@ class EngineArgs:
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
+            mamba_cache_mode=self.mamba_cache_mode,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
@@ -1945,13 +1941,13 @@ class EngineArgs:
             CpuArchEnum.RISCV,
         ):
             logger.info(
-                "Chunked prefill is not supported for ARM and POWER, "
+                "Chunked prefill is not supported for POWER, "
                 "S390X and RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
             self.enable_chunked_prefill = False
             logger.info(
-                "Prefix caching is not supported for ARM and POWER, "
+                "Prefix caching is not supported for POWER, "
                 "S390X and RISC-V CPUs; "
                 "disabling it for V1 backend."
             )

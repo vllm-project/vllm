@@ -77,6 +77,18 @@ class EncoderCacheManager:
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
 
+    def reset(self) -> None:
+        """Reset the encoder cache to its initial state.
+
+        This clears all cached encoder outputs and resets capacity tracking.
+        Called when model weights are updated to invalidate stale embeddings.
+        """
+        self.cached.clear()
+        self.freeable.clear()
+        self.freed.clear()
+        self.num_free_slots = self.cache_size
+        self.num_freeable_slots = self.cache_size
+
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         """Check if encoder output for a specific multimodal input is cached.
 
@@ -237,7 +249,7 @@ class EncoderCacheManager:
 
         Typically called when a request is finished, cancelled, or aborted.
         """
-        input_ids = self.get_cached_input_ids(request).copy()
+        input_ids = self.get_cached_input_ids(request)
         for input_id in input_ids:
             self.free_encoder_input(request, input_id)
 
@@ -357,7 +369,14 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
     def __init__(self, cache_size: int):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
-        self.freed: list[str] = []
+        self.allocated: list[str] = []
+        self.to_free: list[str] = []
+
+    def reset(self) -> None:
+        """Reset the encoder cache to its initial state."""
+        self.num_free_slots = self.cache_size
+        self.allocated.clear()
+        self.to_free.clear()
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         return False
@@ -383,7 +402,7 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         self.num_free_slots -= num_encoder_embeds
 
         mm_hash = request.mm_features[input_id].identifier
-        self.freed.append(mm_hash)
+        self.allocated.append(mm_hash)
 
     def free(self, request: Request) -> None:
         for input_id in range(len(request.mm_features)):
@@ -393,9 +412,14 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         return set(range(len(request.mm_features)))
 
     def get_freed_mm_hashes(self) -> list[str]:
-        freed = self.freed
-        self.freed = []
-        return freed
+        # As encoder cache is not used for enc-dec models, we can free the entries here
+        # The actual free happens in the runner, *before* the model is executed.
+        # Therefore, `freeable` acts as a buffer to free the entries only after the
+        # model is executed, mimicking the state transition of `EncoderCacheManager`.
+        to_free = self.to_free
+        self.to_free = self.allocated
+        self.allocated = []
+        return to_free
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)

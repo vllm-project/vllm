@@ -674,24 +674,26 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version
 
-        self.llm_arch_name = config.text_config.architectures[0]
-        self.is_mono = self.llm_arch_name == "SkyworkLM2VEForCausalLM"
-        self.vision_model = self._init_vision_model(
-            config,
-            quant_config=quant_config,
-            is_mono=self.is_mono,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        llm_arch_name = config.text_config.architectures[0]
+        self.is_mono = llm_arch_name == "SkyworkLM2VEForCausalLM"
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_model = self._init_vision_model(
+                config,
+                quant_config=quant_config,
+                is_mono=self.is_mono,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.mlp1 = self._init_mlp1(
+                config, quant_config, prefix=maybe_prefix(prefix, "mlp1")
+            )
 
-        self.mlp1 = self._init_mlp1(
-            config, quant_config, prefix=maybe_prefix(prefix, "mlp1")
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.img_context_token_id = None
         self.visual_token_mask = None
@@ -838,8 +840,6 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
-        assert self.vision_model is not None
-
         image_embeds = self.extract_feature(image_input["pixel_values_flat"])
 
         num_patches = image_input["num_patches"]
@@ -866,9 +866,6 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             )
         else:
             self.visual_token_mask = None
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -901,7 +898,7 @@ class SkyworkR1VChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

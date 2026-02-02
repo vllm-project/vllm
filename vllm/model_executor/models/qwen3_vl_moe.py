@@ -94,7 +94,7 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -110,9 +110,14 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        aux_hidden_states = []
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
+            if layer_idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
+
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -132,6 +137,9 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_fused_expert_weights(
@@ -438,7 +446,6 @@ class Qwen3VLMoeForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -453,15 +460,16 @@ class Qwen3VLMoeForConditionalGeneration(
                 ]
 
         with self._mark_language_model(vllm_config):
-            self.language_model = language_model = Qwen3MoeLLMForCausalLM(
-                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "language_model")
+            self.language_model = Qwen3MoeLLMForCausalLM(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
             )
 
-            # Whether to include the gate_up_proj mapping is determined by
-            # the language model.
-            self.packed_modules_mapping = (
-                self.packed_modules_mapping | language_model.packed_modules_mapping
-            )
+        # Whether to include the gate_up_proj mapping is determined by
+        # the language model.
+        self.packed_modules_mapping = (
+            self.packed_modules_mapping | self.language_model.packed_modules_mapping
+        )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors

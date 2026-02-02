@@ -3,13 +3,13 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
+from typing import cast
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 from vllm.config import (
-    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
@@ -21,6 +21,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
@@ -36,6 +37,7 @@ from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
@@ -62,8 +64,8 @@ class SpecDecodeBaseProposer:
         runner=None,
     ):
         self.vllm_config = vllm_config
+        assert vllm_config.speculative_config is not None
         self.speculative_config = vllm_config.speculative_config
-        assert self.speculative_config is not None
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
@@ -100,30 +102,23 @@ class SpecDecodeBaseProposer:
             self._get_eagle3_use_aux_hidden_state_from_config()
         )
 
-        self.use_cuda_graph = False
-
         self.compilation_config = self.vllm_config.compilation_config
-        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            cudagraph_mode = self.compilation_config.cudagraph_mode
-            if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
-                CUDAGraphMode.PIECEWISE
-            ):
-                logger.warning(
-                    "Currently the eagle proposer only supports cudagraph_mode "
-                    "PIECEWISE, if you want the drafter to use cuda graphs, "
-                    "please set compilation_config.cudagraph_mode to PIECEWISE "
-                    "or FULL_AND_PIECEWISE"
-                )
-            self.use_cuda_graph = (
-                cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE)
-                and not self.speculative_config.enforce_eager
-            )
+
+        # Cudagraph dispatcher for PIECEWISE-only dispatching in eagle.
+        # Keys are initialized later via initialize_cudagraph_keys() called from
+        # gpu_model_runner._check_and_update_cudagraph_mode after
+        # adjust_cudagraph_sizes_for_spec_decode is called.
+        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
         )
-        self.uses_mrope = self.vllm_config.model_config.uses_mrope
+        # Use draft model's M-RoPE setting, not target model's
+        # Draft models may be text-only even if target is multimodal
+        self.uses_mrope = self.draft_model_config.uses_mrope
+        self.uses_xdrope_dim = self.vllm_config.model_config.uses_xdrope_dim
+        self.draft_uses_xdrope_dim = self.draft_model_config.uses_xdrope_dim
         if self.uses_mrope:
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
@@ -137,6 +132,12 @@ class SpecDecodeBaseProposer:
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = torch.zeros(
                 (3, self.max_num_tokens + 1), dtype=torch.int64, device=device
+            )
+        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            self.xdrope_positions = torch.zeros(
+                (self.uses_xdrope_dim, self.max_num_tokens + 1),
+                dtype=torch.int64,
+                device=device,
             )
         else:
             # RoPE need (max_num_tokens,)
@@ -166,6 +167,10 @@ class SpecDecodeBaseProposer:
             pin_memory=is_pin_memory_available(),
             device=device,
             with_numpy=True,
+        )
+
+        self._slot_mapping_buffer = torch.zeros(
+            self.max_num_tokens, dtype=torch.int64, device=device
         )
 
         # Determine allowed attention backends once during initialization.
@@ -203,6 +208,7 @@ class SpecDecodeBaseProposer:
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
+        assert spec_token_tree is not None
         self.tree_choices: list[tuple[int, ...]] = ast.literal_eval(spec_token_tree)
         tree_depth = len(self.tree_choices[-1])
         # Precompute per-level properties of the tree.
@@ -226,13 +232,57 @@ class SpecDecodeBaseProposer:
     def _get_positions(self, num_tokens: int):
         if self.uses_mrope:
             return self.mrope_positions[:, :num_tokens]
+        if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            return self.xdrope_positions[:, :num_tokens]
         return self.positions[:num_tokens]
 
     def _set_positions(self, num_tokens: int, positions: torch.Tensor):
         if self.uses_mrope:
             self.mrope_positions[:, :num_tokens] = positions
+        elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
+            self.xdrope_positions[:, :num_tokens] = positions
         else:
+            # Convert M-RoPE positions if target model uses M-RoPE
+            # but draft doesn't, For text inputs, all M-RoPE
+            # dimensions are identical
+            if self.vllm_config.model_config.uses_mrope:
+                positions = positions[0]
             self.positions[:num_tokens] = positions
+
+    def _get_slot_mapping(
+        self,
+        num_tokens: int,
+        slot_mapping: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Return slot_mapping dict for EAGLE layers.
+
+        If slot_mapping is provided, copies it into the buffer first.
+        """
+        if slot_mapping is not None:
+            num_actual = slot_mapping.shape[0]
+            self._slot_mapping_buffer[:num_actual].copy_(slot_mapping)
+            if num_tokens > num_actual:
+                self._slot_mapping_buffer[num_actual:num_tokens].fill_(PADDING_SLOT_ID)
+
+        view = self._slot_mapping_buffer[:num_tokens]
+        return {name: view for name in self.attn_layer_names + self.indexer_layer_names}
+
+    def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
+        """Initialize cudagraph dispatcher keys for eagle.
+
+        Eagle only supports PIECEWISE cudagraphs (via mixed_mode).
+        This should be called after adjust_cudagraph_sizes_for_spec_decode.
+        """
+        if (
+            not self.speculative_config.enforce_eager
+            and cudagraph_mode.mixed_mode()
+            in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+        ):
+            eagle_cudagraph_mode = CUDAGraphMode.PIECEWISE
+        else:
+            eagle_cudagraph_mode = CUDAGraphMode.NONE
+
+        self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
     def propose(
         self,
@@ -249,6 +299,9 @@ class SpecDecodeBaseProposer:
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -304,16 +357,10 @@ class SpecDecodeBaseProposer:
             num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
         )
 
-        cudagraph_runtime_mode = CUDAGraphMode.NONE
-        if (
-            self.use_cuda_graph
-            and num_tokens_dp_padded
-            <= self.compilation_config.max_cudagraph_capture_size
-        ):
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens_dp_padded)
-            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
-        else:
-            num_input_tokens = num_tokens_dp_padded
+        cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+            num_tokens_dp_padded
+        )
+        num_input_tokens = batch_desc.num_tokens
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
@@ -351,6 +398,9 @@ class SpecDecodeBaseProposer:
             num_tokens=num_input_tokens,
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
+            slot_mapping=self._get_slot_mapping(
+                num_input_tokens, common_attn_metadata.slot_mapping
+            ),
         ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
@@ -368,7 +418,7 @@ class SpecDecodeBaseProposer:
             return draft_token_ids.view(-1, 1)
 
         if self.uses_mrope:
-            positions = self.positions[:, last_token_indices]
+            positions = self.mrope_positions[:, last_token_indices]
         else:
             positions = self.positions[last_token_indices]
         if self.method in (
@@ -389,6 +439,7 @@ class SpecDecodeBaseProposer:
                 positions=positions,
                 hidden_states=hidden_states,
                 common_attn_metadata=common_attn_metadata,
+                slot_mappings=slot_mappings,
             )
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
@@ -412,16 +463,10 @@ class SpecDecodeBaseProposer:
             num_tokens_unpadded=batch_size, num_tokens_padded=batch_size
         )
 
-        if (
-            self.use_cuda_graph
-            and batch_size_dp_padded
-            <= self.compilation_config.max_cudagraph_capture_size
-        ):
-            input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size_dp_padded)
-            cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
-        else:
-            input_batch_size = batch_size_dp_padded
-            cudagraph_runtime_mode = CUDAGraphMode.NONE
+        cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+            batch_size_dp_padded
+        )
+        input_batch_size = batch_desc.num_tokens
         if batch_size_across_dp is not None:
             batch_size_across_dp[self.dp_rank] = input_batch_size
 
@@ -552,6 +597,9 @@ class SpecDecodeBaseProposer:
                 num_tokens=input_batch_size,
                 num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=self._get_slot_mapping(
+                    input_batch_size, common_attn_metadata.slot_mapping
+                ),
             ):
                 ret_hidden_states = self.model(**model_kwargs)
                 if not self.model_returns_tuple():
@@ -590,6 +638,8 @@ class SpecDecodeBaseProposer:
         self.input_ids[last_token_indices] = next_token_ids
 
         # copy inputs to buffer for cudagraph
+        if self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim == 0:
+            target_positions = target_positions[0]
         self._set_positions(num_tokens, target_positions)
 
         return num_tokens, last_token_indices, cad
@@ -759,6 +809,9 @@ class SpecDecodeBaseProposer:
         # [num_tokens, hidden_size]
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,
     ) -> list[torch.Tensor]:
         tree_attn_metadata_builder = self.runner.attn_groups[0][
             0
@@ -870,21 +923,19 @@ class SpecDecodeBaseProposer:
             self.positions[:num_tokens] = tree_positions.view(-1)
             self.hidden_states[:num_tokens] = tree_hidden_states.view(num_tokens, -1)
 
-            if (
-                self.use_cuda_graph
-                and num_tokens <= self.compilation_config.max_cudagraph_capture_size
-            ):
-                num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
-                cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
-            else:
-                num_input_tokens = num_tokens
-                cudagraph_runtime_mode = CUDAGraphMode.NONE
+            cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+                num_tokens
+            )
+            num_input_tokens = batch_desc.num_tokens
             # Run the model.
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=self._get_slot_mapping(
+                    num_input_tokens, attn_metadata.slot_mapping
+                ),
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
@@ -987,7 +1038,7 @@ class SpecDecodeBaseProposer:
         # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
         # [0, 1, 0, 1, 2, 3, 0, 1, 2]
         #  _r1_  ____r2____  ___r3__
-        token_offests = (
+        token_offsets = (
             self.token_arange_np[:total_num_tokens] - new_query_start_locs_expanded
         )
 
@@ -1002,7 +1053,7 @@ class SpecDecodeBaseProposer:
         # [0, 1,                                // req 1
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
         #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
-        token_indices_np = token_offests + old_query_start_locs_expanded
+        token_indices_np = token_offsets + old_query_start_locs_expanded
         token_indices = torch.from_numpy(token_indices_np).to(device, non_blocking=True)
 
         spec_common_attn_metadata = CommonAttentionMetadata(
@@ -1029,9 +1080,12 @@ class SpecDecodeBaseProposer:
         return model.__class__.__name__
 
     def load_model(self, target_model: nn.Module) -> None:
-        draft_model_config = self.vllm_config.speculative_config.draft_model_config
+        draft_model_config = self.speculative_config.draft_model_config
         target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
+            get_layers_from_vllm_config(
+                self.vllm_config,
+                AttentionLayerBase,  # type: ignore[type-abstract]
+            ).keys()
         )
         # FIXME: support hybrid kv for draft model
         target_indexer_layer_names = set(
@@ -1048,7 +1102,10 @@ class SpecDecodeBaseProposer:
             )
 
         draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
+            get_layers_from_vllm_config(
+                self.vllm_config,
+                AttentionLayerBase,  # type: ignore[type-abstract]
+            ).keys()
             - target_attn_layer_names
         )
         indexer_layers = get_layers_from_vllm_config(
@@ -1088,9 +1145,13 @@ class SpecDecodeBaseProposer:
 
         if supports_multimodal(target_model):
             # handle multimodality
+            assert hasattr(target_model, "config")
             if self.get_model_name(target_model) in [
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
+                "Qwen3VLMoeForConditionalGeneration",
+                "HunYuanVLForConditionalGeneration",
+                "GlmOcrForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
@@ -1101,16 +1162,21 @@ class SpecDecodeBaseProposer:
                 self.model.config.image_token_index = (
                     target_model.config.image_token_index
                 )
-            target_language_model = target_model.get_language_model()
+            target_language_model = cast(
+                SupportsMultiModal, target_model
+            ).get_language_model()
         else:
             target_language_model = target_model
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
-            if hasattr(target_language_model.model, "embed_tokens"):
-                target_embed_tokens = target_language_model.model.embed_tokens
-            elif hasattr(target_language_model.model, "embedding"):
-                target_embed_tokens = target_language_model.model.embedding
+            inner_model = getattr(target_language_model, "model", None)
+            if inner_model is None:
+                raise AttributeError("Target model does not have 'model' attribute")
+            if hasattr(inner_model, "embed_tokens"):
+                target_embed_tokens = inner_model.embed_tokens
+            elif hasattr(inner_model, "embedding"):
+                target_embed_tokens = inner_model.embedding
             else:
                 raise AttributeError(
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
@@ -1215,10 +1281,8 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
+        slot_mappings: dict[str, torch.Tensor] | None = None,
     ) -> None:
-        # Determine if CUDA graphs should be used for this run.
-        cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
-
         # FIXME: when using tree-based specdec, adjust number of forward-passes
         # according to the depth of the tree.
         for fwd_idx in range(
@@ -1228,27 +1292,34 @@ class SpecDecodeBaseProposer:
                 num_tokens_dp_padded, num_tokens_across_dp = self._pad_batch_across_dp(
                     num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
                 )
-                if (
-                    cudagraphs_enabled
-                    and num_tokens_dp_padded
-                    <= self.compilation_config.max_cudagraph_capture_size
-                ):
-                    num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                        num_tokens_dp_padded
+                if use_cudagraphs:
+                    cudagraph_runtime_mode, batch_desc = (
+                        self.cudagraph_dispatcher.dispatch(num_tokens_dp_padded)
                     )
+                    num_input_tokens = batch_desc.num_tokens
                 else:
+                    cudagraph_runtime_mode = CUDAGraphMode.NONE
                     num_input_tokens = num_tokens_dp_padded
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[self.dp_rank] = num_input_tokens
+
+            # Make sure to use EAGLE's own buffer during cudagraph capture.
+            if (
+                self.attn_layer_names
+                and slot_mappings is not None
+                and self.attn_layer_names[0] in slot_mappings
+            ):
+                slot_mapping_dict = self._get_slot_mapping(num_input_tokens)
+            else:
+                slot_mapping_dict = slot_mappings or {}
 
             with set_forward_context(
                 None,
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
-                if cudagraphs_enabled
-                else CUDAGraphMode.NONE,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                slot_mapping=slot_mapping_dict,
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
@@ -1340,7 +1411,8 @@ class SpecDecodeBaseProposer:
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.vllm_config.parallel_config,
             allow_microbatching=False,
-            allow_dp_padding=self.use_cuda_graph,
+            allow_dp_padding=self.cudagraph_dispatcher.cudagraph_mode
+            != CUDAGraphMode.NONE,
             num_tokens_padded=num_tokens_padded,
             uniform_decode=None,
             num_scheduled_tokens_per_request=None,
