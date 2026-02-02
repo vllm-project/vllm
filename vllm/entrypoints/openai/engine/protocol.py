@@ -16,9 +16,7 @@ from pydantic import (
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.logger import init_logger
-from vllm.sampling_params import (
-    SamplingParams,
-)
+from vllm.sampling_params import SamplingParams
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
@@ -261,15 +259,7 @@ class DeltaMessage(OpenAIBaseModel):
     role: str | None = None
     content: str | None = None
     reasoning: str | None = None
-    reasoning_content: str | None = None
-    """Deprecated: use `reasoning` instead."""
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def handle_deprecated_reasoning_content(self):
-        """Copy reasoning to reasoning_content for backward compatibility."""
-        self.reasoning_content = self.reasoning
-        return self
 
 
 ####### Tokens IN <> Tokens OUT #######

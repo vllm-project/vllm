@@ -13,11 +13,7 @@ MAX_NUM_STOP_TOKEN_IDS = 128
 
 
 class LogitBiasState:
-    def __init__(
-        self,
-        max_num_reqs: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_reqs: int, device: torch.device):
         self.max_num_reqs = max_num_reqs
 
         # Allowed token IDs.
@@ -54,10 +50,7 @@ class LogitBiasState:
         self.use_logit_bias = np.zeros(max_num_reqs, dtype=bool)
 
     def add_request(
-        self,
-        req_idx: int,
-        prompt_len: int,
-        sampling_params: SamplingParams,
+        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
         # Using any logit bias.
         use_logit_bias = False

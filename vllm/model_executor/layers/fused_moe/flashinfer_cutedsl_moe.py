@@ -54,7 +54,8 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_device_capability_family(100)
+        p = current_platform
+        return p.is_cuda() and p.is_device_capability_family(100)
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

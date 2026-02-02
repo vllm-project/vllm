@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Optional, Union
+from typing import Union
 
 import torch
 
@@ -285,7 +285,7 @@ class FusedMoEQuantConfig:
         return self._w1.bias
 
     @property
-    def w1_precision(self) -> Optional["PrecisionConfig"]:
+    def w1_precision(self) -> "PrecisionConfig | None":
         assert self._w1.scale is None or isinstance(self._w1.scale, PrecisionConfig)
         return self._w1.scale
 
@@ -307,7 +307,7 @@ class FusedMoEQuantConfig:
         return self._w2.bias
 
     @property
-    def w2_precision(self) -> Optional["PrecisionConfig"]:
+    def w2_precision(self) -> "PrecisionConfig | None":
         assert self._w2.scale is None or isinstance(self._w2.scale, PrecisionConfig)
         return self._w2.scale
 

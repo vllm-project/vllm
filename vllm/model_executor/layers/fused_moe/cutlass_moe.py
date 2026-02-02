@@ -657,7 +657,12 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.has_device_capability((10, 0))
+        p = current_platform
+        return p.is_cuda() and (
+            p.is_device_capability_family(100)
+            or p.is_device_capability_family(110)
+            or p.is_device_capability_family(120)
+        )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

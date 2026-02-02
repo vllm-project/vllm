@@ -84,11 +84,14 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
+        p = current_platform
         return (
-            current_platform.is_cuda()
+            p.is_cuda()
             and (
-                current_platform.is_device_capability((9, 0))
-                or current_platform.is_device_capability_family(100)
+                p.is_device_capability(90)
+                or p.is_device_capability_family(100)
+                or p.is_device_capability_family(110)
+                or p.is_device_capability_family(120)
             )
             and has_flashinfer_cutlass_fused_moe()
         )
@@ -102,29 +105,27 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # The following are supported by FlashInferExperts:
-        #   * unquantized
-        #   * fp8 static per-tensor on 9.0+
-        #   * fp8 block on 9.0
-        #   * nvfp4 on 10.0+
-
         p = current_platform
         scheme = (weight_key, activation_key)
+        # The following are supported by FlashInferExperts:
         return (
+            # unquantized and fp8 static per-tensor on 9.0+
             (
                 scheme
                 in [
                     (None, None),
                     (kFp8StaticTensorSym, kFp8StaticTensorSym),
                 ]
+                and p.has_device_capability(90)
             )
+            # fp8 block-scale on 9.0
             or (
-                (scheme == (kFp8Static128BlockSym, kFp8Dynamic128Sym))
-                and (p.is_device_capability((9, 0)))
+                scheme == (kFp8Static128BlockSym, kFp8Dynamic128Sym)
+                and p.is_device_capability(90)
             )
+            # nvfp4 on 10.0+
             or (
-                (scheme == (kNvfp4Static, kNvfp4Dynamic))
-                and (p.is_device_capability_family(100))
+                scheme == (kNvfp4Static, kNvfp4Dynamic) and p.has_device_capability(100)
             )
         )
 

@@ -26,8 +26,6 @@ logger = init_logger(__name__)
 
 
 __all__ = [
-    "is_flashinfer_fp4_cutlass_moe_available",
-    "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
 ]
 

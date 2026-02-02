@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.nn import Module
@@ -178,7 +178,7 @@ class Fp8Config(QuantizationConfig):
 
     def get_xpu_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         from vllm.model_executor.layers.quantization.ipex_quant import (
             XPUFp8LinearMethod,
             XPUFp8MoEMethod,
@@ -214,7 +214,7 @@ class Fp8Config(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if current_platform.is_xpu():
             return self.get_xpu_quant_method(layer, prefix)
         if isinstance(layer, LinearBase):
@@ -396,7 +396,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 None,
                 weight_loader,
             )
-            set_weight_attrs(scale, {"scale_type": "weight_scale"})
             layer.register_parameter("weight_scale", scale)
         else:
             assert not self.act_q_static
@@ -408,7 +407,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 self.weight_block_size,
                 weight_loader,
             )
-            set_weight_attrs(scale, {"scale_type": "weight_scale"})
             # The weight_scale_inv name is intentional for deepseekv3
             layer.register_parameter("weight_scale_inv", scale)
 
