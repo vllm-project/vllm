@@ -111,9 +111,6 @@ From any node, enter a container and run `ray status` and `ray list nodes` to ve
 !!! tip
     If Ray is running inside containers, run the commands in the remainder of this guide *inside the containers*, not on the host. To open a shell inside a container, connect to a node and use `docker exec -it <container_name> /bin/bash`.
 
-!!! note "Installing Ray dependencies"
-    Ray is an optional dependency. If you use `--distributed-executor-backend ray`, install it with `pip install "vllm[ray]"` (or `pip install ray[cgraph]`).
-
 Once a Ray cluster is running, use vLLM as you would in a single-node setting. All resources across the Ray cluster are visible to vLLM, so a single `vllm` command on a single node is sufficient.
 
 The common practice is to set the tensor parallel size to the number of GPUs in each node, and the pipeline parallel size to the number of nodes. For example, if you have 16 GPUs across 2 nodes (8 GPUs per node), set the tensor parallel size to 8 and the pipeline parallel size to 2:
