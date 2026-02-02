@@ -336,7 +336,7 @@ def _fwd_grouped_kernel_stage1(
             )
             kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
 
-            # load everything up front to explicitly facilitate overlapping computation later
+            # explicitly facilitate overlapping load/compute
             offs_buf_k = (
                 kv_loc[:, None] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
