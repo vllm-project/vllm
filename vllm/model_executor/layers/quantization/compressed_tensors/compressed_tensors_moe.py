@@ -14,6 +14,7 @@ from compressed_tensors.quantization import (
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -173,35 +174,43 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f" and bits: {weight_quant.num_bits}",
                 )
 
-            # Prefer to use the CutlassMoE kernel when it is supported.
-            if (
-                weight_quant.num_bits == 4
-                and group_size % 64 == 0
-                and current_platform.is_cuda()
-            ):
-                logger.info_once("Using CompressedTensorsW4A16CutlassMoEMethod")
-                return CompressedTensorsW4A16CutlassMoEMethod(
-                    weight_quant, input_quant, layer.moe_config
-                )
-            elif (
-                not check_moe_marlin_supports_layer(layer, group_size)
-                or current_platform.is_rocm()
-            ):
+            backend_ = envs.VLLM_WNA16_MOE_BACKEND
+            if backend_ == "cutlass":  # cutlass has most strict limitations
+                if (
+                    weight_quant.num_bits == 4
+                    and group_size % 64 == 0
+                    and current_platform.is_cuda()
+                    and current_platform.get_device_capability()[0] == 9
+                ):
+                    logger.info_once("Using CompressedTensorsW4A16CutlassMoEMethod")
+                    return CompressedTensorsW4A16CutlassMoEMethod(
+                        weight_quant, input_quant, layer.moe_config
+                    )
+                else:
+                    backend_ = "marlin"  # choose marlin over triton
+            if backend_ == "marlin":
+                if (
+                    check_moe_marlin_supports_layer(layer, group_size)
+                    and current_platform.is_cuda()
+                ):
+                    logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
+                    return CompressedTensorsWNA16MarlinMoEMethod(
+                        weight_quant, input_quant, layer.moe_config
+                    )
+                else:
+                    backend_ = "triton"
+            if backend_ == "triton":
                 if (
                     weight_quant.strategy == QuantizationStrategy.GROUP
                     and weight_quant.actorder
                     in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
                 ):
+                    # none of the backends is compatible
                     raise ValueError(
                         "WNA16MoE is not supported with actorder=group/dynamic."
                     )
                 logger.info_once("Using CompressedTensorsWNA16MoEMethod")
                 return CompressedTensorsWNA16MoEMethod(
-                    weight_quant, input_quant, layer.moe_config
-                )
-            else:
-                logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
-                return CompressedTensorsWNA16MarlinMoEMethod(
                     weight_quant, input_quant, layer.moe_config
                 )
         elif quant_config._is_nvfp4_format(weight_quant):

@@ -155,6 +155,7 @@ if TYPE_CHECKING:
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
     VLLM_MXFP4_USE_MARLIN: bool | None = None
+    VLLM_WNA16_MOE_BACKEND: Literal["cutlass", "marlin", "triton"] = "marlin"
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -1165,6 +1166,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use marlin kernel in mxfp4 quantization method
     "VLLM_MXFP4_USE_MARLIN": lambda: maybe_convert_bool(
         os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
+    ),
+    # MoE backend for vLLM's WNA16 Mixture-of-Experts support.
+    # CUTLASS requires compute capability 90.0, Int4 weight, and Bfloat16 activation.
+    # Available options:
+    # - "cutlass":
+    #     Uses CUTLASS kernels optimized for high-throughput batch inference.
+    # - "marlin":  [default]
+    #     Uses Marlin kernels optimized for low-latency batch inference.
+    # - "triton":
+    #     Uses Triton kernels which supports RoCM GPUs.
+    "VLLM_WNA16_MOE_BACKEND": env_with_choices(
+        "VLLM_WNA16_MOE_BACKEND",
+        "marlin",
+        ["cutlass", "marlin", "triton"],
     ),
     # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
