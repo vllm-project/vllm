@@ -1112,6 +1112,29 @@ class Qwen3OmniMoeThinkerProcessingInfo(
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        max_image_tokens = self.get_max_image_tokens()
+        max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
+
+        # Compute max audio tokens from feature extractor config
+        feature_extractor = self.get_feature_extractor()
+        max_audio_seconds = min(feature_extractor.chunk_length, 30)
+        max_audio_samples = max_audio_seconds * feature_extractor.sampling_rate
+        max_feature_length = max_audio_samples // feature_extractor.hop_length
+        max_audio_tokens = _get_feat_extract_output_lengths(
+            torch.tensor([max_feature_length])
+        )
+
+        return {
+            "audio": max_audio_tokens.item(),
+            "image": max_image_tokens,
+            "video": max_video_tokens,
+        }
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
 
@@ -1779,6 +1802,24 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
 
+        # Detect interleaved audio-in-video early, since it affects
+        # both the deepstack path and the final embedding merge.
+        video_token_id = self.config.video_token_id
+        audio_token_id = self.config.audio_token_id
+        is_video = is_multimodal & (input_ids == video_token_id)
+        is_audio = is_multimodal & (input_ids == audio_token_id)
+        num_video = is_video.sum().item()
+        num_audio = is_audio.sum().item()
+
+        is_interleaved = False
+        if num_video > 0 and num_audio > 0:
+            video_pos = is_video.nonzero(as_tuple=True)[0]
+            audio_pos = is_audio.nonzero(as_tuple=True)[0]
+            is_interleaved = (
+                video_pos[0].item() < audio_pos[-1].item()
+                and audio_pos[0].item() < video_pos[-1].item()
+            )
+
         deepstack_input_embeds = None
         # split the feat dim to obtain multi-scale visual feature
         has_vision_embeddings = [
@@ -1790,14 +1831,18 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         ):
             multiscale_len = len(self.visual.deepstack_visual_indexes)
             multimodal_embeddings_multiscale = []
-            is_vision = torch.zeros_like(is_multimodal)
-            mm_positions = torch.nonzero(is_multimodal, as_tuple=True)[0]
-            mm_position_idx = 0
+
+            if is_interleaved:
+                # Use input_ids-based mask for correct vision positions
+                # when audio and video tokens are interleaved.
+                is_vision = is_video.clone()
+            else:
+                is_vision = torch.zeros_like(is_multimodal)
+                mm_positions = torch.nonzero(is_multimodal, as_tuple=True)[0]
+                mm_position_idx = 0
+
             for index, embeddings in enumerate(multimodal_embeddings):
                 num_tokens = embeddings.shape[0]
-                current_positions = mm_positions[
-                    mm_position_idx : mm_position_idx + num_tokens
-                ]
 
                 # Vision embeddings
                 if embeddings.shape[-1] != self.config.text_config.hidden_size:
@@ -1808,13 +1853,22 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                     )
                     multimodal_embeddings[index] = embeddings_main
                     multimodal_embeddings_multiscale.append(embeddings_multiscale)
-                    is_vision[current_positions] = True
+                    if not is_interleaved:
+                        current_positions = mm_positions[
+                            mm_position_idx : mm_position_idx + num_tokens
+                        ]
+                        is_vision[current_positions] = True
 
                 # Audio embeddings
                 else:
-                    is_vision[current_positions] = False
+                    if not is_interleaved:
+                        current_positions = mm_positions[
+                            mm_position_idx : mm_position_idx + num_tokens
+                        ]
+                        is_vision[current_positions] = False
 
-                mm_position_idx += num_tokens
+                if not is_interleaved:
+                    mm_position_idx += num_tokens
 
             deepstack_input_embeds = inputs_embeds.new_zeros(
                 inputs_embeds.size(0), multiscale_len * inputs_embeds.size(1)
@@ -1833,6 +1887,42 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             )
             self._set_deepstack_input_embeds(deepstack_input_embeds)
 
+        if is_interleaved:
+            # Per-modality scatter for interleaved audio-in-video.
+            video_embeds: list[torch.Tensor] = []
+            audio_embeds: list[torch.Tensor] = []
+            other_embeds: list[torch.Tensor] = []
+            video_remaining = num_video
+            audio_remaining = num_audio
+
+            for emb in multimodal_embeddings:
+                n = emb.shape[0]
+                if video_remaining > 0 and n <= video_remaining:
+                    video_embeds.append(emb)
+                    video_remaining -= n
+                elif audio_remaining > 0 and n <= audio_remaining:
+                    audio_embeds.append(emb)
+                    audio_remaining -= n
+                else:
+                    other_embeds.append(emb)
+
+            if video_embeds:
+                inputs_embeds = _merge_multimodal_embeddings(
+                    inputs_embeds, video_embeds, is_video
+                )
+            if audio_embeds:
+                inputs_embeds = _merge_multimodal_embeddings(
+                    inputs_embeds, audio_embeds, is_audio
+                )
+            if other_embeds:
+                other_mask = is_multimodal & ~is_video & ~is_audio
+                inputs_embeds = _merge_multimodal_embeddings(
+                    inputs_embeds, other_embeds, other_mask
+                )
+
+            return inputs_embeds
+
+        # Default: standard merge (no interleaving)
         inputs_embeds = _merge_multimodal_embeddings(
             inputs_embeds=inputs_embeds,
             multimodal_embeddings=multimodal_embeddings,
