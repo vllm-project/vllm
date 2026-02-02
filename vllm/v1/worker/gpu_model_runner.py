@@ -3986,112 +3986,27 @@ class GPUModelRunner(
         elif spec_config.use_eagle() or spec_config.uses_draft_model():
             assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
 
-            if spec_config.disable_padded_drafter_batch:
-                # When padded-batch is disabled, the sampled_token_ids should be
-                # the cpu-side list[list[int]] of valid sampled tokens for each
-                # request, with invalid requests having empty lists.
-                assert isinstance(sampled_token_ids, list), (
-                    "sampled_token_ids should be a python list when"
-                    "padded-batch is disabled."
-                )
-                next_token_ids = self.drafter.prepare_next_token_ids_cpu(
-                    sampled_token_ids,
-                    self.requests,
-                    self.input_batch,
-                    scheduler_output.num_scheduled_tokens,
-                )
-            else:
-                # When using padded-batch, the sampled_token_ids should be
-                # the gpu tensor of sampled tokens for each request, of shape
-                # (num_reqs, num_spec_tokens + 1) with rejected tokens having
-                # value -1.
-                assert isinstance(sampled_token_ids, torch.Tensor), (
-                    "sampled_token_ids should be a torch.Tensor when"
-                    "padded-batch is enabled."
-                )
-                next_token_ids, valid_sampled_tokens_count = (
-                    self.drafter.prepare_next_token_ids_padded(
-                        common_attn_metadata,
-                        sampled_token_ids,
-                        self.requests,
-                        self.input_batch,
-                        self.discard_request_mask.gpu,
-                    )
-                )
-                self._copy_valid_sampled_token_count(
-                    next_token_ids, valid_sampled_tokens_count
-                )
-
-            num_rejected_tokens_gpu = None
-            if spec_decode_metadata is None:
-                token_indices_to_sample = None
-                # input_ids can be None for multimodal models.
-                target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
-                target_positions = self._get_positions(num_scheduled_tokens)
-                if self.use_aux_hidden_state_outputs:
-                    assert aux_hidden_states is not None
-                    target_hidden_states = torch.cat(
-                        [h[:num_scheduled_tokens] for h in aux_hidden_states], dim=-1
-                    )
-                else:
-                    target_hidden_states = hidden_states[:num_scheduled_tokens]
-            else:
-                if spec_config.disable_padded_drafter_batch:
-                    token_indices_to_sample = None
-                    common_attn_metadata, token_indices = self.drafter.prepare_inputs(
-                        common_attn_metadata,
-                        sampled_token_ids,
-                        spec_decode_metadata.num_draft_tokens,
-                    )
-                    target_token_ids = self.input_ids.gpu[token_indices]
-                    target_positions = self._get_positions(token_indices)
-                    if self.use_aux_hidden_state_outputs:
-                        assert aux_hidden_states is not None
-                        target_hidden_states = torch.cat(
-                            [h[token_indices] for h in aux_hidden_states], dim=-1
-                        )
-                    else:
-                        target_hidden_states = hidden_states[token_indices]
-                else:
-                    (
-                        common_attn_metadata,
-                        token_indices_to_sample,
-                        num_rejected_tokens_gpu,
-                    ) = self.drafter.prepare_inputs_padded(
-                        common_attn_metadata,
-                        spec_decode_metadata,
-                        valid_sampled_tokens_count,
-                    )
-                    total_num_tokens = common_attn_metadata.num_actual_tokens
-                    # When padding the batch, token_indices is just a range
-                    target_token_ids = self.input_ids.gpu[:total_num_tokens]
-                    target_positions = self._get_positions(total_num_tokens)
-                    if self.use_aux_hidden_state_outputs:
-                        assert aux_hidden_states is not None
-                        target_hidden_states = torch.cat(
-                            [h[:total_num_tokens] for h in aux_hidden_states], dim=-1
-                        )
-                    else:
-                        target_hidden_states = hidden_states[:total_num_tokens]
-
-            if self.supports_mm_inputs and self.drafter.supports_mm_inputs:
-                mm_embed_inputs = self._gather_mm_embeddings(
-                    scheduler_output,
-                    shift_computed_tokens=1,
-                )
-            else:
-                mm_embed_inputs = None
-
             draft_token_ids = self.drafter.propose(
-                target_token_ids=target_token_ids,
-                target_positions=target_positions,
-                target_hidden_states=target_hidden_states,
-                next_token_ids=next_token_ids,
-                last_token_indices=token_indices_to_sample,
+                target_token_ids=None,
+                target_positions=None,
+                target_hidden_states=None,
+                next_token_ids=None,
+                last_token_indices=None,
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
-                mm_embed_inputs=mm_embed_inputs,
-                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                sampled_token_ids=sampled_token_ids,
+                spec_decode_metadata=spec_decode_metadata,
+                num_scheduled_tokens=num_scheduled_tokens,
+                hidden_states=hidden_states,
+                aux_hidden_states=aux_hidden_states,
+                mm_embed_inputs=(
+                    self._gather_mm_embeddings(
+                        scheduler_output,
+                        shift_computed_tokens=1,
+                    )
+                    if self.supports_mm_inputs
+                    else None
+                ),
                 slot_mappings=slot_mappings,
             )
 
@@ -6171,6 +6086,91 @@ class GPUModelRunner(
         # https://github.com/vllm-project/vllm/issues/22754.
         # `tolist` would trigger a cuda wise stream sync, which
         # would block other copy ops from other cuda streams.
+        # A cuda event sync would avoid such a situation. Since
+        # this is in the critical path of every single model
+        # forward loop, this has caused perf issue for a disagg
+        # setup.
+        pinned = self.sampled_token_ids_pinned_cpu[: sampled_token_ids.shape[0]]
+        pinned.copy_(sampled_token_ids, non_blocking=True)
+        self.transfer_event.record()
+        self.transfer_event.synchronize()
+        return pinned.tolist()
+
+    def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
+        """
+        Get encoder timing stats for all requests and clear the registry.
+
+        Returns:
+            Dictionary mapping request_id to stats dict.
+        """
+        with self._encoder_timing_lock:
+            stats = {
+                req_id: stats_obj.to_dict()
+                for req_id, stats_obj in self.encoder_timing_registry.items()
+            }
+            self.encoder_timing_registry.clear()
+            return stats
+
+    @contextmanager
+    def timed_encoder_operation(
+        self,
+        should_time: bool,
+        group_lora_refs: list[tuple[str, Any]],
+        current_item_idx: int,
+        num_items: int,
+    ):
+        """
+        Context manager to time encoder forward operations.
+
+        Args:
+            should_time: Whether timing is enabled
+            group_lora_refs: Full list of (request_id, pos_info) tuples
+            current_item_idx: Starting index for this group
+            num_items: Number of items in this group
+        """
+        if not should_time:
+            yield
+            return
+
+        group_refs = group_lora_refs[current_item_idx : current_item_idx + num_items]
+        group_request_ids = {req_id for req_id, _ in group_refs}
+
+        torch.cuda.synchronize()
+        start_time = time.perf_counter()
+
+        try:
+            yield
+        finally:
+            torch.cuda.synchronize()
+            elapsed = time.perf_counter() - start_time
+
+            per_request_time = elapsed / max(len(group_request_ids), 1)
+
+            with self._encoder_timing_lock:
+                for req_id in group_request_ids:
+                    if req_id not in self.encoder_timing_registry:
+                        self.encoder_timing_registry[req_id] = EncoderTimingStats()
+
+                    stats = self.encoder_timing_registry[req_id]
+                    stats.encoder_forward_time += per_request_time
+                    stats.num_encoder_calls += 1
+
+
+@dataclass
+class EncoderTimingStats:
+    """Per-request timing statistics for encoder forward pass."""
+
+    encoder_forward_time: float = 0.0
+    """Time spent in vision encoder forward pass (seconds)."""
+
+    num_encoder_calls: int = 0
+    """Number of times encoder was called for this request."""
+
+    def to_dict(self) -> dict[str, float | int]:
+        return {
+            "encoder_forward_time": self.encoder_forward_time,
+            "num_encoder_calls": self.num_encoder_calls,
+        }
         # A cuda event sync would avoid such a situation. Since
         # this is in the critical path of every single model
         # forward loop, this has caused perf issue for a disagg
