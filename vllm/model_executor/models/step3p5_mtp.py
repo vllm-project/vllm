@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -40,9 +41,11 @@ class SharedHead(nn.Module):
         return self.norm(hidden_states)
 
 
+@support_torch_compile
 class Step3p5AMultiTokenPredictorLayer(nn.Module):
     def __init__(
         self,
+        *,
         vllm_config: VllmConfig,
         prefix: str,
     ) -> None:
@@ -92,8 +95,8 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): Step3p5AMultiTokenPredictorLayer(
-                    vllm_config,
-                    f"{prefix}.layers.{idx}",
+                    vllm_config=vllm_config,
+                    prefix=f"{prefix}.layers.{idx}",
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,

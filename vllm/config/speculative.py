@@ -75,6 +75,10 @@ class SpeculativeConfig:
 
     If using `ngram` method, the related configuration `prompt_lookup_max` and
     `prompt_lookup_min` should be considered."""
+    enable_multi_layers_mtp: bool = False
+    """If set to True, the MTP method will run multiple layers of MTP
+    speculator. If set to False, it will run only one layer of MTP speculator.
+    This is only effective when the method is set to `mtp`."""
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
@@ -418,7 +422,10 @@ class SpeculativeConfig:
                     MTPModelTypes
                 ):
                     self.method = "mtp"
-                    if self.num_speculative_tokens > 1:
+                    if (
+                        self.enable_multi_layers_mtp is False
+                        and self.num_speculative_tokens > 1
+                    ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run"
                             "multiple times of forward on same MTP layer"
