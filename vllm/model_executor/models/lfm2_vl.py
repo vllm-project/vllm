@@ -22,6 +22,8 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -57,6 +59,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from .vision import is_vit_use_data_parallel
 
 
 class Lfm2VLImagePixelInputs(TensorSchema):
@@ -354,11 +357,8 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
             tok_kwargs,
         )
 
-        parsed_images = (
-            self._get_data_parser()
-            .parse_mm_data({"image": images})
-            .get_items("image", ImageProcessorItems)
-        )
+        mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+        parsed_images = mm_items.get_items("image", ImageProcessorItems)
         image_sizes = [
             parsed_images.get_image_size(i) for i in range(len(parsed_images))
         ]
@@ -428,10 +428,12 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
 
 class Lfm2VLMultiModalProjector(nn.Module):
     def __init__(
-        self, config: Lfm2VlConfig, use_data_parallel: bool = False, prefix: str = ""
+        self,
+        config: Lfm2VlConfig,
+        prefix: str = "",
     ):
         super().__init__()
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = is_vit_use_data_parallel()
 
         in_channels = config.vision_config.hidden_size * (config.downsample_factor**2)
         self.factor = config.downsample_factor
@@ -583,6 +585,10 @@ class Lfm2VLForConditionalGeneration(
             conv_kernel=hf_language_config.conv_L_cache,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.short_conv_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         super().__init__()
         config: Lfm2VlConfig = vllm_config.model_config.hf_config
@@ -609,7 +615,6 @@ class Lfm2VLForConditionalGeneration(
 
             self.multi_modal_projector = Lfm2VLMultiModalProjector(
                 config=config,
-                use_data_parallel=self.use_data_parallel,
                 prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
