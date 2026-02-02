@@ -158,16 +158,16 @@ def prepare_static_weights_for_trtllm_fp4_moe(
 
     # For gated MLPs (is_act_and_mul=True), w13 contains [w1, w3] merged (2x).
     # For non-gated MLPs (is_act_and_mul=False), w13 contains only w1 (1x).
-    w13_multiplier = 2 if is_act_and_mul else 1
+    w13_num_shards = 2 if is_act_and_mul else 1
 
     # Convert quantized weights to proper formats
     gemm1_weights_fp4 = gemm1_weights.view(torch.float8_e4m3fn).reshape(
-        num_experts, w13_multiplier * intermediate_size, hidden_size // 2
+        num_experts, w13_num_shards * intermediate_size, hidden_size // 2
     )  # packed fp4
     gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
         torch.float8_e4m3fn
     ).reshape(
-        num_experts, w13_multiplier * intermediate_size, hidden_size // 16
+        num_experts, w13_num_shards * intermediate_size, hidden_size // 16
     )  # fp8 scaling factors
 
     gemm2_weights_fp4 = gemm2_weights.view(torch.float8_e4m3fn).reshape(
@@ -261,7 +261,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     gemm1_scales_fp4_shuffled = (
         torch.stack(gemm1_scales_fp4_shuffled)
         .view(torch.float8_e4m3fn)
-        .reshape(num_experts, w13_multiplier * intermediate_size, hidden_size // 16)
+        .reshape(num_experts, w13_num_shards * intermediate_size, hidden_size // 16)
     )
 
     gemm2_weights_fp4_shuffled = torch.stack(gemm2_weights_fp4_shuffled)
