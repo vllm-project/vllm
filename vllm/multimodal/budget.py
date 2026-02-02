@@ -113,7 +113,6 @@ class MultiModalBudget:
         # the encoder budget.
         encoder_budget = self.get_encoder_budget()
 
-        # TODO: handle encoder-decoder models once we support them.
         if encoder_budget == 0:
             return 0, 0
 
