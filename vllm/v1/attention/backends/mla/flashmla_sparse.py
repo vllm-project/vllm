@@ -202,6 +202,30 @@ class FlashMLASparseMetadata(AttentionMetadata):
     fp8_extra_metadata: FP8SeparatePrefillDecode | FP8KernelMetadata | None = None
     fp8_use_mixed_batch: bool = False
 
+    @property
+    def num_decodes(self) -> int:
+        if self.fp8_extra_metadata is not None and isinstance(
+            self.fp8_extra_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode
+        ):
+            return self.fp8_extra_metadata.num_decodes
+        return self.num_reqs
+
+    @property
+    def num_prefills(self) -> int:
+        if self.fp8_extra_metadata is not None and isinstance(
+            self.fp8_extra_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode
+        ):
+            return self.fp8_extra_metadata.num_prefills
+        return 0
+
+    @property
+    def num_decode_tokens(self) -> int:
+        if self.fp8_extra_metadata is not None and isinstance(
+            self.fp8_extra_metadata, FlashMLASparseMetadata.FP8SeparatePrefillDecode
+        ):
+            return self.fp8_extra_metadata.num_decode_tokens
+        return self.num_actual_tokens
+
 
 # Kernel with prefill workspace support
 @triton.jit
