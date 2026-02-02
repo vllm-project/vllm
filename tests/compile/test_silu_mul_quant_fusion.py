@@ -42,7 +42,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
-    kFP8Dynamic128x128Sym,
+    kFp8Dynamic128x128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -145,7 +145,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
 
 
 class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
-    weight_quant_key = kFP8Dynamic128x128Sym
+    weight_quant_key = kFp8Dynamic128x128Sym
     act_quant_key = kFp8Dynamic128Sym
 
     def __init__(self, hidden_size: int, **kwargs):

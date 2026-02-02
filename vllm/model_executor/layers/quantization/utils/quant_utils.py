@@ -152,7 +152,7 @@ kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
 
 kDynamic128x128Scale = ScaleDesc(torch.float32, False, GroupShape(128, 128))
-kFP8Dynamic128x128Sym = QuantKey(FP8_DTYPE, kDynamic128x128Scale, symmetric=True)
+kFp8Dynamic128x128Sym = QuantKey(FP8_DTYPE, kDynamic128x128Scale, symmetric=True)
 
 
 def create_fp8_quant_key(
