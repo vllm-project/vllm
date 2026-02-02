@@ -77,11 +77,8 @@ class ServingScores(OpenAIServing):
 
     async def _embedding_score(
         self,
-        tokenizer: TokenizerLike,
         data_1: list[ScoreData],
         data_2: list[ScoreData],
-        data_1: list[str],
-        data_2: list[str],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         lora_request: LoRARequest | None | None = None,
@@ -172,37 +169,28 @@ class ServingScores(OpenAIServing):
 
     async def _cross_encoding_score(
         self,
-        tokenizer: TokenizerLike,
         data_1: list[ScoreData],
         data_2: list[ScoreData],
-        data_1: list[str] | list[ScoreContentPartParam],
-        data_2: list[str] | list[ScoreContentPartParam],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
-        model_config = self.model_config
         tokenizer = self.renderer.get_tokenizer()
+        if isinstance(tokenizer, MistralTokenizer):
+            raise ValueError("MistralTokenizer not supported for cross-encoding")
 
-        request_prompts: list[str] = []
-        engine_prompts: list[TokensPrompt] = []
+        model_config = self.model_config
 
         if len(data_1) == 1:
             data_1 = data_1 * len(data_2)
 
-        if isinstance(tokenizer, MistralTokenizer):
-            raise ValueError("MistralTokenizer not supported for cross-encoding")
-
         tok_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
-
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
-
         preprocess_async = make_async(
             self._preprocess_score,
             executor=self._tokenizer_executor,
         )
-
         preprocessed_prompts = await asyncio.gather(
             *(
                 preprocess_async(
@@ -216,6 +204,8 @@ class ServingScores(OpenAIServing):
             )
         )
 
+        request_prompts: list[str] = []
+        engine_prompts: list[TokensPrompt] = []
         for full_prompt, engine_prompt in preprocessed_prompts:
             request_prompts.append(full_prompt)
             engine_prompts.append(engine_prompt)
@@ -336,34 +326,13 @@ class ServingScores(OpenAIServing):
         _validate_score_input_lens(data_1, data_2)  # type: ignore[arg-type]
 
         return await self._score_func(
-            tokenizer=tokenizer,
             data_1=data_1,  # type: ignore[arg-type]
             data_2=data_2,  # type: ignore[arg-type]
             request=request,
             request_id=request_id,
-            tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
             trace_headers=trace_headers,
         )
-        if self.model_config.is_cross_encoder:
-            return await self._cross_encoding_score(
-                data_1=data_1,  # type: ignore[arg-type]
-                data_2=data_2,  # type: ignore[arg-type]
-                request=request,
-                request_id=request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-            )
-
-        else:
-            return await self._embedding_score(
-                data_1=data_1,  # type: ignore[arg-type]
-                data_2=data_2,  # type: ignore[arg-type]
-                request=request,
-                request_id=request_id,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-            )
 
     async def create_score(
         self,
