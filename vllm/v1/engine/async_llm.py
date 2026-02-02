@@ -3,7 +3,6 @@
 import asyncio
 import os
 import socket
-import threading
 import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
@@ -142,10 +141,10 @@ class AsyncLLM(EngineClient):
             self.model_config.io_processor_plugin,
         )
 
-        # Thread pool and lock for running process_inputs() in background threads
-        # to avoid blocking the asyncio event loop during CPU-intensive preprocessing
-        self._input_processor_lock = threading.Lock()
-        self._input_processor_executor = ThreadPoolExecutor(max_workers=4)
+        # Single-threaded executor for running process_inputs() in background
+        # to avoid blocking the asyncio event loop during CPU-intensive preprocessing.
+        # Using max_workers=1 ensures sequential execution, eliminating the need for locks.
+        self._input_processor_executor = ThreadPoolExecutor(max_workers=1)
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
         self.output_processor = OutputProcessor(
@@ -308,31 +307,28 @@ class AsyncLLM(EngineClient):
         data_parallel_rank: int | None = None,
         resumable: bool = False,
     ) -> EngineCoreRequest:
-        """Run process_inputs() in a thread pool to avoid blocking event loop.
+        """Run process_inputs() in a background thread to avoid blocking event loop.
 
-        Uses a lock to ensure thread safety since InputProcessor has
-        shared state (mm_processor_cache, mm_cache_stats, etc.).
+        Uses a single-threaded executor to ensure sequential execution,
+        which naturally provides thread safety without explicit locks.
         """
 
-        def _run_with_lock():
-            with self._input_processor_lock:
-                return self.input_processor.process_inputs(
-                    request_id,
-                    prompt,
-                    params,
-                    arrival_time,
-                    lora_request,
-                    tokenization_kwargs,
-                    trace_headers,
-                    priority,
-                    data_parallel_rank,
-                    resumable,
-                )
+        def _run():
+            return self.input_processor.process_inputs(
+                request_id,
+                prompt,
+                params,
+                arrival_time,
+                lora_request,
+                tokenization_kwargs,
+                trace_headers,
+                priority,
+                data_parallel_rank,
+                resumable,
+            )
 
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self._input_processor_executor, _run_with_lock
-        )
+        return await loop.run_in_executor(self._input_processor_executor, _run)
 
     async def add_request(
         self,
