@@ -87,7 +87,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """
         Extract the content after the end tokens
         """
-        if self.end_token_id not in islice(input_ids, 0, len(input_ids) - 1):
+        if self.end_token_id not in islice(input_ids, 0, max(0, len(input_ids) - 1)):
             return []
         else:
             return input_ids[input_ids.index(self.end_token_id) + 1 :]
