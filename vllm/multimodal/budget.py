@@ -111,9 +111,7 @@ class MultiModalBudget:
 
         # Check how many items of this modality can be supported by
         # the encoder budget.
-        encoder_budget = self.get_encoder_budget()
-
-        if encoder_budget == 0:
+        if (encoder_budget := self.get_encoder_budget()) == 0:
             return 0, 0
 
         max_encoder_items_per_batch = encoder_budget // max_tokens_per_item
