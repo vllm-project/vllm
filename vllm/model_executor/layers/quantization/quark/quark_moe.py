@@ -1164,7 +1164,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet."
             )
-
+        print(f' Inside apply of QuarkW4MXFp4MoEMethod_OSS with envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4: {envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4}')
         if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
             from aiter import moe_cktile2stages_gemm1, moe_cktile2stages_gemm2
             from aiter.fused_moe import fused_topk, moe_sorting
