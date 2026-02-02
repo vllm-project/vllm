@@ -364,7 +364,7 @@ class CudaPlatformBase(Platform):
         logger.info_once(
             "Using %s attention backend out of potential backends: %s",
             selected_backend.name,
-            tuple(b[0].name for b in valid_backends_priorities),
+            [b[0].name for b in valid_backends_priorities],
             scope="local",
         )
 
