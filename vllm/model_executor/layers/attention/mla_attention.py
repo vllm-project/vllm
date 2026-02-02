@@ -523,7 +523,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe = k_pe[:num_actual_toks, ...]
 
         # Sparse MLA impls only support forward_mqa (decode-style attention)
-        # Check early since sparse MLA metadata doesn't have prefill/decode split
         is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
 
         # write the latent and rope to kv cache
