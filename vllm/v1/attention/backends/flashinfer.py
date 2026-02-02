@@ -251,7 +251,14 @@ class BatchDCPPrefillWrapper:
             v_scale=layer._v_scale_float,
             return_lse=True,
         )
-        helix_mode = get_current_vllm_config().parallel_config.helix_mode
+        # Check helix_mode - guard against torch.compile tracing where config may not be set
+        try:
+            helix_mode = get_current_vllm_config().parallel_config.helix_mode
+        except AssertionError:
+            # During torch.compile tracing, config context may not be set
+            # Default to standard DCP path (this code shouldn't be executed at runtime
+            # for Helix GQA since FlashInfer is blocked for that configuration)
+            helix_mode = False
         if helix_mode:
             # Helix MLA (TPA=1): Use All-to-All + LSE reduction
             from vllm.distributed.parallel_state import get_helix_kvp_group
