@@ -18,7 +18,6 @@ from starlette.background import BackgroundTask, BackgroundTasks
 from vllm import envs
 from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import current_formatter_type, init_logger
-from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
@@ -178,6 +177,9 @@ def get_max_tokens(
     input_length: int,
     default_sampling_params: dict,
 ) -> int:
+    # Lazy import to avoid platform detection during CLI help display
+    from vllm.platforms import current_platform
+
     default_max_tokens = max_model_len - input_length
     max_output_tokens = current_platform.get_max_output_tokens(input_length)
 
