@@ -218,6 +218,7 @@ class VoxtralRealtimeBuffer:
 @support_torch_compile
 class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
+    skip_warmup = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)

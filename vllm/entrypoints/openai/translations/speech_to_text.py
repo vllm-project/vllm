@@ -137,6 +137,9 @@ class OpenAISpeechToText(OpenAIServing):
         if not supports_transcription(self.model_cls):
             return
 
+        if getattr(self.model_cls, "skip_warmup", False):
+            return
+
         try:
             warmup_start = time.perf_counter()
             logger.info("Warming up audio preprocessing libraries...")
@@ -149,9 +152,7 @@ class OpenAISpeechToText(OpenAIServing):
             _ = librosa.get_duration(y=dummy_audio, sr=self.asr_config.sample_rate)
 
             # Warm up mel-spectrogram computation with model-specific parameters
-            from vllm.transformers_utils.processor import (
-                cached_processor_from_config,
-            )
+            from vllm.transformers_utils.processor import cached_processor_from_config
 
             processor = cached_processor_from_config(self.model_config)
             feature_extractor = None
