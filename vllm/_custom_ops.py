@@ -467,7 +467,9 @@ def rms_norm_per_block_quant(
             dtype=torch.float32,
         )
 
-    assert tma_alignment in [0, 4], "Expected TMA alignment 0 or 4, but got " + str(tma_alignment)
+    assert tma_alignment in [0, 4], "Expected TMA alignment 0 or 4, but got " + str(
+        tma_alignment
+    )
 
     torch.ops._C.rms_norm_per_block_quant(
         output,

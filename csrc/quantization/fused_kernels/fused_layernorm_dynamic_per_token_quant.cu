@@ -108,9 +108,9 @@ __global__ void rms_norm_per_block_quant_kernel(
   // Compute Scale
   // Always able to vectorize due to constraints on hidden_size and group_size
   vllm::vectorized::compute_dynamic_per_token_scales<
-      scalar_t, scalar_out_t, has_residual, is_scale_transposed,
-      tma_alignment, group_size>(nullptr, scales, input, weight, rms,
-                                          scale_ub, hidden_size, residual);
+      scalar_t, scalar_out_t, has_residual, is_scale_transposed, tma_alignment,
+      group_size>(nullptr, scales, input, weight, rms, scale_ub, hidden_size,
+                  residual);
 
   // RMS Norm + Quant
   // Always able to vectorize due to constraints on hidden_size
@@ -268,7 +268,7 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
   TORCH_CHECK(group_size == 128 || group_size == 64,
               "Unsupported group size: ", group_size);
 
-  rms_norm_per_block_quant_dispatch(
-      out, input, weight, scales, group_size, var_epsilon, scale_ub, residual,
-      is_scale_transposed, tma_alignment);
+  rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,
+                                    var_epsilon, scale_ub, residual,
+                                    is_scale_transposed, tma_alignment);
 }

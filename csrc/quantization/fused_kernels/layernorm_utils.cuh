@@ -133,8 +133,11 @@ __device__ void compute_dynamic_per_token_scales(
       scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
       // Global output store
       if constexpr (is_scale_transposed) {
-        int64_t const scale_rows =
-            tma_scale_alignment > 0 ? (gridDim.x + tma_scale_alignment - 1) / tma_scale_alignment * tma_scale_alignment : gridDim.x;
+        int64_t const scale_rows = tma_scale_alignment > 0
+                                       ? (gridDim.x + tma_scale_alignment - 1) /
+                                             tma_scale_alignment *
+                                             tma_scale_alignment
+                                       : gridDim.x;
         all_token_scales[(threadIdx.x / threads_per_group) * scale_rows +
                          blockIdx.x] = scale;
       } else {
@@ -205,8 +208,11 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     int64_t scale_idx = 0;
     if (group_size > 0) {
       if constexpr (is_scale_transposed) {
-        int64_t const scale_rows =
-            tma_scale_alignment > 0 ? (gridDim.x + tma_scale_alignment - 1) / tma_scale_alignment * tma_scale_alignment : gridDim.x;
+        int64_t const scale_rows = tma_scale_alignment > 0
+                                       ? (gridDim.x + tma_scale_alignment - 1) /
+                                             tma_scale_alignment *
+                                             tma_scale_alignment
+                                       : gridDim.x;
         scale_idx = (i / group_size) * scale_rows + blockIdx.x;
       } else {
         scale_idx = blockIdx.x * (hidden_size / group_size) + i / group_size;
@@ -388,8 +394,11 @@ __device__ void compute_dynamic_per_token_scales(
       scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
       // Global output store
       if constexpr (is_scale_transposed) {
-        int64_t const scale_rows =
-            tma_scale_alignment > 0 ? (gridDim.x + tma_scale_alignment - 1) / tma_scale_alignment * tma_scale_alignment : gridDim.x;
+        int64_t const scale_rows = tma_scale_alignment > 0
+                                       ? (gridDim.x + tma_scale_alignment - 1) /
+                                             tma_scale_alignment *
+                                             tma_scale_alignment
+                                       : gridDim.x;
         all_token_scales[(threadIdx.x / threads_per_group) * scale_rows +
                          blockIdx.x] = scale;
       } else {
@@ -524,8 +533,11 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
       int64_t const num_groups = hidden_size / group_size;
       int64_t scale_idx = 0;
       if constexpr (is_scale_transposed) {
-        int64_t const scale_rows =
-            tma_scale_alignment > 0 ? (gridDim.x + tma_scale_alignment - 1) / tma_scale_alignment * tma_scale_alignment : gridDim.x;
+        int64_t const scale_rows = tma_scale_alignment > 0
+                                       ? (gridDim.x + tma_scale_alignment - 1) /
+                                             tma_scale_alignment *
+                                             tma_scale_alignment
+                                       : gridDim.x;
         scale_idx = (i * VEC_SIZE / group_size) * scale_rows + blockIdx.x;
       } else {
         scale_idx = blockIdx.x * num_groups + i * VEC_SIZE / group_size;

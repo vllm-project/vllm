@@ -118,16 +118,15 @@
     }                                         \
   }
 
-#define VLLM_DISPATCH_TMA_ALIGNMENT(expr, const_expr, ...)     \
-  if (expr == 0) {                                             \
-    constexpr int64_t const_expr = 0;                          \
-    __VA_ARGS__();                                             \
-  } else if (expr == 4) {                                      \
-    constexpr int64_t const_expr = 4;                          \
-    __VA_ARGS__();                                             \
-  } else {                                                     \
-    TORCH_CHECK(                                               \
-      false, "Expected TMA alignment 0 or 4, but got ", expr); \
+#define VLLM_DISPATCH_TMA_ALIGNMENT(expr, const_expr, ...)               \
+  if (expr == 0) {                                                       \
+    constexpr int64_t const_expr = 0;                                    \
+    __VA_ARGS__();                                                       \
+  } else if (expr == 4) {                                                \
+    constexpr int64_t const_expr = 4;                                    \
+    __VA_ARGS__();                                                       \
+  } else {                                                               \
+    TORCH_CHECK(false, "Expected TMA alignment 0 or 4, but got ", expr); \
   }
 
 #define VLLM_DISPATCH_BOOL(expr, const_expr, ...) \
