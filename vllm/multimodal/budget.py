@@ -13,24 +13,18 @@ def get_mm_max_toks_per_item(
     model_config: ModelConfig,
     mm_registry: MultiModalRegistry,
     processor: BaseMultiModalProcessor,
-    mm_limits: Mapping[str, int],
+    mm_counts: Mapping[str, int],
 ) -> Mapping[str, int]:
     """
     Get the maximum number of tokens per data item from each modality based
     on underlying model configuration.
     """
-    mm_counts = {modality: 1 for modality, limit in mm_limits.items() if limit > 0}
-
     max_tokens_per_item = processor.info.get_mm_max_tokens_per_item(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
     )
     if max_tokens_per_item is not None:
-        return {
-            modality: max_tokens
-            for modality, max_tokens in max_tokens_per_item.items()
-            if mm_counts.get(modality, 0) > 0
-        }
+        return max_tokens_per_item
 
     mm_inputs = mm_registry.get_dummy_mm_inputs(
         model_config,
@@ -66,10 +60,22 @@ class MultiModalBudget:
         self.cache = cache
         self.mm_limits = mm_limits = processor.info.allowed_mm_limits
 
+        active_modalities = {
+            modality for modality, limit in mm_limits.items() if limit > 0
+        }
+
         with set_default_torch_num_threads():  # Avoid hang during startup
-            mm_max_toks_per_item = get_mm_max_toks_per_item(
-                model_config, mm_registry, processor, mm_limits
+            all_mm_max_toks_per_item = get_mm_max_toks_per_item(
+                model_config,
+                mm_registry,
+                processor,
+                mm_counts=dict.fromkeys(active_modalities, 1),
             )
+
+        mm_max_toks_per_item = {
+            modality: all_mm_max_toks_per_item[modality]
+            for modality in active_modalities
+        }
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
             scheduler_config,
@@ -86,22 +92,13 @@ class MultiModalBudget:
             (
                 mm_max_items_per_prompt[modality],
                 mm_max_items_per_batch[modality],
-            ) = self.get_max_items(modality, max_toks_per_item)
+            ) = self._get_max_items(modality, max_toks_per_item)
 
         self.mm_max_toks_per_item = mm_max_toks_per_item
         self.mm_max_items_per_prompt: Mapping[str, int] = mm_max_items_per_prompt
         self.mm_max_items_per_batch: Mapping[str, int] = mm_max_items_per_batch
 
-    def get_modality_with_max_tokens(self) -> str:
-        mm_max_toks_per_item = self.mm_max_toks_per_item
-        modality, _ = max(mm_max_toks_per_item.items(), key=lambda x: x[1])
-
-        return modality
-
-    def get_encoder_budget(self) -> int:
-        return min(self.encoder_compute_budget, self.encoder_cache_size)
-
-    def get_max_items(
+    def _get_max_items(
         self,
         modality: str,
         max_tokens_per_item: int,
@@ -142,6 +139,15 @@ class MultiModalBudget:
         )
 
         return max_items_per_prompt, max_items_per_batch
+
+    def get_modality_with_max_tokens(self) -> str:
+        mm_max_toks_per_item = self.mm_max_toks_per_item
+        modality, _ = max(mm_max_toks_per_item.items(), key=lambda x: x[1])
+
+        return modality
+
+    def get_encoder_budget(self) -> int:
+        return min(self.encoder_compute_budget, self.encoder_cache_size)
 
     def reset_cache(self) -> None:
         if self.cache is not None:
