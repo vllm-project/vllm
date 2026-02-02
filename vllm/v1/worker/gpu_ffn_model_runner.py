@@ -125,8 +125,8 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
     def _ffn_forward(self,
                      batch_descriptor=None,
                      cudagraph_runtime_mode: CUDAGraphMode = None,
-                     is_ubatch:bool=False):
-        num_ubatches = self.vllm_config.parallel_config.num_ubatches if is_ubatch else 1
+                     dp_metadata_list: dict | None = None):
+        num_ubatches = len(dp_metadata_list) if dp_metadata_list else 1
         rank_ffn_output = None
         
         # TODO(jcz): process first_k_dense_replace
@@ -134,7 +134,11 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         for layer_idx in range(0, self.num_layers):
             for ubatch_idx in range(num_ubatches):
                 hidden_states, recv_metadata = self.connector.recv_attn_output()
-                if hasattr(self.connector, "dp_metadata_list"):
+                if dp_metadata_list:
+                    dp_metadata = dp_metadata_list.get(
+                        recv_metadata.stage_idx, None
+                    )
+                elif hasattr(self.connector, "dp_metadata_list"):
                     dp_metadata = self.connector.dp_metadata_list.get(
                         recv_metadata.stage_idx, None
                     )
@@ -174,15 +178,18 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         self, 
         scheduler_output=None, 
         intermediate_tensors=None, 
-        is_ubatch: bool = False
+        dp_metadata_list: dict | None = None
     ):
         """Execute FFN computation for a single request"""
+        is_ubatch = False
+        if dp_metadata_list is not None and len(dp_metadata_list) > 1:
+            is_ubatch = True
         try:
             if self.use_cuda_graph and not is_ubatch:
                 # TODO(yxj): use _cuda_graphs_full replay
                 self._ffn_forward(
                     cudagraph_runtime_mode=CUDAGraphMode.NONE, 
-                    is_ubatch=is_ubatch
+                    dp_metadata_list=dp_metadata_list
                 )
                 logger.info(f"is_ubatch is false eager")
             elif self.use_cuda_graph and is_ubatch:
@@ -209,7 +216,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                 logger.info(f"ffn_forward, is_ubatch is {is_ubatch}")
                 self._ffn_forward(
                     cudagraph_runtime_mode=CUDAGraphMode.NONE, 
-                    is_ubatch=is_ubatch
+                    dp_metadata_list=dp_metadata_list
                 )
         except Exception as e:
             raise ValueError(f"Error computing FFN: {e}") from e
