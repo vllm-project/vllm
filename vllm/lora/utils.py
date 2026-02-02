@@ -44,6 +44,25 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def get_captured_lora_counts(max_loras: int, specialize: bool) -> list[int]:
+    """
+    Returns num_active_loras values for cudagraph capture.
+
+    When specialize=True: powers of 2 up to max_loras, plus max_loras + 1.
+    When specialize=False: just [max_loras + 1].
+
+    This is the single source of truth for LoRA capture cases, used by both
+    CudagraphDispatcher and PunicaWrapperGPU.
+    """
+    if not specialize:
+        return [max_loras + 1]
+
+    return [
+        n for n in range(1, max_loras + 2) if (n & (n - 1)) == 0 or n == max_loras + 1
+    ]
+
+
 _GLOBAL_LORA_ID = 0
 
 
