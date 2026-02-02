@@ -87,7 +87,7 @@ class LayerNorm(torch.nn.LayerNorm):
         super().__init__(nout, eps=1e-12)
         self.dim = dim
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
         if self.dim == -1:
             return super().forward(x)
         return super().forward(x.transpose(self.dim, -1)).transpose(self.dim, -1)
