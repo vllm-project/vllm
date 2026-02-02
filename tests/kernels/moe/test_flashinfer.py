@@ -151,6 +151,9 @@ class TestData:
             moe_parallel_config=layer.moe_parallel_config,
             in_dtype=hidden_states.dtype,
             is_act_and_mul=is_gated,
+            routing_method=layer.routing_method_type,
+            activation=activation,
+            device=layer.device,
         )
 
         return TestData(
