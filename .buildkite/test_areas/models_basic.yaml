@@ -64,3 +64,18 @@ steps:
     - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
+
+- label: Transformers Backward Compatibility Models
+  working_dir: "/vllm-workspace/"
+  optional: true
+  soft_fail: true
+  commands:
+    - pip install transformers==4.57.5
+    - pytest -v -s tests/models/test_initialization.py
+    - pytest -v -s tests/models/test_transformers.py
+    - pytest -v -s tests/models/multimodal/processing/
+    - pytest -v -s tests/models/multimodal/test_mapping.py
+    - python3 examples/offline_inference/basic/chat.py
+    - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
+    # Whisper needs spawn method to avoid deadlock
+    - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
