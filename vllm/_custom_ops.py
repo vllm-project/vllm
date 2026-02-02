@@ -2185,6 +2185,7 @@ def topk_softmax(
         token_expert_indices,
         gating_output,
         renormalize,
+        e_score_correction_bias,
     )
 
 
