@@ -4,6 +4,7 @@ set -xe
 # Parse command line arguments
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
 ATTENTION_BACKEND=""  # Default to empty (use vllm default)
+CROSS_LAYERS_BLOCKS="False"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)
@@ -14,6 +15,8 @@ while [[ $# -gt 0 ]]; do
       ATTENTION_BACKEND="$2"
       shift 2
       ;;
+    --enable-cross-layers
+      CROSS_LAYERS_BLOCKS="True"
     *)
       echo "Unknown option $1"
       echo "Usage: $0 [--kv_buffer_device <cuda|cpu>] [--attention-backend <backend>]"
@@ -34,7 +37,6 @@ else
   KV_CONFIG_HETERO_LAYOUT=''
 fi
 
-CROSS_LAYERS_BLOCKS=${CROSS_LAYERS_BLOCKS:-"False"} # Default to non cross layers
 if [[ "$CROSS_LAYERS_BLOCKS" == "True" ]]; then
   KV_EXTRA_CONFIG=',"kv_connector_extra_config":{"enable_cross_layers_blocks": "True"}'
 else
