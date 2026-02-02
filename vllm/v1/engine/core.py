@@ -72,7 +72,6 @@ logger = init_logger(__name__)
 
 POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
-_OUTPUT_THREAD_FLUSH_TIMEOUT = 5.0
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -682,23 +681,22 @@ class EngineCore:
         return req, request.current_wave
 
 
-class ParentShutdownMonitor:
-    """Monitors parent process via shutdown pipe, signals when parent exits.
+class ShutdownPipeHandler:
+    """Handles shutdown coordination via pipe from parent process.
 
-    Also handles drain messages from parent before pipe close.
+    Relays DRAIN messages and detects parent death (pipe EOF).
     """
 
     def __init__(self, shutdown_pipe, input_queue: queue.Queue):
-        self.parent_died = False
         self._shutdown_pipe = shutdown_pipe
         self._input_queue = input_queue
         self._thread: threading.Thread | None = None
 
     def start(self):
-        self._thread = threading.Thread(target=self._monitor, daemon=True)
+        self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def _monitor(self):
+    def _run(self):
         try:
             while True:
                 msg = self._shutdown_pipe.recv()
@@ -708,9 +706,9 @@ class ParentShutdownMonitor:
                 else:
                     logger.warning("Unknown message from parent: %s", msg)
         except EOFError:
-            logger.info("Parent exited, terminating EngineCore")
-            self.parent_died = True
-            self._input_queue.put_nowait(None)
+            # Fallback for unexpected parent death.
+            logger.info("Parent exited, shutting down EngineCore")
+            self._input_queue.put_nowait((EngineCoreRequestType.SHUTDOWN, None))
         finally:
             self._shutdown_pipe.close()
 
@@ -989,7 +987,7 @@ class EngineCoreProc(EngineCore):
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-        shutdown_monitor: ParentShutdownMonitor | None = None
+        shutdown_handler: ShutdownPipeHandler | None = None
         engine_core: EngineCoreProc | None = None
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
@@ -1039,10 +1037,10 @@ class EngineCoreProc(EngineCore):
 
             assert engine_core is not None
             if shutdown_pipe:
-                shutdown_monitor = ParentShutdownMonitor(
+                shutdown_handler = ShutdownPipeHandler(
                     shutdown_pipe, engine_core.input_queue
                 )
-                shutdown_monitor.start()
+                shutdown_handler.start()
 
             engine_core.run_busy_loop()
 
@@ -1080,7 +1078,7 @@ class EngineCoreProc(EngineCore):
 
     def _process_input_queue(self) -> bool:
         """Exits when an engine step needs to be performed.
-        Returns False if poison pill received (parent died)."""
+        Returns False on SHUTDOWN request (e.g. parent died)."""
 
         waited = False
         while (
@@ -1097,20 +1095,20 @@ class EngineCoreProc(EngineCore):
                 if logger.isEnabledFor(DEBUG):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
-            req = self.input_queue.get()
-            if req is None:
+            request_type, request = self.input_queue.get()
+            if request_type == EngineCoreRequestType.SHUTDOWN:
                 return False
-            self._handle_client_request(*req)
+            self._handle_client_request(request_type, request)
 
         if waited:
             logger.debug("EngineCore loop active.")
 
         # Handle any more client requests.
         while not self.input_queue.empty():
-            req = self.input_queue.get_nowait()
-            if req is None:
+            request_type, request = self.input_queue.get_nowait()
+            if request_type == EngineCoreRequestType.SHUTDOWN:
                 return False
-            self._handle_client_request(*req)
+            self._handle_client_request(request_type, request)
 
         return True
 

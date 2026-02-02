@@ -214,10 +214,12 @@ class EngineCoreRequestType(enum.Enum):
     ABORT = b"\x01"
     START_DP_WAVE = b"\x02"
     UTILITY = b"\x03"
-    # Sentinel used within EngineCoreProc.
+    # Sentinels used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
-    # drain requests first, then exit
+    # Drain requests first, then exit.
     DRAIN = b"\x05"
+    # Immediate shutdown (e.g. parent process died).
+    SHUTDOWN = b"\x06"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):

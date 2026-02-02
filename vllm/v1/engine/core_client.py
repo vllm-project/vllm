@@ -577,14 +577,11 @@ class MPClient(EngineCoreClient):
                 self._finalizer()
 
     def shutdown(self):
-        # Terminate background resources
+        # Terminate background resources.
         self._finalizer()
 
     async def drain_async(self, timeout: float) -> bool:
         """Signal engines to drain and wait for them to exit."""
-        if self.resources.engine_dead:
-            return True
-
         assert self.resources.engine_manager is not None
         logger.info(
             "Sending DRAIN to %d engine(s) via shutdown pipe",
