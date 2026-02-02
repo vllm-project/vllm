@@ -67,23 +67,19 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Memoization state for routing results
         self._memoized_topk_weights: torch.Tensor | None = None
         self._memoized_topk_ids: torch.Tensor | None = None
+        self._memoized_offset: int | None = None
 
         # Create custom_routing_function to reuse memoized routing results
         def custom_routing_function(hidden_states, gating_output, topk, renormalize):
             """Return memoized `topk_weights` and `topk_ids`."""
-            if self._memoized_topk_weights is None or self._memoized_topk_ids is None:
-                raise RuntimeError(
-                    "ZeroExpertFusedMoE: routing results not memoized. "
-                    "Call select_experts first to compute routing."
-                )
-            return self._memoized_topk_weights, self._memoized_topk_ids
+            return self._select_experts_from_memo(hidden_states, gating_output)
 
         self.custom_routing_function = custom_routing_function
 
     @contextmanager
-    def _temporarily_set_attrs(self, **attrs):
+    def _temporarily_set_attrs(self, target: object, **attrs):
         """
-        Temporarily set attributes using object.__setattr__ and restore them.
+        Temporarily set attributes on a target object and restore them.
 
         This bypasses nn.Module.__setattr__ to avoid Dynamo tracing issues.
         When PyTorch Dynamo traces the forward pass, it cannot handle
@@ -92,14 +88,38 @@ class ZeroExpertFusedMoE(FusedMoE):
         sets the attribute without triggering nn.Module's custom __setattr__,
         allowing Dynamo to trace the code successfully.
         """
-        originals = {key: getattr(self, key) for key in attrs}
+        originals = {key: getattr(target, key) for key in attrs}
         try:
             for key, value in attrs.items():
-                object.__setattr__(self, key, value)
+                object.__setattr__(target, key, value)
             yield
         finally:
             for key, value in originals.items():
-                object.__setattr__(self, key, value)
+                object.__setattr__(target, key, value)
+
+    def _select_experts_from_memo(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,  # Unused, kept for signature parity
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._memoized_topk_weights is None or self._memoized_topk_ids is None:
+            raise RuntimeError(
+                "ZeroExpertFusedMoE: routing results not memoized. "
+                "Call select_experts first to compute routing."
+            )
+        if self._memoized_offset is None:
+            return self._memoized_topk_weights, self._memoized_topk_ids
+
+        start = self._memoized_offset
+        end = start + hidden_states.size(0)
+        total = self._memoized_topk_weights.size(0)
+        if end > total:
+            raise RuntimeError("ZeroExpertFusedMoE: memoized routing size mismatch.")
+        self._memoized_offset = end
+        return (
+            self._memoized_topk_weights[start:end],
+            self._memoized_topk_ids[start:end],
+        )
 
     def _compute_zero_expert_result(
         self,
@@ -139,17 +159,17 @@ class ZeroExpertFusedMoE(FusedMoE):
             Combined output from real experts and zero experts
         """
         # Prepare temporary attribute overrides for routing computation
-        temp_attrs = {
-            "custom_routing_function": None,  # Disable for first routing
-        }
-        if self._router is not None:
-            temp_attrs["e_score_correction_bias"] = self._router.e_score_correction_bias
+        temp_router_attrs = {}
+        if self._router is not None and hasattr(self.router, "e_score_correction_bias"):
+            temp_router_attrs["e_score_correction_bias"] = (
+                self._router.e_score_correction_bias
+            )
 
         # Compute routing with temporary attributes
         # Pass full router_logits (including zero experts) so that zero experts
         # can be properly identified in topk_ids
-        with self._temporarily_set_attrs(**temp_attrs):
-            topk_weights, topk_ids = self.select_experts(
+        with self._temporarily_set_attrs(self.router, **temp_router_attrs):
+            topk_weights_full, topk_ids_full = self.router.select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,  # Full logits (includes zero experts)
             )
@@ -157,13 +177,26 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Compute zero expert result if needed
         zero_expert_result = self._compute_zero_expert_result(
             hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
+            topk_weights=topk_weights_full,
+            topk_ids=topk_ids_full,
         )
+
+        # Filter zero experts for real expert computation
+        topk_weights = topk_weights_full
+        topk_ids = topk_ids_full
+        actual_zero_expert_num = self._actual_zero_expert_num
+        if actual_zero_expert_num is not None and actual_zero_expert_num > 0:
+            zero_mask = topk_ids_full >= self.logical_num_experts
+            if zero_mask.any():
+                topk_weights = topk_weights_full.clone()
+                topk_ids = topk_ids_full.clone()
+                topk_weights[zero_mask] = 0.0
+                topk_ids[zero_mask] = 0
 
         # Memoize routing results for reuse in super().forward()
         self._memoized_topk_weights = topk_weights
         self._memoized_topk_ids = topk_ids
+        self._memoized_offset = 0
 
         # Slice router_logits for real experts only
         router_logits_sliced = router_logits[..., : self.logical_num_experts]
@@ -171,10 +204,14 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Compute real expert results (will reuse memoized routing via
         # custom_routing_function)
         # zero_expert_num is already 0, so FusedMoE won't handle zero experts
-        fused_out = super().forward(
-            hidden_states=hidden_states,
-            router_logits=router_logits_sliced,
-        )
+        with self._temporarily_set_attrs(
+            self.router,
+            select_experts=self._select_experts_from_memo,
+        ):
+            fused_out = super().forward(
+                hidden_states=hidden_states,
+                router_logits=router_logits_sliced,
+            )
 
         # Combine results
         # Both zero_expert_result and fused_out are computed from the same
@@ -185,5 +222,6 @@ class ZeroExpertFusedMoE(FusedMoE):
         # Clear memoization after use
         self._memoized_topk_weights = None
         self._memoized_topk_ids = None
+        self._memoized_offset = None
 
         return fused_out
