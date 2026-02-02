@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import inspect
+import json
+import os
 from collections.abc import Callable
 from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -83,6 +87,10 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    num_lookahead_slots: int = 0
+    """The number of slots to allocate per sequence per step, beyond the known
+    token ids. Used in speculative decoding."""
+
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
@@ -121,6 +129,15 @@ class SchedulerConfig:
     """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
+
+    external_parameters: dict[str, Any] | None = Field(default=None)
+    """A dictionary of external parameters for custom scheduler implementations.
+    If a user-defined scheduler requires additional configuration values, they
+    can be provided here directly as a dict. Alternatively, a JSON file can be
+    placed in the directory of the class specified by ``scheduler_cls``; in that
+    case, the file will be automatically loaded and its contents stored in this
+    field.
+    """
 
     disable_hybrid_kv_cache_manager: bool | None = None
     """If set to True, KV cache manager will allocate the same size of KV cache
@@ -240,6 +257,36 @@ class SchedulerConfig:
                 self.max_long_partial_prefills,
                 self.long_prefill_token_threshold,
             )
+
+        if self.async_scheduling:
+            if (
+                self.scheduler_cls
+                == "vllm.v1.core.sched.ewsjf_scheduler.scheduler.EWSJFScheduler"
+            ):
+                # FIX: Explicit string concatenation for shorter lines
+                self.scheduler_cls = (
+                    "vllm.v1.core.sched.ewsjf_scheduler.async_scheduler"
+                    ".AsyncEWSJFScheduler"
+                )
+            else:
+                self.scheduler_cls = "vllm.v1.core.sched.async_scheduler.AsyncScheduler"
+
+        if isinstance(self.scheduler_cls, str):
+            self.load_external_parameters(max_model_len)
+
+    def load_external_parameters(self, max_model_len: int):
+        module_name, class_name = self.scheduler_cls.rsplit(".", 1)
+        module = importlib.import_module(module_name)
+        cls = getattr(module, class_name)
+
+        module_file = inspect.getfile(cls)
+        module_dir = os.path.dirname(module_file)
+
+        config_path = os.path.join(module_dir, "config.json")
+        # Load config.json only if no external parameters were provided
+        if self.external_parameters is None and os.path.exists(config_path):
+            with open(config_path, encoding="utf-8") as f:
+                self.external_parameters = json.load(f)
 
         self.verify_max_model_len(max_model_len)
 
