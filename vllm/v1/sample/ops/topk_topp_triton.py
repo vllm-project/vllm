@@ -100,165 +100,474 @@ def _topk_topp_kernel(
         max_logit = -float('inf')
         min_logit = float('inf')
 
-        #### STANDALONE TOP-P SAMPLING ####
-        p = tl.load(P + row_id)
-        if p < 1.0:
-            # Zeroth pass: Compute avg and std from a sample block
-            offs = tl.arange(0, BLOCK_SIZE)
-            mask_n = offs < VOCAB_SIZE
-            num_valid = tl.sum(mask_n)
-            logits_blk0 = tl.load(LOGITS_ROW + offs, mask=mask_n, other=0.0)
-            avg_logit = tl.sum(logits_blk0) / num_valid
-            sq_avg_logit = tl.sum(logits_blk0 * logits_blk0) / num_valid
-            std_logit = tl.sqrt(sq_avg_logit - avg_logit * avg_logit)
-            std_logit = tl.maximum(std_logit, 0.0)
-            max_sample = avg_logit + std_logit * 10.0
-            sum_exp_logits = 0.0
+        if TOPK_ENABLED:
+            k = tl.load(K + row_id)
+            if k != VOCAB_SIZE: 
 
-            # First pass: compute max and min logits and sum_exp_logits
-            for i in range(0, NUM_TILES):
-                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                mask_n = offs_n < VOCAB_SIZE
-                logits_blk = tl.load(LOGITS_ROW + offs_n,
-                                    mask=mask_n,
-                                    other=avg_logit)
-                max_logit = tl.maximum(max_logit, tl.max(logits_blk))
-                min_logit = tl.minimum(min_logit, tl.min(logits_blk))
-                
-                probs_blk = tl.exp(logits_blk - max_sample)
-                probs_blk = tl.where(mask_n, probs_blk, 0.0)
-                sum_exp_logits += tl.sum(probs_blk)
+                # Zeroth pass: Compute avg and std from a sample block
+                offs = tl.arange(0, BLOCK_SIZE)
+                mask_n = offs < VOCAB_SIZE
+                num_valid = tl.sum(mask_n)
+                logits_blk0 = tl.load(LOGITS_ROW + offs, mask=mask_n, other=0.0)
+                avg_logit = tl.sum(logits_blk0) / num_valid
+                sq_avg_logit = tl.sum(logits_blk0 * logits_blk0) / num_valid
+                std_logit = tl.sqrt(sq_avg_logit - avg_logit * avg_logit)
+                std_logit = tl.maximum(std_logit, 0.0)
 
-            idx = tl.cast(p * 200, tl.int32)
-            idx = tl.maximum(0, tl.minimum(idx, 199))
-            sigma = tl.load(NORMAL_CDF_TO_SIGMA_TABLE + idx)
-            sigma = sigma + tl.abs(sigma) * -0.25
-            outlier_pivot = avg_logit + std_logit * sigma
+                # Calculate outlier pivot t for Gaussian sigma-truncation
+                percentile = tl.cast(k / VOCAB_SIZE * 200, tl.uint32)
+                percentile = tl.minimum(percentile, 199)
+                sigma = tl.load(PERCENTILE_TO_STD_TABLE + percentile)
+                sigma = sigma + tl.abs(sigma) * -0.25
+                outlier_pivot = avg_logit + std_logit * sigma
+                num_outliers = tl.zeros((), dtype=tl.uint32)
 
-            outlier_prob = tl.exp(outlier_pivot - max_sample) / sum_exp_logits
-            sum_outlier_probs = 0.0
-            num_outliers = tl.zeros((), dtype=tl.uint32)
+                # First pass: compute max and min logits and gather outliers
+                for i in range(0, NUM_TILES):
+                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                    mask_n = offs_n < VOCAB_SIZE
+                    logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=avg_logit)
 
-            # Second pass: Calculate softmax and gather outliers
-            for i in range(0, NUM_TILES):
-                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                mask_n = offs_n < VOCAB_SIZE
+                    max_logit = tl.maximum(max_logit, tl.max(logits_blk))
+                    min_logit = tl.minimum(min_logit, tl.min(logits_blk))
 
-                probs_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float('inf'))
-                probs_blk = tl.exp(probs_blk - max_sample)
-                probs_blk = probs_blk / sum_exp_logits
+                    outlier_mask = (logits_blk > outlier_pivot) & mask_n
+                    cumulative_pos = tl.cast(
+                        tl.cumsum(outlier_mask) - 1 + num_outliers, tl.int32)
+                    num_outliers += tl.sum(outlier_mask)
+                    write_pos = tl.where(outlier_mask, cumulative_pos, -1)
+                    tl.store(BUFFER_ROW + write_pos, logits_blk, mask=outlier_mask)
 
-                outlier_mask = (probs_blk > outlier_prob) & mask_n
-                sum_outlier_probs += tl.sum(outlier_mask * probs_blk)
-                cumulative_pos = tl.cast(
-                    tl.cumsum(outlier_mask) - 1 + num_outliers, tl.int32)
-                num_outliers += tl.sum(outlier_mask)
-                write_pos = tl.where(outlier_mask, cumulative_pos, -1)
-                tl.store(BUFFER_ROW + write_pos, probs_blk, mask=outlier_mask)
-                
+                # Second passes: Quaternary search for pivots (nlog_4(batch_size))
+                num_iters = 0
+                k_pivot = float("inf")
+                k_pivots_num = tl.zeros((), dtype=tl.uint32)
+                min_larger = float("inf")
+                num_min_larger = tl.zeros((), dtype=tl.uint32)
+                if num_outliers > k:
+                    max_range = max_logit
+                    min_range = outlier_pivot
+                    search_range = tl.cast(num_outliers, tl.int32)
+                    search_iters = tl.cast(
+                        (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC, tl.int32
+                    )
+                    while k_pivot == float("inf"):
+                        k_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
+                        k_pivots_num_0 = tl.zeros((), dtype=tl.uint32)
+                        min_larger_0 = float("inf")
+                        num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
 
-            max_range = tl.exp(max_logit - max_sample) / sum_exp_logits
-            min_range = tl.exp(min_logit - max_sample) / sum_exp_logits
-            
-            p_pivot = 1.0
-            num_iters = 0
-            min_larger_prob = 1.0
-            num_min_larger = tl.zeros((), dtype=tl.uint32)
-            p_pivots_sum = 0.0
-            
-            # Third pass: Search for p_pivot
-            if sum_outlier_probs > p:
-                min_range = outlier_prob
-                search_range = tl.cast(num_outliers, tl.int32)
-                search_iters = tl.cast(
-                    (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC, tl.int32)
+                        k_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                        k_pivots_num_1 = tl.zeros((), dtype=tl.uint32)
+                        min_larger_1 = float("inf")
+                        num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
 
-                while p_pivot == 1.0:
-                    p_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
-                    p_pivots_sum_0 = 0.0
-                    min_larger_0 = 1.0
-                    num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
-                    
-                    p_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
-                    p_pivots_sum_1 = 0.0
-                    min_larger_1 = 1.0
-                    num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
+                        k_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
+                        k_pivots_num_2 = tl.zeros((), dtype=tl.uint32)
+                        min_larger_2 = float("inf")
+                        num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
 
-                    p_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
-                    p_pivots_sum_2 = 0.0
-                    min_larger_2 = 1.0
-                    num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
+                        # First pass: Calculate k_pivots_num and min_larger
+                        for i in range(0, search_iters):
+                            offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
+                            mask_n_2 = offs_n < search_range
+                            logits_blk2 = tl.load(
+                                BUFFER_ROW + offs_n, mask=mask_n_2, other=-float("inf")
+                            )
 
+                            k_pivots_num_0 += tl.sum(logits_blk2 > k_pivot_0)
+                            k_pivots_num_1 += tl.sum(logits_blk2 > k_pivot_1)
+                            k_pivots_num_2 += tl.sum(logits_blk2 > k_pivot_2)
 
-                    # First pass: Calculate p_pivots_sum and min_larger
-                    for i in range(0, search_iters):
-                        offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
-                        mask_n_2 = offs_n < search_range
-                        probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0)
+                            min_larger_0 = tl.minimum(min_larger_0, tl.min(logits_blk2))
+                            min_larger_1 = tl.minimum(min_larger_1, tl.min(logits_blk2))
+                            min_larger_2 = tl.minimum(min_larger_2, tl.min(logits_blk2))
 
-                        p_pivots_sum_0 += tl.sum(probs_blk * (probs_blk > p_pivot_0))
-                        masked_larger_0 = tl.where(probs_blk > p_pivot_0, probs_blk, 1.0)
-                        min_larger_0 = tl.minimum(min_larger_0, tl.min(masked_larger_0))
+                        # Second pass: Calculate num_min_larger
+                        for i in range(0, search_iters):
+                            offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
+                            mask_n_2 = offs_n < search_range
+                            logits_blk2 = tl.load(
+                                BUFFER_ROW + offs_n, mask=mask_n_2, other=-float("inf")
+                            )
+
+                            num_min_larger_0 += tl.sum(tl.abs(logits_blk2 - min_larger_0) < 1e-15)
+                            num_min_larger_1 += tl.sum(tl.abs(logits_blk2 - min_larger_1) < 1e-15)
+                            num_min_larger_2 += tl.sum(tl.abs(logits_blk2 - min_larger_2) < 1e-15)
+
+                        # Check if any of the pivots satisfy termination condition
+                        if k_pivots_num_0 >= k:
+                            if k_pivots_num_0 - (min_larger_0 * num_min_larger_0) < k:
+                                k_pivot = k_pivot_0
+                                k_pivots_num = k_pivots_num_0
+                                min_larger = min_larger_0
+                                num_min_larger = num_min_larger_0
+                        if k_pivots_num_1 >= k:
+                            if k_pivots_num_1 - (min_larger_1 * num_min_larger_1) < k:
+                                k_pivot = k_pivot_1
+                                k_pivots_num = k_pivots_num_1
+                                min_larger = min_larger_1
+                                num_min_larger = num_min_larger_1
+                        if k_pivots_num_2 >= k:
+                            if k_pivots_num_2 - (min_larger_2 * num_min_larger_2) < k:
+                                k_pivot = k_pivot_2
+                                k_pivots_num = k_pivots_num_2
+                                min_larger = min_larger_2
+                                num_min_larger = num_min_larger_2
                         
-                        p_pivots_sum_1 += tl.sum(probs_blk * (probs_blk > p_pivot_1))
-                        masked_larger_1 = tl.where(probs_blk > p_pivot_1, probs_blk, 1.0)
-                        min_larger_1 = tl.minimum(min_larger_1, tl.min(masked_larger_1))
+                        # Update range
+                        if k_pivots_num_2 > k:
+                            min_range = k_pivot_2
+                        elif k_pivots_num_1 > k:
+                            min_range = k_pivot_1
+                        elif k_pivots_num_0 > k:
+                            min_range = k_pivot_0
 
-                        p_pivots_sum_2 += tl.sum(probs_blk * (probs_blk > p_pivot_2))
-                        masked_larger_2 = tl.where(probs_blk > p_pivot_2, probs_blk, 1.0)
-                        min_larger_2 = tl.minimum(min_larger_2, tl.min(masked_larger_2))
+                        if k_pivots_num_0 < k:
+                            max_range = k_pivot_0
+                        elif k_pivots_num_1 < k:
+                            max_range = k_pivot_1
+                        elif k_pivots_num_2 < k:
+                            max_range = k_pivot_2
+
+                        num_iters += 1
+                        if num_iters >= 24 or tl.abs(min_range - max_range) < 1e-15:
+                            k_pivot = (max_range + min_range) / 2.0
+                else:
+                    # If top-k outlier gathering failed, search whole logit space
+                    max_range = max_logit
+                    min_range = min_logit
+                    while k_pivot == float("inf"):
+                        k_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
+                        k_pivots_num_0 = tl.zeros((), dtype=tl.uint32)
+                        min_larger_0 = float("inf")
+                        num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
+
+                        k_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                        k_pivots_num_1 = tl.zeros((), dtype=tl.uint32)
+                        min_larger_1 = float("inf")
+                        num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
+
+                        k_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
+                        k_pivots_num_2 = tl.zeros((), dtype=tl.uint32)
+                        min_larger_2 = float("inf")
+                        num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
+
+                        # First pass: Calculate k_pivots_num and min_larger
+                        for i in range(0, NUM_TILES):
+                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                            mask_n = offs_n < VOCAB_SIZE
+                            logits_blk2 = tl.load(
+                                LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                            )
+
+                            k_pivots_num_0 += tl.sum(logits_blk2 > k_pivot_0)
+                            k_pivots_num_1 += tl.sum(logits_blk2 > k_pivot_1)
+                            k_pivots_num_2 += tl.sum(logits_blk2 > k_pivot_2)
+
+                            min_larger_0 = tl.minimum(min_larger_0, tl.min(logits_blk2))
+                            min_larger_1 = tl.minimum(min_larger_1, tl.min(logits_blk2))
+                            min_larger_2 = tl.minimum(min_larger_2, tl.min(logits_blk2))
+
+                        # Second pass: Calculate num_min_larger
+                        for i in range(0, NUM_TILES):
+                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                            mask_n = offs_n < VOCAB_SIZE
+                            logits_blk2 = tl.load(
+                                LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
+                            )
+
+                            num_min_larger_0 += tl.sum(tl.abs(logits_blk2 - min_larger_0) < 1e-15)
+                            num_min_larger_1 += tl.sum(tl.abs(logits_blk2 - min_larger_1) < 1e-15)
+                            num_min_larger_2 += tl.sum(tl.abs(logits_blk2 - min_larger_2) < 1e-15)
+
+                        # Check if any of the pivots satisfy termination condition
+                        if k_pivots_num_0 >= k:
+                            if k_pivots_num_0 - (min_larger_0 * num_min_larger_0) < k:
+                                k_pivot = k_pivot_0
+                                k_pivots_num = k_pivots_num_0
+                                min_larger = min_larger_0
+                                num_min_larger = num_min_larger_0
+                        if k_pivots_num_1 >= k:
+                            if k_pivots_num_1 - (min_larger_1 * num_min_larger_1) < k:
+                                k_pivot = k_pivot_1
+                                k_pivots_num = k_pivots_num_1
+                                min_larger = min_larger_1
+                                num_min_larger = num_min_larger_1
+                        if k_pivots_num_2 >= k:
+                            if k_pivots_num_2 - (min_larger_2 * num_min_larger_2) < k:
+                                k_pivot = k_pivot_2
+                                k_pivots_num = k_pivots_num_2
+                                min_larger = min_larger_2
+                                num_min_larger = num_min_larger_2
+
+                        # Update range                    
+                        if k_pivots_num_2 > k:
+                            min_range = k_pivot_2
+                        elif k_pivots_num_1 > k:
+                            min_range = k_pivot_1
+                        elif k_pivots_num_0 > k:
+                            min_range = k_pivot_0
+                            
+                        if k_pivots_num_0 < k:
+                            max_range = k_pivot_0
+                        elif k_pivots_num_1 < k:
+                            max_range = k_pivot_1
+                        elif k_pivots_num_2 < k:
+                            max_range = k_pivot_2
+
+                        num_iters += 1
+                        if num_iters >= 24 or tl.abs(min_range - max_range) < 1e-15:
+                            k_pivot = (max_range + min_range) / 2.0
+
+                duplicate_logit = min_larger
+                num_duplicate_logit = num_min_larger
+                num_keep = num_duplicate_logit - (k_pivots_num - k)
+                num_kept = tl.zeros((), dtype=tl.uint32)
+                                
+                if TOPP_ENABLED:
+                    #### TOP-P SAMPLING AFTER TOP-K ####
+                    p = tl.load(P + row_id)
+                    if p < 1.0:
+                        min_logit = k_pivot         
+                        sum_exp_logits = 0.0
+                        num_outliers_2 = tl.zeros((), dtype=tl.uint32)
+                        search_range = tl.cast(num_outliers, tl.int32)
+                        search_iters = tl.cast(
+                            (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC, tl.int32
+                        )
+
+                        # Third pass: Calculate exp logits and sum, gather top-k outliers
+                        if num_outliers > k:
+                            for i in range(0, search_iters):
+                                offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
+                                mask_n_2 = offs_n < search_range
+
+                                probs_blk = tl.load(BUFFER_ROW + offs_n,
+                                                    mask=mask_n_2,
+                                                    other=-float('inf'))
+                                
+                                outlier_mask = (probs_blk > min_logit) & mask_n_2
+
+                                # Duplicate logit handling
+                                if num_keep < num_duplicate_logit:
+                                    duplicate_mask = tl.abs(probs_blk - duplicate_logit) < 1e-15
+                                    duplicate_count = tl.cumsum(duplicate_mask) + num_kept
+                                    duplicate_keep_mask = (duplicate_count <= num_keep) & duplicate_mask
+                                    duplicate_remove_mask = duplicate_mask & ~duplicate_keep_mask
+                                    outlier_mask = outlier_mask & (~duplicate_remove_mask)
+                                    num_kept += tl.sum(duplicate_keep_mask)
+
+                                probs_blk = tl.where(outlier_mask, probs_blk, -float('inf'))
+                                probs_blk = probs_blk - max_logit
+                                probs_blk = tl.exp(probs_blk)
+                                sum_exp_logits += tl.sum(probs_blk)
+                                
+                            # Fourth pass: Calculate BUFFER and get outliers
+                            for i in range(0, search_iters):
+                                offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
+                                mask_n_2 = offs_n < search_range
+
+                                probs_blk = tl.load(BUFFER_ROW + offs_n,
+                                                    mask=mask_n_2,
+                                                    other=-float('inf'))
+                                
+                                outlier_mask = (probs_blk > min_logit) & mask_n_2
+                                probs_blk = probs_blk - max_logit
+                                probs_blk = tl.exp(probs_blk)
+                                probs_blk = probs_blk / sum_exp_logits
+                                tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n_2)
+                        else:
+                            # If top-k outlier gathering failed, retry gathering using top-k pivot 
+                            for i in range(0, NUM_TILES):
+                                offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                                mask_n = offs_n < VOCAB_SIZE
+
+                                probs_blk = tl.load(LOGITS_ROW + offs_n,
+                                                    mask=mask_n,
+                                                    other=-float('inf'))
+                                
+                                outlier_mask = (probs_blk > min_logit) & mask_n
+
+                                # Duplicate logit handling
+                                duplicate_mask = tl.abs(probs_blk - duplicate_logit) < 1e-15
+                                duplicate_count = tl.cumsum(duplicate_mask) + num_kept
+                                duplicate_keep_mask = (duplicate_count <= num_keep) & duplicate_mask
+                                duplicate_remove_mask = duplicate_mask & ~duplicate_keep_mask
+                                outlier_mask = outlier_mask & (~duplicate_remove_mask)
+                                num_kept += tl.sum(duplicate_keep_mask)
+
+                                probs_blk = tl.where(outlier_mask, probs_blk, -float('inf'))
+                                probs_blk = probs_blk - max_logit
+                                probs_blk = tl.exp(probs_blk)
+                                sum_exp_logits += tl.sum(probs_blk)
+                                
+                                cumulative_pos = tl.cast(
+                                    tl.cumsum(outlier_mask) - 1 + num_outliers_2, tl.int32)
+                                num_outliers_2 += tl.sum(outlier_mask)
+                                write_pos = tl.where(outlier_mask, cumulative_pos, -1)
+                                tl.store(BUFFER_ROW + write_pos, probs_blk, mask=outlier_mask)
+                                    
+                            search_range = tl.cast(num_outliers_2, tl.int32)
+                            search_iters = tl.cast(
+                                (num_outliers_2 + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC, tl.int32)
+
+                            # Fourth pass: Calculate BUFFER and get outliers
+                            for i in range(0, search_iters):
+                                offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
+                                mask_n_2 = offs_n < search_range
+
+                                probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0)
+                                probs_blk = probs_blk / sum_exp_logits
+                                tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n_2)
+
+                                
+                        max_range = tl.exp(max_logit - max_logit) / sum_exp_logits
+                        min_range = tl.exp(min_logit - max_logit) / sum_exp_logits
+                        
+                        p_pivot = 1.0
+                        num_iters = 0
+                        min_larger_prob = 1.0
+                        num_min_larger = tl.zeros((), dtype=tl.uint32)
+                        p_pivots_sum = 0.0
+                        
+                        # Fifth passes: Search for p_pivot
+                        while p_pivot == 1.0:
+                            p_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
+                            p_pivots_sum_0 = 0.0
+                            min_larger_0 = 1.0
+                            num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
+                            
+                            p_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                            p_pivots_sum_1 = 0.0
+                            min_larger_1 = 1.0
+                            num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
+
+                            p_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
+                            p_pivots_sum_2 = 0.0
+                            min_larger_2 = 1.0
+                            num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
 
 
-                    # Second pass: Calculate num_min_larger
-                    for i in range(0, search_iters):
-                        offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
-                        mask_n_2 = offs_n < search_range
-                        probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0)
+                            # First pass: Calculate p_pivots_sum and min_larger
+                            for i in range(0, search_iters):
+                                offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
+                                mask_n_2 = offs_n < search_range
+                                probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0)
 
-                        num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-15)
-                        num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-15)
-                        num_min_larger_2 += tl.sum(tl.abs(probs_blk - min_larger_2) < 1e-15)
+                                p_pivots_sum_0 += tl.sum(probs_blk * (probs_blk > p_pivot_0))
+                                masked_larger_0 = tl.where(probs_blk > p_pivot_0, probs_blk, 1.0)
+                                min_larger_0 = tl.minimum(min_larger_0, tl.min(masked_larger_0))
+                                
+                                p_pivots_sum_1 += tl.sum(probs_blk * (probs_blk > p_pivot_1))
+                                masked_larger_1 = tl.where(probs_blk > p_pivot_1, probs_blk, 1.0)
+                                min_larger_1 = tl.minimum(min_larger_1, tl.min(masked_larger_1))
 
-                    # Check if any of the pivots satisfy termination condition
-                    if p_pivots_sum_2 >= p:
-                        if p_pivots_sum_2 - (min_larger_2 * num_min_larger_2) < p:
-                            p_pivot = p_pivot_2
-                            min_larger_prob = min_larger_2
-                            num_min_larger = num_min_larger_2
-                            p_pivots_sum = p_pivots_sum_2
-                    if p_pivots_sum_1 >= p:
-                        if p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p:
-                            p_pivot = p_pivot_1
-                            min_larger_prob = min_larger_1
-                            num_min_larger = num_min_larger_1
-                            p_pivots_sum = p_pivots_sum_1
-                    if p_pivots_sum_0 >= p:
-                        if p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p:
-                            p_pivot = p_pivot_0
-                            min_larger_prob = min_larger_0
-                            num_min_larger = num_min_larger_0
-                            p_pivots_sum = p_pivots_sum_0
+                                p_pivots_sum_2 += tl.sum(probs_blk * (probs_blk > p_pivot_2))
+                                masked_larger_2 = tl.where(probs_blk > p_pivot_2, probs_blk, 1.0)
+                                min_larger_2 = tl.minimum(min_larger_2, tl.min(masked_larger_2))
+
+
+                            # Second pass: Calculate num_min_larger
+                            for i in range(0, search_iters):
+                                offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
+                                mask_n_2 = offs_n < search_range
+                                probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0)
+
+                                num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-15)
+                                num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-15)
+                                num_min_larger_2 += tl.sum(tl.abs(probs_blk - min_larger_2) < 1e-15)
+
+                            # Check if any of the pivots satisfy termination condition
+                            if p_pivots_sum_2 >= p:
+                                if p_pivots_sum_2 - (min_larger_2 * num_min_larger_2) < p:
+                                    p_pivot = p_pivot_2
+                                    min_larger_prob = min_larger_2
+                                    num_min_larger = num_min_larger_2
+                                    p_pivots_sum = p_pivots_sum_2
+                            if p_pivots_sum_1 >= p:
+                                if p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p:
+                                    p_pivot = p_pivot_1
+                                    min_larger_prob = min_larger_1
+                                    num_min_larger = num_min_larger_1
+                                    p_pivots_sum = p_pivots_sum_1
+                            if p_pivots_sum_0 >= p:
+                                if p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p:
+                                    p_pivot = p_pivot_0
+                                    min_larger_prob = min_larger_0
+                                    num_min_larger = num_min_larger_0
+                                    p_pivots_sum = p_pivots_sum_0
+                            
+                            # Update range
+                            if p_pivots_sum_2 > p:
+                                min_range = p_pivot_2
+                            elif p_pivots_sum_1 > p:
+                                min_range = p_pivot_1
+                            elif p_pivots_sum_0 > p:
+                                min_range = p_pivot_0
+
+                            if p_pivots_sum_0 < p:
+                                max_range = p_pivot_0
+                            elif p_pivots_sum_1 < p:
+                                max_range = p_pivot_1
+                            elif p_pivots_sum_2 < p:
+                                max_range = p_pivot_2
+
+                            num_iters += 1
+                            if (max_range - min_range) < 1e-15 or num_iters >= 24:
+                                p_pivot = (max_range + min_range) / 2.0
+
+                        duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_logit
+                        num_duplicate_logit = num_min_larger
+                        num_keep = num_duplicate_logit - tl.cast((p_pivots_sum - p) / min_larger_prob, tl.uint32)
+                        num_kept = tl.zeros((), dtype=tl.uint32)
+
+                        # Top-k + Top-p path
+                        final_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
+                else:
+                    # Top-k only path
+                    final_pivot = k_pivot
+        elif TOPP_ENABLED:
+            #### STANDALONE TOP-P SAMPLING ####
+            p = tl.load(P + row_id)
+            if p < 1.0:
+                # Zeroth pass: Compute avg and std from a sample block
+                offs = tl.arange(0, BLOCK_SIZE)
+                mask_n = offs < VOCAB_SIZE
+                num_valid = tl.sum(mask_n)
+                logits_blk0 = tl.load(LOGITS_ROW + offs, mask=mask_n, other=0.0)
+                avg_logit = tl.sum(logits_blk0) / num_valid
+                sq_avg_logit = tl.sum(logits_blk0 * logits_blk0) / num_valid
+                std_logit = tl.sqrt(sq_avg_logit - avg_logit * avg_logit)
+                std_logit = tl.maximum(std_logit, 0.0)
+                max_sample = avg_logit + std_logit * 10.0
+                sum_exp_logits = 0.0
+
+                # First pass: compute max and min logits and sum_exp_logits
+                for i in range(0, NUM_TILES):
+                    offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                    mask_n = offs_n < VOCAB_SIZE
+                    logits_blk = tl.load(LOGITS_ROW + offs_n,
+                                        mask=mask_n,
+                                        other=avg_logit)
+                    max_logit = tl.maximum(max_logit, tl.max(logits_blk))
+                    min_logit = tl.minimum(min_logit, tl.min(logits_blk))
                     
-                    # Update range
-                    if p_pivots_sum_2 > p:
-                        min_range = p_pivot_2
-                    elif p_pivots_sum_1 > p:
-                        min_range = p_pivot_1
-                    elif p_pivots_sum_0 > p:
-                        min_range = p_pivot_0
+                    probs_blk = tl.exp(logits_blk - max_sample)
+                    probs_blk = tl.where(mask_n, probs_blk, 0.0)
+                    sum_exp_logits += tl.sum(probs_blk)
 
-                    if p_pivots_sum_0 < p:
-                        max_range = p_pivot_0
-                    elif p_pivots_sum_1 < p:
-                        max_range = p_pivot_1
-                    elif p_pivots_sum_2 < p:
-                        max_range = p_pivot_2
+                idx = tl.cast(p * 200, tl.int32)
+                idx = tl.maximum(0, tl.minimum(idx, 199))
+                sigma = tl.load(NORMAL_CDF_TO_SIGMA_TABLE + idx)
+                sigma = sigma + tl.abs(sigma) * -0.25
+                outlier_pivot = avg_logit + std_logit * sigma
 
-                    num_iters += 1
-                    if (max_range - min_range) < 1e-15 or num_iters >= 24:
-                        p_pivot = (max_range + min_range) / 2.0
-            else:
-                # Re-populate the buffer with full softmax probabilities
+                outlier_prob = tl.exp(outlier_pivot - max_sample) / sum_exp_logits
+                sum_outlier_probs = 0.0
+                num_outliers = tl.zeros((), dtype=tl.uint32)
+
+                # Second pass: Calculate softmax and gather outliers
                 for i in range(0, NUM_TILES):
                     offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                     mask_n = offs_n < VOCAB_SIZE
@@ -266,100 +575,219 @@ def _topk_topp_kernel(
                     probs_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float('inf'))
                     probs_blk = tl.exp(probs_blk - max_sample)
                     probs_blk = probs_blk / sum_exp_logits
-                    tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n)
+
+                    outlier_mask = (probs_blk > outlier_prob) & mask_n
+                    sum_outlier_probs += tl.sum(outlier_mask * probs_blk)
+                    cumulative_pos = tl.cast(
+                        tl.cumsum(outlier_mask) - 1 + num_outliers, tl.int32)
+                    num_outliers += tl.sum(outlier_mask)
+                    write_pos = tl.where(outlier_mask, cumulative_pos, -1)
+                    tl.store(BUFFER_ROW + write_pos, probs_blk, mask=outlier_mask)
                     
-                while p_pivot == 1.0:
-                    p_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
-                    p_pivots_sum_0 = 0.0
-                    min_larger_0 = 1.0
-                    num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
-                    
-                    p_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
-                    p_pivots_sum_1 = 0.0
-                    min_larger_1 = 1.0
-                    num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
 
-                    p_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
-                    p_pivots_sum_2 = 0.0
-                    min_larger_2 = 1.0
-                    num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
+                max_range = tl.exp(max_logit - max_sample) / sum_exp_logits
+                min_range = tl.exp(min_logit - max_sample) / sum_exp_logits
+                
+                p_pivot = 1.0
+                num_iters = 0
+                min_larger_prob = 1.0
+                num_min_larger = tl.zeros((), dtype=tl.uint32)
+                p_pivots_sum = 0.0
+                
+                # Third pass: Search for p_pivot
+                if sum_outlier_probs > p:
+                    min_range = outlier_prob
+                    search_range = tl.cast(num_outliers, tl.int32)
+                    search_iters = tl.cast(
+                        (num_outliers + BLOCK_SIZE_TRUNC - 1) // BLOCK_SIZE_TRUNC, tl.int32)
 
-
-                    # First pass: Calculate p_pivots_sum and min_larger
-                    for i in range(0, NUM_TILES):
-                        offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                        mask_n = offs_n < VOCAB_SIZE
-                        probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n, other=0.0)
-
-                        p_pivots_sum_0 += tl.sum(probs_blk * (probs_blk > p_pivot_0))
-                        masked_larger_0 = tl.where(probs_blk > p_pivot_0, probs_blk, 1.0)
-                        min_larger_0 = tl.minimum(min_larger_0, tl.min(masked_larger_0))
+                    while p_pivot == 1.0:
+                        p_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
+                        p_pivots_sum_0 = 0.0
+                        min_larger_0 = 1.0
+                        num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
                         
-                        p_pivots_sum_1 += tl.sum(probs_blk * (probs_blk > p_pivot_1))
-                        masked_larger_1 = tl.where(probs_blk > p_pivot_1, probs_blk, 1.0)
-                        min_larger_1 = tl.minimum(min_larger_1, tl.min(masked_larger_1))
+                        p_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                        p_pivots_sum_1 = 0.0
+                        min_larger_1 = 1.0
+                        num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
 
-                        p_pivots_sum_2 += tl.sum(probs_blk * (probs_blk > p_pivot_2))
-                        masked_larger_2 = tl.where(probs_blk > p_pivot_2, probs_blk, 1.0)
-                        min_larger_2 = tl.minimum(min_larger_2, tl.min(masked_larger_2))
+                        p_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
+                        p_pivots_sum_2 = 0.0
+                        min_larger_2 = 1.0
+                        num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
 
 
-                    # Second pass: Calculate num_min_larger
+                        # First pass: Calculate p_pivots_sum and min_larger
+                        for i in range(0, search_iters):
+                            offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
+                            mask_n_2 = offs_n < search_range
+                            probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0)
+
+                            p_pivots_sum_0 += tl.sum(probs_blk * (probs_blk > p_pivot_0))
+                            masked_larger_0 = tl.where(probs_blk > p_pivot_0, probs_blk, 1.0)
+                            min_larger_0 = tl.minimum(min_larger_0, tl.min(masked_larger_0))
+                            
+                            p_pivots_sum_1 += tl.sum(probs_blk * (probs_blk > p_pivot_1))
+                            masked_larger_1 = tl.where(probs_blk > p_pivot_1, probs_blk, 1.0)
+                            min_larger_1 = tl.minimum(min_larger_1, tl.min(masked_larger_1))
+
+                            p_pivots_sum_2 += tl.sum(probs_blk * (probs_blk > p_pivot_2))
+                            masked_larger_2 = tl.where(probs_blk > p_pivot_2, probs_blk, 1.0)
+                            min_larger_2 = tl.minimum(min_larger_2, tl.min(masked_larger_2))
+
+
+                        # Second pass: Calculate num_min_larger
+                        for i in range(0, search_iters):
+                            offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(0, BLOCK_SIZE_TRUNC)
+                            mask_n_2 = offs_n < search_range
+                            probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0)
+
+                            num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-15)
+                            num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-15)
+                            num_min_larger_2 += tl.sum(tl.abs(probs_blk - min_larger_2) < 1e-15)
+
+                        # Check if any of the pivots satisfy termination condition
+                        if p_pivots_sum_2 >= p:
+                            if p_pivots_sum_2 - (min_larger_2 * num_min_larger_2) < p:
+                                p_pivot = p_pivot_2
+                                min_larger_prob = min_larger_2
+                                num_min_larger = num_min_larger_2
+                                p_pivots_sum = p_pivots_sum_2
+                        if p_pivots_sum_1 >= p:
+                            if p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p:
+                                p_pivot = p_pivot_1
+                                min_larger_prob = min_larger_1
+                                num_min_larger = num_min_larger_1
+                                p_pivots_sum = p_pivots_sum_1
+                        if p_pivots_sum_0 >= p:
+                            if p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p:
+                                p_pivot = p_pivot_0
+                                min_larger_prob = min_larger_0
+                                num_min_larger = num_min_larger_0
+                                p_pivots_sum = p_pivots_sum_0
+                        
+                        # Update range
+                        if p_pivots_sum_2 > p:
+                            min_range = p_pivot_2
+                        elif p_pivots_sum_1 > p:
+                            min_range = p_pivot_1
+                        elif p_pivots_sum_0 > p:
+                            min_range = p_pivot_0
+
+                        if p_pivots_sum_0 < p:
+                            max_range = p_pivot_0
+                        elif p_pivots_sum_1 < p:
+                            max_range = p_pivot_1
+                        elif p_pivots_sum_2 < p:
+                            max_range = p_pivot_2
+
+                        num_iters += 1
+                        if (max_range - min_range) < 1e-15 or num_iters >= 24:
+                            p_pivot = (max_range + min_range) / 2.0
+                else:
+                    # Re-populate the buffer with full softmax probabilities
                     for i in range(0, NUM_TILES):
                         offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                         mask_n = offs_n < VOCAB_SIZE
-                        probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n, other=0.0)
 
-                        num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-15)
-                        num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-15)
-                        num_min_larger_2 += tl.sum(tl.abs(probs_blk - min_larger_2) < 1e-15)
+                        probs_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float('inf'))
+                        probs_blk = tl.exp(probs_blk - max_sample)
+                        probs_blk = probs_blk / sum_exp_logits
+                        tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n)
+                        
+                    while p_pivot == 1.0:
+                        p_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
+                        p_pivots_sum_0 = 0.0
+                        min_larger_0 = 1.0
+                        num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
+                        
+                        p_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                        p_pivots_sum_1 = 0.0
+                        min_larger_1 = 1.0
+                        num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
 
-                    # Check if any of the pivots satisfy termination condition
-                    if p_pivots_sum_2 >= p:
-                        if p_pivots_sum_2 - (min_larger_2 * num_min_larger_2) < p:
-                            p_pivot = p_pivot_2
-                            min_larger_prob = min_larger_2
-                            num_min_larger = num_min_larger_2
-                            p_pivots_sum = p_pivots_sum_2
-                    if p_pivots_sum_1 >= p:
-                        if p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p:
-                            p_pivot = p_pivot_1
-                            min_larger_prob = min_larger_1
-                            num_min_larger = num_min_larger_1
-                            p_pivots_sum = p_pivots_sum_1
-                    if p_pivots_sum_0 >= p:
-                        if p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p:
-                            p_pivot = p_pivot_0
-                            min_larger_prob = min_larger_0
-                            num_min_larger = num_min_larger_0
-                            p_pivots_sum = p_pivots_sum_0
-                    
-                    # Update range
-                    if p_pivots_sum_2 > p:
-                        min_range = p_pivot_2
-                    elif p_pivots_sum_1 > p:
-                        min_range = p_pivot_1
-                    elif p_pivots_sum_0 > p:
-                        min_range = p_pivot_0
+                        p_pivot_2 = (max_range - min_range) * 3.0 / 4.0 + min_range
+                        p_pivots_sum_2 = 0.0
+                        min_larger_2 = 1.0
+                        num_min_larger_2 = tl.zeros((), dtype=tl.uint32)
 
-                    if p_pivots_sum_0 < p:
-                        max_range = p_pivot_0
-                    elif p_pivots_sum_1 < p:
-                        max_range = p_pivot_1
-                    elif p_pivots_sum_2 < p:
-                        max_range = p_pivot_2
 
-                    num_iters += 1
-                    if (max_range - min_range) < 1e-15 or num_iters >= 24:
-                        p_pivot = (max_range + min_range) / 2.0
+                        # First pass: Calculate p_pivots_sum and min_larger
+                        for i in range(0, NUM_TILES):
+                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                            mask_n = offs_n < VOCAB_SIZE
+                            probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n, other=0.0)
 
-            duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_logit
-            num_duplicate_logit = num_min_larger
-            num_keep = num_duplicate_logit - tl.cast((p_pivots_sum - p) / min_larger_prob, tl.uint32)
-            num_kept = tl.zeros((), dtype=tl.uint32)
+                            p_pivots_sum_0 += tl.sum(probs_blk * (probs_blk > p_pivot_0))
+                            masked_larger_0 = tl.where(probs_blk > p_pivot_0, probs_blk, 1.0)
+                            min_larger_0 = tl.minimum(min_larger_0, tl.min(masked_larger_0))
+                            
+                            p_pivots_sum_1 += tl.sum(probs_blk * (probs_blk > p_pivot_1))
+                            masked_larger_1 = tl.where(probs_blk > p_pivot_1, probs_blk, 1.0)
+                            min_larger_1 = tl.minimum(min_larger_1, tl.min(masked_larger_1))
 
-            # Top-p only path
-            final_pivot = tl.log(p_pivot * sum_exp_logits) + max_sample
+                            p_pivots_sum_2 += tl.sum(probs_blk * (probs_blk > p_pivot_2))
+                            masked_larger_2 = tl.where(probs_blk > p_pivot_2, probs_blk, 1.0)
+                            min_larger_2 = tl.minimum(min_larger_2, tl.min(masked_larger_2))
+
+
+                        # Second pass: Calculate num_min_larger
+                        for i in range(0, NUM_TILES):
+                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                            mask_n = offs_n < VOCAB_SIZE
+                            probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n, other=0.0)
+
+                            num_min_larger_0 += tl.sum(tl.abs(probs_blk - min_larger_0) < 1e-15)
+                            num_min_larger_1 += tl.sum(tl.abs(probs_blk - min_larger_1) < 1e-15)
+                            num_min_larger_2 += tl.sum(tl.abs(probs_blk - min_larger_2) < 1e-15)
+
+                        # Check if any of the pivots satisfy termination condition
+                        if p_pivots_sum_2 >= p:
+                            if p_pivots_sum_2 - (min_larger_2 * num_min_larger_2) < p:
+                                p_pivot = p_pivot_2
+                                min_larger_prob = min_larger_2
+                                num_min_larger = num_min_larger_2
+                                p_pivots_sum = p_pivots_sum_2
+                        if p_pivots_sum_1 >= p:
+                            if p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p:
+                                p_pivot = p_pivot_1
+                                min_larger_prob = min_larger_1
+                                num_min_larger = num_min_larger_1
+                                p_pivots_sum = p_pivots_sum_1
+                        if p_pivots_sum_0 >= p:
+                            if p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p:
+                                p_pivot = p_pivot_0
+                                min_larger_prob = min_larger_0
+                                num_min_larger = num_min_larger_0
+                                p_pivots_sum = p_pivots_sum_0
+                        
+                        # Update range
+                        if p_pivots_sum_2 > p:
+                            min_range = p_pivot_2
+                        elif p_pivots_sum_1 > p:
+                            min_range = p_pivot_1
+                        elif p_pivots_sum_0 > p:
+                            min_range = p_pivot_0
+
+                        if p_pivots_sum_0 < p:
+                            max_range = p_pivot_0
+                        elif p_pivots_sum_1 < p:
+                            max_range = p_pivot_1
+                        elif p_pivots_sum_2 < p:
+                            max_range = p_pivot_2
+
+                        num_iters += 1
+                        if (max_range - min_range) < 1e-15 or num_iters >= 24:
+                            p_pivot = (max_range + min_range) / 2.0
+
+                duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_logit
+                num_duplicate_logit = num_min_larger
+                num_keep = num_duplicate_logit - tl.cast((p_pivots_sum - p) / min_larger_prob, tl.uint32)
+                num_kept = tl.zeros((), dtype=tl.uint32)
+    
+                # Top-p only path
+                final_pivot = tl.log(p_pivot * sum_exp_logits) + max_sample
 
         # Sixth pass: Apply mask
         if final_pivot != -float("inf"):
