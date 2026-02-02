@@ -168,6 +168,49 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def get_preferred_block_size(cls, default_block_size: int = 16) -> int:
+        """Get the preferred block size for this backend.
+
+        Returns the smallest valid block size that satisfies this backend's
+        requirements. Backends with specific requirements should override this.
+
+        Args:
+            default_block_size: Default block size to use if backend accepts any
+
+        Returns:
+            The preferred block size for this backend
+        """
+        from vllm.config.cache import BlockSize
+
+        supported_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_sizes:
+            return default_block_size
+
+        # Check if backend accepts any block size (MultipleOf(1))
+        for size in supported_sizes:
+            if isinstance(size, MultipleOf) and size.base == 1:
+                return default_block_size
+
+        valid_block_sizes: tuple[int, ...] = get_args(BlockSize)
+
+        # Prefer smaller fixed sizes
+        fixed_sizes: list[int] = [s for s in supported_sizes if isinstance(s, int)]
+        if fixed_sizes:
+            for size in sorted(fixed_sizes):
+                if size in valid_block_sizes:
+                    return size
+
+        # Fall back to MultipleOf requirements - find smallest valid multiple
+        multiple_sizes = [s for s in supported_sizes if isinstance(s, MultipleOf)]
+        if multiple_sizes:
+            max_base = max(s.base for s in multiple_sizes)
+            for size in sorted(valid_block_sizes):
+                if size % max_base == 0:
+                    return size
+
+        return default_block_size
+
+    @classmethod
     def is_mla(cls) -> bool:
         return False
 
