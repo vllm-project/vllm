@@ -141,9 +141,9 @@ class AsyncLLM(EngineClient):
             self.model_config.io_processor_plugin,
         )
 
-        # Single-threaded executor for running process_inputs() in background
-        # to avoid blocking the asyncio event loop during CPU-intensive preprocessing.
-        # Using max_workers=1 ensures sequential execution, eliminating the need for locks.
+        # Single-thread for running process_inputs() in background
+        # to avoid blocking the asyncio event loop during preprocessing.
+        # max_workers=1 ensures sequential execution, no need for locks.
         self._input_processor_executor = ThreadPoolExecutor(max_workers=1)
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
