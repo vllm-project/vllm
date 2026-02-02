@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import fnmatch
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -32,7 +32,7 @@ def _filter_ignore(paths: list[str], patterns: list[str]) -> list[str]:
 
 
 def glob(
-    s3: Optional["BaseClient"] = None,
+    s3: "BaseClient | None" = None,
     path: str = "",
     allow_pattern: list[str] | None = None,
 ) -> list[str]:

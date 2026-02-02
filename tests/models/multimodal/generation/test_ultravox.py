@@ -156,6 +156,51 @@ def test_models_with_multiple_audios(
     )
 
 
+@pytest.mark.core_model
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [32])
+def test_variable_length_audio_batching(
+    vllm_runner,
+    audio_assets: AudioTestAssets,
+    dtype: str,
+    max_tokens: int,
+) -> None:
+    """Test batching of requests with different audio durations.
+
+    This exercises the variable-length tensor handling in
+    MultiModalFlatField._reduce_data() which was buggy before
+    https://github.com/vllm-project/vllm/issues/31658 was fixed.
+    """
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(MODEL_NAME)
+    model_info.check_available_online(on_fail="skip")
+    model_info.check_transformers_version(on_fail="skip")
+
+    # Create prompts with single audio each (different durations)
+    prompts_and_audios = []
+    for audio, question in zip(audio_assets, AUDIO_PROMPTS):
+        prompt = _get_prompt(1, question, VLLM_PLACEHOLDER)
+        prompts_and_audios.append((prompt, [audio.audio_and_sample_rate]))
+
+    with vllm_runner(
+        MODEL_NAME,
+        dtype=dtype,
+        enforce_eager=True,
+        limit_mm_per_prompt={"audio": 1},
+    ) as vllm_model:
+        # Generate for all prompts in a single batch
+        # This triggers the variable-length batching code path
+        outputs = vllm_model.generate_greedy(
+            [prompt for prompt, _ in prompts_and_audios],
+            max_tokens,
+            audios=[audios for _, audios in prompts_and_audios],
+        )
+
+    # Verify outputs were generated for each request
+    assert len(outputs) == len(prompts_and_audios)
+    for output in outputs:
+        assert len(output[1]) > 0, "Expected non-empty output"
+
+
 @pytest.mark.asyncio
 async def test_online_serving(client, audio_assets: AudioTestAssets):
     """Exercises online serving with/without chunked prefill enabled."""

@@ -270,6 +270,49 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
+    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+
+    assert modality == "image"
+
+    model_name = "deepseek-ai/DeepSeek-OCR-2"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        limit_mm_per_prompt={modality: 1},
+        logits_processors=[NGramPerReqLogitsProcessor],
+    )
+
+    # deepseek-ocr use plain prompt template
+    prompts = [f"<image>\n{question}" for question in questions]
+
+    # The following sampling params config is taken from
+    # the official Deepseek-OCR inference example.
+    # (IMPORTANT) Use the custom logits processor and avoid skipping
+    # special tokens for this model for the optimal OCR performance.
+    sampling_params = [
+        SamplingParams(
+            temperature=0.0,
+            max_tokens=8192,
+            # ngram logit processor args
+            extra_args=dict(
+                ngram_size=30,
+                window_size=90,
+                # whitelist: <td>, </td>
+                whitelist_token_ids={128821, 128822},
+            ),
+            skip_special_tokens=False,
+        )
+        for _ in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        sampling_params=sampling_params,
+    )
+
+
 # Dots-OCR
 def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1394,6 +1437,37 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# OpenPangu
+def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "FreedomIntelligence/openPangu-VL-7B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=4,
+        trust_remote_code=True,
+        enforce_eager=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "[unused19]"
+    elif modality == "video":
+        placeholder = "[unused32]"
+
+    prompts = [
+        (
+            f"<s>[unused9]系统：[unused10][unused9]用户：[unused18]{placeholder}[unused20]{question}[unused10][unused9]助手："
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Ovis
 def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2014,6 +2088,7 @@ model_example_map = {
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "deepseek_ocr": run_deepseek_ocr,
+    "deepseek_ocr2": run_deepseek_ocr2,
     "dots_ocr": run_dots_ocr,
     "eagle2_5": run_eagle2_5,
     "ernie45_vl": run_ernie45_vl,
@@ -2051,6 +2126,7 @@ model_example_map = {
     "molmo2": run_molmo2,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
+    "openpangu_vl": run_openpangu_vl,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
     "paddleocr_vl": run_paddleocr_vl,
