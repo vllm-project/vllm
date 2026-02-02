@@ -19,8 +19,7 @@ class FlashinferMoeBackend(Enum):
 
 
 def is_gated_activation(activation: str) -> bool:
-    NON_GATED_ACTIVATION_NAMES = {"relu2_no_mul"}
-    return activation.lower() not in NON_GATED_ACTIVATION_NAMES
+    return not activation.lower().endswith("_no_mul")
 
 
 def activation_str_to_enum_value(activation: str) -> int:
@@ -28,6 +27,8 @@ def activation_str_to_enum_value(activation: str) -> int:
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
+        "silu_no_mul": FlashinferActivationType.Silu,
+        "gelu_no_mul": FlashinferActivationType.Gelu,
         "silu": FlashinferActivationType.Swiglu,
         "gelu": FlashinferActivationType.Geglu,
         "relu2_no_mul": FlashinferActivationType.Relu2,
