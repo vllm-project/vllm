@@ -286,10 +286,6 @@ class OpenAIServing:
             raise TypeError(f"{reasoning_parser_name=} has not been registered") from e
         return parser
 
-    async def reset_mm_cache(self) -> None:
-        self.input_processor.clear_mm_cache()
-        await self.engine_client.reset_mm_cache()
-
     async def beam_search(
         self,
         prompt: PromptType,
@@ -1120,7 +1116,7 @@ class OpenAIServing:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
     ):
-        prompt_text, _, _ = get_prompt_components(engine_prompt)
+        prompt_text = engine_prompt.get("prompt")
 
         orig_priority = priority
         sub_request = 0
@@ -1190,7 +1186,7 @@ class OpenAIServing:
                     context.chat_template_content_format,
                 )
                 engine_prompt = engine_prompts[0]
-                prompt_text, _, _ = get_prompt_components(engine_prompt)
+                prompt_text = engine_prompt.get("prompt")
 
                 sampling_params.max_tokens = get_max_tokens(
                     self.max_model_len,
