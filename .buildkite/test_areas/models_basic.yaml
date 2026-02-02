@@ -30,8 +30,6 @@ steps:
   parallelism: 2
 
 - label: Basic Models Tests (Other)
-  mirror:
-    amd: amd_mi325_1
   timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/
@@ -39,6 +37,11 @@ steps:
   - tests/models/test_registry.py
   commands:
     - pytest -v -s models/test_transformers.py models/test_registry.py
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Basic Models Test (Other CPU) # 5min
   depends_on: 

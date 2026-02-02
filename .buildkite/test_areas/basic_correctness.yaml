@@ -14,3 +14,8 @@ steps:
   - pytest -v -s basic_correctness/test_cumem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd

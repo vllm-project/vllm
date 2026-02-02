@@ -24,6 +24,11 @@ steps:
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (API Server 1)
   timeout_in_minutes: 130
