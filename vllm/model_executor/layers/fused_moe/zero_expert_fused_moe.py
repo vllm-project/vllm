@@ -187,11 +187,12 @@ class ZeroExpertFusedMoE(FusedMoE):
         actual_zero_expert_num = self._actual_zero_expert_num
         if actual_zero_expert_num is not None and actual_zero_expert_num > 0:
             zero_mask = topk_ids_full >= self.logical_num_experts
-            if zero_mask.any():
-                topk_weights = topk_weights_full.clone()
-                topk_ids = topk_ids_full.clone()
-                topk_weights[zero_mask] = 0.0
-                topk_ids[zero_mask] = 0
+            topk_weights = topk_weights_full.masked_fill(zero_mask, 0.0)
+            topk_ids = torch.where(
+                zero_mask,
+                torch.zeros_like(topk_ids_full),
+                topk_ids_full,
+            )
 
         # Memoize routing results for reuse in super().forward()
         self._memoized_topk_weights = topk_weights
