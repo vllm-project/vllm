@@ -180,23 +180,6 @@ def _fused_moe_lora_kernel(
 ):
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
-    lora_idx = tl.program_id(axis=2)
-    lora_id = tl.load(lora_ids + lora_idx)
-
-    if lora_id == -1:
-        # Early exit for the no-lora case.
-        return
-    moe_enabled = tl.load(adapter_enabled + lora_id)
-    if moe_enabled == 0:
-        # Early exit for the no moe lora case.
-        return
-    # The grid's axis-2 dimension is max_loras + 1 to accommodate the -1 sentinel.
-    # This guard ensures we don't access sorted_token_ids / expert_ids /
-    # num_tokens_post_padded beyond their allocated bounds if an invalid
-    # lora_id somehow appears. Although the caller should pass correct
-    # max_loras, defensive programming prevents accidental out-of-bounds.
-    if lora_id >= max_loras:
-        return
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
@@ -270,14 +253,6 @@ def _fused_moe_lora_kernel(
     # remove modulo wrap-around
     offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int32)
     offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-
-    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int32)
-    token_ind = stride_tl * lora_id + offs_token_id
-    offs_token = tl.load(
-        sorted_token_ids_ptr + token_ind,
-        mask=token_ind < max_loras * stride_tl,
-        other=num_valid_tokens,
-    )
     token_mask = offs_token < num_valid_tokens
 
     # get a_ptrs,b_ptrs
@@ -405,8 +380,7 @@ def _fused_moe_lora_shrink(
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_a_stacked),
-        ## max_loras + 1 to handle the no-lora case (lora_id == -1)
-        lora_a_stacked[0].shape[0] + 1,
+        grid_lora_dim,
     )
     _fused_moe_lora_kernel[grid](
         qcurr_hidden_states,
@@ -516,8 +490,7 @@ def _fused_moe_lora_expand(
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_b_stacked),
-        ## max_loras + 1 to handle the no-lora case (lora_id == -1)
-        lora_b_stacked[0].shape[0] + 1,
+        grid_lora_dim,
     )
 
     # Fast path: directly accumulate into the corresponding slice interval of output.
@@ -550,8 +523,8 @@ def _fused_moe_lora_expand(
         w1_lora_b_stacked.stride(2),
         out_view.stride(1),
         out_view.stride(2),
-        sorted_token_ids.stride(0),
-        expert_ids.stride(0),
+        stride_tl,
+        stride_el,
         slice_a_size=a_intermediate_cache1.numel() // num_slices,
         slice_c_size=slice_c_size,
         num_slice_a=num_slices,
