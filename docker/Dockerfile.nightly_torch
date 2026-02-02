@@ -1,3 +1,11 @@
+#######
+#
+# THIS FILE IS DEPRECATED AND WILL BE REMOVED SHORTLY
+#
+# Please use the standard Dockerfile with PYTORCH_NIGHTLY=1 instead
+#
+#######
+
 # The vLLM Dockerfile is used to construct vLLM image against torch nightly that can be directly used for testing
 
 # for torch nightly, cuda >=12.6 is required,
@@ -213,13 +221,13 @@ RUN pip install setuptools==75.6.0 packaging==23.2 ninja==1.11.1.3 build==1.2.2.
 
 
 # build flashinfer for torch nightly from source around 10 mins
-# release version: v0.6.1
+# release version: v0.6.2
 # todo(elainewy): cache flashinfer build result for faster build
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
     echo "git clone flashinfer..." \
-    && git clone --depth 1 --branch v0.6.1 --recursive https://github.com/flashinfer-ai/flashinfer.git \
+    && git clone --depth 1 --branch v0.6.2 --recursive https://github.com/flashinfer-ai/flashinfer.git \
     && cd flashinfer \
     && git submodule update --init --recursive \
     && echo "finish git clone flashinfer..." \

@@ -3,95 +3,83 @@
 import time
 from typing import Any, TypeAlias
 
-from pydantic import (
-    Field,
-)
+from pydantic import Field
 
-from vllm import PoolingParams
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ChatRequestMixin,
     CompletionRequestMixin,
+    EmbedRequestMixin,
     PoolingBasicRequestMixin,
 )
+from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
-from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 
-class EmbeddingCompletionRequest(PoolingBasicRequestMixin, CompletionRequestMixin):
-    # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/embeddings
+def _get_max_total_output_tokens(
+    model_config: ModelConfig,
+) -> tuple[int | None, int]:
+    max_total_tokens = model_config.max_model_len
+    pooler_config = model_config.pooler_config
 
-    encoding_format: EncodingFormat = "float"
-    dimensions: int | None = None
+    if pooler_config is None:
+        return max_total_tokens, 0
 
-    # --8<-- [start:embedding-extra-params]
-    normalize: bool | None = Field(
-        default=None,
-        description="Whether to normalize the embeddings outputs. Default is True.",
-    )
-    embed_dtype: EmbedDType = Field(
-        default="float32",
-        description=(
-            "What dtype to use for encoding. Default to using float32 for base64 "
-            "encoding to match the OpenAI python client behavior. "
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    endianness: Endianness = Field(
-        default="native",
-        description=(
-            "What endianness to use for encoding. Default to using native for "
-            "base64 encoding to match the OpenAI python client behavior."
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    # --8<-- [end:embedding-extra-params]
+    if pooler_config.enable_chunked_processing:
+        return None, 0
 
-    def to_pooling_params(self):
-        return PoolingParams(
-            dimensions=self.dimensions,
-            use_activation=self.normalize,
+    max_embed_len = pooler_config.max_embed_len or max_total_tokens
+    max_output_tokens = max_total_tokens - max_embed_len
+    return max_total_tokens, max_output_tokens
+
+
+class EmbeddingCompletionRequest(
+    PoolingBasicRequestMixin, CompletionRequestMixin, EmbedRequestMixin
+):
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        (
+            max_total_tokens,
+            max_output_tokens,
+        ) = _get_max_total_output_tokens(model_config)
+
+        return TokenizeParams(
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_model_len - max_embed_len",
         )
 
 
-class EmbeddingChatRequest(PoolingBasicRequestMixin, ChatRequestMixin):
-    encoding_format: EncodingFormat = "float"
-    dimensions: int | None = None
-
-    # --8<-- [start:chat-embedding-extra-params]
+class EmbeddingChatRequest(
+    PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin
+):
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
-    normalize: bool | None = Field(
-        default=None,
-        description="Whether to normalize the embeddings outputs. Default is True.",
-    )
-    embed_dtype: EmbedDType = Field(
-        default="float32",
-        description=(
-            "What dtype to use for encoding. Default to using float32 for base64 "
-            "encoding to match the OpenAI python client behavior. "
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    endianness: Endianness = Field(
-        default="native",
-        description=(
-            "What endianness to use for encoding. Default to using native for "
-            "base64 encoding to match the OpenAI python client behavior."
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    # --8<-- [end:chat-embedding-extra-params]
 
-    def to_pooling_params(self):
-        return PoolingParams(
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        (
+            max_total_tokens,
+            max_output_tokens,
+        ) = _get_max_total_output_tokens(model_config)
+
+        return TokenizeParams(
+            max_total_tokens=max_total_tokens,
+            max_output_tokens=max_output_tokens,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            dimensions=self.dimensions,
-            use_activation=self.normalize,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_model_len - max_embed_len",
         )
 
 

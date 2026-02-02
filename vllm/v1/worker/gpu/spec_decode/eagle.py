@@ -13,7 +13,10 @@ from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import (
+    build_attn_metadata,
+    build_slot_mappings_by_layer,
+)
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
@@ -51,26 +54,15 @@ class EagleSpeculator:
             device=device,
         )
         self.hidden_states = torch.zeros(
-            self.max_num_tokens,
-            self.hidden_size,
-            dtype=self.dtype,
-            device=device,
+            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
         )
         self.idx_mapping = torch.zeros(
-            self.max_num_reqs,
-            dtype=torch.int32,
-            device=device,
+            self.max_num_reqs, dtype=torch.int32, device=device
         )
         self.temperature = torch.zeros(
-            self.max_num_reqs,
-            dtype=torch.float32,
-            device=device,
+            self.max_num_reqs, dtype=torch.float32, device=device
         )
-        self.seeds = torch.zeros(
-            self.max_num_reqs,
-            dtype=torch.int64,
-            device=device,
-        )
+        self.seeds = torch.zeros(self.max_num_reqs, dtype=torch.int64, device=device)
         self.draft_tokens = torch.zeros(
             self.max_num_reqs,
             self.num_speculative_steps,
@@ -108,7 +100,8 @@ class EagleSpeculator:
     def run_model(
         self,
         num_tokens: int,
-        attn_metadata: dict[str, Any],
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         with set_forward_context(
@@ -117,6 +110,7 @@ class EagleSpeculator:
             num_tokens=num_tokens,
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
             num_tokens_across_dp=num_tokens_across_dp,
+            slot_mapping=slot_mappings,
         ):
             ret_hidden_states = self.model(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
@@ -134,6 +128,7 @@ class EagleSpeculator:
         self,
         num_reqs: int,
         attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
         num_tokens_across_dp: torch.Tensor | None,
     ) -> None:
         pos = self.input_buffers.positions[:num_reqs]
@@ -142,7 +137,7 @@ class EagleSpeculator:
         for step in range(1, self.num_speculative_steps):
             # Run the eagle model.
             last_hidden_states, hidden_states = self.run_model(
-                num_reqs, attn_metadata, num_tokens_across_dp
+                num_reqs, attn_metadata, slot_mappings, num_tokens_across_dp
             )
             logits = self.model.compute_logits(last_hidden_states)
 
@@ -235,6 +230,7 @@ class EagleSpeculator:
         last_hidden_states, hidden_states = self.run_model(
             num_tokens,
             input_batch.attn_metadata,
+            input_batch.slot_mappings,
             num_tokens_across_dp=None,  # FIXME
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
@@ -311,7 +307,12 @@ class EagleSpeculator:
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
         )
-        self.generate_draft(num_reqs, attn_metadata, num_tokens_across_dp=None)  # FIXME
+        slot_mappings_by_layer = build_slot_mappings_by_layer(
+            slot_mappings, self.kv_cache_config
+        )
+        self.generate_draft(
+            num_reqs, attn_metadata, slot_mappings_by_layer, num_tokens_across_dp=None
+        )  # FIXME
         return self.draft_tokens[:num_reqs]
 
 

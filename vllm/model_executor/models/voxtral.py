@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import inspect
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
+from functools import cached_property, partial
 from math import ceil
 from typing import Literal, cast
 
@@ -20,20 +19,23 @@ from mistral_common.protocol.transcription.request import TranscriptionRequest
 from mistral_common.tokens.tokenizers.audio import (
     Audio,
     AudioEncoder,
-    TranscriptionFormat,
 )
 from transformers import BatchFeature, TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.whisper import WhisperEncoder
+from vllm.model_executor.models.whisper import (
+    WhisperEncoder,
+    _create_fake_bias_for_k_proj,
+)
+from vllm.model_executor.models.whisper_causal import WhisperCausalEncoder
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -101,14 +103,6 @@ class VoxtralProcessorAdapter:
     def begin_audio_token_id(self) -> int:
         return self._audio_processor.special_ids.begin_audio
 
-    # @cached_property
-    # def begin_transcript_token_id(self) -> int:
-    #     return self._audio_processor.special_ids.begin_transcript
-
-    # @cached_property
-    # def end_transcript_token_id(self) -> int:
-    #     return self._audio_processor.special_ids.end_transcript
-
     @cached_property
     def sampling_rate(self) -> int:
         return self._audio_processor.audio_config.sampling_rate
@@ -159,19 +153,10 @@ class VoxtralProcessorAdapter:
             assert isinstance(audio, np.ndarray)
             assert audio.ndim == 1
 
-            # pad if necessary
-            # TODO(Patrick) - remove once mistral-common is bumped
-            if (
-                self._audio_processor.audio_config.transcription_format
-                != TranscriptionFormat.STREAMING
-            ):
-                sig = inspect.signature(self._audio_processor.pad)
-                if "is_online_streaming" in sig.parameters:
-                    audio = self._audio_processor.pad(
-                        audio, self.sampling_rate, is_online_streaming=False
-                    )
-                else:
-                    audio = self._audio_processor.pad(audio, self.sampling_rate)
+            if not self._audio_processor.audio_config.is_streaming:
+                audio = self._audio_processor.pad(
+                    audio, self.sampling_rate, is_online_streaming=False
+                )
 
             audio_tokens = [self.begin_audio_token_id] + [
                 self.audio_token_id
@@ -198,6 +183,12 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self) -> VoxtralProcessorAdapter:
         return VoxtralProcessorAdapter(self.get_tokenizer())
+
+    def get_data_parser(self):
+        return MultiModalDataParser(
+            target_sr=self.get_hf_processor().sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 5}  # Performance tends to degrade after 5
@@ -271,11 +262,14 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         )
         res = tokenizer.mistral.encode_chat_completion(request)
         dummy_tokens = res.tokens
-        # whixtral tokenizer adds padding to the audio
-        # so we need to update the audio arrays
-        dummy_mm_data["audio"] = [a.audio_array for a in res.audios]
 
-        return ProcessorInputs(prompt=dummy_tokens, mm_data=dummy_mm_data)
+        dummy_mm_inputs = self.info.parse_mm_data(
+            # whixtral tokenizer adds padding to the audio
+            # so we need to update the audio arrays
+            {**dummy_mm_data, "audio": [a.audio_array for a in res.audios]},
+        )
+
+        return ProcessorInputs(prompt=dummy_tokens, mm_items=dummy_mm_inputs)
 
 
 class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]):
@@ -330,10 +324,6 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
 
         # NOTE: The tokens are already inserted by the chat template
         return prompt_ids, mm_info, True
-
-    def _get_data_parser(self) -> MultiModalDataParser:
-        sampling_rate = self.info.get_hf_processor().sampling_rate
-        return MultiModalDataParser(target_sr=sampling_rate)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -393,7 +383,7 @@ class VoxtralForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -498,10 +488,13 @@ class VoxtralForConditionalGeneration(
         )
 
         tokenized = tokenizer.instruct.encode_transcription(req)
-        audio = (tokenized.audios[0].audio_array, stt_config.sample_rate)
-        prompts_dict = {"multi_modal_data": {"audio": audio}}
-        prompts_dict["prompt_token_ids"] = tokenized.tokens
-        return cast(PromptType, prompts_dict)
+
+        return TokensPrompt(
+            prompt_token_ids=tokenized.tokens,
+            multi_modal_data={
+                "audio": (tokenized.audios[0].audio_array, stt_config.sample_rate)
+            },
+        )
 
     @classmethod
     def get_num_audio_tokens(
@@ -543,6 +536,7 @@ class VoxtralForConditionalGeneration(
                 }
             ).named_parameters()
         )
+        weights = _create_fake_bias_for_k_proj(weights, ".wk.weight")
 
         loaded_weights = set()
 
@@ -731,6 +725,10 @@ class VoxtralEncoderModel(nn.Module):
             r"whisper_encoder.layers.\1.mlp.fc2.\2",
         ),
         (
+            r"whisper_encoder\.transformer\.layers\.(\d+)\.feed_forward\.w3\.(weight|bias)",
+            r"whisper_encoder.layers.\1.mlp.fc3.\2",
+        ),  # noqa: E501
+        (
             r"whisper_encoder\.transformer\.layers\.(\d+)\.ffn_norm\.(weight|bias)",
             r"whisper_encoder.layers.\1.final_layer_norm.\2",
         ),
@@ -749,10 +747,15 @@ class VoxtralEncoderModel(nn.Module):
         super().__init__()
         self.config = cast(WhisperConfig, vllm_config.model_config.hf_config)
         self.dtype: torch.dtype = vllm_config.model_config.dtype
-        self.whisper_encoder = WhisperEncoder(
+        self.is_causal = getattr(self.config, "is_causal", False)
+        if self.is_causal:
+            WhisperEncoderCls = WhisperCausalEncoder
+        else:
+            WhisperEncoderCls = partial(WhisperEncoder, init_in_fp32=True)
+
+        self.whisper_encoder = WhisperEncoderCls(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "whisper_encoder"),
-            init_in_fp32=True,
         )
         mel_filters = mel_filter_bank(
             num_frequency_bins=1 + self.config.window_size // 2,
@@ -843,6 +846,22 @@ class VoxtralEncoderModel(nn.Module):
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
+        params_mapping = []
+
+        if self.is_causal:
+            # For `WhisperCausalEncoder` we need
+            # some more renaming
+            stacked_params_mapping.extend(
+                [
+                    (".mlp.gate_up_proj", ".mlp.fc1", 0),
+                    (".mlp.gate_up_proj", ".mlp.fc3", 1),
+                ]
+            )
+            params_mapping.extend(
+                [
+                    (".mlp.down_proj", ".mlp.fc2"),
+                ]
+            )
         params_dict = dict(self.named_parameters())
 
         name, loaded_weight = weight
@@ -860,6 +879,11 @@ class VoxtralEncoderModel(nn.Module):
             weight_loader(param, loaded_weight, shard_id)
             break
         else:
+            for param_name, weight_name in params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)

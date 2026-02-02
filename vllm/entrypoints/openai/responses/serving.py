@@ -63,6 +63,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    make_tool_call_id,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -113,15 +114,15 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
-    should_continue_final_message,
 )
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import EmbedsPrompt, TokensPrompt
+from vllm.inputs.parse import get_prompt_len
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
-from vllm.renderers import RendererLike
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -221,15 +222,8 @@ class OpenAIServingResponses(OpenAIServing):
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        if self.default_sampling_params:
-            source = self.model_config.generation_config
-            source = "model" if source == "auto" else source
-            logger.info(
-                "Using default chat sampling params from %s: %s",
-                source,
-                self.default_sampling_params,
-            )
 
         # If False (default), the "store" option is (silently) ignored and the
         # response is not stored. If True, the response is stored in memory.
@@ -257,6 +251,17 @@ class OpenAIServingResponses(OpenAIServing):
             self.default_sampling_params["stop_token_ids"].extend(
                 get_stop_tokens_for_assistant_actions()
             )
+
+        # Handle tool call ID type for Kimi K2 (supporting test mocking via overrides)
+        hf_overrides = getattr(self.model_config, "hf_overrides", None)
+        if self.model_config.hf_text_config.model_type == "kimi_k2" or (
+            isinstance(hf_overrides, dict)
+            and hf_overrides.get("model_type") == "kimi_k2"
+        ):
+            self.tool_call_id_type = "kimi_k2"
+        else:
+            self.tool_call_id_type = "random"
+
         self.enable_auto_tools = enable_auto_tools
         # set up tool use
         self.tool_parser = self._get_tool_parser(
@@ -285,13 +290,14 @@ class OpenAIServingResponses(OpenAIServing):
         self.tool_server = tool_server
 
     def _validate_generator_input(
-        self, engine_prompt: TokensPrompt
+        self,
+        engine_prompt: TokensPrompt | EmbedsPrompt,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
-        if self.max_model_len <= len(engine_prompt["prompt_token_ids"]):
+        prompt_len = get_prompt_len(engine_prompt)
+        if self.max_model_len <= prompt_len:
             error_message = (
-                "The engine prompt length"
-                f" {len(engine_prompt['prompt_token_ids'])} "
+                f"The engine prompt length {prompt_len} "
                 f"exceeds the max_model_len {self.max_model_len}. "
                 "Please reduce prompt."
             )
@@ -301,6 +307,7 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="input",
             )
+
         return None
 
     def _validate_create_responses_input(
@@ -381,8 +388,6 @@ class OpenAIServingResponses(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
             model_name = self.models.model_name(lora_request)
-            renderer = self.engine_client.renderer
-            tokenizer = renderer.get_tokenizer()
 
             if self.use_harmony:
                 messages, engine_prompts = self._make_request_with_harmony(
@@ -390,7 +395,7 @@ class OpenAIServingResponses(OpenAIServing):
                 )
             else:
                 messages, engine_prompts = await self._make_request(
-                    request, prev_response, renderer
+                    request, prev_response
                 )
 
         except (
@@ -425,18 +430,25 @@ class OpenAIServingResponses(OpenAIServing):
             assert len(builtin_tool_list) == 0
             available_tools = []
         try:
+            renderer = self.engine_client.renderer
+            tokenizer = renderer.get_tokenizer()
+
             for engine_prompt in engine_prompts:
                 maybe_error = self._validate_generator_input(engine_prompt)
                 if maybe_error is not None:
                     return maybe_error
 
-                default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"]
+                default_max_tokens = get_max_tokens(
+                    self.max_model_len,
+                    request,
+                    engine_prompt,
+                    self.default_sampling_params,
                 )
 
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params
                 )
+                tok_params = request.build_tok_params(self.model_config)
 
                 trace_headers = (
                     None
@@ -456,7 +468,7 @@ class OpenAIServingResponses(OpenAIServing):
                         # tokens during generation instead of at the end
                         context = ParsableContext(
                             response_messages=messages,
-                            renderer=renderer,
+                            tokenizer=tokenizer,
                             reasoning_parser_cls=self.reasoning_parser,
                             request=request,
                             tool_parser_cls=self.tool_parser,
@@ -486,6 +498,7 @@ class OpenAIServingResponses(OpenAIServing):
                     request_id=request.request_id,
                     engine_prompt=engine_prompt,
                     sampling_params=sampling_params,
+                    tok_params=tok_params,
                     context=context,
                     lora_request=lora_request,
                     priority=request.priority,
@@ -587,7 +600,6 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
-        renderer: RendererLike,
     ):
         tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         # Construct the input messages.
@@ -597,30 +609,15 @@ class OpenAIServingResponses(OpenAIServing):
             prev_msg=self.msg_store.get(prev_response.id) if prev_response else None,
             prev_response_output=prev_response.output if prev_response else None,
         )
-        # Check if we should continue the final message (partial completion)
-        # This enables Anthropic-style partial message completion where the
-        # user provides an incomplete assistant message to continue from.
-        continue_final = should_continue_final_message(request.input)
-        chat_template_kwargs = dict(
-            reasoning_effort=None
-            if request.reasoning is None
-            else request.reasoning.effort
-        )
 
         _, engine_prompts = await self._preprocess_chat(
             request,
-            renderer,
             messages,
+            default_template=self.chat_template,
+            default_template_content_format=self.chat_template_content_format,
+            default_template_kwargs=None,
             tool_dicts=tool_dicts,
             tool_parser=self.tool_parser,
-            chat_template=self.chat_template,
-            chat_template_content_format=self.chat_template_content_format,
-            # When continuing a partial message, we set continue_final_message=True
-            # and add_generation_prompt=False so the model continues the message
-            # rather than starting a new one.
-            add_generation_prompt=not continue_final,
-            continue_final_message=continue_final,
-            chat_template_kwargs=chat_template_kwargs,
         )
         return messages, engine_prompts
 
@@ -684,7 +681,7 @@ class OpenAIServingResponses(OpenAIServing):
             except ValueError as e:
                 return self.create_error_response(e)
 
-        # NOTE: Implementation of stauts is still WIP, but for now
+        # NOTE: Implementation of status is still WIP, but for now
         # we guarantee that if the status is not "completed", it is accurate.
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
@@ -827,10 +824,11 @@ class OpenAIServingResponses(OpenAIServing):
         for i, (token_id, _logprob) in enumerate(logprobs.items()):
             if i >= top_logprobs:
                 break
-            text = (
-                _logprob.decoded_token
-                if _logprob.decoded_token is not None
-                else tokenizer.decode([token_id])
+            text = self._get_decoded_token(
+                logprob=_logprob,
+                token_id=token_id,
+                tokenizer=tokenizer,
+                return_as_token_id=self.return_tokens_as_token_ids,
             )
             out.append(
                 LogprobTopLogprob(
@@ -856,10 +854,11 @@ class OpenAIServingResponses(OpenAIServing):
         for i, token_id in enumerate(token_ids):
             logprob = logprobs[i]
             token_logprob = logprob[token_id]
-            text = (
-                token_logprob.decoded_token
-                if token_logprob.decoded_token is not None
-                else tokenizer.decode([token_id])
+            text = self._get_decoded_token(
+                logprob=token_logprob,
+                token_id=token_id,
+                tokenizer=tokenizer,
+                return_as_token_id=self.return_tokens_as_token_ids,
             )
             out.append(
                 Logprob(
@@ -961,25 +960,28 @@ class OpenAIServingResponses(OpenAIServing):
             enable_auto_tools=self.enable_auto_tools,
             tool_parser_cls=self.tool_parser,
         )
-        if content:
-            output_text = ResponseOutputText(
-                text=content,
-                annotations=[],  # TODO
-                type="output_text",
-                logprobs=(
-                    self._create_response_logprobs(
-                        token_ids=final_output.token_ids,
-                        logprobs=final_output.logprobs,
-                        tokenizer=tokenizer,
-                        top_logprobs=request.top_logprobs,
-                    )
-                    if request.is_include_output_logprobs()
-                    else None
-                ),
-            )
+
+        if content or (self.use_harmony and tool_calls):
+            res_text_part = None
+            if content:
+                res_text_part = ResponseOutputText(
+                    text=content,
+                    annotations=[],  # TODO
+                    type="output_text",
+                    logprobs=(
+                        self._create_response_logprobs(
+                            token_ids=final_output.token_ids,
+                            logprobs=final_output.logprobs,
+                            tokenizer=tokenizer,
+                            top_logprobs=request.top_logprobs,
+                        )
+                        if request.is_include_output_logprobs()
+                        else None
+                    ),
+                )
             message_item = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
-                content=[output_text],
+                content=[res_text_part] if res_text_part else [],
                 role="assistant",
                 status="completed",
                 type="message",
@@ -991,17 +993,28 @@ class OpenAIServingResponses(OpenAIServing):
         if message_item:
             outputs.append(message_item)
         if tool_calls:
-            tool_call_items = [
-                ResponseFunctionToolCall(
-                    id=f"fc_{random_uuid()}",
-                    call_id=f"call_{random_uuid()}",
-                    type="function_call",
-                    status="completed",
-                    name=tool_call.name,
-                    arguments=tool_call.arguments,
+            # We use a simple counter for history_tool_call_count because
+            # we don't track the history of tool calls in the Responses API yet.
+            # This means that the tool call index will start from 0 for each
+            # request.
+            tool_call_items = []
+            for history_tool_call_cnt, tool_call in enumerate(tool_calls):
+                tool_call_items.append(
+                    ResponseFunctionToolCall(
+                        id=f"fc_{random_uuid()}",
+                        call_id=tool_call.id
+                        if tool_call.id
+                        else make_tool_call_id(
+                            id_type=self.tool_call_id_type,
+                            func_name=tool_call.name,
+                            idx=history_tool_call_cnt,
+                        ),
+                        type="function_call",
+                        status="completed",
+                        name=tool_call.name,
+                        arguments=tool_call.arguments,
+                    )
                 )
-                for tool_call in tool_calls
-            ]
             outputs.extend(tool_call_items)
         return outputs
 

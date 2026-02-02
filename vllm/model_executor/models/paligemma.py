@@ -225,14 +225,14 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         mm_inputs = super().apply(
             prompt,
-            mm_data,
+            mm_items,
             hf_processor_mm_kwargs,
             tokenization_kwargs,
             mm_uuids=mm_uuids,
@@ -389,7 +389,7 @@ class PaliGemmaForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
