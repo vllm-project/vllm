@@ -130,15 +130,13 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return False
 
-        info = self._create_processing_info(model_config, tokenizer=None)
-        supported_modalities = info.get_supported_mm_limits()
-
         mm_config = model_config.get_multimodal_config()
+        info = self._create_processing_info(model_config, tokenizer=None)
 
         # Check if all supported modalities have limit == 0
         if all(
             mm_config.get_limit_per_prompt(modality) == 0
-            for modality in supported_modalities
+            for modality in info.supported_mm_limits
         ):
             logger.info_once(
                 "All limits of multimodal modalities supported by the model "
@@ -239,10 +237,9 @@ class MultiModalRegistry:
     def get_dummy_mm_inputs(
         self,
         model_config: "ModelConfig",
-        mm_counts: Mapping[str, int] | None = None,
+        mm_counts: Mapping[str, int],
         *,
         cache: BaseMultiModalProcessorCache | None = None,
-        observability_config: ObservabilityConfig | None = None,
         processor: BaseMultiModalProcessor | None = None,
     ) -> MultiModalInputs:
         """
@@ -253,11 +250,7 @@ class MultiModalRegistry:
         seq_len = model_config.max_model_len
 
         if processor is None:
-            processor = self.create_processor(
-                model_config, observability_config, cache=cache
-            )
-        if mm_counts is None:
-            mm_counts = processor.info.allowed_mm_limits
+            processor = self.create_processor(model_config, cache=cache)
 
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=seq_len,
