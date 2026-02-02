@@ -701,12 +701,14 @@ class InputPreprocessor:
         efs_sparse_enabled = is_multimodal_efs_enabled(efs_sparse_rate)
         if (
             efs_sparse_enabled
+            and isinstance(prompt, dict)
             and "multi_modal_data" in prompt
             and isinstance(prompt["multi_modal_data"], dict)
             and "video" in prompt["multi_modal_data"]
         ):
             videos = prompt["multi_modal_data"]["video"]
-            detector = SimilarFrameDetector(sparse_ratio=(1 - efs_sparse_rate))
+            sparse_ratio = 1 - (efs_sparse_rate if efs_sparse_rate is not None else 0.0)
+            detector = SimilarFrameDetector(sparse_ratio=sparse_ratio)
             videos = detector.process_video_frames(videos)
             prompt["multi_modal_data"]["video"] = videos
         """Preprocess the input prompt."""
