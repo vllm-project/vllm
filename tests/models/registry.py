@@ -1116,6 +1116,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "Qwen3NextMTP": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct", min_transformers_version="4.56.3"
     ),
+    "Step3p5MTP": _HfExamplesInfo(
+        "stepfun-ai/Step-3.5-Flash",
+        trust_remote_code=True,
+        speculative_model="stepfun-ai/Step-3.5-Flash",
+        is_available_online=False
+    ),
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
