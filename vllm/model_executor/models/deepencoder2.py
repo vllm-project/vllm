@@ -185,7 +185,13 @@ class CustomQwen2Decoder(nn.Module):
 
         return CustomQwen2ModelInner(config)
 
-    def forward(self, inputs_embeds, token_type_ids, attention_mask=None, **kwargs):
+    def forward(
+        self,
+        inputs_embeds: torch.Tensor,
+        token_type_ids: torch.Tensor,
+        attention_mask: torch.Tensor = None,
+        **kwargs,
+    ):
         """
         Args:
             inputs_embeds: [batch_size, seq_len, hidden_dim]
