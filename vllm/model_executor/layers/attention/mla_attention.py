@@ -191,7 +191,7 @@ import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TypeVar, cast
 
 if TYPE_CHECKING:
     from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
@@ -593,10 +593,16 @@ try:
 
     is_vllm_fa = True
 except ImportError:
-    # For rocm use upstream flash attention
-    if current_platform.is_rocm():
-        from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
     is_vllm_fa = False
+    try:
+        from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+    except ImportError:
+
+        def flash_attn_varlen_func(*args: Any, **kwargs: Any) -> Any:  # type: ignore[no-redef,misc]
+            raise ImportError(
+                "ROCm platform requires upstream flash-attn "
+                "to be installed. Please install flash-attn first."
+            )
 
 
 def dynamic_per_batched_tensor_quant(
