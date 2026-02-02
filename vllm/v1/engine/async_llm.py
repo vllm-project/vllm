@@ -990,6 +990,38 @@ class AsyncLLM(EngineClient):
                 custom_stat_loggers=None,
             )
 
+    async def get_current_kv_cache_size(self) -> int:
+        """Get the number of free KV cache tokens available.
+
+        This method queries the v1 engine core to determine how many tokens
+        worth of KV cache memory is currently available. Used by ScalarLM
+        for dynamic batch sizing.
+
+        Returns:
+            int: Number of free tokens available in KV cache
+        """
+        try:
+            return await self.engine_core.get_free_kv_cache_tokens_async()
+        except Exception as e:
+            logger.warning("Failed to get free KV cache tokens: %s", e)
+            return 0
+
+    async def get_total_kv_cache_tokens(self) -> int:
+        """Get the number of total KV cache tokens available.
+
+        This method queries the v1 engine core to determine how many tokens
+        worth of KV cache memory is currently available. Used by ScalarLM
+        for dynamic batch sizing.
+
+        Returns:
+            int: Number of free tokens available in KV cache
+        """
+        try:
+            return await self.engine_core.get_total_kv_cache_tokens_async()
+        except Exception as e:
+            logger.warning("Failed to get free KV cache tokens: %s", e)
+            return 0
+
     @property
     def is_running(self) -> bool:
         # Is None before the loop is started.

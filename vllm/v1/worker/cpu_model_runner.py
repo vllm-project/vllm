@@ -1,4 +1,3 @@
-# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import contextmanager
 from typing import Any
@@ -57,6 +56,10 @@ class CPUModelRunner(GPUModelRunner):
 
         if self.lora_config:
             self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
+            logger.info("Loading LoRA model %s...", self.model_config.model)
+        else:
+            logger.info("No LoRA model to load for %s.",
+                        self.model_config.model)
 
     def get_model(self) -> nn.Module:
         return self.model

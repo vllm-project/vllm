@@ -18,6 +18,7 @@ from vllm.lora.layers import LoRAMapping, LoRAMappingType
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.models import supports_lora
+from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
 from vllm.v1.worker.gpu_input_batch import InputBatch as GPUInputBatch
 from vllm.v1.worker.tpu_input_batch import InputBatch as TPUInputBatch
 
@@ -35,15 +36,17 @@ class LoRAModelRunnerMixin:
         device: torch.device,
     ) -> nn.Module:
         if not supports_lora(model):
-            raise ValueError(f"{model.__class__.__name__} does not support LoRA yet.")
+            raise ValueError(
+                f"{model.__class__.__name__} does not support LoRA yet.")
 
-        # Add LoRA Manager to the Model Runner
-        self.lora_manager = LRUCacheWorkerLoRAManager(
-            vllm_config,
-            device,
-            model.embedding_modules,
-        )
-        return self.lora_manager.create_lora_manager(model, vllm_config)
+        self.lora_manager = TokenformerModelManager(model=model,
+                                                    device=device)
+
+        logger.info("Created LoRA manager for model "
+                    f"{model.__class__.__name__} with device {device}.")
+
+        return self.lora_manager.model
+
 
     def _set_active_loras(
         self,
@@ -53,6 +56,8 @@ class LoRAModelRunnerMixin:
         mapping_type: LoRAMappingType = LoRAMappingType.LANGUAGE,
     ) -> None:
         self._ensure_lora_enabled()
+        if self.lora_manager is None:
+            raise RuntimeError("LoRA is not enabled.")
 
         # Set is_prefill to True, so we always use the SGMV kernels on
         # non-cuda platforms.
@@ -90,10 +95,48 @@ class LoRAModelRunnerMixin:
             prompt_lora_mapping, token_lora_mapping, lora_requests, mapping_type
         )
 
+
     @contextmanager
-    def maybe_setup_dummy_loras(
+    def maybe_setup_dummy_loras(self, lora_config: LoRAConfig | None, remove_lora: bool = True):
+        # TODO: ScalarLM this is different from our original fork, see next method
+        if lora_config is None:
+            yield
+        else:
+            # __enter__ code
+            assert self.lora_manager is not None, "LoRA is not enabled"
+
+            num_loras = lora_config.max_loras
+            lora_warmup_rank = (
+                lora_config.max_lora_rank if lora_config.max_lora_rank < 8 else 8
+            )
+            # Make dummy lora requests
+            lora_requests: set[LoRARequest] = {
+                LoRARequest(
+                    lora_name=f"warmup_{lora_id}",
+                    lora_int_id=lora_id,
+                    lora_path="/not/a/real/path",
+                )
+                for lora_id in range(1, num_loras + 1)
+            }
+
+            with self.lora_manager.dummy_lora_cache():
+                # Add the dummy LoRAs here so _set_active_loras doesn't try to
+                # load from disk.
+                for lr in lora_requests:
+                    self.lora_manager.add_dummy_lora(lr, rank=lora_warmup_rank)
+
+                yield
+
+            # __exit__ code
+            if remove_lora:
+                self.lora_manager.remove_all_adapters()
+
+
+    @contextmanager
+    def maybe_setup_dummy_loras_MAIN_FORK(
         self, lora_config: LoRAConfig | None, remove_lora: bool = True
     ):
+
         if lora_config is None:
             yield
         else:
@@ -138,6 +181,19 @@ class LoRAModelRunnerMixin:
         if num_sampled_tokens is None:
             num_sampled_tokens = np.ones_like(num_scheduled_tokens, dtype=np.int32)
 
+        if lora_config is None:
+            yield
+        else:
+            # __enter__ code
+            assert self.lora_manager is not None, "LoRA is not enabled"
+
+            num_reqs = len(num_scheduled_tokens)
+            num_loras = lora_config.max_loras
+            yield
+
+    @contextmanager
+    def maybe_select_dummy_loras_MAIN_FORK(self, lora_config: LoRAConfig | None,
+                                 num_scheduled_tokens: np.ndarray):
         if lora_config is None:
             yield
         else:
@@ -210,6 +266,16 @@ class LoRAModelRunnerMixin:
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         self._ensure_lora_enabled()
+        if not self.lora_manager:
+            # Initialize the tokenformer manager if not already done
+            # This handles the case where tokenformer adapters are loaded dynamically
+            if hasattr(self, 'model') and hasattr(self, 'device'):
+                from vllm.tokenformer.tokenformer_model_manager import TokenformerModelManager
+                self.lora_manager = TokenformerModelManager(model=self.model,
+                                                           device=self.device)
+                logger.info("Initialized TokenformerModelManager for dynamic adapter loading")
+            else:
+                raise RuntimeError("LoRA is not enabled and cannot initialize adapter manager.")
         return self.lora_manager.add_adapter(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:

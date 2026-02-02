@@ -45,7 +45,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP, SupportsTokenformer
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
@@ -250,7 +250,7 @@ class Qwen3Model(Qwen2Model):
         )
 
 
-class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
+class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3, SupportsTokenformer):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -329,3 +329,39 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        state_dict = super().state_dict(destination, prefix, keep_vars)
+
+        # unpack keys ending in qkv_proj.weight to separate q_proj, k_proj, v_proj
+        for packed_key, unpacked_keys in self.packed_modules_mapping.items():
+            for key in list(state_dict.keys()):
+                if key.endswith(f"{packed_key}.weight"):
+                    weight = state_dict.pop(key)
+                    split_weights = torch.chunk(weight, len(unpacked_keys), dim=0)
+                    for unpacked_key, split_weight in zip(unpacked_keys,
+                                                         split_weights):
+                        new_key = key.replace(packed_key, unpacked_key)
+                        state_dict[new_key] = split_weight
+                elif key.endswith(f"{packed_key}.bias"):
+                    bias = state_dict.pop(key)
+                    split_biases = torch.chunk(bias, len(unpacked_keys), dim=0)
+                    for unpacked_key, split_bias in zip(unpacked_keys,
+                                                       split_biases):
+                        new_key = key.replace(packed_key, unpacked_key)
+                        state_dict[new_key] = split_bias
+
+        # remove keys related to expert weights
+        keys_to_remove = []
+
+        for key in state_dict.keys():
+            if ".experts." in key:
+                keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            state_dict.pop(key)
+
+        for key in state_dict.keys():
+            logger.debug("State dict key: %s", key)
+
+        return state_dict

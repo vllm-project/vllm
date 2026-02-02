@@ -163,7 +163,7 @@ steps:
         depends_on: ~
 
       - label: "Build release image - arm64 - CPU"
-        depends_on: 
+        depends_on:
           - block-arm64-cpu-release-image-build
           - input-release-version
         agents:
@@ -476,7 +476,7 @@ steps:
         # This fixes version detection when tags are moved/force-pushed
         echo "Fetching latest tags from origin..."
         git fetch --tags --force origin
-        
+
         # Log tag information for debugging version detection
         echo "========================================"
         echo "Git Tag Verification"

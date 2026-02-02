@@ -1012,6 +1012,14 @@ class AsyncMPClient(MPClient):
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self.call_utility_async("pin_lora", lora_id)
 
+    async def get_free_kv_cache_tokens_async(self) -> int:
+        """Get the number of free KV cache tokens available."""
+        return await self.call_utility_async("get_free_kv_cache_tokens")
+
+    async def get_total_kv_cache_tokens_async(self) -> int:
+        """Get the number of total KV cache tokens available."""
+        return await self.call_utility_async("get_total_kv_cache_tokens")
+
     async def save_sharded_state_async(
         self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
