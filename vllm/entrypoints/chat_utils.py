@@ -50,8 +50,8 @@ from vllm.multimodal.inputs import (
     VisionChunkImage,
     VisionChunkVideo,
 )
+from vllm.multimodal.media import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.multimodal.processing import BaseMultiModalProcessor
-from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
@@ -528,7 +528,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         else:
             num_items = len(self._items_by_modality[original_modality]) + 1
 
-        self.mm_processor.validate_num_items(input_modality, num_items)
+        self.mm_processor.info.validate_num_items(input_modality, num_items)
 
         # Track original modality for vision_chunk items
         if use_vision_chunk:
@@ -1437,7 +1437,7 @@ def _parse_chat_message_content(
 ) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
-    reasoning = message.get("reasoning") or message.get("reasoning_content")
+    reasoning = message.get("reasoning")
 
     if content is None:
         content = []
@@ -1463,9 +1463,6 @@ def _parse_chat_message_content(
             # Include reasoning if present for interleaved thinking.
             if reasoning is not None:
                 result_msg["reasoning"] = cast(str, reasoning)
-                result_msg["reasoning_content"] = cast(
-                    str, reasoning
-                )  # keep compatibility
         elif role == "tool":
             parsed_msg = _ToolParser(message)
             if "tool_call_id" in parsed_msg:
