@@ -156,6 +156,7 @@ def make_unquantized_moe_kernel(
     moe_config: FusedMoEConfig,
 ) -> tuple[mk.FusedMoEModularKernel | None, bool]:
     use_inplace = True
+
     if backend in UNSUPPORTED_BACKEND:
         return None, use_inplace
 
@@ -197,7 +198,6 @@ def make_unquantized_moe_kernel(
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe import XPUExperts
 
-        # use_inplace = False
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             XPUExperts(

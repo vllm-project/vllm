@@ -40,11 +40,9 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
-if current_platform.is_cuda_alike():
+if current_platform.is_cuda_alike() or current_platform.is_xpu():
     from .fused_batched_moe import BatchedTritonExperts
     from .fused_moe import TritonExperts
-elif current_platform.is_xpu():
-    pass
 else:
     TritonExperts = None  # type: ignore
 
