@@ -103,8 +103,8 @@ struct cutlass_3x_gemm_fp8_blockwise {
           MainloopScheduler
       >::CollectiveOp;
 
-  // SM120+ to support both SM120 (RTX 5090) and SM121 (DGX Spark)
-  using KernelType = enable_sm120_or_later<cutlass::gemm::kernel::GemmUniversal<
+  // SM12x family to support both SM120 (RTX 5090) and SM121 (DGX Spark)
+  using KernelType = enable_sm120_family<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue>>;
 
   struct GemmKernel : public KernelType {};

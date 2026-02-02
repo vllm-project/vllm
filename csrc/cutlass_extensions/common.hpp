@@ -73,7 +73,7 @@ struct enable_sm120_only : Kernel {
 
 // SM12x family includes SM120 (RTX 5090) and SM121 (DGX Spark GB10)
 template <typename Kernel>
-struct enable_sm120_or_later : Kernel {
+struct enable_sm120_family : Kernel {
   template <typename... Args>
   CUTLASS_DEVICE void operator()(Args&&... args) {
 #if defined __CUDA_ARCH__ && (__CUDA_ARCH__ >= 1200 && __CUDA_ARCH__ < 1300)
