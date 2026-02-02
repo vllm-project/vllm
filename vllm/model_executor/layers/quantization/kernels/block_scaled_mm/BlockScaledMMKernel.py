@@ -16,14 +16,14 @@ from vllm.model_executor.utils import replace_parameter
 
 from ...utils.fp8_utils import process_fp8_weight_block_strategy
 from ..base import (
-    CustomKernelConfig,
     FP8Params,
     MMLinearKernel,
+    MMLinearLayerConfig,
 )
 
 
 @dataclass
-class Fp8BlockMMScaledConfig(CustomKernelConfig):
+class Fp8BlockMMScaledConfig(MMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
     out_dtype: torch.dtype | None

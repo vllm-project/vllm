@@ -10,7 +10,7 @@ from typing_extensions import Self
 
 
 @dataclass
-class CustomKernelConfig: ...
+class MMLinearLayerConfig: ...
 
 
 @dataclass
@@ -75,7 +75,7 @@ class Int8Params(Params):
 
 
 _ParamsT = TypeVar("_ParamsT", bound=Params)
-_ConfigT = TypeVar("_ConfigT", bound=CustomKernelConfig)
+_ConfigT = TypeVar("_ConfigT", bound=MMLinearLayerConfig)
 
 
 class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):

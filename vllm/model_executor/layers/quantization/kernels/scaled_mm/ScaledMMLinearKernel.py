@@ -17,15 +17,15 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 
 from ..base import (
-    CustomKernelConfig,
     FP8Params,
     Int8Params,
     MMLinearKernel,
+    MMLinearLayerConfig,
 )
 
 
 @dataclass
-class Int8ScaledMMLinearLayerConfig(CustomKernelConfig):
+class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
     is_static_input_scheme: bool
     is_channelwise: bool
@@ -33,7 +33,7 @@ class Int8ScaledMMLinearLayerConfig(CustomKernelConfig):
 
 
 @dataclass
-class FP8ScaledMMLinearLayerConfig(CustomKernelConfig):
+class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
     out_dtype: torch.dtype | None

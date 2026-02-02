@@ -8,8 +8,8 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.base import (
-    CustomKernelConfig,
     MMLinearKernel,
+    MMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
     Fp8BlockScaledMMKernel,
@@ -84,7 +84,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
 
 
 _KernelT = TypeVar("_KernelT", bound=MMLinearKernel)
-_KernelConfigT = TypeVar("_KernelConfigT", bound=CustomKernelConfig)
+_KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
 def is_supported_and_can_implement_kernel(
