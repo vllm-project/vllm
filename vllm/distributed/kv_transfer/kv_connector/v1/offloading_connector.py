@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from collections.abc import Iterable
+from collections import Counter
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any
@@ -403,6 +404,7 @@ class OffloadingConnectorScheduler:
 
     def _get_reqs_to_store(self, scheduler_output: SchedulerOutput):
         reqs_to_store: dict[ReqId, TransferSpec] = {}
+        block_hash_counts: Counter = Counter()
         # iterate over both new and cached requests
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             if preempted:
@@ -443,8 +445,7 @@ class OffloadingConnectorScheduler:
                 continue
             block_hashes_to_store = set(store_output.block_hashes_to_store)
 
-            block_hashes = self._get_block_hashes(req, end_idx=num_blocks)
-            self.manager.touch(block_hashes)
+            block_hash_counts.update(self._get_block_hashes(req, end_idx=num_blocks))
 
             new_block_hashes = self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks
@@ -469,6 +470,12 @@ class OffloadingConnectorScheduler:
                 len(block_hashes_to_store),
                 start_block_idx,
             )
+
+        if block_hash_counts:
+            sorted_block_hashes = [
+                block_hash for block_hash, _ in block_hash_counts.most_common()
+            ]
+            self.manager.touch(sorted_block_hashes)
 
         return reqs_to_store
 
