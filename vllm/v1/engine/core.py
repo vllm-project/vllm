@@ -579,6 +579,26 @@ class EngineCore:
             reset_running_requests, reset_connector
         )
 
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings computed with old weights are not reused.
+        Clears both the scheduler's cache manager and the GPU model runner's cache.
+        """
+        # NOTE: Since this is mainly for debugging, we don't attempt to
+        # re-sync the internal caches (P0 sender, P1 receiver)
+        if self.scheduler.has_unfinished_requests():
+            logger.warning(
+                "Resetting the encoder cache when requests are "
+                "in progress may lead to desynced internal caches."
+            )
+
+        # Reset the scheduler's encoder cache manager (logical state)
+        self.scheduler.reset_encoder_cache()
+        # Reset the GPU model runner's encoder cache (physical storage)
+        self.model_executor.reset_encoder_cache()
+
     def sleep(self, level: int = 1):
         self.model_executor.sleep(level)
 

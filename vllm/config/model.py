@@ -75,7 +75,7 @@ else:
 logger = init_logger(__name__)
 
 RunnerOption = Literal["auto", RunnerType]
-ConvertType = Literal["none", "embed", "classify", "reward", "mm_encoder_only"]
+ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
@@ -501,15 +501,6 @@ class ModelConfig:
         )
         self.model_arch_config = self.get_model_arch_config()
 
-        if self.convert == "mm_encoder_only":
-            logger.warning_once(
-                "`--convert mm_encoder_only` is deprecated and "
-                "will be removed in v0.15. "
-                "Please use --mm-encoder-only` instead."
-            )
-            mm_encoder_only = True
-            self.convert = "none"
-
         architectures = self.architectures
         registry = self.registry
         is_generative_model = registry.is_text_generation_model(architectures, self)
@@ -567,13 +558,14 @@ class ModelConfig:
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
+            config_format=self.config_format,
         )
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
 
         if self.is_encoder_decoder:
-            self.mm_processor_cache_gb = 0
+            mm_processor_cache_gb = 0
             logger.info("Encoder-decoder model detected, disabling mm processor cache.")
 
         # Init multimodal config if needed
@@ -770,7 +762,7 @@ class ModelConfig:
             )
             self.tokenizer = object_storage_tokenizer.dir
 
-    def _get_encoder_config(self):
+    def _get_encoder_config(self) -> dict[str, Any] | None:
         model = self.model
         if is_remote_gguf(model):
             model, _ = split_remote_gguf(model)
@@ -857,13 +849,6 @@ class ModelConfig:
         runner_type: RunnerType,
         convert: ConvertOption,
     ) -> ConvertType:
-        if convert == "reward":
-            logger.warning(
-                "`--convert reward` is deprecated and will be removed in v0.15. "
-                "Please use `--convert embed` instead."
-            )
-            return "embed"
-
         if convert != "auto":
             return convert
 
@@ -893,10 +878,7 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
-                "bitblas",
-                "gptq_marlin_24",
                 "gptq_marlin",
-                "gptq_bitblas",
                 "awq_marlin",
                 "ipex",
                 "inc",
@@ -1850,9 +1832,10 @@ def _get_and_verify_dtype(
     *,
     is_pooling_model: bool,
     revision: str | None = None,
+    config_format: ConfigFormat = "hf",
 ) -> torch.dtype:
     config_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
-        config, model_id, revision=revision
+        config, model_id, revision=revision, config_format=config_format
     )
     model_type = config.model_type
 
@@ -1922,7 +1905,7 @@ def _get_and_verify_max_len(
     disable_sliding_window: bool,
     sliding_window: int | None,
     spec_target_max_model_len: int | None = None,
-    encoder_config: Any | None = None,
+    encoder_config: dict[str, Any] | None = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     (derived_max_model_len, max_len_key) = (

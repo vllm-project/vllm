@@ -135,6 +135,8 @@ class TestData:
                 layer.w2_input_scale,
             )
         layer.custom_routing_function = Llama4MoE.custom_routing_function
+        layer.routing_method_type = RoutingMethodType.Llama4
+        layer.renormalize = False
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
         layer.local_num_experts = e
