@@ -312,8 +312,8 @@ class ServingScores(OpenAIServing):
         )
 
         return await self._score_func(
-            data_1=data_1,  # type: ignore[arg-type]
-            data_2=data_2,  # type: ignore[arg-type]
+            data_1=data_1,
+            data_2=data_2,
             request=request,
             request_id=request_id,
             lora_request=lora_request,

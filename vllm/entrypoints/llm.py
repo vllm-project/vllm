@@ -1326,8 +1326,8 @@ class LLM:
 
     def _embedding_score(
         self,
-        text_1: list[SingletonPrompt],
-        text_2: list[SingletonPrompt],
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
         *,
         use_tqdm: bool | Callable[..., tqdm],
         pooling_params: PoolingParams | None,
@@ -1336,8 +1336,16 @@ class LLM:
     ) -> list[ScoringRequestOutput]:
         tokenizer = self.get_tokenizer()
 
+        input_texts = data_1 + data_2
+        for text in input_texts:
+            if not isinstance(text, str):
+                raise NotImplementedError(
+                    "Embedding scores currently do not support multimodal input."
+                )
+        input_texts = cast(list[str], input_texts)
+
         encoded_output = self.encode(
-            text_1 + text_2,
+            input_texts,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             pooling_params=pooling_params,
@@ -1345,8 +1353,8 @@ class LLM:
             tokenization_kwargs=tokenization_kwargs,
         )
 
-        encoded_output_1 = encoded_output[0 : len(text_1)]
-        encoded_output_2 = encoded_output[len(text_1) :]
+        encoded_output_1 = encoded_output[0 : len(data_1)]
+        encoded_output_2 = encoded_output[len(data_2) :]
 
         if len(encoded_output_1) == 1:
             encoded_output_1 = encoded_output_1 * len(encoded_output_2)
@@ -1511,8 +1519,8 @@ class LLM:
         architecture = model_config.architecture
 
         data_1, data_2 = validate_score_input(
-            data_1,
-            data_2,
+            data_1,  # type: ignore[arg-type]
+            data_2,  # type: ignore[arg-type]
             is_multimodal_model=is_multimodal_model,
             architecture=architecture,
         )

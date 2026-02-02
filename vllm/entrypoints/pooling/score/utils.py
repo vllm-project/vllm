@@ -103,15 +103,16 @@ def _validate_mm_score_input(
     data: list[str | ScoreMultiModalParam],
     is_multimodal_model: bool,
     architecture: str,
-) -> list[str | list[ScoreContentPartParam]]:
-    out = []
+) -> list[ScoreInputs]:
+    out: list[ScoreInputs] = []
     for d in data:
         if isinstance(d, str):
             out.append(d)
         else:
             if not is_multimodal_model:
                 raise ValueError(f"MultiModalParam is not supported for {architecture}")
-            out.append(d.get("content", []))
+            content = cast(list[ScoreContentPartParam], d.get("content", []))
+            out.append(content)
     return out
 
 
