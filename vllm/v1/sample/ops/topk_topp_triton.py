@@ -140,7 +140,7 @@ def _topk_topp_kernel(
                     write_pos = tl.where(outlier_mask, cumulative_pos, -1)
                     tl.store(BUFFER_ROW + write_pos, logits_blk, mask=outlier_mask)
 
-                # Second passes: Quaternary search for pivots (nlog_4(batch_size))
+                # Second passes: Ternary search for pivots
                 num_iters = 0
                 k_pivot = float("inf")
                 k_pivots_num = tl.zeros((), dtype=tl.uint32)
@@ -226,6 +226,7 @@ def _topk_topp_kernel(
                             max_range = k_pivot_0
                         elif k_pivots_num_1 < k:
                             max_range = k_pivot_1
+                            
                         num_iters += 1
                         if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-9:
                             k_pivot = (max_range + min_range) / 2.0
@@ -343,7 +344,7 @@ def _topk_topp_kernel(
 
                                 outlier_mask = (probs_blk > min_logit) & mask_n_2
 
-                                # Duplicate logit handling
+                                # Duplicate logit handling for Top-k
                                 if num_keep < num_duplicate_logit:
                                     duplicate_mask = (
                                         tl.abs(probs_blk - duplicate_logit) < 1e-9
@@ -402,7 +403,7 @@ def _topk_topp_kernel(
 
                                 outlier_mask = (probs_blk > min_logit) & mask_n
 
-                                # Duplicate logit handling
+                                # Duplicate logit handling for Top-k
                                 duplicate_mask = (
                                     tl.abs(probs_blk - duplicate_logit) < 1e-9
                                 )
@@ -563,6 +564,7 @@ def _topk_topp_kernel(
 
                         # Top-k + Top-p path
                         final_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
+                        
         if TOPP_ENABLED and final_pivot == -float("inf"):
             #### STANDALONE TOP-P SAMPLING ####
             p = tl.load(P + row_id)
@@ -841,7 +843,7 @@ def _topk_topp_kernel(
                 # Top-p only path
                 final_pivot = tl.log(p_pivot * sum_exp_logits) + max_sample
 
-        # Sixth pass: Apply mask
+        # Sixth pass: Apply mask and store final output
         if final_pivot != -float("inf"):
             for i in range(0, NUM_TILES):
                 offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
@@ -919,6 +921,7 @@ def apply_top_k_top_p_triton(
     num_sm = torch.cuda.get_device_properties(logits.device).multi_processor_count
     NUM_PROGRAMS = min(num_sm, batch_size)
 
+    # Cache per-Triton Program buffer on each device.
     buf_key = (logits.device, logits.dtype, NUM_PROGRAMS, vocab_size)
     buffer = _TRITON_BUFFER_CACHE.get(buf_key)
     if buffer is None or buffer.numel() < NUM_PROGRAMS * vocab_size:
@@ -927,7 +930,7 @@ def apply_top_k_top_p_triton(
         )
         _TRITON_BUFFER_CACHE[buf_key] = buffer
 
-    # Cache percentile table per device.
+    # Cache lookup table entries on each device.
     tbl_key = (logits.device, torch.float32)
     tables = _TRITON_TABLE_CACHE.get(tbl_key)
     if tables is None:
