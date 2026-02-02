@@ -349,7 +349,7 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "AttentionBackendEnum",
+        selected_backend: "AttentionBackendEnum | None",
         attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         device_capability = cls.get_device_capability()
