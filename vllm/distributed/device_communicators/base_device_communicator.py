@@ -154,23 +154,50 @@ class DeviceCommunicatorBase:
         dist.all_reduce(input_, group=self.device_group)
         return input_
 
-    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
-        if dim < 0:
-            # Convert negative dim to positive.
-            dim += input_.dim()
+    def all_gather_raw(self, input_: torch.Tensor) -> torch.Tensor:
+        """Raw NCCL all_gather returning tensor with world_size as first dim.
+
+        This primitive operation performs only the NCCL collective without
+        additional reshaping. The output has shape (world_size, *input_shape)
+        where slice [i] contains rank i's contribution.
+
+        This is used by the all_gather decomposition to expose subsequent
+        reshape operations to Inductor for fusion optimization.
+
+        Args:
+            input_: Input tensor to gather from all ranks.
+
+        Returns:
+            Gathered tensor with shape (world_size, *input_shape).
+
+        Note:
+            Uses concat-style all-gather (not stack-style) due to torch.compile
+            compatibility issues. See pytorch/pytorch#138795.
+        """
         input_size = input_.size()
         # NOTE: we have to use concat-style all-gather here,
         # stack-style all-gather has compatibility issues with
         # torch.compile . see https://github.com/pytorch/pytorch/issues/138795
         output_size = (input_size[0] * self.world_size,) + input_size[1:]
-        # Allocate output tensor.
+        # Allocate output tensor
         output_tensor = torch.empty(
             output_size, dtype=input_.dtype, device=input_.device
         )
-        # All-gather.
+        # NCCL all-gather
         dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
-        # Reshape
-        output_tensor = output_tensor.reshape((self.world_size,) + input_size)
+        # Reshape to (world_size, *input_size) - this is a view, no copy
+        return output_tensor.reshape((self.world_size,) + input_size)
+
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        if dim < 0:
+            # Convert negative dim to positive.
+            dim += input_.dim()
+        input_size = input_.size()
+
+        # Use all_gather_raw for the NCCL collective
+        output_tensor = self.all_gather_raw(input_)
+
+        # Reshape to final output
         output_tensor = output_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(
             input_size[:dim]

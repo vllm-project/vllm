@@ -51,9 +51,7 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
-from vllm.utils.torch_utils import (
-    direct_register_custom_op,
-)
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @dataclass
@@ -161,6 +159,86 @@ def all_gather_fake(
     return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
 
 
+def all_gather_raw(
+    tensor: torch.Tensor, world_size: int, group_name: str
+) -> torch.Tensor:
+    """Raw NCCL all_gather returning tensor with world_size as first dimension.
+
+    This is the primitive all_gather operation that only performs the NCCL
+    collective without any reshaping. It returns a tensor of shape
+    (world_size, *input_shape) where each slice [i] contains rank i's input.
+
+    This op is used by the all_gather decomposition to expose the reshape
+    operations to Inductor, enabling fusion with subsequent operations.
+
+    Args:
+        tensor: Input tensor to gather from all ranks.
+        world_size: Number of ranks in the group.
+        group_name: Name of the process group (e.g., "tp:0").
+
+    Returns:
+        Gathered tensor with shape (world_size, *input_shape).
+    """
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group._all_gather_raw(tensor)
+
+
+def all_gather_raw_fake(
+    tensor: torch.Tensor, world_size: int, group_name: str
+) -> torch.Tensor:
+    """Fake implementation of all_gather_raw for tracing/shape inference."""
+    return torch.empty(
+        (world_size,) + tensor.shape,
+        dtype=tensor.dtype,
+        device=tensor.device,
+    )
+
+
+def all_gather_decomposed(
+    tensor: torch.Tensor, dim: int, world_size: int, group_name: str
+) -> torch.Tensor:
+    """Decomposed all_gather that exposes reshape ops to Inductor for fusion.
+
+    This decomposition breaks all_gather into visible operations that Inductor
+    can optimize:
+    1. all_gather_raw: NCCL collective only -> (world_size, *input_shape)
+    2. movedim: Reorder dimensions (aten op, visible to Inductor)
+    3. reshape: Flatten gathered dimension (aten op, visible to Inductor)
+
+    By exposing steps 2-3 as aten operations, Inductor can fuse them with
+    subsequent operations like dtype conversion or RMSNorm, eliminating
+    a standalone copy kernel that would otherwise be needed for the
+    non-contiguous reshape.
+
+    Args:
+        tensor: Input tensor to gather from all ranks.
+        dim: Dimension along which to gather.
+        world_size: Number of ranks in the group.
+        group_name: Name of the process group.
+
+    Returns:
+        Gathered tensor with the gather dimension expanded by world_size.
+    """
+    if dim < 0:
+        dim += tensor.dim()
+
+    # Raw NCCL gather -> (world_size, *input_shape)
+    gathered = torch.ops.vllm.all_gather_raw(tensor, world_size, group_name)
+
+    # Move world_size dim to target position (aten op visible to Inductor)
+    gathered = gathered.movedim(0, dim)
+
+    # Flatten the gather dimension (aten op visible to Inductor)
+    input_shape = tensor.shape
+    output_shape = (
+        input_shape[:dim] + (world_size * input_shape[dim],) + input_shape[dim + 1 :]
+    )
+    return gathered.reshape(output_shape)
+
+
 def patched_fused_scaled_matmul_reduce_scatter_fake(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -262,6 +340,22 @@ direct_register_custom_op(
     op_func=all_gather,
     fake_impl=all_gather_fake,
 )
+
+direct_register_custom_op(
+    op_name="all_gather_raw",
+    op_func=all_gather_raw,
+    fake_impl=all_gather_raw_fake,
+)
+
+# NOTE: We intentionally do NOT register a CompositeExplicitAutograd decomposition
+# for all_gather. While decomposing to all_gather_raw + aten ops would allow
+# Inductor to fuse the reshape with subsequent operations, it would break
+# existing pattern matchers in vllm/compilation/ that look for the high-level
+# all_gather op (e.g., AllGatherGEMMPattern, sequence parallelism patterns).
+#
+# Instead, fusion opportunities should be handled via explicit pattern matchers
+# in the compilation passes. The all_gather_raw op and all_gather_decomposed
+# function are available for use in such pattern matchers if needed.
 
 # TODO: Remove this once the pytorch fix
 # (https://github.com/pytorch/pytorch/pull/165086) gets released,
@@ -524,6 +618,15 @@ class GroupCoordinator:
         if self.device_communicator is None:
             raise ValueError("No device communicator found")
         return self.device_communicator.all_gather(input_, dim)
+
+    def _all_gather_raw(self, input_: torch.Tensor) -> torch.Tensor:
+        """
+        Raw all_gather that only performs NCCL collective.
+        Returns tensor with shape (world_size, *input_shape).
+        """
+        if self.device_communicator is None:
+            raise ValueError("No device communicator found")
+        return self.device_communicator.all_gather_raw(input_)
 
     def all_gatherv(
         self,

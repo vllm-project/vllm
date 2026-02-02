@@ -31,7 +31,11 @@ if current_platform.is_cuda_alike():
     from .sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_cuda():
-    from .collective_fusion import AllReduceFusionPass, AsyncTPPass
+    from .collective_fusion import (
+        AllGatherDecomposePass,
+        AllReduceFusionPass,
+        AsyncTPPass,
+    )
 
 from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import (
@@ -139,6 +143,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.enable_qk_norm_rope_fusion:
                 self.passes += [QKNormRoPEFusionPass(config)]
+
+            # Decompose remaining all_gather ops to expose reshape for fusion.
+            # This runs AFTER fusion pattern matchers so they get first chance.
+            if self.pass_config.enable_sp and current_platform.is_cuda():
+                self.passes += [AllGatherDecomposePass(config)]
 
             # needs a functional graph
             self.post_cleanup = PostCleanupPass(config)

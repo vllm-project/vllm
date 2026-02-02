@@ -1226,3 +1226,81 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             flashinfer_comm.trtllm_destroy_ipc_workspace_for_all_reduce(
                 self.ipc_handles, self.group
             )
+
+
+class AllGatherDecomposePass(VllmInductorPass):
+    """
+    Decomposes remaining all_gather ops to expose reshape operations to Inductor.
+
+    This pass should run AFTER all fusion pattern matchers (AsyncTPPass,
+    SequenceParallelismPass, etc.) have had a chance to match. Any all_gather
+    ops that weren't matched by fusion patterns will be decomposed to:
+
+        all_gather -> all_gather_raw + movedim + reshape
+
+    This exposes the reshape operations as aten ops, allowing Inductor to fuse
+    them with subsequent operations (dtype conversion, pointwise ops, etc.),
+    eliminating the standalone copy kernel that would otherwise be needed.
+
+    The optimization is generic - it doesn't target specific operations like
+    RMSNorm, but rather enables fusion with ANY subsequent operation that
+    Inductor can optimize.
+    """
+
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config)
+        self.tp = get_tp_group()
+        self.tp_size = get_tensor_model_parallel_world_size()
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph) -> None:
+        count = 0
+        all_gather_op = torch.ops.vllm.all_gather.default
+        for node in list(graph.nodes):
+            if node.op == "call_function" and node.target == all_gather_op:
+                count += self._decompose_all_gather(graph, node)
+
+        if count > 0:
+            graph.lint()
+            graph.eliminate_dead_code()
+            logger.debug("Decomposed %s all_gather ops for fusion", count)
+
+    def _decompose_all_gather(self, graph: fx.Graph, node: fx.Node) -> int:
+        """Replace all_gather with all_gather_raw + movedim + reshape."""
+        # Extract arguments: tensor, dim, world_size, group_name
+        args = node.args
+        kwargs = node.kwargs
+
+        tensor = args[0] if len(args) > 0 else kwargs.get("tensor")
+        dim = args[1] if len(args) > 1 else kwargs.get("dim", -1)
+        world_size = args[2] if len(args) > 2 else kwargs.get("world_size")
+        group_name = args[3] if len(args) > 3 else kwargs.get("group_name")
+
+        if tensor is None or world_size is None or group_name is None:
+            return 0
+
+        with graph.inserting_before(node):
+            # Step 1: all_gather_raw -> (world_size, *input_shape)
+            raw_gather = graph.call_function(
+                torch.ops.vllm.all_gather_raw.default,
+                args=(tensor, world_size, group_name),
+            )
+
+            # Step 2: movedim(0, dim) - visible to Inductor
+            movedim = graph.call_function(
+                torch.ops.aten.movedim.int,
+                args=(raw_gather, 0, dim),
+            )
+
+            # Step 3: reshape to final shape - visible to Inductor
+            # We need to compute the output shape
+            # For now, use reshape with -1 to infer, or use the original node's shape
+            reshape = graph.call_function(
+                torch.ops.aten.flatten.using_ints,
+                args=(movedim, dim, dim + 1),
+            )
+
+        # Replace all uses of the original node with the reshaped result
+        node.replace_all_uses_with(reshape)
+        graph.erase_node(node)
+        return 1
