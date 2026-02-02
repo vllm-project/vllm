@@ -36,6 +36,7 @@ async def main():
     token_times: list[tuple[int, float]] = []  # (token_count, timestamp)
     pause_time: float = 0
     resume_time: float = 0
+    pause_token_idx: int = 0  # Index in token_times when pause occurred
 
     async def generator_task():
         """Generate tokens and record timestamps."""
@@ -54,7 +55,7 @@ async def main():
 
     async def controller_task():
         """Pause and resume the engine after some tokens generated."""
-        nonlocal pause_time, resume_time
+        nonlocal pause_time, resume_time, pause_token_idx
 
         # Wait for some tokens to be generated
         while len(token_times) < 5:
@@ -63,6 +64,7 @@ async def main():
         print(f"\nPausing engine (keep mode) at token {len(token_times)}")
         pause_time = time.monotonic()
         await engine.pause_generation(mode="keep")
+        pause_token_idx = len(token_times)
         print(f"Paused! Sleeping for {PAUSE_DURATION}s...")
 
         # Sleep while paused - no tokens should be generated during this time
@@ -79,36 +81,20 @@ async def main():
 
     final_output, _ = await asyncio.gather(gen_task, ctrl_task)
 
-    # Analyze token timing gaps
-    print("\n=== Token Timing Analysis ===")
-    max_gap = 0.0
-    max_gap_tokens = (0, 0)
-    # Start from index 2 to exclude TTFT (time to first token)
-    for i in range(2, len(token_times)):
-        gap = token_times[i][1] - token_times[i - 1][1]
-        if gap > max_gap:
-            max_gap = gap
-            max_gap_tokens = (token_times[i - 1][0], token_times[i][0])
-        if gap > 0.5:  # Log significant gaps
-            print(
-                f"  Gap of {gap:.3f}s"
-                f" between token {token_times[i - 1][0]} and {token_times[i][0]}"
-            )
-
-    print(
-        f"\nLargest gap: {max_gap:.3f}s "
-        f"(between tokens {max_gap_tokens[0]} and {max_gap_tokens[1]})"
-    )
-    print(f"Pause duration: {PAUSE_DURATION}s")
-    print(f"Final token count: {len(final_output.outputs[0].token_ids)}")
-    print(f"Request finished: {final_output.finished}")
-
     # Verify the pause actually stopped generation.
-    # The max gap should be approximately the pause duration.
-    if max_gap >= PAUSE_DURATION * 0.9:
-        print(f"\n✓ Test passed! Engine paused for ~{max_gap:.1f}s")
+    # The gap after the pause token should be approximately the sleep duration.
+    pause_gap = token_times[pause_token_idx][1] - token_times[pause_token_idx - 1][1]
+    print(
+        f"\nGap after pause (token {pause_token_idx - 1} -> {pause_token_idx}): "
+        f"{pause_gap:.3f}s"
+    )
+    if pause_gap >= PAUSE_DURATION * 0.9:
+        print(f"✓ Test passed! Engine paused for ~{pause_gap:.1f}s")
     else:
-        print(f"\n✗ Test failed! Expected ~{PAUSE_DURATION}s gap, got {max_gap:.3f}s")
+        print(
+            f"✗ Test failed! Expected ~{PAUSE_DURATION}s gap after pause, "
+            f"got {pause_gap:.3f}s"
+        )
         raise AssertionError("Engine did not properly pause")
 
     # Verify request completed

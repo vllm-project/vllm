@@ -211,9 +211,7 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         # Pause state for "keep" mode - freezes requests in queue.
-        self._scheduler_pause_requested = False
         self._scheduler_paused = False
-        self._pause_requester_client_index: int | None = None
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -327,18 +325,12 @@ class EngineCore:
         # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids, RequestStatus.FINISHED_ABORTED)
 
-    def pause_scheduler(self, client_index: int | None = None) -> None:
-        """Request the scheduler to pause after the current step.
+    def pause_scheduler(self) -> None:
+        """Pause the scheduler, keeping requests frozen in queue.
 
         Requests are kept frozen in queue and can be resumed later.
-        The pause takes effect after the current step completes.
-
-        Args:
-            client_index: The index of the client requesting the pause.
-                Used to send acknowledgement back to the correct client.
         """
-        self._scheduler_pause_requested = True
-        self._pause_requester_client_index = client_index
+        self._scheduler_paused = True
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler after a pause.
@@ -346,8 +338,6 @@ class EngineCore:
         Resumes processing of frozen requests in the queue.
         """
         self._scheduler_paused = False
-        self._scheduler_pause_requested = False
-        self._pause_requester_client_index = None
 
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
@@ -403,17 +393,6 @@ class EngineCore:
             A tuple of (outputs, model_executed=False) if paused or pause was
             just acknowledged.
         """
-        # Check if pause was requested - acknowledge and enter paused state.
-        if self._scheduler_pause_requested:
-            self._scheduler_paused = True
-            self._scheduler_pause_requested = False
-            # Send acknowledgement to the client that requested the pause.
-            client_idx = self._pause_requester_client_index
-            self._pause_requester_client_index = None
-            if client_idx is None:
-                raise RuntimeError("Pause request received but no client index found")
-            return {client_idx: EngineCoreOutputs(pause_acknowledged=True)}, False
-
         # If paused, don't schedule any work.
         if self._scheduler_paused:
             return {}, False
@@ -1022,7 +1001,7 @@ class EngineCoreProc(EngineCore):
             not self.engines_running
             and not self.scheduler.has_requests()
             and not self.batch_queue
-            and not self._scheduler_pause_requested
+            and not self._scheduler_paused
         ):
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
@@ -1089,11 +1068,6 @@ class EngineCoreProc(EngineCore):
             )
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
-        elif request_type == EngineCoreRequestType.PAUSE:
-            # request contains the client_index that requested the pause.
-            self.pause_scheduler(client_index=request)
-        elif request_type == EngineCoreRequestType.RESUME:
-            self.resume_scheduler()
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type

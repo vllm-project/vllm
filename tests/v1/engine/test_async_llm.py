@@ -758,8 +758,9 @@ async def test_pause_abort():
         # Start generation task
         gen_task = asyncio.create_task(gen())
 
-        # Wait a bit for some tokens
-        await asyncio.sleep(0.3)
+        # Wait for some tokens to be generated
+        while len(outputs) < 3:
+            await asyncio.sleep(0.01)
 
         # Pause with abort mode
         await engine.pause_generation(mode="abort")
@@ -815,14 +816,17 @@ async def test_pause_wait():
         # Start a request - use fewer tokens since wait mode waits for completion
         sampling_params = SamplingParams(max_tokens=10, ignore_eos=True)
         got_first_token = asyncio.Event()
+        request_completed = False
 
         async def gen():
+            nonlocal request_completed
             async for out in engine.generate(
                 request_id="test-wait",
                 prompt=TEXT_PROMPT,
                 sampling_params=sampling_params,
             ):
                 got_first_token.set()
+            request_completed = True
             return out
 
         # Start generation
@@ -835,8 +839,9 @@ async def test_pause_wait():
         await engine.pause_generation(mode="wait")
 
         # By now the request should be done (wait mode waits for completion)
-        final_output = await asyncio.wait_for(gen_task, timeout=30.0)
+        assert request_completed, "Request should have completed during wait"
 
+        final_output = gen_task.result()
         assert final_output.finished
         # Should complete normally, not aborted
         assert final_output.outputs[0].finish_reason != "eos"
@@ -853,6 +858,7 @@ async def test_pause_keep_single_request():
         sampling_params = SamplingParams(max_tokens=30, ignore_eos=True)
         token_times: list[tuple[int, float]] = []
         pause_duration = 5.0
+        pause_token_idx = 0
 
         async def generator_task():
             """Generate tokens and record timestamps."""
@@ -867,12 +873,14 @@ async def test_pause_keep_single_request():
 
         async def controller_task():
             """Pause and resume the engine."""
+            nonlocal pause_token_idx
             # Wait for some tokens (event-driven, handles slow token generation)
             while len(token_times) < 5:
                 await asyncio.sleep(0.01)
 
             # Pause with keep mode
             await engine.pause_generation(mode="keep")
+            pause_token_idx = len(token_times)
 
             # Sleep while paused
             await asyncio.sleep(pause_duration)
@@ -892,17 +900,12 @@ async def test_pause_keep_single_request():
         assert final_output.finished
         assert len(final_output.outputs[0].token_ids) == 30
 
-        # Analyze timing gaps - should see a gap matching pause duration
-        # Start from index 2 to exclude TTFT (time to first token) which has
-        # higher latency due to prefill, leaving only the pause as an outlier
-        max_gap = 0.0
-        for i in range(2, len(token_times)):
-            gap = token_times[i][1] - token_times[i - 1][1]
-            max_gap = max(max_gap, gap)
-
-        # The max gap should be close to the pause duration
-        assert max_gap >= pause_duration * 0.8, (
-            f"Expected gap of ~{pause_duration}s, got {max_gap:.3f}s"
+        # Check the gap at the recorded pause index matches the pause duration
+        pause_gap = (
+            token_times[pause_token_idx][1] - token_times[pause_token_idx - 1][1]
+        )
+        assert pause_gap >= pause_duration * 0.8, (
+            f"Expected gap of ~{pause_duration}s after pause, got {pause_gap:.3f}s"
         )
 
 

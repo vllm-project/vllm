@@ -583,7 +583,7 @@ class AsyncLLM(EngineClient):
                   :meth:`resume_generation`.
             wait_for_inflight_requests: DEPRECATED: use mode argument.
                 Whether to wait for in-flight requests to complete before pausing.
-            clear_cache: DEPRECATED. Whether to clear KV cache and prefix cache after
+            clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
                 Default is ``True`` (clear caches).
 

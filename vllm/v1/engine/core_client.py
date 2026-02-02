@@ -832,9 +832,6 @@ class AsyncMPClient(MPClient):
         self.client_count = client_count
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
-        # Lock and event for pause acknowledgement from EngineCore.
-        self._pause_lock = asyncio.Lock()
-        self._pause_ack_event = asyncio.Event()
         try:
             # If we are running in an asyncio event loop, start the queue task.
             # Otherwise, it will be started lazily. If it is not started here,
@@ -858,8 +855,7 @@ class AsyncMPClient(MPClient):
         output_handler: (
             Callable[[AsyncMPClient, EngineCoreOutputs], Awaitable[None]] | None
         ) = getattr(self.__class__, "process_engine_outputs", None)
-        # Always create ref for pause_acknowledged handling.
-        _self_ref = weakref.ref(self)
+        _self_ref = weakref.ref(self) if output_handler else None
         output_socket = resources.output_socket
         assert output_socket is not None
 
@@ -873,14 +869,8 @@ class AsyncMPClient(MPClient):
                         _process_utility_output(outputs.utility_output, utility_results)
                         continue
 
-                    # Handle pause acknowledgement.
-                    if outputs.pause_acknowledged:
-                        _self = _self_ref()
-                        if _self:
-                            _self._pause_ack_event.set()
-                        continue
-
                     if output_handler is not None:
+                        assert _self_ref is not None
                         _self = _self_ref()
                         if not _self:
                             # Client has been garbage collected, abort.
@@ -979,18 +969,11 @@ class AsyncMPClient(MPClient):
         """Pause the scheduler, keeping requests frozen in queue.
         Blocks until the EngineCore acknowledges the pause.
         """
-        async with self._pause_lock:
-            # Clear event before sending request.
-            self._pause_ack_event.clear()
-            # Send pause request with client_index for acknowledgement routing.
-            await self._send_input(EngineCoreRequestType.PAUSE, self.client_index)
-            self._ensure_output_queue_task()
-            # Wait for acknowledgement from EngineCore.
-            await self._pause_ack_event.wait()
+        await self.call_utility_async("pause_scheduler")
 
     async def resume_scheduler_async(self) -> None:
         """Resume the scheduler after a pause."""
-        await self._send_input(EngineCoreRequestType.RESUME, None)
+        await self.call_utility_async("resume_scheduler")
 
     async def profile_async(self, is_start: bool = True) -> None:
         await self.call_utility_async("profile", is_start)

@@ -194,9 +194,6 @@ class EngineCoreOutputs(
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
 
-    # Acknowledgement that the scheduler has paused (for mode="keep").
-    pause_acknowledged: bool = False
-
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
@@ -214,9 +211,6 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
-    # Pause/resume scheduler with requests kept frozen in queue.
-    PAUSE = b"\x05"
-    RESUME = b"\x06"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
