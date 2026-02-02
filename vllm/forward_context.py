@@ -47,6 +47,14 @@ class BatchDescriptor(NamedTuple):
     """
     Whether this batch has active LoRA adapters.
     """
+    num_active_loras: int = 0
+    """
+    Number of distinct active LoRA adapters in this batch.
+    When cudagraph_specialize_lora_count is enabled, separate CUDA graphs
+    are captured for each num_active_loras value. This allows kernels
+    (like fused_moe_lora) whose grid size depends on num_active_loras
+    to be properly captured.
+    """
 
     def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
         """
@@ -54,7 +62,11 @@ class BatchDescriptor(NamedTuple):
         with PIECEWISE cudagraphs (or mixed prefill-decode FA cudagraphs).
         """
         return BatchDescriptor(
-            self.num_tokens, num_reqs=None, uniform=False, has_lora=self.has_lora
+            self.num_tokens,
+            num_reqs=None,
+            uniform=False,
+            has_lora=self.has_lora,
+            num_active_loras=self.num_active_loras,
         )
 
 
@@ -189,6 +201,7 @@ class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
     attn_metadata: dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]]
+    slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]]
     """
     Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
     attention layer to its attention metadata
@@ -206,6 +219,36 @@ class ForwardContext:
     batch_descriptor: BatchDescriptor | None = None
 
     ubatch_slices: UBatchSlices | None = None
+
+    # If True, bypass the compiled model call, e.g. by using .forward() directly
+    skip_compiled: bool = False
+
+    # For torch.compile cold start times, we need to avoid hard-coding
+    # any strings into the graph. Right now, the vllm.moe_forward
+    # and vllm.moe_forward_shared custom operators hard-code strings into
+    # the graph.
+    #
+    # The workaround is to store a list of the strings that each of those
+    # custom ops needs in the ForwardContext (all_moe_layers)
+    # as well as a counter (moe_layer_index).
+    # The ForwardContext object is alive for the duration of the forward pass.
+    # When the custom op needs a layer string, get the next string
+    # from all_moe_layers and increment the counter.
+    #
+    # This assumes that the custom operators will always be executed in
+    # order and that torch.compile will not try to reorder these
+    # operations with respect to each other.
+    #
+    # TODO(https://github.com/vllm-project/vllm/issues/31985):
+    # There are longer-term solutions, like unwrapping the moe custom operator,
+    # that aren't ready yet.
+    # We could also treat the string as a "symbolic input" to the graph but
+    # the PyTorch-side bits for that aren't ready yet either.
+    #
+    # If this value is None (like in some tests), then we end up baking the string
+    # into the graph. Otherwise, the moe custom ops will pop a string from this list.
+    all_moe_layers: list[str] | None = None
+    moe_layer_index: int = 0
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
@@ -239,16 +282,21 @@ def create_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
+    slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     additional_kwargs: dict[str, Any] | None = None,
+    skip_compiled: bool = False,
 ):
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
+        all_moe_layers=vllm_config.compilation_config.static_all_moe_layers,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
+        slot_mapping=slot_mapping or {},
         dp_metadata=dp_metadata,
         cudagraph_runtime_mode=cudagraph_runtime_mode,
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
+        skip_compiled=skip_compiled,
         additional_kwargs=additional_kwargs or {},
     )
 
@@ -278,6 +326,8 @@ def set_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
+    slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
+    skip_compiled: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -335,7 +385,9 @@ def set_forward_context(
         cudagraph_runtime_mode,
         batch_descriptor,
         ubatch_slices,
+        slot_mapping,
         additional_kwargs,
+        skip_compiled,
     )
 
     try:
