@@ -100,11 +100,11 @@ def _validate_score_input_lens(
 
 
 def _validate_mm_score_input(
-    data: list[str | ScoreMultiModalParam],
+    data: list[ScoreInputs],
     is_multimodal_model: bool,
     architecture: str,
-) -> list[ScoreInputs]:
-    out: list[ScoreInputs] = []
+) -> list[ScoreData]:
+    out: list[ScoreData] = []
     for d in data:
         if isinstance(d, str):
             out.append(d)
@@ -128,10 +128,10 @@ def validate_score_input(
     if not isinstance(data_2, list):
         data_2 = [data_2]
 
-    data_1 = _validate_mm_score_input(data_1, is_multimodal_model, architecture)
-    data_2 = _validate_mm_score_input(data_2, is_multimodal_model, architecture)
-    _validate_score_input_lens(data_1, data_2)
-    return data_1, data_2
+    score_input_1 = _validate_mm_score_input(data_1, is_multimodal_model, architecture)
+    score_input_2 = _validate_mm_score_input(data_2, is_multimodal_model, architecture)
+    _validate_score_input_lens(score_input_1, score_input_2)
+    return score_input_1, score_input_2
 
 
 def parse_score_data(
