@@ -60,12 +60,15 @@ from pydantic import (
     model_validator,
 )
 
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.engine.protocol import (
-    OpenAIBaseModel,
+from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
+from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
@@ -222,8 +225,7 @@ class ResponsesRequest(OpenAIBaseModel):
         default=False,
         description=(
             "Dictates whether or not to return messages as part of the "
-            "response object. Currently only supported for"
-            "non-background and gpt-oss only. "
+            "response object. Currently only supported for non-background."
         ),
     )
     # similar to input_messages / output_messages in ResponsesResponse
@@ -244,6 +246,42 @@ class ResponsesRequest(OpenAIBaseModel):
         ),
     )
     # --8<-- [end:responses-extra-params]
+
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParams:
+        from .utils import should_continue_final_message
+
+        # Check if we should continue the final message (partial completion)
+        # This enables Anthropic-style partial message completion where the
+        # user provides an incomplete assistant message to continue from.
+        continue_final = should_continue_final_message(self.input)
+
+        reasoning = self.reasoning
+
+        return ChatParams(
+            chat_template=default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=merge_kwargs(  # To remove unset values
+                {},
+                dict(
+                    add_generation_prompt=not continue_final,
+                    continue_final_message=continue_final,
+                    reasoning_effort=None if reasoning is None else reasoning.effort,
+                ),
+            ),
+        )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=self.max_output_tokens or 0,
+            truncate_prompt_tokens=-1 if self.truncation != "disabled" else None,
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_output_tokens",
+        )
 
     _DEFAULT_SAMPLING_PARAMS = {
         "temperature": 1.0,
