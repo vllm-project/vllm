@@ -1120,7 +1120,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "stepfun-ai/Step-3.5-Flash",
         trust_remote_code=True,
         speculative_model="stepfun-ai/Step-3.5-Flash",
-        is_available_online=False
+        is_available_online=False,
     ),
 }
 
