@@ -14,7 +14,6 @@ def reshape_and_cache_kernel_flash(
     key_cache_ptr,  # [num_blocks, block_size, num_heads, head_size]
     value_cache_ptr,  # [num_blocks, block_size, num_heads, head_size]
     slot_mapping_ptr,  # [num_tokens]
-    location_match,
     k_scale,  # float32
     v_scale,  # float32
     # strides
@@ -34,9 +33,6 @@ def reshape_and_cache_kernel_flash(
     slot_idx = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
     if slot_idx < 0:
         # Padding token that should be ignored.
-        return
-
-    if not location_match:
         return
 
     tile_i = tl.program_id(axis=1)
@@ -100,9 +96,7 @@ def triton_reshape_and_cache_flash(
     kv_cache_dtype: str,  # "auto", "fp8"
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
-    location_match: bool = True,
 ):
-    num_tokens = key.shape[0]
     num_heads = key.shape[1]
     head_size = key.shape[2]
     block_size = key_cache.shape[1]
@@ -171,7 +165,6 @@ def triton_reshape_and_cache_flash(
         key_cache_ptr=key_cache,
         value_cache_ptr=value_cache,
         slot_mapping_ptr=slot_mapping,
-        location_match=location_match,
         k_scale=k_scale,
         v_scale=v_scale,
         # strides

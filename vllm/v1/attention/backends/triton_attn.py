@@ -341,6 +341,7 @@ class TritonAttentionBackend(AttentionBackend):
 
 
 class TritonAttentionImpl(AttentionImpl):
+    can_return_lse_for_decode: bool = True
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
@@ -522,15 +523,14 @@ class TritonAttentionImpl(AttentionImpl):
                 #  (because some explicit casts (e.g. float8_e4m3fnuz)
                 #   are not supported)
             triton_reshape_and_cache_flash(
-                out1,   # key,
-                out2,   # value,
+                key,
+                value,
                 key_cache,
                 value_cache,
-                out3,   # attn_metadata.slot_mapping,
+                attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
-                location_match,
             )
 
         if self.kv_cache_dtype.startswith("fp8"):
