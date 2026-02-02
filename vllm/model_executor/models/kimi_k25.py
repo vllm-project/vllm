@@ -105,7 +105,7 @@ class MoonshotKimiVAutoProcessor(ProcessorMixin):
         self,
         vision_chunks: list[VisionChunk] | None = None,
         *,
-        text: list[int],
+        text: list[int] | str,
         **kwargs,
     ) -> BatchFeature:
         """
@@ -122,6 +122,8 @@ class MoonshotKimiVAutoProcessor(ProcessorMixin):
             - **grid_thws** -- list of image 3D grid in LLM. Returned when `vision_chunks` is not `None`.
         """
         mm_inputs = {}
+        if isinstance(text, str):
+            text = self.tokenizer.encode(text)
         if vision_chunks is not None:
             assert isinstance(vision_chunks, list)
             mm_inputs = self.media_processor.preprocess(vision_chunks)
