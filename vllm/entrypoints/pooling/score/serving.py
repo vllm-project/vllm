@@ -36,7 +36,6 @@ from vllm.entrypoints.pooling.score.utils import (
     compress_token_type_ids,
     get_score_prompt,
 )
-from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -81,28 +80,31 @@ class ServingScores(OpenAIServing):
         tokenizer: TokenizerLike,
         data_1: list[ScoreData],
         data_2: list[ScoreData],
+        data_1: list[str],
+        data_2: list[str],
         request: RerankRequest | ScoreRequest,
         request_id: str,
-        tokenization_kwargs: dict[str, Any] | None = None,
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
+        model_config = self.model_config
+        tokenizer = self.renderer.get_tokenizer()
+
+        encode_async = make_async(
+            tokenizer.encode,
+            executor=self._tokenizer_executor,
+        )
+
         input_texts = data_1 + data_2
 
-        engine_prompts: list[TokensPrompt] = []
-        tokenize_async = make_async(
-            tokenizer.__call__, executor=self._tokenizer_executor
-        )
-
-        tokenization_kwargs = tokenization_kwargs or {}
+        tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
         tokenized_prompts = await asyncio.gather(
-            *(tokenize_async(t, **tokenization_kwargs) for t in input_texts)
+            *(encode_async(t, **tokenization_kwargs) for t in input_texts)
         )
 
+        engine_prompts: list[TokensPrompt] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
-            text_token_prompt = self._validate_input(
-                request, tok_result["input_ids"], input_text
-            )
+            text_token_prompt = self._validate_input(request, tok_result, input_text)
 
             engine_prompts.append(
                 TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
@@ -173,12 +175,16 @@ class ServingScores(OpenAIServing):
         tokenizer: TokenizerLike,
         data_1: list[ScoreData],
         data_2: list[ScoreData],
+        data_1: list[str] | list[ScoreContentPartParam],
+        data_2: list[str] | list[ScoreContentPartParam],
         request: RerankRequest | ScoreRequest,
         request_id: str,
-        tokenization_kwargs: dict[str, Any] | None = None,
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
+        model_config = self.model_config
+        tokenizer = self.renderer.get_tokenizer()
+
         request_prompts: list[str] = []
         engine_prompts: list[TokensPrompt] = []
 
@@ -188,12 +194,13 @@ class ServingScores(OpenAIServing):
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError("MistralTokenizer not supported for cross-encoding")
 
-        tokenization_kwargs = tokenization_kwargs or {}
+        tok_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
 
         preprocess_async = make_async(
-            self._preprocess_score, executor=self._tokenizer_executor
+            self._preprocess_score,
+            executor=self._tokenizer_executor,
         )
 
         preprocessed_prompts = await asyncio.gather(
@@ -201,7 +208,7 @@ class ServingScores(OpenAIServing):
                 preprocess_async(
                     request=request,
                     tokenizer=tokenizer,
-                    tokenization_kwargs=tokenization_kwargs,
+                    tokenization_kwargs=tok_kwargs,
                     data_1=t1,
                     data_2=t2,
                 )
@@ -295,14 +302,6 @@ class ServingScores(OpenAIServing):
         raw_request: Request | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         lora_request = self._maybe_get_adapters(request)
-        tokenizer = self.renderer.get_tokenizer()
-
-        truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens", None)
-
-        tokenization_kwargs: dict[str, Any] = {}
-        _validate_truncation_size(
-            self.max_model_len, truncate_prompt_tokens, tokenization_kwargs
-        )
 
         trace_headers = (
             None
@@ -346,6 +345,25 @@ class ServingScores(OpenAIServing):
             lora_request=lora_request,
             trace_headers=trace_headers,
         )
+        if self.model_config.is_cross_encoder:
+            return await self._cross_encoding_score(
+                data_1=data_1,  # type: ignore[arg-type]
+                data_2=data_2,  # type: ignore[arg-type]
+                request=request,
+                request_id=request_id,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+            )
+
+        else:
+            return await self._embedding_score(
+                data_1=data_1,  # type: ignore[arg-type]
+                data_2=data_2,  # type: ignore[arg-type]
+                request=request,
+                request_id=request_id,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+            )
 
     async def create_score(
         self,
