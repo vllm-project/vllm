@@ -290,9 +290,13 @@ def move_to_buffer(
 
     # Calculate group size and number of communication rounds
     group_size = ep_size // num_groups
-    # Number of rounds equals number of groups
-    # (one round per XOR value: 0, 1, 2, ..., num_groups-1)
-    num_rounds = num_groups
+    # Number of rounds must accommodate the maximum possible XOR value
+    # If world size is not evenly divisible by num_groups, some ranks will
+    # map to higher group IDs, so we need to allocate enough rounds
+    max_group_id = (ep_size - 1) // group_size
+    # Maximum XOR value is the next power of 2 above max_group_id, minus 1
+    # E.g., max_group_id=4 → max_xor=7 (binary: 100 → 111)
+    num_rounds = 1 << max_group_id.bit_length()
 
     # Create separate lists for sends and recvs for each round
     # Round i: Communication between groups where (group1 XOR group2) == i

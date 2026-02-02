@@ -1635,10 +1635,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
     # Number of communication groups for EPLB (Expert Parallel Load Balancing)
     # P2P operations during rebalancing. Determines how ranks are divided into
-    # groups for communication.
+    # groups for hierarchical communication.
     # - Must not be larger than world size
-    # - Communications are done in VLLM_EPLB_NUM_COMMUNICATION_GROUPS rounds
-    # - Default is 1 (all ranks in one group, no grouping)
+    # - Ranks are assigned to groups: group_id = rank // (world_size // num_groups)
+    # - Communication rounds are determined by XOR of group IDs. For example,
+    #   if num_groups=4, groups 0 and 2 communicate in round (0 XOR 2) = 2
+    # - Total rounds = next power of 2 >= max_group_id. For num_groups=4 with
+    #   world_size=8, max_group_id=3, rounds=4; for num_groups=3, max_group_id=2,
+    #   rounds=4 (accommodates max XOR value of 3)
+    # - Default is 1 (all ranks in one group, single communication round)
     # - If VLLM_EPLB_COMMUNICATION_BATCH_SIZE is set, this will be
     #   overridden to equal world size
     "VLLM_EPLB_NUM_COMMUNICATION_GROUPS": lambda: int(
