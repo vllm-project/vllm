@@ -22,6 +22,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
 )
+from vllm.tool_parsers.utils import safe_json_loads
 
 logger = init_logger(__name__)
 
@@ -184,7 +185,7 @@ class Ernie45ToolParser(ToolParser):
             tool_call = extracted_tool_calls.tool_calls[0]
             self.prev_tool_call_arr[self.current_tool_id] = {
                 "name": tool_call.function.name,
-                "arguments": json.loads(tool_call.function.arguments),
+                "arguments": safe_json_loads(tool_call.function.arguments),
             }
             self.streamed_args_for_tool[self.current_tool_id] = (
                 tool_call.function.arguments

@@ -128,6 +128,39 @@ def is_complete_json(input_str: str) -> bool:
         return False
 
 
+def safe_json_loads(input_str: str) -> Any:
+    """
+    Safely parse a JSON string that may contain multiple concatenated JSON
+    objects (e.g., when multiple tool calls are in a single message).
+
+    When multiple tool calls are parsed in a single message, the function
+    arguments field may contain multiple JSON objects concatenated together
+    like '{"a": 1}{"b": 2}'. Standard json.loads() fails with "Extra data"
+    error in this case. This function handles that by parsing only the first
+    valid JSON object.
+
+    Args:
+        input_str: A JSON string that may contain one or more JSON objects.
+
+    Returns:
+        The parsed JSON value (dict, list, etc.) from the first complete
+        JSON object in the string.
+
+    Raises:
+        JSONDecodeError: If the input string is not valid JSON.
+    """
+    try:
+        return json.loads(input_str)
+    except JSONDecodeError as e:
+        if "Extra data" in e.msg:
+            # Handle multiple concatenated JSON objects by parsing
+            # only the first one using raw_decode
+            dec = JSONDecoder()
+            result, _ = dec.raw_decode(input_str)
+            return result
+        raise
+
+
 def consume_space(i: int, s: str) -> int:
     while i < len(s) and s[i].isspace():
         i += 1
