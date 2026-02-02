@@ -140,9 +140,13 @@ class FlashConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
-        self.num_hidden_layers = (
-            num_hidden_layers if num_hidden_layers is not None else num_layers
-        )
+        # Longcat Flash HF configs use num_layers as the actual layer count.
+        # num_hidden_layers is often derived (e.g., 2 * num_layers) and should
+        # not drive vLLM layer construction.
+        if num_layers is not None:
+            self.num_hidden_layers = num_layers
+        else:
+            self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         self.ep_size = ep_size
         self.kv_lora_rank = kv_lora_rank
