@@ -18,11 +18,9 @@ from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
 
 if importlib.util.find_spec("orjson") is not None:
-    from fastapi.responses import ORJSONResponse
-
-    _RESPONSE_CLASS = ORJSONResponse
+    from fastapi.responses import ORJSONResponse as _RESPONSE_CLASS
 else:
-    _RESPONSE_CLASS = JSONResponse
+    from fastapi.responses import JSONResponse as _RESPONSE_CLASS
 
 router = APIRouter()
 
@@ -38,6 +36,7 @@ def embedding(request: Request) -> OpenAIServingEmbedding | None:
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
+    response_class=_RESPONSE_CLASS,
 )
 @with_cancellation
 @load_aware_call
