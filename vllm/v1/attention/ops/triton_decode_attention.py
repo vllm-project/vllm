@@ -350,14 +350,6 @@ def _fwd_grouped_kernel_stage1(
                 cache_modifier=".cg",
             )
 
-            offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
-            v = tl.load(
-                V_Buffer + offs_buf_v,
-                mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
-                other=0.0,
-                cache_modifier=".cg",
-            )
-
             qk = tl.dot(q, k.to(q.dtype))
             if BLOCK_DPE > 0:
                 offs_buf_kpe = kv_loc[None, :] * stride_buf_kbs + base_offs_kpe
@@ -375,6 +367,14 @@ def _fwd_grouped_kernel_stage1(
 
             qk = tl.where(
                 mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
+            )
+
+            offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
+            v = tl.load(
+                V_Buffer + offs_buf_v,
+                mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
+                other=0.0,
+                cache_modifier=".cg",
             )
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
