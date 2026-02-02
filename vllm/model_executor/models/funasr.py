@@ -153,7 +153,6 @@ class MultiHeadedAttentionSANM(nn.Module):
         kernel_size,
         sanm_shift=0,
     ):
-        """Construct an MultiHeadedAttention object."""
         super().__init__()
         assert n_feat % n_head == 0
         # We assume d_v always equals d_k
@@ -239,8 +238,10 @@ class MultiHeadedAttentionSANM(nn.Module):
         out, _ = self.out_proj(x)  # (batch, time1, d_model)
         return out
 
-    def forward(self, x, mask, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
-        q_h, k_h, v_h, v = self.forward_qkv(x)
+    def forward(
+        self, hidden_states, mask, mask_shfit_chunk=None, mask_att_chunk_encoder=None
+    ):
+        q_h, k_h, v_h, v = self.forward_qkv(hidden_states)
         fsmn_memory = self.forward_fsmn(v, mask, mask_shfit_chunk)
         q_h = q_h * self.d_k ** (-0.5)
         scores = torch.matmul(q_h, k_h.transpose(-2, -1))
@@ -452,8 +453,6 @@ class EncoderLayer(nn.Module):
 
 
 class FunASRAudioAttention(nn.Module):
-    """Multi-headed attention for Qwen3-Omni Audio Encoder using MMEncoderAttention."""
-
     def __init__(
         self,
         num_heads: int,
