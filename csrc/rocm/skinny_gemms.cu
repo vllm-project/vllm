@@ -1958,7 +1958,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         const fp8_t* B_ = &B[min__(k_, K - A_CHUNK)];
   #pragma unroll
         for (uint32_t y = 0; y < YTILE; ++y) {
-          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[(y + m) * Kbp])));
+          bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y + m, M - 1) * Kbp])));
         }
       }
 
@@ -2027,7 +2027,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     if (BIAS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
-          biases[n][y] = BIAS[(m + y) % Bx + (n % By) * M];
+          biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
         }
       }
     if (threadIdx.x == 0) {
@@ -2198,7 +2198,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       if (BIAS)
         for (int n = 0; n < N; n++) {
           for (int y = 0; y < YTILE; y++) {
-            biases[n][y] = BIAS[(m + y) % Bx + (n % By) * M];
+            biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
           }
         }
       for (int n = 0; n < N; n++) {
