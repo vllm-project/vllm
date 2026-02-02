@@ -531,8 +531,6 @@ class GptOssModel(nn.Module):
         use_ep = self.parallel_config.enable_expert_parallel
         num_experts = self.config.num_local_experts
 
-        # In MoE, we need to flatten the tensor parallel size across the data
-        # parallel size when EP is disabled.
         if use_ep:
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
@@ -561,8 +559,6 @@ class GptOssModel(nn.Module):
 
         intermediate_size = self.config.intermediate_size
 
-        # Get MoE quantization weight dtype to determine if we need block alignment
-        # All layers should have the same quantization, so we check layer 0
         moe_weight_dtype = _get_moe_weight_dtype(layer_id=0)
 
         if moe_weight_dtype == "mxfp4":
@@ -576,12 +572,10 @@ class GptOssModel(nn.Module):
             # FP8 and other formats don't need alignment
             per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
 
-        # Calculate common slicing bounds for current rank
         tp_rank_start = tp_rank * per_rank_intermediate_size
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
         expert_params_mapping = self.get_expert_mapping()
         for name, loaded_weight in weights:
-            # Skip layers on other devices.
             if is_pp_missing_parameter(name, self):
                 continue
 
@@ -612,7 +606,6 @@ class GptOssModel(nn.Module):
                         "an unexpected condition. Please open an issue if encountered."
                     )
 
-                # Get quantization weight dtype for this layer's experts
                 moe_quant_method = _get_moe_weight_dtype(layer_id=layer_id)
 
             load_kv_cache_scale_completed, loaded_params = kv_cache_scale_loader(
@@ -626,7 +619,6 @@ class GptOssModel(nn.Module):
             if load_kv_cache_scale_completed:
                 continue
 
-            # mapping to convert individual experts input_scale into fused_moe.
             if (
                 all(key in name for key in ["input_scale", "mlp.experts"])
                 and expert_id is not None
@@ -647,16 +639,12 @@ class GptOssModel(nn.Module):
                     ".w2_weight",
                 ]
             ):
-                # Determine weight type
                 is_w13 = ".w13_" in name
                 is_scale = "_scale" in name
 
                 # Reshape weight for mxfp4 if needed (not for scales)
                 if not is_scale and expert_id is None:
                     if is_w13:
-                        # w13_weight: (E, 2 * N, block_size,
-                        # entry_per_block) -> (E, 2 * N, -1)
-                        # Validate shape before reshape
                         if loaded_weight.dim() < 3:
                             raise ValueError(
                                 f"Expected w13_weight to have at least 3 "
@@ -673,9 +661,6 @@ class GptOssModel(nn.Module):
                             num_experts, 2 * intermediate_size, -1
                         ).contiguous()
                     else:
-                        # w2_weight: flatten and divide by 2
-                        # (2 mxfp4 values packed in 1 uint8)
-                        # Validate shape before reshape
                         if loaded_weight.dim() < 3:
                             raise ValueError(
                                 f"Expected w2_weight to have at least 3 "
@@ -730,50 +715,93 @@ class GptOssModel(nn.Module):
                 loaded_params.add(fused_name)
                 continue
 
-            # Unified handler for Quark FP8 weights and scales
-            elif moe_quant_method == "fp8" and any(
-                name.endswith(suffix)
-                for suffix in [".w13_weight", ".w13_weight_scale", ".w13_input_scale"]
-            ):
+            elif name.endswith(".w13_weight") and moe_quant_method == "fp8":
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    if expert_id is None:
+                        narrow_weight = loaded_weight[
+                            :, 2 * tp_rank_start : 2 * tp_rank_end, :
+                        ]
+                    else:
+                        narrow_weight = loaded_weight[
+                            2 * tp_rank_start : 2 * tp_rank_end, :
+                        ]
+
                 assert fused_name is not None
                 param = params_dict[fused_name]
 
-                # Determine if slicing is needed
-                is_input_scale = ".w13_input_scale" in name
-                is_weight_scale = ".w13_weight_scale" in name
-                is_weight = ".w13_weight" in name
+                if expert_id is None:
+                    param.data.copy_(narrow_weight)
+                else:
+                    param.data[expert_id].copy_(narrow_weight)
 
-                if is_input_scale:
-                    # Input scale: per-expert scalar, no TP sharding
-                    narrow_weight = loaded_weight
-                elif is_weight_scale:
-                    # Weight scale: check if per-channel or per-tensor
-                    if loaded_weight.numel() > 1 and loaded_weight.dim() == 1:
-                        # Per-channel scale: needs TP sharding
-                        if use_ep:
-                            narrow_weight = loaded_weight[
-                                ep_rank_start:ep_rank_end, ...
-                            ]
-                        else:
-                            narrow_weight = loaded_weight[
-                                2 * tp_rank_start : 2 * tp_rank_end
-                            ]
-                    else:
-                        # Per-tensor scale: no TP sharding needed
-                        narrow_weight = loaded_weight
-                elif is_weight:
-                    # w13_weight: combined gate_up_proj, needs TP sharding
+                loaded_params.add(fused_name)
+                continue
+
+            elif name.endswith(".w13_weight_scale") and moe_quant_method == "fp8":
+                assert fused_name is not None
+                param = params_dict[fused_name]
+
+                # Check if this is per-channel or per-tensor scale
+                if loaded_weight.numel() > 1 and loaded_weight.dim() == 1:
                     if use_ep:
                         narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                     else:
-                        if expert_id is None:
-                            narrow_weight = loaded_weight[
-                                :, 2 * tp_rank_start : 2 * tp_rank_end, :
-                            ]
-                        else:
-                            narrow_weight = loaded_weight[
-                                2 * tp_rank_start : 2 * tp_rank_end, :
-                            ]
+                        narrow_weight = loaded_weight[
+                            2 * tp_rank_start : 2 * tp_rank_end
+                        ]
+                else:
+                    narrow_weight = loaded_weight
+
+                if expert_id is None:
+                    param.data.copy_(narrow_weight)
+                else:
+                    param.data[expert_id].copy_(narrow_weight)
+
+                loaded_params.add(fused_name)
+                continue
+
+            elif name.endswith(".w13_input_scale") and moe_quant_method == "fp8":
+                assert fused_name is not None
+                param = params_dict[fused_name]
+
+                if expert_id is None:
+                    param.data.copy_(loaded_weight)
+                else:
+                    param.data[expert_id].copy_(loaded_weight)
+
+                loaded_params.add(fused_name)
+                continue
+
+            elif name.endswith(".w2_weight") and moe_quant_method == "fp8":
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    if expert_id is None:
+                        narrow_weight = loaded_weight[..., tp_rank_start:tp_rank_end]
+                    else:
+                        narrow_weight = loaded_weight[..., tp_rank_start:tp_rank_end]
+
+                assert fused_name is not None
+                param = params_dict[fused_name]
+
+                if expert_id is None:
+                    param.data.copy_(narrow_weight)
+                else:
+                    param.data[expert_id].copy_(narrow_weight)
+
+                loaded_params.add(fused_name)
+                continue
+
+            elif name.endswith(".w2_weight_scale") and moe_quant_method == "fp8":
+                assert fused_name is not None
+                param = params_dict[fused_name]
+
+                if use_ep:
+                    narrow_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
+                else:
+                    narrow_weight = loaded_weight
 
                 if expert_id is None:
                     param.data.copy_(narrow_weight)
@@ -787,24 +815,19 @@ class GptOssModel(nn.Module):
             elif name.endswith(".w13_bias") or name.endswith(".w2_bias"):
                 is_w13_bias = name.endswith(".w13_bias")
 
-                # Apply EP and TP slicing
                 if use_ep:
                     sliced_weight = loaded_weight[ep_rank_start:ep_rank_end, ...]
                 else:
                     if is_w13_bias:
-                        # w13_bias: TP slicing along intermediate_size dimension
                         if expert_id is None:
-                            # All experts: [num_experts, 2*intermediate_size]
                             sliced_weight = loaded_weight[
                                 :, 2 * tp_rank_start : 2 * tp_rank_end
                             ]
                         else:
-                            # Single expert: [2*intermediate_size]
                             sliced_weight = loaded_weight[
                                 2 * tp_rank_start : 2 * tp_rank_end
                             ]
                     else:
-                        # w2_bias: replicated, only load on rank 0
                         sliced_weight = loaded_weight
                         if tp_rank != 0:
                             sliced_weight = sliced_weight.zero_()
@@ -813,7 +836,6 @@ class GptOssModel(nn.Module):
                 param = params_dict[fused_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
 
-                # Pass full fused w13 or w2 (already TP-sliced) to weight_loader
                 weight_loader(
                     param,
                     sliced_weight,

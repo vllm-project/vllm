@@ -978,7 +978,7 @@ class FusedMoE(CustomOp):
         loaded_weight = loaded_weight.narrow(
             shard_dim, shard_size * tp_rank, shard_size
         )
-        self._dimension_aware_copy(param, loaded_weight)
+        param.copy_(loaded_weight)
 
     def _load_model_weight_or_group_weight_scale(
         self,
@@ -1027,7 +1027,7 @@ class FusedMoE(CustomOp):
     ):
         # for per channel weight quantization
         if shard_id == "w2":
-            self._dimension_aware_copy(expert_data, loaded_weight)
+            expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
             self._load_w13(
                 shard_id=shard_id,
@@ -1036,28 +1036,6 @@ class FusedMoE(CustomOp):
                 expert_data=expert_data,
                 tp_rank=tp_rank,
             )
-
-    def _dimension_aware_copy(
-        self,
-        expert_data: torch.Tensor,
-        loaded_weight: torch.Tensor,
-    ):
-        """
-        Copy loaded_weight to expert_data, handling dimension mismatches.
-        This is needed for mxfp4/quark formats where alignment requirements
-        may cause parameter dimensions to be larger than checkpoint dimensions.
-        """
-        if expert_data.shape == loaded_weight.shape:
-            expert_data.copy_(loaded_weight)
-        else:
-            # Handle dimension mismatch by copying only valid dimensions
-            # Use the minimum number of dimensions between the two tensors
-            num_dims = min(len(expert_data.shape), len(loaded_weight.shape))
-            slices = tuple(
-                slice(0, min(expert_data.shape[i], loaded_weight.shape[i]))
-                for i in range(num_dims)
-            )
-            expert_data[slices].copy_(loaded_weight[slices])
 
     def _load_w13(
         self,
@@ -1074,7 +1052,7 @@ class FusedMoE(CustomOp):
             shard_size = expert_data.shape[shard_dim] // 2
         else:
             shard_size = expert_data.shape[shard_dim]
-        if not load_full:
+        if not load_full and loaded_weight.ndim > 0:
             loaded_weight = loaded_weight.narrow(
                 shard_dim, shard_size * tp_rank, shard_size
             )
@@ -1087,7 +1065,7 @@ class FusedMoE(CustomOp):
         else:
             assert shard_id == "w3"
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
-        self._dimension_aware_copy(expert_data, loaded_weight)
+        expert_data.copy_(loaded_weight)
 
     def _load_w2(
         self,
@@ -1101,12 +1079,12 @@ class FusedMoE(CustomOp):
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Narrow parameter and load.
         shard_size = expert_data.shape[shard_dim]
-        if not load_full:
+        if not load_full and loaded_weight.ndim > 0:
             loaded_weight = loaded_weight.narrow(
                 shard_dim, shard_size * tp_rank, shard_size
             )
         # w2, down_proj: Load into only logical weight of w2.
-        self._dimension_aware_copy(expert_data, loaded_weight)
+        expert_data.copy_(loaded_weight)
 
     def _load_single_value(
         self,
@@ -1139,7 +1117,7 @@ class FusedMoE(CustomOp):
             )
         else:
             assert shard_id in ("w1", "w3")
-            self._dimension_aware_copy(expert_data, loaded_weight)
+            expert_data.copy_(loaded_weight)
 
     def _map_global_expert_id_to_local_expert_id(self, expert_id: int) -> int:
         if self._expert_map is None:
@@ -1223,8 +1201,7 @@ class FusedMoE(CustomOp):
                 f"shard_id must be ['w1','w2','w3','w13'] but got {shard_id}."
             )
 
-        # Special handling for mxfp4/quark
-        # Directly copy without additional TP slicing (matching original behavior)
+        # Special handling for mxfp4/quark pre-sliced weights AND all biases
         if (
             self.quant_config is not None
             and self.model_type == "gpt_oss"
@@ -1232,39 +1209,31 @@ class FusedMoE(CustomOp):
                 self.quant_config.get_name() == quant_name
                 for quant_name in ["mxfp4", "quark"]
             )
+            and (
+                shard_id == "w13"
+                or ".w13_" in weight_name
+                or ".w2_" in weight_name
+                or expert_id is None
+                or "bias" in weight_name
+            )
         ):
-            # loaded_weight is already:
-            # 1. EP-sliced (if EP is enabled)
-            # 2. TP-sliced at model level
-            # 3. Full fused w13 (not split) for w13 weights/scales/biases
-            # We just need to copy directly to the parameter
-
-            expert_data = param.data if expert_id is None else param.data[expert_id]
-
-            # For fused w13 or separate w2: direct dimension-aware copy
-            if shard_id == "w13":
-                # loaded_weight is full fused w13 (w1+w3), already TP-sliced
-                # Direct copy to full fused parameter
-                self._dimension_aware_copy(expert_data, loaded_weight)
-            elif shard_id == "w2":
-                # loaded_weight is w2 weight, already TP-sliced
-                # Direct copy
-                self._dimension_aware_copy(expert_data, loaded_weight)
-            elif shard_id in ("w1", "w3"):
-                # For backward compatibility: split w1/w3 loading
-                # (in case some code paths still use this)
-                SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w3": 0}
-                shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
-                if expert_id is None:
-                    shard_dim += 1  # Adjust for expert dimension
-                self._load_w13(
-                    expert_data=expert_data,
-                    shard_dim=shard_dim,
-                    shard_id=shard_id,
-                    loaded_weight=loaded_weight,
-                    tp_rank=self.tp_rank,
-                    load_full=True,  # Don't apply TP slicing, already done
-                )
+            # Copy with dimension-based slicing to handle potential size mismatches
+            # from MXFP4 block alignment
+            if expert_id is None:
+                dim1 = loaded_weight.shape[1]
+                if "bias" in weight_name:
+                    param.data[:, :dim1].copy_(loaded_weight)
+                else:
+                    dim2 = loaded_weight.shape[2]
+                    param.data[:, :dim1, :dim2].copy_(loaded_weight)
+            else:
+                expert_data = param.data[expert_id]
+                dim1 = loaded_weight.shape[0]
+                if "bias" in weight_name:
+                    expert_data.data[:dim1].copy_(loaded_weight)
+                else:
+                    dim2 = loaded_weight.shape[1]
+                    expert_data.data[:dim1, :dim2].copy_(loaded_weight)
 
             return True if return_success else None
 
@@ -1287,7 +1256,7 @@ class FusedMoE(CustomOp):
 
             expert_data = param.data[expert_id]
             if shard_id == "w2":
-                self._dimension_aware_copy(expert_data, loaded_weight)
+                expert_data.copy_(loaded_weight)
             elif shard_id in ("w1", "w3"):
                 # BNB inflight quantization has already sharded the weights
                 full_load = True
