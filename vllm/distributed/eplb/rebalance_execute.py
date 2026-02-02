@@ -19,6 +19,7 @@ from torch.distributed import (
     get_global_rank,
 )
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -248,11 +249,75 @@ def move_to_buffer(
                 for w, b in zip(expert_weights, expert_weights_buffers):
                     b[dst].copy_(w[src_local], non_blocking=True)
 
-    p2p_ops: list[P2POp] = []
-
     # Pre-compute global ranks mapping
     ep_size = ep_group.size()
     rank_to_global = {rank: get_global_rank(ep_group, rank) for rank in range(ep_size)}
+
+    # Get configuration from environment variables
+    num_groups = envs.VLLM_EPLB_NUM_COMMUNICATION_GROUPS
+    batch_size = envs.VLLM_EPLB_COMMUNICATION_BATCH_SIZE
+
+    # Ensure num_groups is at least 1
+    if num_groups < 1:
+        logger.warning(
+            "VLLM_EPLB_NUM_COMMUNICATION_GROUPS (%d) is less than 1. Using 1 instead.",
+            num_groups,
+        )
+        num_groups = 1
+
+    # If batch_size is set, num_groups must equal world size
+    if batch_size is not None and num_groups != ep_size:
+        logger.warning(
+            "VLLM_EPLB_COMMUNICATION_BATCH_SIZE is set (%d), "
+            "overriding VLLM_EPLB_NUM_COMMUNICATION_GROUPS from %d to "
+            "%d (must equal world size when batch size is specified).",
+            batch_size,
+            num_groups,
+            ep_size,
+        )
+        num_groups = ep_size
+
+    # Cap num_groups at world size
+    if num_groups > ep_size:
+        logger.warning(
+            "VLLM_EPLB_NUM_COMMUNICATION_GROUPS (%d) is larger than "
+            "world size (%d). Using %d instead.",
+            num_groups,
+            ep_size,
+            ep_size,
+        )
+        num_groups = ep_size
+
+    # Calculate group size and number of communication rounds
+    group_size = ep_size // num_groups
+    # Number of rounds equals number of groups
+    # (one round per XOR value: 0, 1, 2, ..., num_groups-1)
+    num_rounds = num_groups
+
+    # Create separate lists for sends and recvs for each round
+    # Round i: Communication between groups where (group1 XOR group2) == i
+    # Round 0: Same group (intra-group)
+    # Round 1+: Different groups with specific XOR values
+    send_ops_per_round: list[list[P2POp]] = [[] for _ in range(num_rounds)]
+    recv_ops_per_round: list[list[P2POp]] = [[] for _ in range(num_rounds)]
+
+    def get_communication_round(rank1: int, rank2: int) -> int:
+        """
+        Determine which communication round a pair of ranks belongs to.
+
+        Uses hierarchical grouping: ranks are divided into `num_groups` groups.
+        - Round 0: Same group (intra-group)
+        - Round i (i>0): Communication between groups with XOR = i
+
+        Returns the round index based on the XOR of group IDs.
+        """
+        group1 = rank1 // group_size
+        group2 = rank2 // group_size
+
+        # The round is determined by the XOR of the group IDs
+        # This ensures each unique pair of groups communicates in a separate round
+        group_xor = group1 ^ group2
+        return group_xor
 
     # 2. Post sends
     if send_count > 0:
@@ -285,7 +350,7 @@ def move_to_buffer(
                 recv_ranks.append(ranks_to_recv[recver_pos])
             for dst in recv_ranks:
                 dst_global = rank_to_global[dst]
-                p2p_ops += [
+                send_ops = [
                     P2POp(
                         torch.distributed.isend,
                         w[src],
@@ -293,6 +358,9 @@ def move_to_buffer(
                     )
                     for w in expert_weights
                 ]
+                # Determine which round based on sender and receiver ranks
+                round_idx = get_communication_round(ep_rank, dst)
+                send_ops_per_round[round_idx] += send_ops
 
     # 3. Post recvs
     if recv_count > 0:
@@ -322,7 +390,7 @@ def move_to_buffer(
             else:
                 src = ranks_to_send[recver_pos - remainder_start]
             src_global = rank_to_global[src]
-            p2p_ops += [
+            recv_ops = [
                 P2POp(
                     torch.distributed.irecv,
                     b[dst],
@@ -330,17 +398,98 @@ def move_to_buffer(
                 )
                 for b in expert_weights_buffers
             ]
+            # Determine which round based on sender and receiver ranks
+            round_idx = get_communication_round(ep_rank, src)
+            recv_ops_per_round[round_idx] += recv_ops
 
-    # 4. Execute the P2P operations. The real communication happens here.
-    if p2p_ops and cuda_stream is not None:
-        with torch.cuda.stream(cuda_stream):
-            reqs = batch_isend_irecv(p2p_ops)
+    def execute_batch(ops: list[P2POp]) -> None:
+        """Execute a batch of P2P operations and wait for completion."""
+        if cuda_stream is not None:
+            with torch.cuda.stream(cuda_stream):
+                reqs = batch_isend_irecv(ops)
+                for req in reqs:
+                    req.wait()
+        else:
+            reqs = batch_isend_irecv(ops)
             for req in reqs:
                 req.wait()
-    elif p2p_ops:
-        reqs = batch_isend_irecv(p2p_ops)
-        for req in reqs:
-            req.wait()
+
+    def execute_p2p_ops_round(send_ops: list[P2POp], recv_ops: list[P2POp]) -> None:
+        """
+        Execute P2P operations for a communication round.
+
+        When batch_size is set, uses rank ordering to avoid deadlocks:
+        - Phase 1: lower rank sends (batches if needed), higher rank receives
+        - Phase 2: lower rank receives (batches if needed), higher rank sends
+        Otherwise, merges sends and recvs and executes them together.
+        """
+        if not send_ops and not recv_ops:
+            return
+
+        # When batch_size is set, each rank communicates with only one peer per round
+        # We need special handling to avoid deadlocks
+        if batch_size is not None:
+            # Validate that all operations are for the same peer
+            peer_ranks = set()
+            for op in send_ops:
+                peer_ranks.add(op.peer)
+            for op in recv_ops:
+                peer_ranks.add(op.peer)
+
+            assert len(peer_ranks) == 1, (
+                f"Rank {ep_rank}: All send and recv operations in a round "
+                f"must be for the same peer. Found {len(peer_ranks)} "
+                f"different peers: {peer_ranks}"
+            )
+
+            # Find the peer rank - should be the same for all ops in this round
+            my_global_rank = rank_to_global[ep_rank]
+            peer_rank = peer_ranks.pop()  # Get the single peer rank
+
+            # Determine if we should send first based on having smaller rank
+            send_first = my_global_rank < peer_rank
+
+            # Phase 1: Lower rank sends, higher rank receives
+            if send_first:
+                # We are the lower rank - send first
+                for i in range(0, len(send_ops), batch_size):
+                    batch = send_ops[i : i + batch_size]
+                    execute_batch(batch)
+            else:
+                # We are the higher rank - receive first
+                for i in range(0, len(recv_ops), batch_size):
+                    batch = recv_ops[i : i + batch_size]
+                    execute_batch(batch)
+
+            # Phase 2: Lower rank receives, higher rank sends
+            if send_first:
+                # We are the lower rank - receive second
+                for i in range(0, len(recv_ops), batch_size):
+                    batch = recv_ops[i : i + batch_size]
+                    execute_batch(batch)
+            else:
+                # We are the higher rank - send second
+                for i in range(0, len(send_ops), batch_size):
+                    batch = send_ops[i : i + batch_size]
+                    execute_batch(batch)
+        else:
+            # Normal case: merge sends and recvs and execute together
+            all_ops = send_ops + recv_ops
+            execute_batch(all_ops)
+
+    # 4. Execute the P2P operations in multiple rounds
+    # Each round handles communication between groups where
+    # (group1 XOR group2) == round_idx
+    # Round 0: Intra-group (same group)
+    # Round i (i>0): Inter-group with XOR = i
+    for round_idx in range(num_rounds):
+        execute_p2p_ops_round(
+            send_ops_per_round[round_idx], recv_ops_per_round[round_idx]
+        )
+        # Barrier to ensure all ranks complete this round before proceeding
+        # This prevents ranks from getting out of sync across rounds
+        torch.distributed.barrier(group=ep_group)
+
     # wait for the communication to finish
     return (
         is_unchanged,

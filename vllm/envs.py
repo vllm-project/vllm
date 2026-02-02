@@ -254,6 +254,8 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
+    VLLM_EPLB_NUM_COMMUNICATION_GROUPS: int = 1
+    VLLM_EPLB_COMMUNICATION_BATCH_SIZE: int | None = None
 
 
 def get_default_cache_root():
@@ -1631,6 +1633,28 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
+    # Number of communication groups for EPLB (Expert Parallel Load Balancing)
+    # P2P operations during rebalancing. Determines how ranks are divided into
+    # groups for communication.
+    # - Must not be larger than world size
+    # - Communications are done in VLLM_EPLB_NUM_COMMUNICATION_GROUPS rounds
+    # - Default is 1 (all ranks in one group, no grouping)
+    # - If VLLM_EPLB_COMMUNICATION_BATCH_SIZE is set, this will be
+    #   overridden to equal world size
+    "VLLM_EPLB_NUM_COMMUNICATION_GROUPS": lambda: int(
+        os.environ.get("VLLM_EPLB_NUM_COMMUNICATION_GROUPS", "1")
+    ),
+    # Maximum number of P2P operations to batch together during EPLB
+    # rebalancing.
+    # - When set, VLLM_EPLB_NUM_COMMUNICATION_GROUPS will be overridden
+    #   to equal world size (one rank per group), and operations will be
+    #   split into batches
+    # - Helps avoid overwhelming communication system with too many
+    #   concurrent ops
+    # - If None (default), no special batching is applied
+    "VLLM_EPLB_COMMUNICATION_BATCH_SIZE": lambda: maybe_convert_int(
+        os.environ.get("VLLM_EPLB_COMMUNICATION_BATCH_SIZE", None)
+    ),
 }
 
 
