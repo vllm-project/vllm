@@ -51,10 +51,7 @@ class MRopeState:
         mm_features: list,
     ) -> None:
         prefill_mrope_positions, prefill_mrope_delta = (
-            mrope_model.get_mrope_input_positions(
-                prefill_token_ids,
-                mm_features,
-            )
+            mrope_model.get_mrope_input_positions(prefill_token_ids, mm_features)
         )
         for i in range(3):
             pos = prefill_mrope_positions[i].tolist()
