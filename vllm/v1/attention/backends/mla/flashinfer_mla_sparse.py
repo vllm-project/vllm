@@ -341,9 +341,8 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
 
     def forward_mqa(
         self,
-        q: torch.Tensor,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
-        topk_indices: torch.Tensor,
         attn_metadata: FlashInferMLASparseMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -355,26 +354,25 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         - The resulting indices are passed as block_tables with shape
           [batch_size, q_len_per_request, sparse_mla_top_k]
         """
-        assert kv_c_and_k_pe_cache.numel() > 0
-        assert attn_metadata.decode is not None
+        # Concatenate q if it's a tuple (ql_nope, q_pe)
+        if isinstance(q, tuple):
+            q = torch.cat(q, dim=-1)
 
-        num_decodes = attn_metadata.num_decodes
-        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_actual_toks = q.shape[0]
+
+        # Get topk indices
+        assert self.topk_indices_buffer is not None
+        topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
         # Convert per-request topk indices to global cache slots
         # topk_indices: (num_decode_tokens, topk) -> physical cache slots
         topk_indices_physical = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_decode_tokens],
+            attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
         )
-
-        # Reshape q for batch decode: (num_decode_tokens, num_heads, head_dim)
-        #                          -> (num_decodes, q_len, num_heads, head_dim)
-        q_len = num_decode_tokens // num_decodes
-        q = q.view(num_decodes, q_len, q.shape[-2], q.shape[-1])
 
         # Reshape topk_indices: (num_decode_tokens, topk)
         #                    -> (num_decodes, q_len, topk)
