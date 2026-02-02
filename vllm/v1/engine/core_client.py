@@ -577,37 +577,29 @@ class MPClient(EngineCoreClient):
                 self._finalizer()
 
     def shutdown(self):
+        # Terminate background resources
         self._finalizer()
 
-    def _send_drain_to_engines(self):
-        """Send DRAIN message to all engine cores via shutdown pipe."""
+    async def drain_async(self, timeout: float) -> bool:
+        """Signal engines to drain and wait for them to exit."""
         if self.resources.engine_dead:
-            return
-        # drain mode requires non-headless, so engine_manager is always set
+            return True
+
         assert self.resources.engine_manager is not None
         logger.info(
             "Sending DRAIN to %d engine(s) via shutdown pipe",
             len(self.core_engines),
         )
         self.resources.engine_manager.signal_drain()
-
-    async def drain_async(self, timeout: float) -> bool:
-        """Signal engines to drain and wait for them to exit."""
         start_time = time.monotonic()
-        self._send_drain_to_engines()
 
         while not self.resources.engine_dead:
-            elapsed = time.monotonic() - start_time
-            if elapsed >= timeout:
-                logger.warning(
-                    "Drain: timed out after %.1fs, proceeding with shutdown",
-                    elapsed,
-                )
+            if time.monotonic() - start_time >= timeout:
+                logger.warning("Drain: timed out, proceeding with shutdown")
                 return False
             await asyncio.sleep(0.1)
 
-        elapsed = time.monotonic() - start_time
-        logger.info("Drain: complete in %.1fs", elapsed)
+        logger.info("Drain: complete in %.1fs", time.monotonic() - start_time)
         return True
 
     def _format_exception(self, e: Exception) -> Exception:
@@ -946,8 +938,6 @@ class AsyncMPClient(MPClient):
 
     async def get_output_async(self) -> EngineCoreOutputs:
         self._ensure_output_queue_task()
-        # Check if engine is already dead before waiting
-        self.ensure_alive()
         # If an exception arises in process_outputs_socket task,
         # it is forwarded to the outputs_queue so we can raise it
         # from this (run_output_handler) task to shut down the server.
