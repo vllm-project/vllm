@@ -256,12 +256,6 @@ class NgramEmbedding(nn.Module):
     ) -> torch.Tensor:
         """Shift tensor right by n positions, resetting at EOS tokens."""
         batch_size, seq_len = tensor.shape
-        if seq_len == 0:
-            return torch.zeros_like(tensor)
-
-        if n <= 0:
-            return tensor.clone()
-
         idx = torch.arange(seq_len, device=tensor.device, dtype=torch.int64)
         eos_mask = tensor == eos_token_id
         eos_pos = torch.where(eos_mask, idx, -1)
@@ -274,9 +268,11 @@ class NgramEmbedding(nn.Module):
         dist = idx.unsqueeze(0) - segment_start
         shift_mask = dist >= n
 
-        shifted = torch.zeros_like(tensor)
-        if n < seq_len:
-            shifted[:, n:] = tensor[:, :-n]
+        src_idx = idx - n
+        src_idx_clamped = torch.clamp(src_idx, min=0)
+        gather_idx = src_idx_clamped.unsqueeze(0).expand(batch_size, -1)
+        shifted = tensor.gather(dim=1, index=gather_idx)
+        shifted = shifted.masked_fill(src_idx.unsqueeze(0) < 0, 0)
         return shifted.masked_fill(~shift_mask, 0)
 
     def _precompute_vocab_mods(self) -> dict[tuple[int, int], list[int]]:
