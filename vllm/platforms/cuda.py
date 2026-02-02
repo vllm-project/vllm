@@ -387,9 +387,9 @@ class CudaPlatformBase(Platform):
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
         logger.info_once(
-            "Using %s attention backend out of potential backends: %s",
+            "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,
-            tuple(b[0].name for b in valid_backends_priorities),
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
             scope="local",
         )
 
