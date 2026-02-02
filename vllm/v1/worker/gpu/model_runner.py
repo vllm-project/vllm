@@ -151,6 +151,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             vocab_size=self.vocab_size,
             device=self.device,
+            request_token_ids=self.req_states.request_token_ids.gpu,
+            request_prompt_len=self.req_states.prompt_len.gpu,
+            prefill_len=self.req_states.prefill_len.gpu,
+            output_len=self.req_states.output_len.gpu,
             logprobs_mode=self.model_config.logprobs_mode,
         )
         self.prompt_logprobs_worker = PromptLogprobsWorker(self.max_num_reqs)
@@ -318,10 +322,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=self.device)
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=self.device)
+        dummy_input_ids = torch.zeros(num_reqs, dtype=torch.int32, device=self.device)
+        expanded_local_pos = torch.zeros(
+            num_reqs, dtype=torch.int32, device=self.device
+        )
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
         # during actual execution.
-        self.sampler(logits, idx_mapping, idx_mapping_np, idx_mapping_np, pos)
+        self.sampler(
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            idx_mapping_np,
+            pos,
+            dummy_input_ids,
+            expanded_local_pos,
+        )
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -434,7 +450,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
-                prefill_token_ids=new_req_data.prefill_token_ids,
+                request_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
             )
             req_index = self.req_states.req_id_to_index[req_id]
@@ -465,9 +481,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
             self.sampler.apply_staged_writes(
-                self.req_states.prefill_token_ids.gpu,
+                self.req_states.request_token_ids.gpu,
                 self.req_states.prefill_len.np,
-                self.req_states.prompt_len,
+                self.req_states.prompt_len.np,
             )
             if self.uses_mrope:
                 self.mrope_states.apply_staged_writes()
@@ -511,6 +527,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs + 1, device=self.device, dtype=torch.int32
             )
             expanded_idx_mapping = idx_mapping
+            expanded_local_pos = torch.zeros(
+                num_reqs, dtype=torch.int32, device=self.device
+            )
         else:
             num_draft_tokens = np.array(
                 [len(draft_tokens.get(req_id, ())) for req_id in req_ids],
@@ -526,7 +545,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
             max_expand_len = self.num_speculative_steps + 1
-            expanded_idx_mapping = expand_idx_mapping(
+            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
 
@@ -552,7 +571,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.next_prefill_tokens,
             idx_mapping,
             query_start_loc,
-            self.req_states.prefill_token_ids.gpu,
+            self.req_states.request_token_ids.gpu,
             self.req_states.prefill_len.gpu,
             self.req_states.num_computed_tokens.gpu,
         )
@@ -627,6 +646,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens_after_padding,
@@ -674,6 +694,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         sample_pos = input_batch.positions[input_batch.logits_indices]
+        input_ids = input_batch.input_ids[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
@@ -691,6 +712,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.idx_mapping_np,
             input_batch.cu_num_logits_np,
             sample_pos,
+            input_ids,
+            input_batch.expanded_local_pos,
         )
 
         if input_batch.num_draft_tokens == 0:
@@ -700,7 +723,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         else:
             # Rejection sampling for spec decoding.
-            input_ids = input_batch.input_ids[input_batch.logits_indices]
             sampled_tokens, num_sampled = rejection_sample(
                 sampler_output.sampled_token_ids,
                 input_ids,
@@ -737,6 +759,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled,
             num_rejected,
             input_batch.query_start_loc,
+            self.req_states.request_token_ids.gpu,
+            self.req_states.prefill_len.gpu,
+            self.req_states.output_len.gpu,
         )
 
         # Update the number of computed prefill tokens.
@@ -902,9 +927,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model.compute_logits,
             hidden_states,
             input_batch,
-            self.req_states.prefill_token_ids.gpu,
+            self.req_states.request_token_ids.gpu,
             self.req_states.num_computed_tokens.gpu,
-            self.req_states.prompt_len,
+            self.req_states.prompt_len.np,
             self.req_states.prefill_len.np,
             self.req_states.num_computed_prefill_tokens,
         )

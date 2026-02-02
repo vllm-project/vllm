@@ -9,6 +9,7 @@ from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
+from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
 from vllm.v1.worker.gpu.sample.gumbel import apply_temperature, gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
@@ -24,6 +25,10 @@ class Sampler:
         max_num_reqs: int,
         vocab_size: int,
         device: torch.device,
+        request_token_ids: torch.Tensor,
+        request_prompt_len: torch.Tensor,
+        prefill_len: torch.Tensor,
+        output_len: torch.Tensor,
         logprobs_mode: LogprobsMode = "raw_logprobs",
     ):
         if logprobs_mode not in ("processed_logprobs", "raw_logprobs"):
@@ -34,6 +39,14 @@ class Sampler:
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         self.penalties_state = PenaltiesState(max_num_reqs, vocab_size, device)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
+        self.bad_words_state = BadWordsState(
+            max_num_reqs,
+            device,
+            request_token_ids=request_token_ids,
+            prompt_len=request_prompt_len,
+            prefill_len=prefill_len,
+            output_len=output_len,
+        )
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
@@ -41,18 +54,20 @@ class Sampler:
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
+        self.bad_words_state.add_request(req_idx, sampling_params)
 
     def apply_staged_writes(
         self,
-        prefill_token_ids: torch.Tensor,
+        request_token_ids: torch.Tensor,
         prefill_lens: np.ndarray,
         prompt_lens: np.ndarray,
     ) -> None:
         self.sampling_states.apply_staged_writes()
         self.penalties_state.apply_staged_writes(
-            prefill_token_ids, prefill_lens, prompt_lens
+            request_token_ids, prefill_lens, prompt_lens
         )
         self.logit_bias_state.apply_staged_writes()
+        self.bad_words_state.apply_staged_writes()
 
     def __call__(
         self,
@@ -61,12 +76,19 @@ class Sampler:
         idx_mapping_np: np.ndarray,
         cu_num_logits_np: np.ndarray,
         pos: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        expanded_local_pos: torch.Tensor | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.compute_nans else None
         sampled, processed_logits = self.sample(
-            logits, idx_mapping, idx_mapping_np, pos
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            pos,
+            input_ids,
+            expanded_local_pos,
         )
 
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
@@ -98,6 +120,8 @@ class Sampler:
         idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
@@ -107,6 +131,15 @@ class Sampler:
 
         # Apply penalties in place.
         self.penalties_state.apply_penalties(logits, idx_mapping, idx_mapping_np)
+
+        # Apply bad words masking in place.
+        self.bad_words_state.apply_bad_words(
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            input_ids,
+            expanded_local_pos,
+        )
 
         # Apply temperature in place.
         apply_temperature(logits, idx_mapping, self.sampling_states.temperature.gpu)
