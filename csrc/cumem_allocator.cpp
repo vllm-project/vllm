@@ -129,7 +129,7 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   if (ret) {
     if (fab_flag &&
         (ret == CUDA_ERROR_NOT_PERMITTED || ret == CUDA_ERROR_NOT_SUPPORTED)) {
-      // Fabric allocation may fail on architectures other than Blackwell GPU,
+      // Fabric allocation may fail without multi-node nvlink,
       // fallback to POSIX file descriptor
       prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
       CUDA_CHECK(cuMemCreate(p_memHandle, size, &prop, 0));
