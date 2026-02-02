@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 from weakref import ref as weakref_ref
 
 import msgpack
@@ -340,7 +340,7 @@ class MoRIIOWrapper:
 
     def __init__(
         self,
-        moriio_engine: Optional["IOEngine"] = None,
+        moriio_engine: "IOEngine | None" = None,
         tp_rank: int = 0,
         dp_rank: int = 0,
     ):
