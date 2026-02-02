@@ -127,10 +127,7 @@ async def serve_http(
 
     async def drain_then_shutdown() -> None:
         """Drain in-flight requests then trigger shutdown."""
-        try:
-            await perform_drain()
-        except asyncio.CancelledError:
-            logger.info("Drain cancelled, proceeding with immediate shutdown")
+        await perform_drain()
         signal_handler()
 
     shutting_down = False
@@ -140,9 +137,10 @@ async def serve_http(
         """Signal callback that spawns the drain task."""
         nonlocal shutting_down, drain_task
         if shutting_down:
+            logger.warning("Received second signal, forcing immediate shutdown")
             if drain_task is not None and not drain_task.done():
-                logger.warning("Received second signal, forcing immediate shutdown")
                 drain_task.cancel()
+            signal_handler()
             return
         shutting_down = True
 
