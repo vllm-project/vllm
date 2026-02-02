@@ -367,26 +367,14 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         super().__init__(config)
 
         # Get min_token_num threshold
+        # Read min_token_num from config (calculated during config init)
         self.min_token_num = None
         if config.model_config is not None:
             pass_config = config.compilation_config.pass_config
-
-            # Check if user provided explicit token override
-            # User override works regardless of hidden_size
-            if pass_config.sequence_parallelism_min_token_num is not None:
-                self.min_token_num = pass_config.sequence_parallelism_min_token_num
-            else:
-                # Otherwise calculate using helper function with branching logic
-                tp_size = get_tensor_model_parallel_world_size()
-                hidden_size = config.model_config.get_hidden_size()
-                dtype = config.model_config.dtype
-                assert isinstance(dtype, torch.dtype)
-                self.min_token_num = get_sequence_parallelism_threshold(
-                    hidden_size, tp_size, dtype.itemsize
-                )
+            self.min_token_num = pass_config.sp_min_token_num
 
             if self.min_token_num is not None:
-                # take the min to avoid exceeding max_num_batched_tokens
+                # Take the min to avoid exceeding max_num_batched_tokens
                 max_batched = config.scheduler_config.max_num_batched_tokens
                 if max_batched is not None:
                     self.min_token_num = min(self.min_token_num, max_batched)
@@ -425,7 +413,21 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         self.dump_patterns(config, self.patterns)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        # For piecewise compilation, require concrete sizes divisible by TP
+        """
+        Determines if sequence parallelism should be applied for the given
+        compile range.
+
+        SP is only beneficial for larger batch sizes where the communication
+        overhead is amortized. For small batches, the overhead of splitting
+        and gathering tensors across TP ranks outweighs the benefits.
+
+        Returns False (SP disabled) when:
+        - Using piecewise compilation with non-concrete or TP-indivisible sizes
+        - min_token_num is None (SP disabled for this device/config)
+        - The compile range starts below the minimum token threshold
+        """
+        # For piecewise compilation (not using inductor graph partition),
+        # we need concrete sizes that are divisible by TP for correct splitting
         if (
             not self.compilation_config.use_inductor_graph_partition
             and self.compilation_config.splitting_ops
@@ -434,10 +436,12 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
             if not compile_range.is_single_size() or compile_range.end % tp_size != 0:
                 return False
 
-        # Check token threshold (None means SP disabled for this config)
+        # min_token_num is None when SP is disabled for this device/config
+        # (e.g., non-CUDA platform, unsupported GPU, or small hidden_size)
         if self.min_token_num is None:
             return False
 
+        # Only apply SP when batch size meets the minimum threshold
         return compile_range.start >= self.min_token_num
 
     @VllmInductorPass.time_and_log
