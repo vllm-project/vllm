@@ -147,7 +147,9 @@ class CoreEngineProcManager:
                         )
                     )
                     else contextlib.nullcontext(),
-                    numa_utils.configure_subprocess(vllm_config, local_dp_rank),
+                    numa_utils.configure_subprocess(
+                        vllm_config, local_rank=0, dp_local_rank=local_dp_rank
+                    ),
                 ):
                     proc.start()
         finally:

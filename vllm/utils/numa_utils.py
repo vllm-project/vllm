@@ -74,12 +74,14 @@ def get_auto_numa_nodes() -> list[int] | None:
     return numa_nodes
 
 
-def _get_gpu_index(parallel_config, local_rank: int) -> int:
+def _get_gpu_index(
+    parallel_config, local_rank: int, dp_local_rank: int | None = None
+) -> int:
     """Compute the actual GPU index for NUMA node lookup.
 
     When data parallelism is used with mp backend on a single node,
     the local_rank within each DP rank's executor needs to be offset
-    by the DP rank to get the actual GPU index.
+    by the local DP rank to get the actual GPU index.
 
     This mirrors the logic in gpu_worker.py:init_device() which adjusts
     local_rank for GPU device selection.
@@ -87,6 +89,9 @@ def _get_gpu_index(parallel_config, local_rank: int) -> int:
     Args:
         parallel_config: The parallel configuration
         local_rank: Local rank within the current executor (0 to TP*PP-1)
+        dp_local_rank: Optional local DP rank override. If provided, uses this
+                       instead of reading from parallel_config. Useful when
+                       spawning processes before the config is updated.
 
     Returns:
         The actual GPU index to use for numa_node array lookup
@@ -97,9 +102,11 @@ def _get_gpu_index(parallel_config, local_rank: int) -> int:
         and parallel_config.data_parallel_backend != "ray"
         and parallel_config.nnodes_within_dp == 1
     ):
-        dp_local_rank = parallel_config.data_parallel_rank_local
+        # Use provided dp_local_rank, or fall back to config values
         if dp_local_rank is None:
-            dp_local_rank = parallel_config.data_parallel_index
+            dp_local_rank = parallel_config.data_parallel_rank_local
+            if dp_local_rank is None:
+                dp_local_rank = parallel_config.data_parallel_index
 
         tp_pp_world_size = (
             parallel_config.pipeline_parallel_size
@@ -111,7 +118,11 @@ def _get_gpu_index(parallel_config, local_rank: int) -> int:
 
 
 @contextmanager
-def configure_subprocess(vllm_config: "VllmConfig", local_rank: int):
+def configure_subprocess(
+    vllm_config: "VllmConfig",
+    local_rank: int,
+    dp_local_rank: int | None = None,
+):
     """Configure NUMA binding for worker subprocess before it starts.
 
     This context manager wraps process creation to ensure the worker process
@@ -127,11 +138,14 @@ def configure_subprocess(vllm_config: "VllmConfig", local_rank: int):
 
     Args:
         vllm_config: vLLM configuration containing NUMA node mapping
-        local_rank: Local GPU rank (0-based on this node)
+        local_rank: Local GPU rank within executor (0 to TP*PP-1)
+        dp_local_rank: Optional local DP rank override for GPU index calculation.
+                       Use when spawning EngineCore processes before config has
+                       correct DP rank.
 
     Example:
         proc = mp.Process(target=worker_main, ...)
-        with numa_utils.configure_subprocess(config, local_rank):
+        with numa_utils.configure_subprocess(config, local_rank, dp_local_rank):
             proc.start()  # Now bound to correct NUMA node
 
     Requires:
@@ -148,7 +162,7 @@ def configure_subprocess(vllm_config: "VllmConfig", local_rank: int):
 
     if numa_nodes is not None:
         # Compute actual GPU index accounting for data parallelism
-        gpu_index = _get_gpu_index(parallel_config, local_rank)
+        gpu_index = _get_gpu_index(parallel_config, local_rank, dp_local_rank)
 
         # Validate array bounds
         if gpu_index >= len(numa_nodes):
