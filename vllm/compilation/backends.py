@@ -346,6 +346,7 @@ def _is_symint_placeholder(node: fx.Node) -> bool:
         torch.ops.aten.sym_size.int,
         torch.ops.aten.sym_size.default,
     )
+
     example_value = node.meta.get("example_value")
     return example_value is not None and isinstance(example_value, torch.SymInt)
 
