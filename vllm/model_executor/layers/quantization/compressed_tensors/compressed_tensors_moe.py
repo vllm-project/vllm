@@ -27,7 +27,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    RoutingMethodType,
     int4_w4a16_moe_quant_config,
     int4_w4afp8_moe_quant_config,
     int8_w8a8_moe_quant_config,
@@ -1032,11 +1031,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 if layer.e_score_correction_bias is not None
                 else None
             )
-            routing_method_type = layer.routing_method_type
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                routing_logits=router_logits.to(torch.float32)
-                if routing_method_type == RoutingMethodType.DeepSeekV3
-                else router_logits,
+                routing_logits=router_logits,
                 routing_bias=e_score_correction_bias,
                 x=x,
                 w13_weight=layer.w13_weight,
@@ -1051,7 +1047,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
                 block_shape=self.weight_block_size,
-                routing_method_type=routing_method_type,
+                routing_method_type=layer.routing_method_type,
                 routed_scaling=layer.routed_scaling_factor,
             )
         else:

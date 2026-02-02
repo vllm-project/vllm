@@ -26,7 +26,6 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
@@ -1014,11 +1013,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 if layer.e_score_correction_bias is not None
                 else None
             )
-            routing_method_type = layer.routing_method_type
             return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                routing_logits=router_logits.to(torch.float32)
-                if routing_method_type == RoutingMethodType.DeepSeekV3
-                else router_logits,
+                routing_logits=router_logits,
                 routing_bias=e_score_correction_bias,
                 x=x,
                 w13_weight=layer.w13_weight,
@@ -1033,7 +1029,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
                 block_shape=self.weight_block_size,
-                routing_method_type=routing_method_type,
+                routing_method_type=layer.routing_method_type,
                 routed_scaling=layer.routed_scaling_factor,
             )
         else:

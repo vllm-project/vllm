@@ -96,7 +96,23 @@ def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bo
     return not moe_parallel_config.enable_eplb
 
 
-def is_supported_config_trtllm(
+def _supports_router_logits_dtype(
+    router_logits_dtype: torch.dtype | None,
+    routing_method: RoutingMethodType,
+) -> bool:
+    """
+    The FlashInfer TRTLLM FP8 kernel expects bfloat16 router_logits by default.
+    Only DeepSeekV3 routing supports float32 router_logits (which is converted
+    internally in the kernel).
+    """
+    if router_logits_dtype == torch.float32:
+        # Only DeepSeekV3 routing handles float32 logits
+        # https://github.com/flashinfer-ai/flashinfer/issues/2469
+        return routing_method == RoutingMethodType.DeepSeekV3
+    return True
+
+
+def is_supported_config_trtllm_fp8(
     moe_config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
@@ -125,6 +141,10 @@ def is_supported_config_trtllm(
         return False, _make_reason("routing method")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
         return False, _make_reason("activation format")
+    elif not _supports_router_logits_dtype(
+        moe_config.router_logits_dtype, moe_config.routing_method
+    ):
+        return False, _make_reason("float32 router_logits with non-DeepSeekV3 routing")
 
     return True, None
 
@@ -173,7 +193,7 @@ def flashinfer_fused_moe_blockscale_fp8(
     expert_offset: int,
     local_num_experts: int,
     block_shape: list[int],
-    routing_method_type: int = int(RoutingMethodType.DeepSeekV3),
+    routing_method_type: int,
     routed_scaling: float | None = 1.0,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
@@ -185,6 +205,10 @@ def flashinfer_fused_moe_blockscale_fp8(
     assert block_shape == [128, 128]
     # Routing kernel expects #experts <= #threads 512
     assert global_num_experts <= 512
+
+    # The DeepSeekV3 routing method requires float32 router logits.
+    if routing_method_type == RoutingMethodType.DeepSeekV3:
+        routing_logits = routing_logits.to(torch.float32)
 
     a_q, a_sf = per_token_group_quant_fp8(x, block_shape[1])
     # NOTE: scales of hidden states have to be transposed!
