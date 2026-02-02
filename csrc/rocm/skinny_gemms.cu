@@ -1945,7 +1945,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   while (m < M) {
     floatx16 sum[N][YTILE] = {};
-
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
       bigType bigB[YTILE][UNRL];
@@ -1976,9 +1975,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Do the matrix multiplication in interleaved manner
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
-        if (k >= K) break;
-
         for (uint32_t n = 0; n < N; n++) {
           for (int i = 0; i < A_CHUNK; i += 8) {
             for (int y = 0; y < YTILE; ++y) {
@@ -2023,14 +2019,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       }
     }
 
-    scalar_t biases[N][YTILE] = {};
-    if (BIAS)
-      for (int n = 0; n < N; n++) {
-        for (int y = 0; y < YTILE; y++) {
-          biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
-        }
-      }
     if (threadIdx.x == 0) {
+      scalar_t biases[N][YTILE] = {};
+      if (BIAS)
+        for (int n = 0; n < N; n++) {
+          for (int y = 0; y < YTILE; y++) {
+            biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
+          }
+        }
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
@@ -2111,11 +2107,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   while (m < M) {
     floatx16 sum[N][YTILE] = {};
-
-    bigType bigA[N][UNRL] = {};
-    bigType bigB[YTILE][UNRL];
-
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
+      bigType bigA[N][UNRL] = {};
+      bigType bigB[YTILE][UNRL];
+
       // Fetch the weight matrix from memory!
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
@@ -2123,7 +2118,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         const fp8_t* B_ = &B[min__(k_, K - A_CHUNK)];
         for (int y = 0; y < YTILE; ++y) {
-          // if (y + m >= M) break;  // To avoid mem access fault.
           bigB[y][k2].h8 = (loadnt((scalar8*)(&B_[min__(y + m, M - 1) * Kbp])));
         }
       }
@@ -2145,10 +2139,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // Do the matrix multiplication in interleaved manner
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
-        uint32_t k = k1 + k2 * THRDS * A_CHUNK;
-        uint32_t k_ = k + threadIdx.x * A_CHUNK;
-        if (k_ >= K) break;
-
         for (uint32_t n = 0; n < N; n++) {
           for (int i = 0; i < A_CHUNK; i += 8) {
             for (int y = 0; y < YTILE; ++y) {
@@ -2267,13 +2257,13 @@ void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
   {                                                                           \
     dim3 block(64, _WvPrGrp);                                                 \
     if ((Kap_in * N_in <= max_lds_len) && (M_in % _YTILEs == 0)) {            \
-      int __wvPrGrp = mindiv(M_in, CuCount * _YTILEs, _WvPrGrp);              \
+      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEs, 16));     \
       wvSplitKQ_hf_sml_<fptype, fp8_t, 64, _YTILEs, _WvPrGrp, 16, _UNRLs, _N> \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, b_ptr, a_ptr, bias_ptr, c_ptr,  \
                                        s_a, s_b, __wvPrGrp, CuCount);         \
     } else {                                                                  \
-      int __wvPrGrp = mindiv(M_in, CuCount * _YTILEm, _WvPrGrp);              \
+      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEm, 16));     \
       wvSplitKQ_hf_<fptype, fp8_t, 64, _YTILEm, _WvPrGrp, 16, _UNRLm, _N>     \
           <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
                                        By_in, b_ptr, a_ptr, bias_ptr, c_ptr,  \
