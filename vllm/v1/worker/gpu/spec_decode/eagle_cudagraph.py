@@ -19,11 +19,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 
 class EagleCudaGraphManager:
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
         self.device = device
@@ -35,15 +31,10 @@ class EagleCudaGraphManager:
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
 
-        cudagraph_mode: CUDAGraphMode
-        if self.compilation_config.cudagraph_mode is None:
-            cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            cudagraph_mode = self.compilation_config.cudagraph_mode
-            if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
-                # NOTE(woosuk): For Eagle, we only use CUDA graphs for decode.
-                cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
-        self.cudagraph_mode = cudagraph_mode
+        self.cudagraph_mode = self.compilation_config.cudagraph_mode
+        if self.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+            # NOTE(woosuk): For Eagle, we only use CUDA graphs for decode.
+            self.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
 
         # only need to capture uniform decode cudagraph sizes (the 2nd return value)
         _, self.cudagraph_sizes = get_cudagraph_sizes(
