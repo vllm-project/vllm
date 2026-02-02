@@ -1135,7 +1135,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             if self.expert_map is None or not torch.equal(self.expert_map, expert_map):
                 self.expert_map = expert_map.clone()
 
-            start_idx = int(torch.distributed.get_rank()) * local_num_experts
+            start_idx = self.moe_parallel_config.ep_rank * local_num_experts
             expert_load_view[start_idx : start_idx + local_num_experts] += (
                 expert_tokens_meta.expert_num_tokens
             )
