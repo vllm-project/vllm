@@ -151,7 +151,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         else:
             properties = torch.cuda.get_device_properties(q.device)
             num_sms = properties.multi_processor_count
-            num_heads_k = 1
             heads_per_64 = (q_num_heads + 63) // 64
             num_kv_splits = min(max(num_sms // heads_per_64, 1), 16)
 
