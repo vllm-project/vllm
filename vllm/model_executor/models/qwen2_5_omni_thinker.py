@@ -240,6 +240,29 @@ class Qwen2_5OmniThinkerProcessingInfo(
         """Return target audio channels for Qwen2.5 Omni models (mono)."""
         return 1
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        max_image_tokens = self.get_max_image_tokens()
+        max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
+
+        # Compute max audio tokens from feature extractor config
+        feature_extractor = self.get_feature_extractor()
+        max_audio_seconds = min(feature_extractor.chunk_length, 30)
+        max_audio_samples = max_audio_seconds * feature_extractor.sampling_rate
+        max_feature_length = max_audio_samples // feature_extractor.hop_length
+        _, max_audio_tokens = _get_feat_extract_output_lengths(
+            torch.tensor([max_feature_length])
+        )
+
+        return {
+            "audio": max_audio_tokens.item(),
+            "image": max_image_tokens,
+            "video": max_video_tokens,
+        }
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
 
@@ -1286,15 +1309,84 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        # This is to satisfy the type checker for each overload
+        from .utils import _merge_multimodal_embeddings
+
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
 
-        return super().embed_input_ids(
+        inputs_embeds = self._embed_text_input_ids(
             input_ids,
-            multimodal_embeddings=multimodal_embeddings,
+            self.get_language_model().embed_input_ids,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
+        )
+
+        if len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        # Check for audio-in-video: interleaved video and audio tokens
+        # in the multimodal region. When use_audio_in_video=True, video
+        # and audio tokens are interleaved in the token sequence, but
+        # the embeddings are provided as separate contiguous tensors.
+        # A single masked_scatter_ would place them in the wrong order,
+        # so we scatter each modality separately using per-modality masks.
+        video_token_id = self.config.video_token_index
+        audio_token_id = self.config.audio_token_index
+
+        is_video = is_multimodal & (input_ids == video_token_id)
+        is_audio = is_multimodal & (input_ids == audio_token_id)
+
+        num_video = is_video.sum().item()
+        num_audio = is_audio.sum().item()
+
+        if num_video > 0 and num_audio > 0:
+            # Check if video and audio positions are actually interleaved
+            video_pos = is_video.nonzero(as_tuple=True)[0]
+            audio_pos = is_audio.nonzero(as_tuple=True)[0]
+
+            is_interleaved = (
+                video_pos[0].item() < audio_pos[-1].item()
+                and audio_pos[0].item() < video_pos[-1].item()
+            )
+
+            if is_interleaved:
+                # Match embeddings to modalities by exact token count
+                video_embeds: list[torch.Tensor] = []
+                audio_embeds: list[torch.Tensor] = []
+                other_embeds: list[torch.Tensor] = []
+                video_remaining = num_video
+                audio_remaining = num_audio
+
+                for emb in multimodal_embeddings:
+                    n = emb.shape[0]
+                    if video_remaining > 0 and n <= video_remaining:
+                        video_embeds.append(emb)
+                        video_remaining -= n
+                    elif audio_remaining > 0 and n <= audio_remaining:
+                        audio_embeds.append(emb)
+                        audio_remaining -= n
+                    else:
+                        other_embeds.append(emb)
+
+                if video_embeds:
+                    inputs_embeds = _merge_multimodal_embeddings(
+                        inputs_embeds, video_embeds, is_video
+                    )
+                if audio_embeds:
+                    inputs_embeds = _merge_multimodal_embeddings(
+                        inputs_embeds, audio_embeds, is_audio
+                    )
+                if other_embeds:
+                    other_mask = is_multimodal & ~is_video & ~is_audio
+                    inputs_embeds = _merge_multimodal_embeddings(
+                        inputs_embeds, other_embeds, other_mask
+                    )
+
+                return inputs_embeds
+
+        # Default: standard merge (no interleaving)
+        return _merge_multimodal_embeddings(
+            inputs_embeds, multimodal_embeddings, is_multimodal
         )
 
     def forward(
