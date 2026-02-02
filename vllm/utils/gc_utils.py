@@ -340,22 +340,26 @@ class ManualGCController:
         if gen0_count < self._thresholds[0]:
             return 0
 
-        total_collected = 0
+        # Determine the highest generation to collect to avoid redundant work.
+        # Note: gc.collect(gen) collects gen and all younger generations.
+        pending_gc0_count = self._gc0_count_since_gc1 + 1
+        highest_gen = 0
+        if pending_gc0_count >= self._thresholds[1]:
+            highest_gen = 1
+            pending_gc1_count = self._gc1_count_since_gc2 + 1
+            if pending_gc1_count >= self._thresholds[2]:
+                highest_gen = 2
 
-        # Generation 0: collect if allocations exceed threshold
-        total_collected += self._do_collect(0)
-        self._gc0_count_since_gc1 += 1
+        total_collected = self._do_collect(highest_gen)
 
-        # Generation 1: collect every N gen0 collections
-        if self._gc0_count_since_gc1 >= self._thresholds[1]:
-            total_collected += self._do_collect(1)
+        if highest_gen == 0:
+            self._gc0_count_since_gc1 += 1
+        elif highest_gen == 1:
             self._gc0_count_since_gc1 = 0
             self._gc1_count_since_gc2 += 1
-
-            # Generation 2: collect every N gen1 collections
-            if self._gc1_count_since_gc2 >= self._thresholds[2]:
-                total_collected += self._do_collect(2)
-                self._gc1_count_since_gc2 = 0
+        else:
+            self._gc0_count_since_gc1 = 0
+            self._gc1_count_since_gc2 = 0
 
         return total_collected
 
