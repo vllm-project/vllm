@@ -324,6 +324,11 @@ def _fwd_grouped_kernel_stage1(
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
     if split_kv_end > split_kv_start:
+        base_offs_k = cur_kv_head * stride_buf_kh + offs_d[:, None]
+        base_offs_v = cur_kv_head * stride_buf_vh + offs_dv[None, :]
+        if BLOCK_DPE > 0:
+            base_offs_kpe = cur_kv_head * stride_buf_kh + offs_dpe[:, None]
+
         for start_n in tl.range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
             kv_page_number = tl.load(
@@ -337,23 +342,15 @@ def _fwd_grouped_kernel_stage1(
             kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
 
             # explicitly facilitate overlapping load/compute
-            offs_buf_k = (
-                kv_loc[:, None] * stride_buf_kbs
-                + cur_kv_head * stride_buf_kh
-                + offs_d[None, :]
-            )
+            offs_buf_k = kv_loc[None, :] * stride_buf_kbs + base_offs_k
             k = tl.load(
                 K_Buffer + offs_buf_k,
-                mask=(offs_n[:, None] < split_kv_end) & (mask_d[None, :]),
+                mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
                 other=0.0,
                 cache_modifier=".cg",
             )
 
-            offs_buf_v = (
-                kv_loc[:, None] * stride_buf_vbs
-                + cur_kv_head * stride_buf_vh
-                + offs_dv[None, :]
-            )
+            offs_buf_v = kv_loc[:, None] * stride_buf_vbs + base_offs_v
             v = tl.load(
                 V_Buffer + offs_buf_v,
                 mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
@@ -361,21 +358,15 @@ def _fwd_grouped_kernel_stage1(
                 cache_modifier=".cg",
             )
 
-            k = k.T
             qk = tl.dot(q, k.to(q.dtype))
             if BLOCK_DPE > 0:
-                offs_buf_kpe = (
-                    kv_loc[:, None] * stride_buf_kbs
-                    + cur_kv_head * stride_buf_kh
-                    + offs_dpe[None, :]
-                )
+                offs_buf_kpe = kv_loc[None, :] * stride_buf_kbs + base_offs_kpe
                 kpe = tl.load(
                     K_Buffer + offs_buf_kpe,
-                    mask=(offs_n[:, None] < split_kv_end) & (mask_dpe[None, :]),
+                    mask=(offs_n[None, :] < split_kv_end) & (mask_dpe[:, None]),
                     other=0.0,
                     cache_modifier=".cg",
                 )
-                kpe = kpe.T
                 qk += tl.dot(qpe, kpe.to(qpe.dtype))
             qk *= sm_scale
 
