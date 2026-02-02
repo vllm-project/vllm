@@ -920,10 +920,6 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 alt = name.replace(".mlp.gate.", ".mlp.router.")
                 if alt in params_dict:
                     return alt
-            if ".mlp.router." in name:
-                alt = name.replace(".mlp.router.", ".mlp.gate.")
-                if alt in params_dict:
-                    return alt
             return None
 
         for name, loaded_weight in weights:
@@ -931,8 +927,6 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
-                    continue
-                if "mlp" in name and "mlps" not in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 mapped_name = _resolve_param_name(name)
