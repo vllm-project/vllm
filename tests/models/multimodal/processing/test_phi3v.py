@@ -47,7 +47,11 @@ def test_processor_override(
     prompt = f"<|user|>\n{img_str}<|end|>\n<|assistant|>\n"
     mm_data = {"image": [image_assets[0].pil_image] * num_imgs}
 
-    processed_inputs = processor.apply(prompt, mm_data, hf_processor_mm_kwargs)
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+    )
 
     # Ensure we have the right number of placeholders per num_crops size
     img_tok_count = processed_inputs["prompt_token_ids"].count(_IMAGE_TOKEN_ID)
