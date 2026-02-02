@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
+    is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
 )
 
@@ -63,7 +64,8 @@ class QuantFP8(CustomOp):
         self.num_token_padding = num_token_padding
         self.column_major_scales = column_major_scales
         self.tma_aligned_scales = tma_aligned_scales
-        self.use_ue8m0 = use_ue8m0
+        self.use_ue8m0 = is_deep_gemm_e8m0_used() if use_ue8m0 is None else use_ue8m0
+        self.use_deep_gemm_supported = is_deep_gemm_supported()
 
         self.use_aiter = rocm_aiter_ops.is_linear_fp8_enabled()
         self.use_deepgemm = is_deep_gemm_supported()
@@ -86,13 +88,13 @@ class QuantFP8(CustomOp):
         scale_ub: torch.Tensor | None = None,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        from vllm.model_executor.layers.quantization.utils import fp8_utils
+
         if (
             self.is_group_quant
-            and self.use_deepgemm
+            and self.use_deep_gemm_supported
             and (DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0)
         ):
-            from vllm.model_executor.layers.quantization.utils import fp8_utils
-
             return fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
                 x,
                 group_size=self.group_size,
@@ -101,7 +103,6 @@ class QuantFP8(CustomOp):
 
         if self.is_group_quant and not self.static:
             assert scale is None, "Dynamic group quantization does not use scale"
-            from vllm.model_executor.layers.quantization.utils import fp8_utils
 
             return fp8_utils.per_token_group_quant_fp8(
                 x,
