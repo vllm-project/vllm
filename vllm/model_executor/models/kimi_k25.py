@@ -196,7 +196,7 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
         self.media_token_id = self.info.media_token_id
         self.frame_per_chunk = self.info.media_processor.num_frames_per_chunk
 
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> list[int]:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_media = mm_counts.get("vision_chunk", 0)
         return "<|media_pad|>" * num_media
 
