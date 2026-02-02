@@ -1091,6 +1091,13 @@ class LongcatFlashNgramForCausalLM(LongcatFlashForCausalLM):
         expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
         params_dict = dict(self.named_parameters())
+        param_aliases: dict[int, list[str]] = {}
+        for param_name, param in params_dict.items():
+            param_aliases.setdefault(id(param), []).append(param_name)
+
+        def _mark_loaded(param: torch.nn.Parameter) -> None:
+            for alias in param_aliases.get(id(param), ()):
+                loaded_params.add(alias)
 
         def _insert_mla_attn(name: str) -> str | None:
             token = ".self_attn."
@@ -1114,8 +1121,8 @@ class LongcatFlashNgramForCausalLM(LongcatFlashForCausalLM):
                 alt = name.replace(".mla_attn.", ".")
                 if alt in params_dict:
                     return alt
-            if ".mlp.router." in name:
-                alt = name.replace(".mlp.router.", ".mlp.gate.")
+            if ".mlp.gate." in name:
+                alt = name.replace(".mlp.gate.", ".mlp.router.")
                 if alt in params_dict:
                     return alt
             return None
@@ -1147,11 +1154,11 @@ class LongcatFlashNgramForCausalLM(LongcatFlashForCausalLM):
                 param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                _mark_loaded(param)
                 loaded_name = name_mapped
                 break
 
             if loaded_name is not None:
-                loaded_params.add(loaded_name)
                 continue
 
             is_expert_weight = False
@@ -1185,10 +1192,10 @@ class LongcatFlashNgramForCausalLM(LongcatFlashForCausalLM):
                 )
                 if success:
                     loaded_name = name_mapped
+                    _mark_loaded(param)
                     break
 
             if loaded_name is not None:
-                loaded_params.add(loaded_name)
                 continue
             if is_expert_weight:
                 continue
@@ -1212,7 +1219,7 @@ class LongcatFlashNgramForCausalLM(LongcatFlashForCausalLM):
             param = params_dict[name_mapped]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
-            loaded_params.add(name_mapped)
+            _mark_loaded(param)
 
         for layer_id in range(self.config.num_hidden_layers):
             for i in range(2):
