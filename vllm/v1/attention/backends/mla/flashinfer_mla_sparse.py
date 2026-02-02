@@ -23,7 +23,6 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
-    MLACommonBaseImpl,
     get_mla_dims,
 )
 from vllm.platforms.interface import DeviceCapability
@@ -36,6 +35,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
+    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -293,7 +293,7 @@ def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
     return _fi_sparse_workspace
 
 
-class FlashInferMLASparseImpl(MLACommonBaseImpl[FlashInferMLASparseMetadata]):
+class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata]):
     """FlashInfer MLA Sparse implementation.
 
     Uses the TRT-LLM MLA kernel with sparse_mla_top_k parameter for
