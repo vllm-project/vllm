@@ -27,7 +27,9 @@ from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
+    gc_collect_on_sync,
     maybe_attach_gc_debug_callback,
+    maybe_enable_manual_gc_control,
 )
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
@@ -213,6 +215,11 @@ class EngineCore:
         freeze_gc_heap()
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
+        # Enable manual GC control if configured.
+        # This disables automatic GC and triggers collection at controlled
+        # points (during CUDA stream sync) to avoid stop-the-world pauses
+        # during GPU kernel execution.
+        self._gc_controller = maybe_enable_manual_gc_control()
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
@@ -384,6 +391,11 @@ class EngineCore:
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
         ):
+            # Perform GC while CPU waits for GPU (hides GC latency).
+            # Hook point rationale: future.result() blocks until GPU
+            # completes execution - ideal time to run GC without
+            # affecting GPU kernel launch latency.
+            gc_collect_on_sync()
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
@@ -483,6 +495,8 @@ class EngineCore:
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
         ):
+            # Perform GC while CPU waits for GPU (hides GC latency).
+            gc_collect_on_sync()
             model_output = future.result()
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
