@@ -310,114 +310,9 @@ class NgramEmbedding(nn.Module):
         self,
         input_ids: torch.Tensor,
         ngram_context: torch.Tensor | None = None,
-        query_start_loc: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if input_ids.dim() == 1:
-            if query_start_loc is None:
-                raise ValueError("query_start_loc is required for flat N-gram input.")
-            query_start_loc = query_start_loc.to(
-                device=input_ids.device, dtype=torch.int64
-            )
-            num_reqs = query_start_loc.numel() - 1
-            eos_token_id = int(self.config.eos_token_id)
-
-            if ngram_context is None:
-                ngram_context = input_ids.new_full(
-                    (num_reqs, self.context_len), eos_token_id
-                )
-            elif ngram_context.shape != (num_reqs, self.context_len):
-                raise ValueError("ngram_context shape mismatch.")
-
-            x = self.word_embeddings(input_ids)
-            vocab_mods = self._precompute_vocab_mods()
-
-            token_positions = torch.arange(
-                input_ids.shape[0], device=input_ids.device, dtype=torch.int64
-            )
-            req_indices = torch.searchsorted(
-                query_start_loc[1:], token_positions, right=True
-            )
-            seq_start = query_start_loc[req_indices]
-            pos_in_seq = token_positions - seq_start
-
-            ctx_len = self.context_len
-            virtual_pos = pos_in_seq + ctx_len
-
-            eos_mask_input = input_ids == eos_token_id
-            eos_pos_rel = torch.where(
-                eos_mask_input,
-                pos_in_seq,
-                pos_in_seq.new_full(pos_in_seq.shape, -1),
-            )
-            offset = req_indices * (input_ids.shape[0] + ctx_len + 1)
-            eos_pos_rel_offset = eos_pos_rel + offset
-            last_eos_rel_offset = torch.cummax(eos_pos_rel_offset, dim=0).values
-            last_eos_input_rel = last_eos_rel_offset - offset
-            is_req_start = pos_in_seq == 0
-            prev_eos_input_rel = torch.where(
-                is_req_start,
-                pos_in_seq.new_full(pos_in_seq.shape, -1),
-                last_eos_input_rel.roll(1),
-            )
-            prev_eos_input_virtual = torch.where(
-                prev_eos_input_rel >= 0,
-                prev_eos_input_rel + ctx_len,
-                prev_eos_input_rel,
-            )
-
-            ctx_positions = torch.arange(
-                ctx_len, device=input_ids.device, dtype=torch.int64
-            )
-            ctx_eos = ngram_context == eos_token_id
-            ctx_eos_pos = torch.where(ctx_eos, ctx_positions, -1)
-            last_eos_context = ctx_eos_pos.max(dim=1).values
-            last_eos_context_for_token = last_eos_context[req_indices]
-
-            last_eos_virtual = torch.maximum(
-                last_eos_context_for_token, prev_eos_input_virtual
-            )
-            segment_start_virtual = last_eos_virtual + 1
-
-            ngram_range = range(2, self.n + 1)
-            shifted_ids = {}
-            for i in ngram_range:
-                shift = i - 1
-                src_virtual = virtual_pos - shift
-                valid = src_virtual >= segment_start_virtual
-                valid = valid & (src_virtual >= 0)
-
-                src_in_context = src_virtual < ctx_len
-                context_idx = src_virtual.clamp(min=0, max=ctx_len - 1)
-                context_vals = ngram_context[req_indices, context_idx]
-
-                src_abs = token_positions - shift
-                src_abs_clamped = src_abs.clamp(min=0)
-                input_vals = input_ids.gather(0, src_abs_clamped)
-
-                shifted = torch.where(src_in_context, context_vals, input_vals)
-                shifted = shifted.masked_fill(~valid, 0)
-                shifted_ids[i] = shifted
-
-            for i in ngram_range:
-                base = (i - 2) * self.k
-                for j in range(self.k):
-                    index = base + j
-                    emb_vocab_dim = int(self.m + index * 2 + 1)
-
-                    ngram_ids = self._get_ngram_ids(
-                        input_ids, shifted_ids, vocab_mods[(i, j)], ngram=i
-                    )
-                    new_ids = (ngram_ids % emb_vocab_dim).to(input_ids.dtype)
-
-                    x_ngram = self.embedders[index](new_ids)
-                    x_proj, _ = self.post_projs[index](x_ngram)
-                    x = x + x_proj
-
-            x = x / (1 + self.k * (self.n - 1))
-            return x
-
         if input_ids.dim() != 2:
-            raise ValueError("input_ids must be a 1D or 2D tensor.")
+            raise ValueError("input_ids must be a 2D tensor.")
 
         batch_size, seq_len = input_ids.shape
         eos_token_id = int(self.config.eos_token_id)
@@ -849,11 +744,23 @@ class FlashNgramModel(FlashModel):
         if input_ids.numel() == 0:
             return input_ids.new_empty((0, self.config.hidden_size))
 
-        return self.ngram_embeddings(
-            input_ids,
-            ngram_context=ngram_context,
-            query_start_loc=query_start_loc,
+        query_start_loc = query_start_loc.to(torch.int64)
+        num_reqs = query_start_loc.numel() - 1
+        lengths = query_start_loc[1:] - query_start_loc[:-1]
+        max_len = int(lengths.max().item())
+        eos_token_id = int(self.config.eos_token_id)
+
+        padded_input_ids = input_ids.new_full((num_reqs, max_len), eos_token_id)
+
+        token_positions = torch.arange(input_ids.shape[0], device=input_ids.device)
+        req_indices = torch.searchsorted(
+            query_start_loc[1:], token_positions, right=True
         )
+        col_indices = token_positions - query_start_loc[req_indices]
+        padded_input_ids[req_indices, col_indices] = input_ids
+
+        embeds = self.ngram_embeddings(padded_input_ids, ngram_context=ngram_context)
+        return embeds[req_indices, col_indices]
 
     def forward(
         self,

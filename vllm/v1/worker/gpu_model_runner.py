@@ -1745,6 +1745,41 @@ class GPUModelRunner(
         else:
             model_kwargs["ngram_context"] = self._prepare_ngram_context(num_reqs)
 
+    def _maybe_prepare_ngram_inputs_embeds(
+        self,
+        *,
+        input_ids: torch.Tensor | None,
+        inputs_embeds: torch.Tensor | None,
+        num_scheduled_tokens: int,
+        num_input_tokens: int,
+        model_kwargs: dict[str, Any],
+        is_first_rank: bool,
+        is_encoder_decoder: bool,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if (
+            not self.uses_ngram_embedding
+            or not is_first_rank
+            or is_encoder_decoder
+            or inputs_embeds is not None
+            or input_ids is None
+        ):
+            return input_ids, inputs_embeds
+
+        query_start_loc = model_kwargs.get("query_start_loc")
+        if query_start_loc is None:
+            raise RuntimeError("query_start_loc is required for N-gram input.")
+
+        inputs_embeds_scheduled = self.model.embed_input_ids(
+            input_ids[:num_scheduled_tokens],
+            query_start_loc=query_start_loc,
+            ngram_context=model_kwargs.get("ngram_context"),
+        )
+        self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
+        if num_input_tokens > num_scheduled_tokens:
+            self.inputs_embeds.gpu[num_scheduled_tokens:num_input_tokens].zero_()
+
+        return None, self.inputs_embeds.gpu[:num_input_tokens]
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -2898,6 +2933,15 @@ class GPUModelRunner(
             is_encoder_decoder=is_encoder_decoder,
             use_dummy_context=False,
             query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
+        )
+        input_ids, inputs_embeds = self._maybe_prepare_ngram_inputs_embeds(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_input_tokens=num_input_tokens,
+            model_kwargs=model_kwargs,
+            is_first_rank=is_first_rank,
+            is_encoder_decoder=is_encoder_decoder,
         )
 
         if self.uses_mrope:
@@ -4899,6 +4943,15 @@ class GPUModelRunner(
                 is_encoder_decoder=self.model_config.is_encoder_decoder,
                 use_dummy_context=True,
                 num_scheduled_tokens=num_scheduled_tokens,
+            )
+            input_ids, inputs_embeds = self._maybe_prepare_ngram_inputs_embeds(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                num_scheduled_tokens=num_tokens_unpadded,
+                num_input_tokens=num_tokens_padded,
+                model_kwargs=model_kwargs,
+                is_first_rank=get_pp_group().is_first_rank,
+                is_encoder_decoder=self.model_config.is_encoder_decoder,
             )
 
             if self.uses_mrope:
