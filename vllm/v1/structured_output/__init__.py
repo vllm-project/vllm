@@ -284,15 +284,10 @@ class StructuredOutputManager:
         # NOTE (Hanchen) if enable_in_reasoning is True, it means that
         # the model needs to be constrained in reasoning. So we should always
         # enable the bitmask filling.
-
         if self.reasoner is not None:
             if self.enable_in_reasoning:
                 return True
             assert request.structured_output_request is not None
-            if request.structured_output_request.reasoning_ended is None:
-                request.structured_output_request.reasoning_ended = (
-                    self.reasoner.is_reasoning_end(request.prompt_token_ids or [])
-                )
             return request.structured_output_request.reasoning_ended
         return True
 
