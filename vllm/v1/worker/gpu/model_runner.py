@@ -20,7 +20,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -168,6 +168,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
 
+        # Draft tokens propagation - for spec-dec + struct outputs.
+        self.draft_tokens_handler = DraftTokensHandler(self.device)
+
+        # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
     def update_max_model_len(self, max_model_len: int) -> None:
