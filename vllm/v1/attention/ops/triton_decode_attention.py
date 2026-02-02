@@ -295,7 +295,12 @@ def _fwd_grouped_kernel_stage1(
     cur_batch_req_idx = cur_batch
 
     offs_q = cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_d[None, :]
-    q = tl.load(Q + offs_q, mask=(mask_h[:, None]) & (mask_d[None, :]), other=0.0)
+    q = tl.load(
+        Q + offs_q,
+        mask=(mask_h[:, None]) & (mask_d[None, :]),
+        other=0.0,
+        cache_modifier=".ca",
+    )
 
     if BLOCK_DPE > 0:
         offs_dpe = BLOCK_DMODEL + tl.arange(0, BLOCK_DPE)
@@ -304,7 +309,10 @@ def _fwd_grouped_kernel_stage1(
             cur_batch * stride_qbs + cur_head[:, None] * stride_qh + offs_dpe[None, :]
         )
         qpe = tl.load(
-            Q + off_qpe, mask=(mask_h[:, None]) & (mask_dpe[None, :]), other=0.0
+            Q + off_qpe,
+            mask=(mask_h[:, None]) & (mask_dpe[None, :]),
+            other=0.0,
+            cache_modifier=".ca",
         )
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
@@ -316,7 +324,7 @@ def _fwd_grouped_kernel_stage1(
     acc = tl.zeros([BLOCK_H, BLOCK_DV], dtype=tl.float32)
 
     if split_kv_end > split_kv_start:
-        for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
+        for start_n in tl.range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
             kv_page_number = tl.load(
                 Req_to_tokens
@@ -324,8 +332,11 @@ def _fwd_grouped_kernel_stage1(
                 + offs_n // PAGE_SIZE,
                 mask=offs_n < split_kv_end,
                 other=0,
+                cache_modifier=".ca",
             )
             kv_loc = kv_page_number * PAGE_SIZE + offs_n % PAGE_SIZE
+
+            # load everything up front to explicitly facilitate overlapping computation later
             offs_buf_k = (
                 kv_loc[:, None] * stride_buf_kbs
                 + cur_kv_head * stride_buf_kh
@@ -335,7 +346,21 @@ def _fwd_grouped_kernel_stage1(
                 K_Buffer + offs_buf_k,
                 mask=(offs_n[:, None] < split_kv_end) & (mask_d[None, :]),
                 other=0.0,
+                cache_modifier=".cg",
             )
+
+            offs_buf_v = (
+                kv_loc[:, None] * stride_buf_vbs
+                + cur_kv_head * stride_buf_vh
+                + offs_dv[None, :]
+            )
+            v = tl.load(
+                V_Buffer + offs_buf_v,
+                mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
+                other=0.0,
+                cache_modifier=".cg",
+            )
+
             k = k.T
             qk = tl.dot(q, k.to(q.dtype))
             if BLOCK_DPE > 0:
@@ -348,6 +373,7 @@ def _fwd_grouped_kernel_stage1(
                     K_Buffer + offs_buf_kpe,
                     mask=(offs_n[:, None] < split_kv_end) & (mask_dpe[None, :]),
                     other=0.0,
+                    cache_modifier=".cg",
                 )
                 kpe = kpe.T
                 qk += tl.dot(qpe, kpe.to(qpe.dtype))
@@ -358,17 +384,6 @@ def _fwd_grouped_kernel_stage1(
 
             qk = tl.where(
                 mask_h[:, None] & (offs_n[None, :] < split_kv_end), qk, float("-inf")
-            )
-
-            offs_buf_v = (
-                kv_loc[:, None] * stride_buf_vbs
-                + cur_kv_head * stride_buf_vh
-                + offs_dv[None, :]
-            )
-            v = tl.load(
-                V_Buffer + offs_buf_v,
-                mask=(offs_n[:, None] < split_kv_end) & (mask_dv[None, :]),
-                other=0.0,
             )
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
