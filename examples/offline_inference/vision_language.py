@@ -270,6 +270,49 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
+    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+
+    assert modality == "image"
+
+    model_name = "deepseek-ai/DeepSeek-OCR-2"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        limit_mm_per_prompt={modality: 1},
+        logits_processors=[NGramPerReqLogitsProcessor],
+    )
+
+    # deepseek-ocr use plain prompt template
+    prompts = [f"<image>\n{question}" for question in questions]
+
+    # The following sampling params config is taken from
+    # the official Deepseek-OCR inference example.
+    # (IMPORTANT) Use the custom logits processor and avoid skipping
+    # special tokens for this model for the optimal OCR performance.
+    sampling_params = [
+        SamplingParams(
+            temperature=0.0,
+            max_tokens=8192,
+            # ngram logit processor args
+            extra_args=dict(
+                ngram_size=30,
+                window_size=90,
+                # whitelist: <td>, </td>
+                whitelist_token_ids={128821, 128822},
+            ),
+            skip_special_tokens=False,
+        )
+        for _ in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        sampling_params=sampling_params,
+    )
+
+
 # Dots-OCR
 def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -944,6 +987,31 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
         max_model_len=4096,
         limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Kimi-VL
+def run_kimi_k25(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "vision_chunk"
+
+    prompts = [
+        "<|im_user|>user<|media_begin|>image<|media_content|>"
+        f"<|media_pad|><|media_end|>{question}<|im_end|>"
+        "<|im_assistant|>assistant<|im_middle|>"
+        for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+        tensor_parallel_size=4,
     )
 
     return ModelRequestData(
@@ -2045,6 +2113,7 @@ model_example_map = {
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "deepseek_ocr": run_deepseek_ocr,
+    "deepseek_ocr2": run_deepseek_ocr2,
     "dots_ocr": run_dots_ocr,
     "eagle2_5": run_eagle2_5,
     "ernie45_vl": run_ernie45_vl,
@@ -2066,6 +2135,7 @@ model_example_map = {
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
+    "kimi_k25": run_kimi_k25,
     "lightonocr": run_lightonocr,
     "lfm2_vl": run_lfm2_vl,
     "llama4": run_llama4,
@@ -2152,6 +2222,19 @@ def get_multi_modal_input(args):
             "questions": vid_questions,
         }
 
+    if args.modality == "vision_chunk":
+        # Input vision chunks and question
+        image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
+        vision_chunk_questions = [
+            "What is the content of this image chunk?",
+            "Describe the content of this image chunk in detail.",
+        ]
+
+        return {
+            "data": {"type": "image", "image": image},
+            "questions": vision_chunk_questions,
+        }
+
     msg = f"Modality {args.modality} is not supported."
     raise ValueError(msg)
 
@@ -2234,7 +2317,7 @@ def parse_args():
         "--modality",
         type=str,
         default="image",
-        choices=["image", "video"],
+        choices=["image", "video", "vision_chunk"],
         help="Modality of the input.",
     )
     parser.add_argument(
@@ -2311,7 +2394,7 @@ def main(args):
     req_data = model_example_map[model](questions, modality)
 
     # Disable other modalities to save memory
-    default_limits = {"image": 0, "video": 0, "audio": 0}
+    default_limits = {"image": 0, "video": 0, "audio": 0, "vision_chunk": 0}
     req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
         req_data.engine_args.limit_mm_per_prompt or {}
     )
