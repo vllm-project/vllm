@@ -15,8 +15,10 @@ while [[ $# -gt 0 ]]; do
       ATTENTION_BACKEND="$2"
       shift 2
       ;;
-    --enable-cross-layers
+    --enable-cross-layers)
       CROSS_LAYERS_BLOCKS="True"
+      shift 1
+      ;;
     *)
       echo "Unknown option $1"
       echo "Usage: $0 [--kv_buffer_device <cuda|cpu>] [--attention-backend <backend>]"
