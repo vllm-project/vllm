@@ -450,6 +450,7 @@ class LLM:
             lora_request=lora_request,
             priority=priority,
             use_tqdm=use_tqdm,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return self.wait_for_completion(use_tqdm=use_tqdm)
@@ -461,6 +462,7 @@ class LLM:
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
         """Enqueue prompts for generation without waiting for completion.
 
@@ -474,6 +476,7 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             priority: The priority of the requests, if any.
             use_tqdm: If True, shows a tqdm progress bar while adding requests.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
 
         Returns:
             A list of request IDs for the enqueued requests.
