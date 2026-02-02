@@ -198,7 +198,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
                 moe_parallel_config=self.moe.moe_parallel_config,
             )
 
-            logger.info_once(
+            logger.debug_once(
                 "Selected %s for %s",
                 type(experts).__name__,
                 type(self).__name__,

@@ -238,12 +238,14 @@ class MoeOnlineWeightLoader:
             if layer._loaded_numel == target_loaded_numel:
                 self.process_weights_after_loading(layer)
 
-                # Delete the bookkeeping
-                del layer._loaded_numel
-                del layer._w13_weight_orig_id
-                del layer._w2_weight_orig_id
                 # Prevent the usual `process_weights_after_loading` call
                 layer._already_called_process_weights_after_loading = True
+
+                # Note that we keep `layer._loaded_numel`,
+                # `layer._w13_weight_orig_id` and `layer._w2_weight_orig_id`
+                # around because if EP is on, weight loaders for non-local
+                # experts will run but not actually copy any elements, and we
+                # need to not re-initialize in that case.
 
             return res
 

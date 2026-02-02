@@ -591,11 +591,14 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             if layer._loaded_numel == target_loaded_numel:
                 self.process_weights_after_loading(layer)
 
-                # Delete the bookkeeping
-                del layer._loaded_numel
                 # Prevent the usual `process_weights_after_loading` call from doing
                 # anything
                 layer._already_called_process_weights_after_loading = True
+
+                # Note that we keep `layer._loaded_numel` around just in case
+                # there is logic added to vllm in the future which calls a
+                # weight loader twice - we do not want to re-initialize in
+                # that case.
 
             return res
 
