@@ -226,7 +226,7 @@ def _topk_topp_kernel(
                             max_range = k_pivot_0
                         elif k_pivots_num_1 < k:
                             max_range = k_pivot_1
-                            
+
                         num_iters += 1
                         if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-9:
                             k_pivot = (max_range + min_range) / 2.0
@@ -564,7 +564,7 @@ def _topk_topp_kernel(
 
                         # Top-k + Top-p path
                         final_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
-                        
+
         if TOPP_ENABLED and final_pivot == -float("inf"):
             #### STANDALONE TOP-P SAMPLING ####
             p = tl.load(P + row_id)
