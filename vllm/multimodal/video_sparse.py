@@ -26,7 +26,7 @@ class SimilarFrameDetector:
         Args:
             sparse_ratio: Ratio of frames to keep (0-1)
             use_downsampled_loss: Whether to compute loss on
-            downsampled frames (speed up)
+            downsampled frames
             downscale_factor: Downscale ratio for frame resolution
             alpha: Weight coefficient for SSIM loss (1-alpha for L1 loss)
         """
