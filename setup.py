@@ -909,6 +909,10 @@ def get_vllm_version() -> str:
     else:
         raise RuntimeError("Unknown runtime environment")
 
+    # Add fork identifier to distinguish from upstream builds
+    sep = "." if "+" in version else "+"
+    version += f"{sep}mgehre"
+
     return version
 
 
