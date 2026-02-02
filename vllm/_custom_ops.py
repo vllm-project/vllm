@@ -1264,7 +1264,7 @@ def marlin_gemm(
     )
 
 
-if has_hop("marlin_gemm"):
+if has_op("marlin_gemm"):
 
     @register_fake("_C::marlin_gemm")
     def _marlin_gemm_fake(
