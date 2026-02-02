@@ -5,7 +5,9 @@
 set -exuo pipefail
 
 # Try building the docker image
-cat <<EOF | docker build -t hpu-plugin-v1-test-env -f - .
+image_name="hpu/upstream-vllm-ci:${BUILDKITE_COMMIT}"
+container_name="hpu-upstream-vllm-ci-${BUILDKITE_COMMIT}-container"
+cat <<EOF | docker build -t ${image_name} -f - .
 FROM gaudi-base-image:latest
 
 COPY ./ /workspace/vllm
@@ -15,7 +17,8 @@ WORKDIR /workspace/vllm
 ENV no_proxy=localhost,127.0.0.1
 ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 
-RUN VLLM_TARGET_DEVICE=empty pip install .
+RUN bash -c 'pip install -r <(sed "/^torch/d" requirements/build.txt)'
+RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
 RUN pip install git+https://github.com/vllm-project/vllm-gaudi.git
 
 # install development dependencies (for testing)
@@ -36,15 +39,20 @@ EOF
 # functions, while other platforms only need one remove_docker_container
 # function.
 EXITCODE=1
-remove_docker_containers() { docker rm -f hpu-plugin-v1-test || true; }
+remove_docker_containers() { docker rm -f ${container_name} || true; }
 trap 'remove_docker_containers; exit $EXITCODE;' EXIT
 remove_docker_containers
 
 echo "Running HPU plugin v1 test"
-docker run --rm --runtime=habana --name=hpu-plugin-v1-test --network=host \
+docker run --rm --runtime=habana --name=${container_name} --network=host \
   -e HABANA_VISIBLE_DEVICES=all \
-  hpu-plugin-v1-test-env \
-  /bin/bash "/workspace/vllm-gaudi/tests/upstream_tests/ci_tests.sh"
+  -e VLLM_SKIP_WARMUP=true \
+  -e PT_HPU_ENABLE_LAZY_COLLECTIVES=true \
+  -e PT_HPU_LAZY_MODE=1 \
+  "${image_name}" \
+  /bin/bash -c '
+  cd vllm; timeout 120s python -u examples/offline_inference/basic/generate.py --model facebook/opt-125m
+'
 
 EXITCODE=$?
 if [ $EXITCODE -eq 0 ]; then
