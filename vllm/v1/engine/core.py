@@ -1329,9 +1329,10 @@ class EngineCoreProc(EngineCore):
                 outputs.engine_index = engine_index
 
                 if client_index == -1:
-                    # broadcast message (e.g., stats, wave info) - send to coordinator
-                    if coord_socket is not None:
-                        coord_socket.send_multipart(encoder.encode(outputs))
+                    # Don't reuse buffer for coordinator message
+                    # which will be very small.
+                    assert coord_socket is not None
+                    coord_socket.send_multipart(encoder.encode(outputs))
                     continue
 
                 # Reclaim buffers that zmq is finished with.
