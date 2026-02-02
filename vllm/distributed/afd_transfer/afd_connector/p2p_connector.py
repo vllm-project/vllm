@@ -279,7 +279,6 @@ class P2PAFDConnector(AFDConnectorBase):
         if pynccl_comm and not pynccl_comm.disabled:
             # PyNCCL uses rank in group
             logger.info(f"jcz send_hidden_states using pynccl dst:{dst}")
-            torch.cuda.synchronize()
             pynccl_comm.send(hidden_states, dst)
         else:
             raise RuntimeError("PyNCCL communicator is required but not available.")
@@ -310,7 +309,6 @@ class P2PAFDConnector(AFDConnectorBase):
         if pynccl_comm and not pynccl_comm.disabled:
             # PyNCCL uses rank in group
             logger.info(f"jcz recv_hidden_states using pynccl src:{src}")
-            torch.cuda.synchronize()
             pynccl_comm.recv(hidden_states, src)
         else:
             raise RuntimeError("PyNCCL communicator is required but not available.")
@@ -412,7 +410,7 @@ class P2PAFDConnector(AFDConnectorBase):
         self._current_afd_connector_metadata.stage_idx = stage_idx
         return hidden_states, self._current_afd_connector_metadata
 
-    def send_is_ubatch(self, data):
+    def send_dp_metadata_list(self, data):
         for dst in self.dst_list:
             object_bytes = pickle.dumps(data)
             object_tensor_cpu = torch.frombuffer(bytearray(object_bytes), dtype=torch.uint8)
@@ -425,13 +423,13 @@ class P2PAFDConnector(AFDConnectorBase):
             size_tensor = torch.tensor([object_tensor_cpu.numel()],
                                         dtype=torch.long,
                                         device="cuda")
-            logger.info(f"jcz send_is_ubatch dst:{dst} self.p2p_rank:{self.p2p_rank}")
+            logger.info(f"jcz send_dp_metadata_list dst:{dst} self.p2p_rank:{self.p2p_rank}")
             torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
             torch.distributed.send(object_tensor_gpu, dst=dst, group=self.p2p_pg)
     
-    def recv_is_ubatch(self):
+    def recv_dp_metadata_list(self):
         src = self.p2p_rank % self.min_size + self.ffn_size
-        logger.info(f"jcz recv_is_ubatch src:{src} self.p2p_rank:{self.p2p_rank}")
+        logger.info(f"jcz recv_dp_metadata_list src:{src} self.p2p_rank:{self.p2p_rank}")
 
         size_tensor = torch.empty(1, dtype=torch.long, device="cuda")
         rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)
