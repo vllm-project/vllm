@@ -136,7 +136,7 @@ You can skip applying chat template if your data already has it by using `--cust
 
 #### Custom mulmtimodal dataset
 
-If the mulmimodal dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomMM\Dataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" and "image_files" field per entry, e.g., mm_data.jsonl
+If the muliimodal dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomMMDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" and "image_files" field per entry, e.g., `mm_data.jsonl`:
 
 ```json
 {"prompt": "How many animals are present in the given image?", "image_files": ["/path/to/image/folder/horsepony.jpg"]}
