@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterable, Mapping, MutableSequence
+import asyncio
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, MutableSequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     TYPE_CHECKING,
@@ -521,6 +522,8 @@ class SupportsLoRA(Protocol):
     # are empty by default.
     embedding_modules: ClassVar[dict[str, str]] = {}
     packed_modules_mapping: dict[str, list[str]] = {}
+    # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
+    lora_skip_prefixes: ClassVar[list[str]] = []
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -603,6 +606,8 @@ class SupportsPP(Protocol):
 
     def forward(
         self,
+        input_ids: Tensor | None,
+        positions: Tensor,
         *,
         intermediate_tensors: IntermediateTensors | None,
     ) -> IntermediateTensors | None:
@@ -631,6 +636,8 @@ class _SupportsPPType(Protocol):
 
     def forward(
         self,
+        input_ids: Tensor | None,
+        positions: Tensor,
         *,
         intermediate_tensors: IntermediateTensors | None,
     ) -> Tensor | IntermediateTensors: ...
@@ -1010,6 +1017,37 @@ class SupportsQuant:
 
 
 @runtime_checkable
+class SupportsRealtime(Protocol):
+    """The interface required for all models that support transcription."""
+
+    supports_realtime: ClassVar[Literal[True]] = True
+
+    @classmethod
+    async def buffer_realtime_audio(
+        cls,
+        audio_stream: AsyncGenerator[np.ndarray, None],
+        input_stream: asyncio.Queue[list[int]],
+        model_config: ModelConfig,
+    ) -> AsyncGenerator[PromptType, None]: ...
+
+
+@overload
+def supports_realtime(
+    model: type[object],
+) -> TypeIs[type[SupportsRealtime]]: ...
+
+
+@overload
+def supports_realtime(model: object) -> TypeIs[SupportsRealtime]: ...
+
+
+def supports_realtime(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsRealtime]] | TypeIs[SupportsRealtime]:
+    return getattr(model, "supports_realtime", False)
+
+
+@runtime_checkable
 class SupportsTranscription(Protocol):
     """The interface required for all models that support transcription."""
 
@@ -1106,6 +1144,22 @@ class SupportsTranscription(Protocol):
         This is used for estimating the amount of processing for this audio.
         """
         return None
+
+    @classmethod
+    def post_process_output(cls, text: str) -> str:
+        """
+        Post-process the raw model output text.
+
+        Some ASR models output structured formats (e.g., language tags,
+        special tokens) that need to be stripped before returning to the user.
+
+        Args:
+            text: Raw decoded text from the model.
+
+        Returns:
+            Cleaned transcription text.
+        """
+        return text
 
 
 @overload

@@ -21,7 +21,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import RendererLike
+from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
@@ -332,6 +332,14 @@ class LLMEngine:
             reset_running_requests, reset_connector
         )
 
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings computed with old weights are not reused.
+        """
+        self.engine_core.reset_encoder_cache()
+
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 
@@ -359,7 +367,7 @@ class LLMEngine:
         return self.input_processor.get_tokenizer()
 
     @property
-    def renderer(self) -> RendererLike:
+    def renderer(self) -> BaseRenderer:
         return self.input_processor.renderer
 
     def do_log_stats(self) -> None:

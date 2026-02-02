@@ -124,7 +124,7 @@ class KVConnectorPromMetrics:
         self._counter_cls = metric_types[Counter]
         self._histogram_cls = metric_types[Histogram]
         self._labelnames = labelnames
-        self._per_engine_labelvalues = per_engine_labelvalues
+        self.per_engine_labelvalues = per_engine_labelvalues
 
     def make_per_engine(self, metric: PromMetric) -> dict[int, PromMetric]:
         """
@@ -134,7 +134,7 @@ class KVConnectorPromMetrics:
         """
         return {
             idx: metric.labels(*labelvalues)
-            for idx, labelvalues in self._per_engine_labelvalues.items()
+            for idx, labelvalues in self.per_engine_labelvalues.items()
         }
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):

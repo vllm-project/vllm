@@ -174,7 +174,7 @@ class TestStreamingScheduler(unittest.TestCase):
         scheduler = create_scheduler()
 
         mm_feature = MultiModalFeatureSpec(
-            data=MultiModalKwargsItem.dummy("audio"),
+            data=MultiModalKwargsItem.dummy(),
             modality="audio",
             identifier="",
             mm_position=PlaceholderRange(offset=1, length=1),
@@ -187,7 +187,7 @@ class TestStreamingScheduler(unittest.TestCase):
         session.num_computed_tokens = len(session.prompt_token_ids)
 
         mm_feature = MultiModalFeatureSpec(
-            data=MultiModalKwargsItem.dummy("audio"),
+            data=MultiModalKwargsItem.dummy(),
             modality="audio",
             identifier="",
             mm_position=PlaceholderRange(offset=2, length=1),

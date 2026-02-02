@@ -21,7 +21,6 @@ from tests.compile.fusion_test_utils import (
 from tests.utils import flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.attention.layer import Attention
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.matcher_utils import QUANT_OPS
@@ -40,6 +39,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,

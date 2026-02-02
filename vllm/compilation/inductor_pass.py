@@ -16,21 +16,10 @@ import torch
 from torch import fx
 from torch._subclasses.fake_tensor import FakeTensorMode, unset_fake_temporarily
 
-from vllm.utils.torch_utils import is_torch_equal_or_newer
-
 if TYPE_CHECKING:
     from vllm.config.utils import Range
 
-if is_torch_equal_or_newer("2.6"):
-    from torch._inductor.custom_graph_pass import CustomGraphPass
-else:
-    # CustomGraphPass is not present in 2.5 or lower, import our version
-    from .torch25_custom_graph_pass import (
-        Torch25CustomGraphPass as CustomGraphPass,
-    )
-
-# Re-export CustomGraphPass for external usage
-__all__ = ["CustomGraphPass"]
+from torch._inductor.custom_graph_pass import CustomGraphPass
 
 _pass_context = None
 P = ParamSpec("P")

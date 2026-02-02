@@ -662,7 +662,7 @@ class LlavaForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -769,7 +769,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         mm_uuids: MultiModalUUIDDict | None = None,
@@ -785,13 +785,12 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
         result = super().apply(
             prompt,
-            mm_data,
+            mm_items,
             hf_processor_mm_kwargs,
             tokenization_kwargs,
             mm_uuids=mm_uuids,
         )
 
-        mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
         mm_kwargs = result["mm_kwargs"]
         mm_hashes = result["mm_hashes"]

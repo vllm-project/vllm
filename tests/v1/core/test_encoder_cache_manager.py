@@ -4,7 +4,10 @@ import pytest
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
-from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.core.encoder_cache_manager import (
+    EncoderCacheManager,
+    EncoderDecoderCacheManager,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -247,3 +250,88 @@ def test_encoder_cache_mask_based_retrieval():
 
     assert num_embeds_before == 0
     assert num_embeds_in_range == 2
+
+
+def test_reset_clears_all_state():
+    """Test that reset() clears all cached entries and restores capacity."""
+    manager = EncoderCacheManager(cache_size=20)
+
+    req1 = MockRequest("req1", ["img1", "img2"], [5, 3])
+    req2 = MockRequest("req2", ["img3"], [4])
+
+    manager.allocate(req1, 0)
+    manager.allocate(req1, 1)
+    manager.allocate(req2, 0)
+    manager.free_encoder_input(req1, 0)
+
+    req3 = MockRequest("req3", ["img4"], [10])
+    manager.free_encoder_input(req1, 1)
+    manager.free_encoder_input(req2, 0)
+    manager.can_allocate(req3, 0, int(1e9), 0)
+    manager.allocate(req3, 0)
+
+    assert len(manager.cached) > 0
+    assert manager.num_free_slots < 20
+
+    manager.reset()
+
+    assert len(manager.cached) == 0
+    assert len(manager.freeable) == 0
+    assert len(manager.freed) == 0
+    assert manager.num_free_slots == 20
+    assert manager.num_freeable_slots == 20
+
+
+def test_reset_allows_fresh_allocations():
+    manager = EncoderCacheManager(cache_size=10)
+
+    req1 = MockRequest("req1", ["img1"], [10])
+    manager.allocate(req1, 0)
+    assert manager.num_free_slots == 0
+
+    manager.reset()
+
+    req2 = MockRequest("req2", ["img2"], [8])
+    assert manager.can_allocate(req2, 0, int(1e9), 0)
+    manager.allocate(req2, 0)
+
+    assert manager.num_free_slots == 2
+    assert "img2" in manager.cached
+    assert "img1" not in manager.cached
+
+
+def test_encoder_decoder_cache_manager_reset():
+    manager = EncoderDecoderCacheManager(cache_size=20)
+
+    req1 = MockRequest("req1", ["img1"], [5])
+    req2 = MockRequest("req2", ["img2"], [3])
+
+    manager.allocate(req1, 0)
+    manager.allocate(req2, 0)
+    manager.free(req1)
+    manager.get_freed_mm_hashes()
+
+    assert manager.num_free_slots < 20
+
+    manager.reset()
+
+    assert len(manager.allocated) == 0
+    assert len(manager.to_free) == 0
+    assert manager.num_free_slots == 20
+
+
+def test_encoder_decoder_cache_manager_reset_allows_fresh_allocations():
+    manager = EncoderDecoderCacheManager(cache_size=10)
+
+    req1 = MockRequest("req1", ["img1"], [10])
+    manager.allocate(req1, 0)
+    assert manager.num_free_slots == 0
+
+    manager.reset()
+
+    req2 = MockRequest("req2", ["img2"], [8])
+    assert manager.can_allocate(req2, 0, int(1e9), 0)
+    manager.allocate(req2, 0)
+
+    assert manager.num_free_slots == 2
+    assert "img2" in manager.allocated

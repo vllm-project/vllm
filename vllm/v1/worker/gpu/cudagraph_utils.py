@@ -24,12 +24,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 
 class CudaGraphManager:
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        uses_mrope: bool,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, uses_mrope: bool, device: torch.device):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
         self.uses_mrope = uses_mrope
@@ -50,10 +45,7 @@ class CudaGraphManager:
         self.hidden_states: torch.Tensor | None = None
 
     def set_cudagraph_mode_and_sizes(self) -> None:
-        if self.compilation_config.cudagraph_mode is None:
-            self.cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            self.cudagraph_mode = self.compilation_config.cudagraph_mode
+        self.cudagraph_mode = self.compilation_config.cudagraph_mode
         self.cudagraph_sizes = get_cudagraph_sizes(
             self.compilation_config.cudagraph_capture_sizes,
             self.max_num_reqs,

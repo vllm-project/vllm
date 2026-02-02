@@ -19,10 +19,10 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention.encoder_only_attention import (
+from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
+    MMEncoderAttention,
 )
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -187,20 +187,20 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        if prompt and mm_data:
+        if prompt and mm_items:
             raise ValueError(
                 "Siglip accepts text-only or image-only inputs, not both! "
                 "Image-only inputs means passing an image with an empty text "
                 "prompt."
             )
 
-        if mm_data:
+        if mm_items:
             # For multi-modal data, the prompt after processing should
             # only contain the image token
             tokenization_kwargs = {
@@ -210,7 +210,7 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
 
         return super().apply(
             prompt=prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,

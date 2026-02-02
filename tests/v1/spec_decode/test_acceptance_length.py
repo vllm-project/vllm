@@ -35,6 +35,10 @@ class Eagle3ModelConfig:
     id: str = ""
     # Backends that are incompatible with this model (will be skipped)
     excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
+    # Pytest marks for this configuration (e.g., pytest.mark.optional)
+    marks: list = field(default_factory=list)
+    # Custom relative tolerance (defaults to DEFAULT_RTOL if None)
+    rtol: float | None = None
 
 
 # Model configurations for EAGLE3 acceptance length tests.
@@ -64,6 +68,17 @@ EAGLE3_MODEL_CONFIGS = [
         # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
         # FLASHINFER does not support ("sink setting not supported")
         excluded_backends={AttentionBackendEnum.FLASHINFER},
+    ),
+    Eagle3ModelConfig(
+        verifier="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        drafter="nm-testing/Speculator-Qwen3-30B-MOE-VL-Eagle3",
+        expected_acceptance_length=1.35,
+        expected_acceptance_lengths_per_pos=[0.2900, 0.0620, 0.0115],
+        id="qwen3-30b-moe-vl-eagle3",
+        marks=[
+            pytest.mark.slow_test,
+        ],
+        rtol=0.15,  # Higher tolerance due to small absolute values at position 2
     ),
 ]
 
@@ -194,9 +209,16 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
 
 
 @large_gpu_mark(min_gb=40)
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="This test is only supported on CUDA platform.",
+)
 @pytest.mark.parametrize(
     "model_config",
-    [pytest.param(config, id=config.id) for config in EAGLE3_MODEL_CONFIGS],
+    [
+        pytest.param(config, id=config.id, marks=config.marks)
+        for config in EAGLE3_MODEL_CONFIGS
+    ],
 )
 @pytest.mark.parametrize("num_spec_tokens", [DEFAULT_NUM_SPEC_TOKENS])
 @pytest.mark.parametrize("tp_size", get_tp_size_params())
@@ -251,6 +273,7 @@ def test_eagle3_acceptance_length(
 
             rel_error = abs(actual_acceptance_length - expected) / expected
 
+            # Overall acceptance length always uses DEFAULT_RTOL
             assert rel_error <= DEFAULT_RTOL, (
                 f"Acceptance length regression detected for {model_config.id}!\n"
                 f"  Expected: {expected:.3f}\n"
@@ -261,18 +284,22 @@ def test_eagle3_acceptance_length(
             )
 
             if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
+                # Per-position checks use model-specific rtol if provided
+                rtol = (
+                    model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
+                )
                 for pos, (actual, exp) in enumerate(
                     zip(actual_per_pos, expected_per_pos)
                 ):
                     if exp > 0:
                         pos_rel_error = abs(actual - exp) / exp
-                        assert pos_rel_error <= DEFAULT_RTOL, (
+                        assert pos_rel_error <= rtol, (
                             f"Per-position acceptance length regression at pos {pos} "
                             f"for {model_config.id}!\n"
                             f"  Expected: {exp:.3f}\n"
                             f"  Actual:   {actual:.3f}\n"
                             f"  Relative error: {pos_rel_error:.2%} "
-                            f"(tolerance: {DEFAULT_RTOL:.2%})"
+                            f"(tolerance: {rtol:.2%})"
                         )
 
             print(

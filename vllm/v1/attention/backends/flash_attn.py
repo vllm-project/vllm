@@ -9,7 +9,7 @@ from typing import ClassVar
 import numpy as np
 import torch
 
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -256,6 +256,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: "AttentionSpec",
+    ) -> AttentionCGSupport:
+        return cls._cudagraph_support
 
     def __init__(
         self,

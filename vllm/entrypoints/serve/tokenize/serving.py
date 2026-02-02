@@ -9,12 +9,9 @@ from fastapi import Request
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -83,21 +80,17 @@ class OpenAIServingTokenization(OpenAIServing):
 
                 _, engine_prompts = await self._preprocess_chat(
                     request,
-                    self.renderer,
                     request.messages,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=None,
                     tool_dicts=tool_dicts,
-                    chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    add_special_tokens=request.add_special_tokens,
                 )
             else:
-                renderer = self._get_completion_renderer()
-                engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=request.prompt,
-                    config=self._build_render_config(request),
+                engine_prompts = await self._preprocess_completion(
+                    request,
+                    prompt_input=request.prompt,
+                    prompt_embeds=None,
                 )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -106,11 +99,14 @@ class OpenAIServingTokenization(OpenAIServing):
         input_ids: list[int] = []
         for engine_prompt in engine_prompts:
             self._log_inputs(
-                request_id, engine_prompt, params=None, lora_request=lora_request
+                request_id,
+                engine_prompt,
+                params=None,
+                lora_request=lora_request,
             )
 
-            if isinstance(engine_prompt, dict) and "prompt_token_ids" in engine_prompt:
-                input_ids.extend(engine_prompt["prompt_token_ids"])
+            if "prompt_token_ids" in engine_prompt:
+                input_ids.extend(engine_prompt["prompt_token_ids"])  # type: ignore[typeddict-item]
 
         token_strs = None
         if request.return_token_strs:
@@ -136,7 +132,6 @@ class OpenAIServingTokenization(OpenAIServing):
         request_id = f"tokenize-{self._base_request_id(raw_request)}"
 
         lora_request = self._maybe_get_adapters(request)
-        tokenizer = self.renderer.get_tokenizer()
 
         self._log_inputs(
             request_id,
@@ -145,14 +140,13 @@ class OpenAIServingTokenization(OpenAIServing):
             lora_request=lora_request,
         )
 
-        prompt_input = await self._tokenize_prompt_input_async(
-            request,
-            tokenizer,
-            request.tokens,
+        engine_prompt = await self.renderer.tokenize_prompt_async(
+            TokensPrompt(prompt_token_ids=request.tokens),
+            request.build_tok_params(self.model_config),
         )
-        input_text = prompt_input["prompt"]
+        prompt_text = engine_prompt["prompt"]  # type: ignore[typeddict-item]
 
-        return DetokenizeResponse(prompt=input_text)
+        return DetokenizeResponse(prompt=prompt_text)
 
     async def get_tokenizer_info(
         self,
@@ -164,9 +158,6 @@ class OpenAIServingTokenization(OpenAIServing):
             return TokenizerInfoResponse(**info)
         except Exception as e:
             return self.create_error_response(f"Failed to get tokenizer info: {str(e)}")
-
-    def _build_render_config(self, request: TokenizeRequest) -> RenderConfig:
-        return RenderConfig(add_special_tokens=request.add_special_tokens)
 
 
 @dataclass

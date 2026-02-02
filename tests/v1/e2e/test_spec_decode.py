@@ -455,7 +455,7 @@ def test_eagle_correctness(
         from packaging.version import Version
 
         installed = Version(transformers.__version__)
-        required = Version("5.0.0.dev")
+        required = Version("5.0.0")
         if installed < required:
             pytest.skip(
                 "Eagle3 with the Transformers modeling backend requires "
