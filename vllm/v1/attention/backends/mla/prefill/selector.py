@@ -138,31 +138,26 @@ def get_mla_prefill_backend(
             )
 
     # Auto-select based on priority
-    # Pass major/minor as ints for caching (DeviceCapability isn't hashable)
     return _auto_select_mla_prefill_backend(
-        device_capability.major,
-        device_capability.minor,
+        device_capability,
         selector_config,
     )
 
 
 @cache
 def _auto_select_mla_prefill_backend(
-    major: int,
-    minor: int,
+    device_capability: DeviceCapability,
     selector_config: MLAPrefillSelectorConfig,
 ) -> "type[MLAPrefillBackend]":
     """Auto-select the best available MLA prefill backend.
 
     Args:
-        major: Device capability major version (for cache key).
-        minor: Device capability minor version (for cache key).
+        device_capability: The device's compute capability.
         selector_config: Hashable configuration for backend selection.
 
     Returns:
         The selected prefill backend class.
     """
-    device_capability = DeviceCapability(major=major, minor=minor)
     priorities = _get_mla_prefill_backend_priorities(device_capability)
 
     for backend_enum in priorities:
