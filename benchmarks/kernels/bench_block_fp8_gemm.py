@@ -80,7 +80,7 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
     )
 
     def run():
-        return linear_op.apply(
+        return linear_op.apply_weights(
             input=A_ref,
             weight=B,
             weight_scale=Bs,

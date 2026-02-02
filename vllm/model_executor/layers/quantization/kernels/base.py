@@ -10,7 +10,7 @@ from typing_extensions import Self
 
 
 @dataclass
-class CustomKernelConfig: ...
+class MMLinearLayerConfig: ...
 
 
 @dataclass
@@ -75,7 +75,7 @@ class Int8Params(Params):
 
 
 _ParamsT = TypeVar("_ParamsT", bound=Params)
-_ConfigT = TypeVar("_ConfigT", bound=CustomKernelConfig)
+_ConfigT = TypeVar("_ConfigT", bound=MMLinearLayerConfig)
 
 
 class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
@@ -107,7 +107,7 @@ class MMLinearKernel(ABC, Generic[_ConfigT, _ParamsT]):
         return None
 
     @abstractmethod
-    def apply(
+    def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
@@ -196,7 +196,7 @@ class DynamicMMLinearKernel(
     ) -> bool:
         raise NotImplementedError
 
-    def apply(
+    def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
@@ -213,7 +213,7 @@ class DynamicMMLinearKernel(
 
         return torch.cond(
             self.predicate(layer, x, bias),
-            self.base.apply,
-            self.fallback.apply,
+            self.base.apply_weights,
+            self.fallback.apply_weights,
             (layer, x, bias),
         )

@@ -1455,4 +1455,4 @@ class TestBlockFP8Layer(torch.nn.Module):
     def forward(
         self, y: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
-        return self.kernel.apply(self, y, bias)
+        return self.kernel.apply_weights(self, y, bias)

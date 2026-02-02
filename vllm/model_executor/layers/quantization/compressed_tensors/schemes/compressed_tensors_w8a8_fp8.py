@@ -199,7 +199,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.weight_block_size is not None:
-            return self.w8a8_block_fp8_linear.apply(
+            return self.w8a8_block_fp8_linear.apply_weights(
                 layer,
                 x,
                 bias,

@@ -23,7 +23,7 @@ class AiterBlockScaledMMKernel(Fp8BlockScaledMMKernel):
     def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
         return [TritonBlockScaledMMKernel]
 
-    def apply(
+    def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,

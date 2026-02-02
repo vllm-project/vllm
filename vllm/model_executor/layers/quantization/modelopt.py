@@ -698,7 +698,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.w8a8_block_fp8_linear.apply(
+        return self.w8a8_block_fp8_linear.apply_weights(
             layer,
             x,
             bias,

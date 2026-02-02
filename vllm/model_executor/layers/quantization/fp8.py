@@ -488,7 +488,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if vllm_is_batch_invariant():
             if self.block_quant:
                 assert self.weight_block_size is not None
-                return self.w8a8_block_fp8_linear.apply(
+                return self.w8a8_block_fp8_linear.apply_weights(
                     layer,
                     x,
                     bias,
@@ -537,7 +537,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             assert self.weight_block_size is not None
 
-            return self.w8a8_block_fp8_linear.apply(
+            return self.w8a8_block_fp8_linear.apply_weights(
                 layer,
                 x,
                 bias,
