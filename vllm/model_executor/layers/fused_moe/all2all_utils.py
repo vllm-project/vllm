@@ -112,6 +112,7 @@ def maybe_make_prepare_finalize(
                 num_dispatchers=(
                     get_ep_group().device_communicator.all2all_manager.world_size
                 ),
+                use_monolithic=use_monolithic,
             )
         else:
             return MoEPrepareAndFinalizeNoEPBase.make(use_monolithic)
