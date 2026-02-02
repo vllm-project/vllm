@@ -110,6 +110,11 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLA V1 with FP8 KV cache not yet supported"
             )
 
+        # Pre-compute sm_count to avoid recomputing it. Use device 0 as a proxy
+        # (assumes all devices are similar)
+        properties = torch.cuda.get_device_properties(torch.device("cuda:0"))
+        self._sm_count = properties.multi_processor_count
+
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
     ):
@@ -149,10 +154,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if vllm_is_batch_invariant():
             num_kv_splits = 1
         else:
-            properties = torch.cuda.get_device_properties(q.device)
-            num_sms = properties.multi_processor_count
             heads_per_64 = (q_num_heads + 63) // 64
-            num_kv_splits = min(max(num_sms // heads_per_64, 1), 16)
+            num_kv_splits = min(max(self._sm_count // heads_per_64, 1), 16)
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(
