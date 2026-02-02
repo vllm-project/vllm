@@ -338,8 +338,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
         """
-        (token_lora_mapping, _, _, _, lora_ids, _, _) = self.token_mapping_meta.meta_args(
-            num_tokens
+        (token_lora_mapping, _, _, _, lora_ids, _, _) = (
+            self.token_mapping_meta.meta_args(
+                num_tokens, self.lora_config.specialize_active_lora
+            )
         )
         if naive_block_assignment:
             expert_ids = topk_ids.reshape(-1)
@@ -415,7 +417,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             lora_ids,
             _,
             num_active_loras,
-        ) = self.token_mapping_meta.meta_args(x.size(0))
+        ) = self.token_mapping_meta.meta_args(
+            x.size(0), self.lora_config.specialize_active_lora
+        )
         if token_lora_mapping is None:
             token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(
