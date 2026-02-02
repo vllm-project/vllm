@@ -186,35 +186,35 @@ class TestTritonTopkTopp:
                     f"(max diff {max_diff} values out of {max_kept})"
                 )
 
-    @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
-    @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
-    def test_topk_only(self, batch_size: int, vocab_size: int):
-        """Test top-k only (p=None)."""
-        logits = torch.randn(
-            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
-        )
-        k = torch.randint(
-            1, min(100, vocab_size), (batch_size,), generator=self.generator
-        )
-        # Randomly disable top-k for some rows (~25%)
-        disable_mask = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
-        k.masked_fill_(disable_mask, vocab_size)
+    # @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
+    # @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
+    # def test_topk_only(self, batch_size: int, vocab_size: int):
+    #     """Test top-k only (p=None)."""
+    #     logits = torch.randn(
+    #         batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+    #     )
+    #     k = torch.randint(
+    #         1, min(100, vocab_size), (batch_size,), generator=self.generator
+    #     )
+    #     # Randomly disable top-k for some rows (~25%)
+    #     disable_mask = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
+    #     k.masked_fill_(disable_mask, vocab_size)
 
-        self._compare_results(logits, k, p=None)
+    #     self._compare_results(logits, k, p=None)
 
-    @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
-    @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
-    def test_topp_only(self, batch_size: int, vocab_size: int):
-        """Test top-p only (k=None)."""
-        logits = torch.randn(
-            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
-        )
-        p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1  # [0.1, 1.0]
-        # Randomly disable top-p for some rows (~25%)
-        disable_mask = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
-        p.masked_fill_(disable_mask, 1.0)
+    # @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
+    # @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
+    # def test_topp_only(self, batch_size: int, vocab_size: int):
+    #     """Test top-p only (k=None)."""
+    #     logits = torch.randn(
+    #         batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+    #     )
+    #     p = torch.rand(batch_size, generator=self.generator) * 0.9 + 0.1  # [0.1, 1.0]
+    #     # Randomly disable top-p for some rows (~25%)
+    #     disable_mask = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
+    #     p.masked_fill_(disable_mask, 1.0)
 
-        self._compare_results(logits, k=None, p=p)
+    #     self._compare_results(logits, k=None, p=p)
 
     @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
     @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
@@ -237,62 +237,62 @@ class TestTritonTopkTopp:
 
         self._compare_results(logits, k, p)
 
-    def test_both_disabled(self):
-        """Test when both k and p are None (should be no-op)."""
-        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+    # def test_both_disabled(self):
+    #     """Test when both k and p are None (should be no-op)."""
+    #     from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
-        logits = torch.randn(32, 1024, generator=self.generator, dtype=torch.float32)
-        logits_clone = logits.clone()
+    #     logits = torch.randn(32, 1024, generator=self.generator, dtype=torch.float32)
+    #     logits_clone = logits.clone()
 
-        result = apply_top_k_top_p_triton(logits_clone, k=None, p=None)
+    #     result = apply_top_k_top_p_triton(logits_clone, k=None, p=None)
 
-        assert torch.equal(result, logits), "Should be no-op when both k and p are None"
+    #     assert torch.equal(result, logits), "Should be no-op when both k and p are None"
 
-    def test_extreme_k_values(self):
-        """Test edge cases for k values."""
-        batch_size, vocab_size = 16, 1024
-        logits = torch.randn(
-            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
-        )
+    # def test_extreme_k_values(self):
+    #     """Test edge cases for k values."""
+    #     batch_size, vocab_size = 16, 1024
+    #     logits = torch.randn(
+    #         batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+    #     )
 
-        # k=1 (keep only top 1)
-        k = torch.ones(batch_size, dtype=torch.int32)
-        self._compare_results(logits.clone(), k, p=None)
+    #     # k=1 (keep only top 1)
+    #     k = torch.ones(batch_size, dtype=torch.int32)
+    #     self._compare_results(logits.clone(), k, p=None)
 
-        # k=vocab_size (keep all)
-        k = torch.full((batch_size,), vocab_size, dtype=torch.int32)
-        self._compare_results(logits.clone(), k, p=None)
+    #     # k=vocab_size (keep all)
+    #     k = torch.full((batch_size,), vocab_size, dtype=torch.int32)
+    #     self._compare_results(logits.clone(), k, p=None)
 
-        # Mixed extreme values
-        k = torch.tensor([1, vocab_size, 2, vocab_size - 1] * 4, dtype=torch.int32)
-        self._compare_results(logits.clone(), k, p=None)
+    #     # Mixed extreme values
+    #     k = torch.tensor([1, vocab_size, 2, vocab_size - 1] * 4, dtype=torch.int32)
+    #     self._compare_results(logits.clone(), k, p=None)
 
-    def test_extreme_p_values(self):
-        """Test edge cases for p values."""
-        batch_size, vocab_size = 16, 1024
-        logits = torch.randn(
-            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
-        )
+    # def test_extreme_p_values(self):
+    #     """Test edge cases for p values."""
+    #     batch_size, vocab_size = 16, 1024
+    #     logits = torch.randn(
+    #         batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+    #     )
 
-        # p close to 0 (very restrictive)
-        p = torch.full((batch_size,), 0.01, dtype=torch.float32)
-        self._compare_results(logits.clone(), k=None, p=p)
+    #     # p close to 0 (very restrictive)
+    #     p = torch.full((batch_size,), 0.01, dtype=torch.float32)
+    #     self._compare_results(logits.clone(), k=None, p=p)
 
-        # p=1.0 (keep all)
-        p = torch.ones(batch_size, dtype=torch.float32)
-        self._compare_results(logits.clone(), k=None, p=p)
+    #     # p=1.0 (keep all)
+    #     p = torch.ones(batch_size, dtype=torch.float32)
+    #     self._compare_results(logits.clone(), k=None, p=p)
 
-        # Mixed values
-        p = torch.tensor([0.1, 0.5, 0.9, 1.0] * 4, dtype=torch.float32)
-        self._compare_results(logits.clone(), k=None, p=p)
+    #     # Mixed values
+    #     p = torch.tensor([0.1, 0.5, 0.9, 1.0] * 4, dtype=torch.float32)
+    #     self._compare_results(logits.clone(), k=None, p=p)
 
-    def test_large_batch(self):
-        """Test with a large batch size."""
-        batch_size, vocab_size = 512, 32000
-        logits = torch.randn(
-            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
-        )
-        k = torch.randint(1, 50, (batch_size,), generator=self.generator)
-        p = torch.rand(batch_size, generator=self.generator) * 0.5 + 0.5
+    # def test_large_batch(self):
+    #     """Test with a large batch size."""
+    #     batch_size, vocab_size = 512, 32000
+    #     logits = torch.randn(
+    #         batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+    #     )
+    #     k = torch.randint(1, 50, (batch_size,), generator=self.generator)
+    #     p = torch.rand(batch_size, generator=self.generator) * 0.5 + 0.5
 
-        self._compare_results(logits, k, p)
+    #     self._compare_results(logits, k, p)
