@@ -111,7 +111,7 @@ class Step3ReasoningParser(ReasoningParser):
         return end_token_id in delta_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        if self.think_end_token_id not in islice(input_ids, 0, len(input_ids) - 1):
+        if self.think_end_token_id not in islice(input_ids, 0, max(0, len(input_ids) - 1)):
             return []
         else:
             return input_ids[input_ids.index(self.think_end_token_id) + 1 :]
