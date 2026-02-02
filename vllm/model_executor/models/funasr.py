@@ -82,6 +82,17 @@ def sequence_mask(lengths, maxlen=None, dtype=torch.float32, device=None):
     return mask.type(dtype).to(device) if device is not None else mask.type(dtype)
 
 
+class LayerNorm(torch.nn.LayerNorm):
+    def __init__(self, nout, dim=-1):
+        super().__init__(nout, eps=1e-12)
+        self.dim = dim
+
+    def forward(self, x):
+        if self.dim == -1:
+            return super().forward(x)
+        return super().forward(x.transpose(self.dim, -1)).transpose(self.dim, -1)
+
+
 class EncoderLayerSANM(nn.Module):
     def __init__(
         self,
@@ -91,7 +102,6 @@ class EncoderLayerSANM(nn.Module):
         feed_forward,
         normalize_before=True,
     ):
-        """Construct an EncoderLayer object."""
         super().__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
@@ -102,57 +112,39 @@ class EncoderLayerSANM(nn.Module):
         self.normalize_before = normalize_before
 
     def forward(
-        self, x, mask, cache=None, mask_shfit_chunk=None, mask_att_chunk_encoder=None
+        self,
+        hidden_states,
+        mask,
+        cache=None,
+        mask_shfit_chunk=None,
+        mask_att_chunk_encoder=None,
     ):
-        """Compute encoded features.
-
-        Args:
-            x_input (torch.Tensor): Input tensor (#batch, time, size).
-            mask (torch.Tensor): Mask tensor for the input (#batch, time).
-            cache (torch.Tensor): Cache tensor of the input (#batch, time - 1, size).
-
-        Returns:
-            torch.Tensor: Output tensor (#batch, time, size).
-            torch.Tensor: Mask tensor (#batch, time).
-
-        """
-        stoch_layer_coeff = 1.0
-
-        residual = x
-        x = self.norm1(x)
+        residual = hidden_states
+        hidden_states = self.norm1(hidden_states)
 
         if self.in_size == self.size:
-            x = residual + stoch_layer_coeff * self.self_attn(
-                x,
+            hidden_states = residual + self.self_attn(
+                hidden_states,
                 mask,
                 mask_shfit_chunk=mask_shfit_chunk,
                 mask_att_chunk_encoder=mask_att_chunk_encoder,
             )
         else:
-            x = stoch_layer_coeff * self.self_attn(
-                x,
+            hidden_states = self.self_attn(
+                hidden_states,
                 mask,
                 mask_shfit_chunk=mask_shfit_chunk,
                 mask_att_chunk_encoder=mask_att_chunk_encoder,
             )
 
-        residual = x
-        x = self.norm2(x)
-        x = residual + stoch_layer_coeff * self.feed_forward(x)
+        residual = hidden_states
+        hidden_states = self.norm2(hidden_states)
+        hidden_states = residual + self.feed_forward(hidden_states)
 
-        return x, mask, cache, mask_shfit_chunk, mask_att_chunk_encoder
+        return hidden_states, mask, cache, mask_shfit_chunk, mask_att_chunk_encoder
 
 
 class MultiHeadedAttentionSANM(nn.Module):
-    """Multi-Head Attention layer.
-
-    Args:
-        n_head (int): The number of heads.
-        n_feat (int): The number of features.
-        dropout_rate (float): Dropout rate.
-
-    """
-
     def __init__(
         self,
         n_head,
@@ -207,19 +199,6 @@ class MultiHeadedAttentionSANM(nn.Module):
         return x
 
     def forward_qkv(self, x):
-        """Transform query, key and value.
-
-        Args:
-            query (torch.Tensor): Query tensor (#batch, time1, size).
-            key (torch.Tensor): Key tensor (#batch, time2, size).
-            value (torch.Tensor): Value tensor (#batch, time2, size).
-
-        Returns:
-            torch.Tensor: Transformed query tensor (#batch, n_head, time1, d_k).
-            torch.Tensor: Transformed key tensor (#batch, n_head, time2, d_k).
-            torch.Tensor: Transformed value tensor (#batch, n_head, time2, d_k).
-
-        """
         b, t, d = x.size()
         q_k_v, _ = self.linear_q_k_v(x)
         q, k, v = torch.split(q_k_v, int(self.h * self.d_k), dim=-1)
@@ -236,18 +215,6 @@ class MultiHeadedAttentionSANM(nn.Module):
         return q_h, k_h, v_h, v
 
     def forward_attention(self, value, scores, mask, mask_att_chunk_encoder=None):
-        """Compute attention context vector.
-
-        Args:
-            value (torch.Tensor): Transformed value (#batch, n_head, time2, d_k).
-            scores (torch.Tensor): Attention score (#batch, n_head, time1, time2).
-            mask (torch.Tensor): Mask (#batch, 1, time2) or (#batch, time1, time2).
-
-        Returns:
-            torch.Tensor: Transformed value (#batch, time1, d_model)
-                weighted by the attention score (#batch, time1, time2).
-
-        """
         n_batch = value.size(0)
         if mask is not None:
             if mask_att_chunk_encoder is not None:
@@ -273,19 +240,6 @@ class MultiHeadedAttentionSANM(nn.Module):
         return out
 
     def forward(self, x, mask, mask_shfit_chunk=None, mask_att_chunk_encoder=None):
-        """Compute scaled dot product attention.
-
-        Args:
-            query (torch.Tensor): Query tensor (#batch, time1, size).
-            key (torch.Tensor): Key tensor (#batch, time2, size).
-            value (torch.Tensor): Value tensor (#batch, time2, size).
-            mask (torch.Tensor): Mask tensor (#batch, 1, time2) or
-                (#batch, time1, time2).
-
-        Returns:
-            torch.Tensor: Output tensor (#batch, time1, d_model).
-
-        """
         q_h, k_h, v_h, v = self.forward_qkv(x)
         fsmn_memory = self.forward_fsmn(v, mask, mask_shfit_chunk)
         q_h = q_h * self.d_k ** (-0.5)
@@ -295,8 +249,6 @@ class MultiHeadedAttentionSANM(nn.Module):
 
 
 class SinusoidalPositionEncoder(torch.nn.Module):
-    """ """
-
     def __init__(self, d_model=80, dropout_rate=0.1):
         super().__init__()
 
@@ -332,12 +284,6 @@ class SinusoidalPositionEncoder(torch.nn.Module):
 
 
 class SenseVoiceEncoderSmall(nn.Module):
-    """
-    Author: Speech Lab of DAMO Academy, Alibaba Group
-    SCAMA: Streaming chunk-aware multihead attention for online end-to-end
-    speech recognition https://arxiv.org/abs/2006.01713
-    """
-
     def __init__(
         self,
         input_size: int,
@@ -458,17 +404,7 @@ class SenseVoiceEncoderSmall(nn.Module):
 
 
 class PositionwiseFeedForward(torch.nn.Module):
-    """Positionwise feed forward layer.
-
-    Args:
-        idim (int): Input dimenstion.
-        hidden_units (int): The number of hidden units.
-        dropout_rate (float): Dropout rate.
-
-    """
-
     def __init__(self, idim, hidden_units):
-        """Construct an PositionwiseFeedForward object."""
         super().__init__()
         self.w_1 = ColumnParallelLinear(
             input_size=idim,
@@ -489,95 +425,28 @@ class PositionwiseFeedForward(torch.nn.Module):
         return hidden_states
 
 
-class LayerNorm(torch.nn.LayerNorm):
-    """Layer normalization module.
-
-    Args:
-        nout (int): Output dim size.
-        dim (int): Dimension to be normalized.
-
-    """
-
-    def __init__(self, nout, dim=-1):
-        """Construct an LayerNorm object."""
-        super().__init__(nout, eps=1e-12)
-        self.dim = dim
-
-    def forward(self, x):
-        """Apply layer normalization.
-
-        Args:
-            x (torch.Tensor): Input tensor.
-
-        Returns:
-            torch.Tensor: Normalized tensor.
-
-        """
-        if self.dim == -1:
-            return super().forward(x)
-        return (
-            # super(LayerNorm, self)
-            super().forward(x.transpose(self.dim, -1)).transpose(self.dim, -1)
-        )
-
-
 class EncoderLayer(nn.Module):
-    """Encoder layer module.
-
-    Args:
-        size (int): Input dimension.
-        self_attn (torch.nn.Module): Self-attention module instance.
-            `MultiHeadedAttention` or `RelPositionMultiHeadedAttention` instance
-            can be used as the argument.
-        feed_forward (torch.nn.Module): Feed-forward module instance.
-            `PositionwiseFeedForward`, `MultiLayeredConv1d`, or `Conv1dLinear` instance
-            can be used as the argument.
-        dropout_rate (float): Dropout rate.
-        normalize_before (bool): Whether to use layer_norm before the first block.
-        concat_after (bool): Whether to concat attention layer's input and output.
-            if True, additional linear will be applied.
-            i.e. x -> x + linear(concat(x, att(x)))
-            if False, no additional linear will be applied. i.e. x -> x + att(x)
-        stochastic_depth_rate (float): Proability to skip this layer.
-            During training, the layer may skip residual computation and return input
-            as-is with given probability.
-    """
-
     def __init__(
         self,
         size,
         self_attn,
         feed_forward,
     ):
-        """Construct an EncoderLayer object."""
         super().__init__()
         self.self_attn = self_attn
         self.feed_forward = feed_forward
         self.norm1 = LayerNorm(size)
         self.norm2 = LayerNorm(size)
 
-    def forward(self, x, mask):
-        """Compute encoded features.
+    def forward(self, hidden_states):
+        residual = hidden_states
+        hidden_states = self.norm1(hidden_states)
+        hidden_states = residual + self.self_attn(hidden_states, None, None)
+        residual = hidden_states
+        hidden_states = self.norm2(hidden_states)
+        hidden_states = residual + self.feed_forward(hidden_states)
 
-        Args:
-            x_input (torch.Tensor): Input tensor (#batch, time, size).
-            mask (torch.Tensor): Mask tensor for the input (#batch, time).
-            cache (torch.Tensor): Cache tensor of the input (#batch, time - 1, size).
-
-        Returns:
-            torch.Tensor: Output tensor (#batch, time, size).
-            torch.Tensor: Mask tensor (#batch, time).
-
-        """
-        residual = x
-        x = self.norm1(x)
-        x_q = x
-        x = residual + self.self_attn(x_q, None, None)
-        residual = x
-        x = self.norm2(x)
-        x = residual + self.feed_forward(x)
-
-        return x, mask
+        return hidden_states
 
 
 class FunASRAudioAttention(nn.Module):
@@ -698,27 +567,26 @@ class Transformer(nn.Module):
                 ]
             )
 
-    def forward(self, x, ilens=None):
-        batch_size, seq_len, dim = x.size()
+    def forward(self, hidden_states, ilens=None):
+        batch_size, seq_len, dim = hidden_states.size()
         chunk_num = (seq_len - 1) // self.k + 1
         pad_num = chunk_num * self.k - seq_len
-        x = F.pad(x, (0, 0, 0, pad_num, 0, 0), value=0.0)
-        seq_len = x.size(1)
+        hidden_states = F.pad(hidden_states, (0, 0, 0, pad_num, 0, 0), value=0.0)
+        seq_len = hidden_states.size(1)
 
-        x = x.contiguous()
-        x = x.view(batch_size, chunk_num, dim * self.k)
-        x, _ = self.linear1(x)
-        x = self.relu(x)
-        x, _ = self.linear2(x)
+        hidden_states = hidden_states.contiguous()
+        hidden_states = hidden_states.view(batch_size, chunk_num, dim * self.k)
+        hidden_states, _ = self.linear1(hidden_states)
+        hidden_states = self.relu(hidden_states)
+        hidden_states, _ = self.linear2(hidden_states)
 
         olens = None
         olens = (ilens - 1) // self.k + 1
-        masks = None
 
         if self.blocks is not None:
             for layer, block in enumerate(self.blocks):
-                x, masks = block(x, masks)
-        return x, olens
+                hidden_states = block(hidden_states)
+        return hidden_states, olens
 
 
 class FunASRAudioInputs(TensorSchema):
