@@ -183,7 +183,9 @@ class SpecDecodeBaseProposer:
                 RocmAttentionMetadata,
             ]
             # ROCM_AITER_FA is an optional backend
-            if find_spec(
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if rocm_aiter_ops.is_enabled() and find_spec(
                 AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
             ):
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
