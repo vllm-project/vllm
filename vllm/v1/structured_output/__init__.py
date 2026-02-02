@@ -288,6 +288,7 @@ class StructuredOutputManager:
             if self.enable_in_reasoning:
                 return True
             assert request.structured_output_request is not None
+            assert request.structured_output_request.reasoning_ended is not None
             return request.structured_output_request.reasoning_ended
         return True
 
