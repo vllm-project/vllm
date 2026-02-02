@@ -347,6 +347,7 @@ class OpenAIServing:
             logprobs=logprobs_num,
             max_tokens=1,
             temperature=temperature,
+            detokenize=False,
         )
         all_beams = [
             BeamSearchSequence(
