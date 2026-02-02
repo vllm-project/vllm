@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing_extensions import assert_never
 
-from vllm.entrypoints.openai.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingBytesResponse,
@@ -47,9 +47,7 @@ async def create_embedding(
     try:
         generator = await handler.create_embedding(request, raw_request)
     except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        return handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
@@ -59,8 +57,8 @@ async def create_embedding(
         return JSONResponse(content=generator.model_dump())
     elif isinstance(generator, EmbeddingBytesResponse):
         return StreamingResponse(
-            content=generator.body,
-            headers={"metadata": generator.metadata},
+            content=generator.content,
+            headers=generator.headers,
             media_type=generator.media_type,
         )
 

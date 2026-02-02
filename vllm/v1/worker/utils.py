@@ -1,21 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.layer import Attention
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
+from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.utils.mem_utils import MemorySnapshot, format_gib
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
+
+logger = init_logger(__name__)
 
 
 class MultiModalBudget:
@@ -23,21 +26,20 @@ class MultiModalBudget:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        scheduler_config: SchedulerConfig,
+        vllm_config: VllmConfig,
         mm_registry: MultiModalRegistry,
     ) -> None:
         super().__init__()
 
-        self.model_config = model_config
-        self.scheduler_config = scheduler_config
+        self.model_config = model_config = vllm_config.model_config
+        self.scheduler_config = scheduler_config = vllm_config.scheduler_config
         self.mm_registry = mm_registry
-        self.cache = cache = processor_only_cache_from_config(model_config, mm_registry)
+        self.cache = cache = mm_registry.processor_only_cache_from_config(vllm_config)
 
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
 
         max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
             model_config,
@@ -135,7 +137,7 @@ class AttentionGroup:
     kv_cache_spec: KVCacheSpec
     kv_cache_group_id: int
     # When ubatching is enabled we will have a metadata builder for each ubatch
-    # so that if they use internal persistant buffers for cudagraphs, and they
+    # so that if they use internal persistent buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
     metadata_builders: list[AttentionMetadataBuilder] = field(
         default_factory=lambda: []
@@ -198,48 +200,27 @@ def sanity_check_mm_encoder_outputs(
     )
 
 
-def scatter_mm_placeholders(
-    embeds: torch.Tensor,
-    is_embed: torch.Tensor | None,
-) -> torch.Tensor:
+def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
     """
-    Scatter the multimodal embeddings into a contiguous tensor that represents
-    the placeholder tokens.
-
-    [`vllm.multimodal.processing.PromptUpdateDetails.is_embed`][].
-
-    Args:
-        embeds: The multimodal embeddings.
-            Shape: `(num_embeds, embed_dim)`
-        is_embed: A boolean mask indicating which positions in the placeholder
-            tokens need to be filled with multimodal embeddings.
-            Shape: `(num_placeholders, num_embeds)`
+    Calculate the amount of memory required by vLLM, then validate
+    that the current amount of free memory is sufficient for that.
     """
-    if is_embed is None:
-        return embeds
-
-    placeholders = embeds.new_full(
-        (is_embed.shape[0], embeds.shape[-1]),
-        fill_value=torch.nan,
+    requested_memory = math.ceil(
+        init_snapshot.total_memory * cache_config.gpu_memory_utilization
     )
-    placeholders[is_embed] = embeds
-    return placeholders
 
+    if init_snapshot.free_memory < requested_memory:
+        raise ValueError(
+            f"Free memory on device {init_snapshot.device_} "
+            f"({format_gib(init_snapshot.free_memory)}/"
+            f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
+            f"is less than desired GPU memory utilization "
+            f"({cache_config.gpu_memory_utilization}, "
+            f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
+            f"utilization or reduce GPU memory used by other processes."
+        )
 
-def gather_mm_placeholders(
-    placeholders: torch.Tensor,
-    is_embed: torch.Tensor | None,
-) -> torch.Tensor:
-    """
-    Reconstructs the embeddings from the placeholder tokens.
-
-    This is the operation of [`scatter_mm_placeholders`]
-    [vllm.v1.worker.utils.scatter_mm_placeholders].
-    """
-    if is_embed is None:
-        return placeholders
-
-    return placeholders[is_embed]
+    return requested_memory
 
 
 def add_kv_sharing_layers_to_kv_cache_groups(
@@ -313,15 +294,19 @@ def bind_kv_cache(
             # TODO - analyze where runner_kv_caches is used and the right
             # way to ensure it properly reflects multiple attention layers
             # in the same decoder block.
-            if current_platform.is_cuda_alike() or current_platform.is_xpu():
-                # We know that the GPU runner is not impacted by this
+            if (
+                current_platform.is_cuda_alike()
+                or current_platform.is_xpu()
+                or current_platform.is_cpu()
+            ):
+                # We know that the GPU / CPU runner is not impacted by this
                 # case. Some test code depends on runner_kv_caches, but
                 # not in a way that's impacted by ignoring this.
                 pass
             else:
                 raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
@@ -337,7 +322,7 @@ def is_residual_scattered_for_sp(
     The residual tensor is scattered across tensor parallel ranks when sequence
     parallelism and tensor parallelism is enabled.
 
-    This follows the same logic as SequenceParallelismPass.is_applicable():
+    This follows the same logic as SequenceParallelismPass.is_applicable_for_range():
     - In full-graph compilation mode (no splitting ops or using inductor graph
       partition), SP is always applied
     - Otherwise, SP is only applied for specific shapes in compile_sizes

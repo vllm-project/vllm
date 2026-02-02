@@ -379,6 +379,50 @@ def test_load_config_file(tmp_path):
     os.remove(str(config_file_path))
 
 
+def test_load_config_file_nested(tmp_path):
+    """Test that nested dicts in YAML config are converted to JSON strings."""
+    config_data = {
+        "port": 8000,
+        "compilation-config": {
+            "pass_config": {"fuse_allreduce_rms": True},
+        },
+    }
+    config_file_path = tmp_path / "nested_config.yaml"
+    with open(config_file_path, "w") as f:
+        yaml.dump(config_data, f)
+
+    parser = FlexibleArgumentParser()
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    assert processed_args[processed_args.index("--port") + 1] == "8000"
+    cc_value = json.loads(
+        processed_args[processed_args.index("--compilation-config") + 1]
+    )
+    assert cc_value == {"pass_config": {"fuse_allreduce_rms": True}}
+
+
+def test_nested_config_end_to_end(tmp_path):
+    """Test end-to-end parsing of nested configs in YAML files."""
+    config_data = {
+        "compilation-config": {
+            "mode": 3,
+            "pass_config": {"fuse_allreduce_rms": True},
+        },
+    }
+    config_file_path = tmp_path / "nested_config.yaml"
+    with open(config_file_path, "w") as f:
+        yaml.dump(config_data, f)
+
+    parser = FlexibleArgumentParser()
+    parser.add_argument("-cc", "--compilation-config", type=json.loads)
+    args = parser.parse_args(["--config", str(config_file_path)])
+
+    assert args.compilation_config == {
+        "mode": 3,
+        "pass_config": {"fuse_allreduce_rms": True},
+    }
+
+
 def test_compilation_mode_string_values(parser):
     """Test that -cc.mode accepts both integer and string mode values."""
     args = parser.parse_args(["-cc.mode", "0"])
@@ -458,25 +502,3 @@ def test_flat_product():
         (3, 4, "a", 5, 6),
         (3, 4, "b", 5, 6),
     ]
-
-
-def test_o_legacy_syntax_deprecation(caplog_vllm):
-    """Test that -O.* dotted syntax emits warnings and converts correctly to -cc syntax."""
-    parser = FlexibleArgumentParser()
-    parser.add_argument("-cc", "--compilation-config", type=json.loads)
-
-    # Test that -O.backend gets converted correctly AND emits warning
-    args = parser.parse_args(["-O.backend=eager"])
-    assert args.compilation_config == {"backend": "eager"}
-
-    # Check that deprecation warning was logged
-    assert len(caplog_vllm.records) >= 1
-    assert (
-        "The -O.* dotted syntax for --compilation-config is deprecated"
-        in caplog_vllm.text
-    )
-
-    # Test that -O.mode gets converted correctly
-    # Note: warning_once won't emit again in same session
-    args = parser.parse_args(["-O.mode=2"])
-    assert args.compilation_config == {"mode": 2}

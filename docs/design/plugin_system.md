@@ -100,7 +100,7 @@ Every plugin has three parts:
     - `_enum`: This property is the device enumeration from [PlatformEnum][vllm.platforms.interface.PlatformEnum]. Usually, it should be `PlatformEnum.OOT`, which means the platform is out-of-tree.
     - `device_type`: This property should return the type of the device which pytorch uses. For example, `"cpu"`, `"cuda"`, etc.
     - `device_name`: This property is set the same as `device_type` usually. It's mainly used for logging purposes.
-    - `check_and_update_config`: This function is called very early in the vLLM's initialization process. It's used for plugins to update the vllm configuration. For example, the block size, graph mode config, etc, can be updated in this function. The most important thing is that the **worker_cls** should be set in this function to let vLLM know which worker class to use for the worker process.
+    - `check_and_update_config`: This function is called very early in the vLLM's initialization process. It's used for plugins to update the vllm configuration. For example, the block size, graph mode config, etc., can be updated in this function. The most important thing is that the **worker_cls** should be set in this function to let vLLM know which worker class to use for the worker process.
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
 
@@ -109,7 +109,7 @@ Every plugin has three parts:
     - `init_device`: This function is called to set up the device for the worker.
     - `initialize_cache`: This function is called to set cache config for the worker.
     - `load_model`: This function is called to load the model weights to device.
-    - `get_kv_cache_spaces`: This function is called to generate the kv cache spaces for the model.
+    - `get_kv_cache_spec`: This function is called to generate the kv cache spec for the model.
     - `determine_available_memory`: This function is called to profiles the peak memory usage of the model to determine how much memory can be used for KV cache without OOMs.
     - `initialize_from_config`: This function is called to allocate device KV cache with the specified kv_cache_config
     - `execute_model`: This function is called every step to inference the model.
@@ -124,9 +124,9 @@ Every plugin has three parts:
 
     Please look at the worker base class [WorkerBase][vllm.v1.worker.worker_base.WorkerBase] for more functions that can be implemented.
 
-5. Implement the attention backend class `MyDummyAttention` in `my_dummy_attention.py`. The attention backend class should inherit from [AttentionBackend][vllm.attention.backends.abstract.AttentionBackend]. It's used to calculate attentions with your device. Take `vllm.v1.attention.backends` as examples, it contains many attention backend implementations.
+5. Implement the attention backend class `MyDummyAttention` in `my_dummy_attention.py`. The attention backend class should inherit from [AttentionBackend][vllm.v1.attention.backend.AttentionBackend]. It's used to calculate attentions with your device. Take `vllm.v1.attention.backends` as examples, it contains many attention backend implementations.
 
-6. Implement custom ops for high performance. Most ops can be ran by pytorch native implementation, while the performance may not be good. In this case, you can implement specific custom ops for your plugins. Currently, there are kinds of custom ops vLLM supports:
+6. Implement custom ops for high performance. Most ops can be run by pytorch native implementation, while the performance may not be good. In this case, you can implement specific custom ops for your plugins. Currently, there are kinds of custom ops vLLM supports:
 
     - pytorch ops
       there are 3 kinds of pytorch ops:
@@ -152,5 +152,6 @@ The interface for the model/module may change during vLLM's development. If you 
 ## Deprecation announcement
 
 !!! warning "Deprecations"
-    - `use_v1` parameter in `Platform.get_attn_backend_cls` is deprecated. It will be removed in v0.13.0 or v1.0.0.
-    - `_Backend` in `vllm.attention` is deprecated. It will be removed in v0.13.0 or v1.0.0. Please use `vllm.attention.backends.registry.register_backend` to add new attention backend to `AttentionBackendEnum` instead.
+    - `use_v1` parameter in `Platform.get_attn_backend_cls` is deprecated. It has been removed in v0.13.0.
+    - `_Backend` in `vllm.attention` is deprecated. It has been removed in v0.13.0. Please use `vllm.v1.attention.backends.registry.register_backend` to add new attention backend to `AttentionBackendEnum` instead.
+    - `seed_everything` platform interface is deprecated. It has been removed in v0.16.0. Please use `vllm.utils.torch_utils.set_random_seed` instead.

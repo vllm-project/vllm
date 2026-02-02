@@ -244,9 +244,8 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
+            elif arg.startswith("-O") and arg != "-O":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
-                # -O.<...> handled later
                 # also handle -O=<optimization_level> here
                 optimization_level = arg[3:] if arg[2] == "=" else arg[2:]
                 processed_args += ["--optimization-level", optimization_level]
@@ -257,17 +256,6 @@ class FlexibleArgumentParser(ArgumentParser):
             ):
                 # Convert -O <n> to --optimization-level <n>
                 processed_args.append("--optimization-level")
-            elif arg.startswith("-O."):
-                # Handle -O.* dotted syntax - ALL dotted syntax is deprecated
-                logger.warning_once(
-                    "The -O.* dotted syntax for --compilation-config is "
-                    "deprecated and will be removed in v0.13.0 or v1.0.0"
-                    ", whichever is earlier.  Please use -cc.* instead. "
-                    "Example: -cc.backend=eager instead of "
-                    "-O.backend=eager."
-                )
-                converted_arg = arg.replace("-O", "-cc", 1)
-                processed_args.append(converted_arg)
             else:
                 processed_args.append(arg)
 
@@ -411,8 +399,7 @@ class FlexibleArgumentParser(ArgumentParser):
         index = args.index("--config")
         if index == len(args) - 1:
             raise ValueError(
-                "No config file specified! \
-                             Please check your command-line arguments."
+                "No config file specified! Please check your command-line arguments."
             )
 
         file_path = args[index + 1]
@@ -457,16 +444,30 @@ class FlexibleArgumentParser(ArgumentParser):
 
     def load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
-        flattened list with argparse like pattern
+        flattened list with argparse like pattern.
+
+        Supports both flat configs and nested YAML structures.
+
+        Flat config example:
         ```yaml
             port: 12323
             tensor-parallel-size: 4
         ```
         returns:
-            processed_args: list[str] = [
-                '--port': '12323',
-                '--tensor-parallel-size': '4'
-            ]
+            ['--port', '12323', '--tensor-parallel-size', '4']
+
+        Nested config example:
+        ```yaml
+            compilation-config:
+              pass_config:
+                fuse_allreduce_rms: true
+            speculative-config:
+              model: "nvidia/gpt-oss-120b-Eagle3-v2"
+              num_speculative_tokens: 3
+        ```
+        returns:
+            ['--compilation-config', '{"pass_config": {"fuse_allreduce_rms": true}}',
+             '--speculative-config', '{"model": "nvidia/gpt-oss-120b-Eagle3-v2", ...}']
         """
         extension: str = file_path.split(".")[-1]
         if extension not in ("yaml", "yml"):
@@ -474,10 +475,10 @@ class FlexibleArgumentParser(ArgumentParser):
                 f"Config file must be of a yaml/yml type. {extension} supplied"
             )
 
-        # only expecting a flat dictionary of atomic types
+        # Supports both flat configs and nested dicts
         processed_args: list[str] = []
 
-        config: dict[str, int | str] = {}
+        config: dict[str, Any] = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -497,6 +498,11 @@ class FlexibleArgumentParser(ArgumentParser):
                     processed_args.append("--" + key)
                     for item in value:
                         processed_args.append(str(item))
+            elif isinstance(value, dict):
+                # Convert nested dicts to JSON strings so they can be parsed
+                # by the existing JSON argument parsing machinery.
+                processed_args.append("--" + key)
+                processed_args.append(json.dumps(value))
             else:
                 processed_args.append("--" + key)
                 processed_args.append(str(value))

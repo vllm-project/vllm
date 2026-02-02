@@ -17,7 +17,6 @@ from transformers import BatchFeature, PretrainedConfig, ProcessorMixin, TensorT
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -29,6 +28,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import MulAndSilu, QuickGELU, SiluAndMul
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -53,6 +53,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptIndexTargets,
@@ -60,7 +61,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -141,6 +141,7 @@ class ViTMLP(nn.Module):
         self,
         config: VisionBackboneConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.w1 = ColumnParallelLinear(
@@ -148,6 +149,7 @@ class ViTMLP(nn.Module):
             config.image_mlp_dim,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.w1",
         )
         # Activation function.
         assert config.image_mlp_activations == "quick_gelu"
@@ -157,6 +159,7 @@ class ViTMLP(nn.Module):
             config.image_emb_dim,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.w2",
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -175,6 +178,7 @@ class MultiHeadDotProductAttention(nn.Module):
         use_bias: bool = True,
         nlayers: int = 1,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -201,28 +205,32 @@ class MultiHeadDotProductAttention(nn.Module):
             self.total_num_heads * self.head_dim,
             bias=use_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.wq",
         )
         self.wk = ColumnParallelLinear(
             nlayers * self.hidden_size,
             self.total_num_kv_heads * self.head_dim,
             bias=use_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.wk",
         )
         self.wv = ColumnParallelLinear(
             nlayers * self.hidden_size,
             self.total_num_kv_heads * self.head_dim,
             bias=use_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.wv",
         )
         self.wo = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=use_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.wo",
         )
 
         self.scale = self.head_dim**-0.5
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_heads, self.head_dim, self.scale, num_kv_heads=self.num_kv_heads
         )
 
@@ -253,10 +261,15 @@ class ResidualAttentionBlock(nn.Module):
         self,
         config: VisionBackboneConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
-        self.attention = MultiHeadDotProductAttention(config, quant_config=quant_config)
-        self.feed_forward = ViTMLP(config, quant_config)
+        self.attention = MultiHeadDotProductAttention(
+            config, quant_config=quant_config, prefix=f"{prefix}.attention"
+        )
+        self.feed_forward = ViTMLP(
+            config, quant_config, prefix=f"{prefix}.feed_forward"
+        )
         self.attention_norm = nn.LayerNorm(
             config.image_emb_dim,
             eps=config.image_norm_eps,
@@ -279,12 +292,15 @@ class BlockCollection(nn.Module):
         self,
         config: VisionBackboneConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.resblocks = nn.ModuleList(
             [
-                ResidualAttentionBlock(config, quant_config)
-                for _ in range(config.image_num_layers)
+                ResidualAttentionBlock(
+                    config, quant_config, prefix=f"{prefix}.resblocks.{i}"
+                )
+                for i in range(config.image_num_layers)
             ]
         )
 
@@ -307,6 +323,7 @@ class VisionTransformer(nn.Module):
         self,
         config: VisionBackboneConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         scale = config.image_emb_dim**-0.5
@@ -323,7 +340,9 @@ class VisionTransformer(nn.Module):
             bias=False,
         )
         self.pre_ln = nn.LayerNorm(config.image_emb_dim, eps=config.image_norm_eps)
-        self.transformer = BlockCollection(config, quant_config)
+        self.transformer = BlockCollection(
+            config, quant_config, prefix=f"{prefix}.transformer"
+        )
 
     def add_pos_emb(self, x: torch.Tensor, patch_num: int) -> torch.Tensor:
         cls_emb = self.positional_embedding[0:1]
@@ -418,6 +437,7 @@ class MolmoAttention(nn.Module):
             self.total_num_kv_heads,
             bias=config.qkv_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
 
         self.tp_rank: int | None = None
@@ -433,7 +453,6 @@ class MolmoAttention(nn.Module):
         # Rotary embeddings.
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )
@@ -454,6 +473,7 @@ class MolmoAttention(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
     def _apply_qk_norm(
@@ -493,6 +513,7 @@ class LanguageModelMLP(nn.Module):
         config: PretrainedConfig,
         input_dim: int | None = None,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -503,6 +524,7 @@ class LanguageModelMLP(nn.Module):
             [self.intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         # Activation function.
         self.act_fn = MulAndSilu()
@@ -512,6 +534,7 @@ class LanguageModelMLP(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
 
     def forward(
@@ -532,6 +555,7 @@ class ImageProjectorMLP(nn.Module):
         config: PretrainedConfig,
         input_dim: int | None = None,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -542,6 +566,7 @@ class ImageProjectorMLP(nn.Module):
             [self.intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.merged_linear",
         )
         # Activation function.
         self.act_fn = SiluAndMul()
@@ -552,6 +577,7 @@ class ImageProjectorMLP(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
 
     def forward(
@@ -579,7 +605,9 @@ class MolmoDecoderLayer(nn.Module):
         )
 
         # MLP block.
-        self.mlp = LanguageModelMLP(config, quant_config=quant_config)
+        self.mlp = LanguageModelMLP(
+            config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+        )
 
         # LayerNorm
         assert config.layer_norm_type == "rms"
@@ -643,6 +671,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         config: PretrainedConfig,
         vision_config: VisionBackboneConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.vit_layers = VIT_LAYERS
@@ -651,18 +680,24 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
             (self.image_num_patch[0] + 1) // POOLING_SIZE,
             (self.image_num_patch[1] + 1) // POOLING_SIZE,
         )
-        self.image_vit = VisionTransformer(vision_config, quant_config=quant_config)
+        self.image_vit = VisionTransformer(
+            vision_config, quant_config=quant_config, prefix=f"{prefix}.image_vit"
+        )
         self.num_prefix_tokens = self.image_vit.num_prefix_tokens
         assert self.num_prefix_tokens in {0, 1}, (
             "Only 0 or 1 prefix tokens are supported"
         )
         self.image_pooling_2d = MultiHeadDotProductAttention(
-            vision_config, nlayers=len(self.vit_layers), quant_config=quant_config
+            vision_config,
+            nlayers=len(self.vit_layers),
+            quant_config=quant_config,
+            prefix=f"{prefix}.image_pooling_2d",
         )
         self.image_projector = ImageProjectorMLP(
             config,
             input_dim=vision_config.image_emb_dim,
             quant_config=quant_config,
+            prefix=f"{prefix}.image_projector",
         )
 
         image_dim = vision_config.image_emb_dim * len(self.vit_layers)
@@ -835,7 +870,7 @@ class MolmoModel(nn.Module, SupportsQuant):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -1354,8 +1389,6 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 class MolmoForCausalLM(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsQuant
 ):
-    merge_by_field_config = True
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # vision backbone mapping
@@ -1407,10 +1440,20 @@ class MolmoForCausalLM(
         self.multimodal_config = multimodal_config
 
         vision_config = VisionBackboneConfig()
-        self.vision_backbone = MolmoVisionBackbone(config, vision_config, quant_config)
-        self.model = MolmoModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_backbone = MolmoVisionBackbone(
+                config,
+                vision_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_backbone"),
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.model = MolmoModel(
+                vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+            )
+
         self.img_patch_id = None
 
         if self.config.weight_tying:
@@ -1485,9 +1528,6 @@ class MolmoForCausalLM(
             order = torch.argsort(valid_img_idx)
             results.append(feats[is_valid][order])
         return results
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)

@@ -6,37 +6,73 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
 )
 
 
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
-        moe: FusedMoEConfig,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
         gemm1_alpha,
         gemm1_beta,
         gemm1_clamp_limit,
         max_capture_size,
     ):
-        super().__init__(quant_config)
-        self.moe = moe
+        super().__init__(moe_config, quant_config)
         self.gemm1_alpha = gemm1_alpha
         self.gemm1_beta = gemm1_beta
         self.gemm1_clamp_limit = gemm1_clamp_limit
         self.max_capture_size = max_capture_size
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        raise NotImplementedError(
+            "TrtLlmGenExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        raise NotImplementedError(
+            "TrtLlmGenExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        raise NotImplementedError(
+            "TrtLlmGenExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        raise NotImplementedError(
+            "TrtLlmGenExperts is not yet used by an Oracle. "
+            "This method should not be called."
+        )
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        raise NotImplementedError(
+            "TrtLlmGenExperts is not yet used by an Oracle. "
+            "This method should not be called."
         )
 
     def supports_chunking(self) -> bool:
@@ -57,6 +93,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: str,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
@@ -85,7 +122,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk = topk_ids.size(-1)
         local_num_experts = w1.size(0)
         intermediate_size = w2.size(1)
-        local_expert_offset = self.moe.ep_rank * local_num_experts
+        local_expert_offset = self.moe_config.ep_rank * local_num_experts
 
         x_quant = hidden_states
         x_scale = a1q_scale
@@ -123,7 +160,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "local_expert_offset": local_expert_offset,
             "local_num_experts": local_num_experts,
             "routed_scaling_factor": None,
-            "tile_tokens_dim": None,
             "routing_method_type": 1,
             "do_finalize": True,
             "output": output,

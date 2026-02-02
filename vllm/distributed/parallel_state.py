@@ -33,7 +33,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import shared_memory
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -53,7 +53,6 @@ from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
-    supports_custom_op,
 )
 
 
@@ -107,7 +106,7 @@ def _get_unique_name(name: str) -> str:
     return newname
 
 
-_groups: dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
+_groups: dict[str, Callable[[], "GroupCoordinator | None"]] = {}
 
 
 def _register_group(group: "GroupCoordinator") -> None:
@@ -246,33 +245,32 @@ def patched_fused_scaled_matmul_reduce_scatter(
     )
 
 
-if supports_custom_op():
-    direct_register_custom_op(
-        op_name="all_reduce",
-        op_func=all_reduce,
-        fake_impl=all_reduce_fake,
-    )
+direct_register_custom_op(
+    op_name="all_reduce",
+    op_func=all_reduce,
+    fake_impl=all_reduce_fake,
+)
 
-    direct_register_custom_op(
-        op_name="reduce_scatter",
-        op_func=reduce_scatter,
-        fake_impl=reduce_scatter_fake,
-    )
+direct_register_custom_op(
+    op_name="reduce_scatter",
+    op_func=reduce_scatter,
+    fake_impl=reduce_scatter_fake,
+)
 
-    direct_register_custom_op(
-        op_name="all_gather",
-        op_func=all_gather,
-        fake_impl=all_gather_fake,
-    )
+direct_register_custom_op(
+    op_name="all_gather",
+    op_func=all_gather,
+    fake_impl=all_gather_fake,
+)
 
-    # TODO: Remove this once the pytorch fix
-    # (https://github.com/pytorch/pytorch/pull/165086) gets released,
-    # in either 2.9.1 or 2.10
-    direct_register_custom_op(
-        op_name="patched_fused_scaled_matmul_reduce_scatter",
-        op_func=patched_fused_scaled_matmul_reduce_scatter,
-        fake_impl=patched_fused_scaled_matmul_reduce_scatter_fake,
-    )
+# TODO: Remove this once the pytorch fix
+# (https://github.com/pytorch/pytorch/pull/165086) gets released,
+# in either 2.9.1 or 2.10
+direct_register_custom_op(
+    op_name="patched_fused_scaled_matmul_reduce_scatter",
+    op_func=patched_fused_scaled_matmul_reduce_scatter,
+    fake_impl=patched_fused_scaled_matmul_reduce_scatter_fake,
+)
 
 
 class GroupCoordinator:
@@ -786,7 +784,7 @@ class GroupCoordinator:
         self,
         tensor_dict: dict[str, torch.Tensor | Any],
         dst: int | None = None,
-        all_gather_group: Optional["GroupCoordinator"] = None,
+        all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> dict[str, torch.Tensor | Any] | None:
         """Send the input tensor dictionary.
@@ -873,7 +871,7 @@ class GroupCoordinator:
     def recv_tensor_dict(
         self,
         src: int | None = None,
-        all_gather_group: Optional["GroupCoordinator"] = None,
+        all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> dict[str, torch.Tensor | Any] | None:
         """Recv the input tensor dictionary.
@@ -1002,18 +1000,47 @@ class GroupCoordinator:
         if self.device_communicator is not None:
             self.device_communicator.prepare_communication_buffer_for_model(model)
 
-    def dispatch(
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         is_sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
         if self.device_communicator is not None:
-            return self.device_communicator.dispatch(
-                hidden_states, router_logits, is_sequence_parallel
+            return self.device_communicator.dispatch_router_logits(
+                hidden_states,
+                router_logits,
+                is_sequence_parallel,
+                extra_tensors,
             )
         else:
             return hidden_states, router_logits
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
+        if self.device_communicator is not None:
+            return self.device_communicator.dispatch(
+                hidden_states,
+                topk_weights,
+                topk_ids,
+                is_sequence_parallel,
+                extra_tensors,
+            )
+        else:
+            return hidden_states, topk_weights, topk_ids
 
     def combine(
         self, hidden_states, is_sequence_parallel: bool = False
@@ -1108,7 +1135,11 @@ _EP: GroupCoordinator | None = None
 
 
 def get_ep_group() -> GroupCoordinator:
-    assert _EP is not None, "expert parallel group is not initialized"
+    assert _EP is not None, (
+        "expert parallel group is not initialized. "
+        "EP group is only created for MoE models with num_experts > 0. "
+        "This function should only be called for MoE models."
+    )
     return _EP
 
 
@@ -1166,9 +1197,9 @@ def init_distributed_environment(
         distributed_init_method,
         backend,
     )
-    from vllm.config import get_current_vllm_config
+    from vllm.config import get_current_vllm_config_or_none
 
-    config = get_current_vllm_config()
+    config = get_current_vllm_config_or_none()
     if (
         config is not None
         and config.parallel_config.distributed_executor_backend != "external_launcher"
@@ -1240,7 +1271,7 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
-        if config.parallel_config.nnodes > 1:
+        if config is not None and config.parallel_config.nnodes > 1:
             _NODE_COUNT = config.parallel_config.nnodes
         else:
             _NODE_COUNT = _node_count(_WORLD.cpu_group)
@@ -1249,7 +1280,7 @@ def init_distributed_environment(
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size"
         )
-    if config.parallel_config.nnodes_within_dp > 1:
+    if config is not None and config.parallel_config.nnodes_within_dp > 1:
         if parallel_config.data_parallel_size > 1:
             world_size_inner_dp = parallel_config.world_size
             group_ranks = [
@@ -1305,9 +1336,9 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
     data_parallel_size = 1
-    from vllm.config import get_current_vllm_config
+    from vllm.config import get_current_vllm_config_or_none
 
-    config = get_current_vllm_config()
+    config = get_current_vllm_config_or_none()
     if config is not None:
         data_parallel_size = config.parallel_config.data_parallel_size
 
@@ -1393,20 +1424,23 @@ def initialize_model_parallel(
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
-    group_ranks = (
-        all_ranks.transpose(1, 2)
-        .reshape(
-            -1,
-            data_parallel_size
-            * prefill_context_model_parallel_size
-            * tensor_model_parallel_size,
+    # Don't create EP group for dense models.
+    if config is None or config.model_config is None or config.model_config.is_moe:
+        group_ranks = (
+            all_ranks.transpose(1, 2)
+            .reshape(
+                -1,
+                data_parallel_size
+                * prefill_context_model_parallel_size
+                * tensor_model_parallel_size,
+            )
+            .unbind(0)
         )
-        .unbind(0)
-    )
-    group_ranks = [x.tolist() for x in group_ranks]
-    _EP = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="ep"
-    )
+        group_ranks = [x.tolist() for x in group_ranks]
+        _EP = init_model_parallel_group(
+            group_ranks, get_world_group().local_rank, backend, group_name="ep"
+        )
+    # If no EP group needed, _EP remains None
 
     logger.info_once(
         "rank %s in world size %s is assigned as "
@@ -1418,7 +1452,7 @@ def initialize_model_parallel(
         _PP.rank_in_group,
         _PCP.rank_in_group,
         _TP.rank_in_group,
-        _EP.rank_in_group,
+        _EP.rank_in_group if _EP is not None else "N/A",
     )
 
 
@@ -1515,22 +1549,22 @@ def patch_tensor_parallel_group(tp_group: GroupCoordinator):
         _TP = old_tp_group
 
 
-def get_tensor_model_parallel_world_size():
+def get_tensor_model_parallel_world_size() -> int:
     """Return world size for the tensor model parallel group."""
     return get_tp_group().world_size
 
 
-def get_tensor_model_parallel_rank():
+def get_tensor_model_parallel_rank() -> int:
     """Return my rank for the tensor model parallel group."""
     return get_tp_group().rank_in_group
 
 
-def get_decode_context_model_parallel_world_size():
+def get_decode_context_model_parallel_world_size() -> int:
     """Return world size for the decode context model parallel group."""
     return get_dcp_group().world_size
 
 
-def get_decode_context_model_parallel_rank():
+def get_decode_context_model_parallel_rank() -> int:
     """Return my rank for the decode context model parallel group."""
     return get_dcp_group().rank_in_group
 
@@ -1586,6 +1620,8 @@ def destroy_distributed_environment():
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+    # Reset environment variable cache
+    envs.disable_envs_cache()
     # Ensure all objects are not frozen before cleanup
     gc.unfreeze()
 

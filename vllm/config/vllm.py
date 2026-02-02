@@ -27,6 +27,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
+from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
@@ -38,6 +39,7 @@ from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
+from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
@@ -65,7 +67,7 @@ class OptimizationLevel(IntEnum):
     """O0 : No optimization. no compilation, no cudagraphs, no other
     optimization, just starting up immediately"""
     O1 = 1
-    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise 
+    """O1: Quick optimizations. Dynamo+Inductor compilation and Piecewise
     cudagraphs"""
     O2 = 2
     """O2: Full optimizations. -O1 as well as Full and Piecewise cudagraphs."""
@@ -100,6 +102,18 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
     ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
 
+def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if using AITER RMSNorm and AITER Triton GEMMs
+    and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
+
+    return (
+        envs.VLLM_ROCM_USE_AITER
+        and envs.VLLM_ROCM_USE_AITER_RMSNORM
+        and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        and cfg.model_config.get_hidden_size() == 2880
+    )
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
@@ -110,6 +124,7 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_attn_quant": False,
             "enable_sp": False,
             "fuse_gemm_comms": False,
+            "fuse_act_padding": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -125,6 +140,7 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_attn_quant": False,
             "enable_sp": False,
             "fuse_gemm_comms": False,
+            "fuse_act_padding": enable_norm_pad_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -140,6 +156,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
+            "fuse_act_padding": enable_norm_pad_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -155,6 +172,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
+            "fuse_act_padding": enable_norm_pad_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -192,6 +210,8 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
+    attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
+    """Attention configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
@@ -215,6 +235,8 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
+    profiler_config: ProfilerConfig = Field(default_factory=ProfilerConfig)
+    """Profiling configuration."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
@@ -257,6 +279,12 @@ class VllmConfig:
         vllm_factors.append(__version__)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
+            if (
+                self.compilation_config
+                and getattr(self.compilation_config, "compile_mm_encoder", False)
+                and self.model_config.multimodal_config
+            ):
+                vllm_factors.append(self.model_config.multimodal_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.cache_config:
@@ -279,6 +307,10 @@ class VllmConfig:
             vllm_factors.append(self.load_config.compute_hash())
         else:
             vllm_factors.append("None")
+        if self.attention_config:
+            vllm_factors.append(self.attention_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
         else:
@@ -289,6 +321,8 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.structured_outputs_config:
             vllm_factors.append(self.structured_outputs_config.compute_hash())
+        if self.profiler_config:
+            vllm_factors.append(self.profiler_config.compute_hash())
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.observability_config.compute_hash())
@@ -324,12 +358,28 @@ class VllmConfig:
         ]
         return hash_str
 
-    def pad_for_cudagraph(self, batch_size: int) -> int:
-        # if batch_size > self.compilation_config.max_cudagraph_capture_size,
-        # it should raise an IndexError.
-        # the caller should make sure the batch_size is within the range,
-        # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
-        return self.compilation_config.bs_to_padded_graph_size[batch_size]
+    @property
+    def needs_dp_coordinator(self) -> bool:
+        """
+        Determine if the DPCoordinator process is needed.
+
+        The DPCoordinator is needed in two cases:
+        1. For MoE models with DP > 1: to handle wave coordination
+           (even in external LB mode, since wave coordination runs in the coordinator)
+        2. For non-MoE models in internal/hybrid LB mode: to collect and publish
+           queue stats for load balancing across DP ranks
+
+        Returns:
+            True if DPCoordinator process is needed, False otherwise.
+        """
+
+        # For non-MoE models, only need coordinator in internal/hybrid LB mode
+        # (for stats collection).
+        return self.parallel_config.data_parallel_size > 1 and (
+            self.model_config is None
+            or self.model_config.is_moe
+            or not self.parallel_config.data_parallel_external_lb
+        )
 
     def enable_trace_function_call_for_thread(self) -> None:
         """
@@ -408,7 +458,32 @@ class VllmConfig:
             hf_config.architectures = architectures
 
         model_config = copy.deepcopy(self.model_config)
+
+        if (
+            model_config.is_multimodal_model
+            and hasattr(model_config.hf_config, "tie_word_embeddings")
+            and not hasattr(hf_config.get_text_config(), "tie_word_embeddings")
+        ):
+            # In Transformers v5, tie_word_embeddings belongs to the config of the class
+            # that can see both layers to be tied. For example:
+            #
+            # SomeVLModel:
+            #   self.language_model = SomeLanguageModel()
+            #   self.vision_model = SomeVisionModel()
+            #
+            # SomeVLModelForMultimodalLM:
+            #   self.model = SomeVLModel()
+            #   self.lm_head = nn.Linear()
+            #
+            # Therefore, tie_word_embeddings is defined in SomeVLModelForMultimodalLM's
+            # config and is not present in SomeVLModel's config. In vLLM, the lm_head
+            # belongs to the language_model, so we must ensure that tie_word_embeddings
+            # is set in the language_model's config.
+            tie_word_embeddings = model_config.hf_config.tie_word_embeddings
+            hf_config.get_text_config().tie_word_embeddings = tie_word_embeddings
+
         model_config.hf_config = hf_config
+        model_config.model_arch_config = model_config.get_model_arch_config()
 
         return replace(self, model_config=model_config)
 
@@ -462,17 +537,15 @@ class VllmConfig:
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
-        if (kv_offloading_backend := self.cache_config.kv_offloading_backend) is None:
+        # KV offloading is only activated when kv_offloading_size is set.
+        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
             return
+
+        kv_offloading_backend = self.cache_config.kv_offloading_backend
 
         # If no KVTransferConfig is provided, create a default one.
         if self.kv_transfer_config is None:
             self.kv_transfer_config = KVTransferConfig()
-
-        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
-            raise ValueError(
-                "You must set kv_offloading_size when kv_offloading_backend is set."
-            )
         num_kv_ranks = (
             self.parallel_config.tensor_parallel_size
             * self.parallel_config.pipeline_parallel_size
@@ -480,12 +553,8 @@ class VllmConfig:
 
         if kv_offloading_backend == "native":
             self.kv_transfer_config.kv_connector = "OffloadingConnector"
-            kv_bytes_per_rank = kv_offloading_size * (1 << 30) / num_kv_ranks
-
-            # NOTE(ApostaC): the actual calculation for num_cpu_blocks should be
-            # done after the model's KV cache is initialized
             self.kv_transfer_config.kv_connector_extra_config.update(
-                {"kv_bytes_per_rank": kv_bytes_per_rank, "num_cpu_blocks": 0}
+                {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
         elif kv_offloading_backend == "lmcache":
             self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
@@ -510,6 +579,8 @@ class VllmConfig:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
+            self.parallel_config.is_moe_model = self.model_config.is_moe
+
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config is not None:
@@ -529,26 +600,18 @@ class VllmConfig:
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
-            if self.parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Async scheduling is not yet compatible with "
-                    "pipeline_parallel_size > 1."
-                )
             # Currently, async scheduling only support eagle speculative
             # decoding.
             if self.speculative_config is not None:
                 if self.speculative_config.method not in get_args(EagleModelTypes):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP kind of speculative decoding"
+                        "with EAGLE/MTP kind of speculative decoding."
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
-                        "async scheduling for EAGLE/MTP kind of speculative "
-                        "decoding is enabled, but disable_padded_drafter_batch=True "
-                        "disable_padded_drafter_batch=True is not supported for "
-                        "this situation now. please set "
-                        "disable_padded_drafter_batch=Fasle"
+                        "Async scheduling is not compatible with "
+                        "disable_padded_drafter_batch=True."
                     )
             if not executor_supports_async_sched:
                 raise ValueError(
@@ -556,28 +619,71 @@ class VllmConfig:
                     "`external_launcher` distributed executor backend, but you chose "
                     f"`{executor_backend}`."
                 )
+            if self.cache_config.mamba_cache_mode != "none":
+                raise ValueError(
+                    "Currently, async scheduling is not compatible with "
+                    "prefix caching for Mamba models."
+                )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
-            # NOTE: we won't reach here until async scheduling is enabled by default.
             if (
-                self.parallel_config.pipeline_parallel_size > 1
-                or self.speculative_config is not None
+                self.speculative_config is not None
+                and self.speculative_config.method not in get_args(EagleModelTypes)
             ):
-                logger.warning(
-                    "Async scheduling is not yet supported with speculative decoding "
-                    " or pipeline_parallel_size > 1 and will be disabled."
+                logger.warning_once(
+                    "Async scheduling not supported with %s-based "
+                    "speculative decoding and will be disabled.",
+                    self.speculative_config.method,
+                    scope="local",
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
+                self.speculative_config is not None
+                and self.speculative_config.disable_padded_drafter_batch
+            ):
+                logger.warning_once(
+                    "Async scheduling is not compatible with "
+                    "disable_padded_drafter_batch=True and will be disabled.",
+                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
-                logger.warning(
+                logger.warning_once(
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend (only `mp`, `uni`, and "
                     "`external_launcher` are supported).",
                     executor_backend,
+                    scope="local",
+                )
+                self.scheduler_config.async_scheduling = False
+            elif self.cache_config.mamba_cache_mode != "none":
+                logger.warning_once(
+                    "Async scheduling is not compatible with "
+                    "prefix caching for Mamba models and will be disabled.",
+                    scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
             else:
                 self.scheduler_config.async_scheduling = True
+
+        logger.info_once(
+            "Asynchronous scheduling is %s.",
+            "enabled" if self.scheduler_config.async_scheduling else "disabled",
+        )
+
+        if self.parallel_config.disable_nccl_for_dp_synchronization is None:
+            if self.scheduler_config.async_scheduling:
+                if self.parallel_config.data_parallel_size > 1 and (
+                    self.model_config is None or self.model_config.is_moe
+                ):
+                    logger.info_once(
+                        "Disabling NCCL for DP synchronization "
+                        "when using async scheduling.",
+                        scope="local",
+                    )
+                self.parallel_config.disable_nccl_for_dp_synchronization = True
+            else:
+                self.parallel_config.disable_nccl_for_dp_synchronization = False
 
         from vllm.platforms import current_platform
 
@@ -606,9 +712,9 @@ class VllmConfig:
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.warning(
-                "Inductor compilation was disabled by user settings,"
-                "Optimizations settings that are only active during"
-                "Inductor compilation will be ignored."
+                "Inductor compilation was disabled by user settings, "
+                "optimizations settings that are only active during "
+                "inductor compilation will be ignored."
             )
 
         def has_blocked_weights():
@@ -645,8 +751,9 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+
         if (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
         ):
             logger.info(
@@ -671,22 +778,29 @@ class VllmConfig:
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
-            if (
-                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-                and self.model_config is not None
-            ):
-                if self.model_config.pooler_config is not None:
+            if model_config := self.model_config:
+                if (
+                    self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                    and model_config.pooler_config is not None
+                ):
                     logger.warning_once(
                         "Pooling models do not support full cudagraphs. "
                         "Overriding cudagraph_mode to PIECEWISE."
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                elif self.model_config.is_encoder_decoder:
-                    logger.warning_once(
-                        "Encoder-decoder models do not support full cudagraphs. "
-                        "Overriding cudagraph_mode to PIECEWISE."
+                elif (
+                    model_config.is_encoder_decoder
+                    and self.compilation_config.cudagraph_mode
+                    not in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY)
+                ):
+                    logger.info_once(
+                        "Encoder-decoder models do not support %s. "
+                        "Overriding cudagraph_mode to FULL_DECODE_ONLY.",
+                        self.compilation_config.cudagraph_mode.name,
                     )
-                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                    self.compilation_config.cudagraph_mode = (
+                        CUDAGraphMode.FULL_DECODE_ONLY
+                    )
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
@@ -716,30 +830,22 @@ class VllmConfig:
 
             logger.warning_once(
                 "--kv-sharing-fast-prefill requires changes on model side for "
-                "correctness and to realize prefill savings. "
+                "correctness and to realize prefill savings."
             )
+        # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
+        self._set_compile_ranges()
 
-        if self.model_config and self.model_config.is_encoder_decoder:
-            from vllm.multimodal import MULTIMODAL_REGISTRY
-
-            self.scheduler_config.max_num_encoder_input_tokens = (
-                MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(self.model_config)
+        if (
+            self.model_config
+            and self.model_config.architecture == "WhisperForConditionalGeneration"
+            and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
+        ):
+            logger.warning(
+                "Whisper is known to have issues with "
+                "forked workers. If startup is hanging, "
+                "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
+                "to 'spawn'."
             )
-            logger.debug(
-                "Encoder-decoder model detected: setting "
-                "`max_num_encoder_input_tokens` to encoder length (%s)",
-                self.scheduler_config.max_num_encoder_input_tokens,
-            )
-            if (
-                self.model_config.architecture == "WhisperForConditionalGeneration"
-                and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"
-            ):
-                logger.warning(
-                    "Whisper is known to have issues with "
-                    "forked workers. If startup is hanging, "
-                    "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
-                    "to 'spawn'."
-                )
 
         if (
             self.kv_events_config is not None
@@ -747,7 +853,7 @@ class VllmConfig:
             and not self.cache_config.enable_prefix_caching
         ):
             logger.warning(
-                "KV cache events are on, but prefix caching is not enabled."
+                "KV cache events are on, but prefix caching is not enabled. "
                 "Use --enable-prefix-caching to enable."
             )
         if (
@@ -756,9 +862,9 @@ class VllmConfig:
             and not self.kv_events_config.enable_kv_cache_events
         ):
             logger.warning(
-                "KV cache events are disabled,"
-                "but the scheduler is configured to publish them."
-                "Modify KVEventsConfig.enable_kv_cache_events"
+                "KV cache events are disabled, "
+                "but the scheduler is configured to publish them. "
+                "Modify KVEventsConfig.enable_kv_cache_events "
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
@@ -789,13 +895,16 @@ class VllmConfig:
                 f"({self.parallel_config.cp_kv_cache_interleave_size})."
             )
 
-        assert (
-            self.parallel_config.cp_kv_cache_interleave_size == 1
-            or self.speculative_config is None
-        ), "MTP with cp_kv_cache_interleave_size > 1 is not supported now."
-
         # Do this after all the updates to compilation_config.mode
-        self.compilation_config.set_splitting_ops_for_v1()
+        effective_dp_size = (
+            self.parallel_config.data_parallel_size
+            if self.model_config is None or self.model_config.is_moe
+            else 1
+        )
+        self.compilation_config.set_splitting_ops_for_v1(
+            all2all_backend=self.parallel_config.all2all_backend,
+            data_parallel_size=effective_dp_size,
+        )
 
         if self.compilation_config.pass_config.enable_sp:
             # With pipeline parallelism or dynamo partitioning,
@@ -824,7 +933,7 @@ class VllmConfig:
                         else "pipeline parallelism"
                     )
                     logger.warning_once(
-                        "Sequence parallelism not supported with"
+                        "Sequence parallelism not supported with "
                         "native rms_norm when using %s, "
                         "this will likely lead to an error.",
                         regime,
@@ -841,7 +950,7 @@ class VllmConfig:
                 logger.warning_once(
                     "No piecewise cudagraph for executing cascade attention."
                     " Will fall back to eager execution if a batch runs "
-                    "into cascade attentions"
+                    "into cascade attentions."
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
@@ -850,10 +959,25 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 
-        if self.parallel_config.enable_dbo:
+        if (
+            self.model_config
+            and vllm_is_batch_invariant()
+            and not self.model_config.disable_cascade_attn
+        ):
+            self.model_config.disable_cascade_attn = True
+            logger.warning_once(
+                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
+                scope="local",
+            )
+
+        if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
-            assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
+            assert a2a_backend in [
+                "deepep_low_latency",
+                "deepep_high_throughput",
+            ], (
                 "Microbatching currently only supports the deepep_low_latency and "
                 f"deepep_high_throughput all2all backend. {a2a_backend} is not "
                 "supported. To fix use --all2all-backend=deepep_low_latency or "
@@ -868,17 +992,48 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
-        if not self.scheduler_config.disable_hybrid_kv_cache_manager:
-            # logger should only print warning message for hybrid models. As we
-            # can't know whether the model is hybrid or not now, so we don't log
-            # warning message here and will log it later.
-            if not current_platform.support_hybrid_kv_cache():
-                # Hybrid KV cache manager is not supported on non-GPU platforms.
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+        # Hybrid KV cache manager (HMA) runtime rules:
+        # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
+        #   disables it
+        # - No preference: auto-disable for unsupported features (e.g. kv connector)
+        # - Explicit disable (--disable-kv-cache-manager): always respect it
+        need_disable_hybrid_kv_cache_manager = False
+        # logger should only print warning message for hybrid models. As we
+        # can't know whether the model is hybrid or not now, so we don't log
+        # warning message here and will log it later.
+        if not current_platform.support_hybrid_kv_cache():
+            # Hybrid KV cache manager is not supported on non-GPU platforms.
+            need_disable_hybrid_kv_cache_manager = True
+        if self.kv_events_config is not None:
+            # Hybrid KV cache manager is not compatible with KV events.
+            need_disable_hybrid_kv_cache_manager = True
+        if (
+            self.model_config is not None
+            and self.model_config.attention_chunk_size is not None
+        ):
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.use_eagle()
+            ):
+                # Hybrid KV cache manager is not yet supported with chunked
+                # local attention + eagle.
+                need_disable_hybrid_kv_cache_manager = True
+            elif not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
+                logger.warning(
+                    "There is a latency regression when using chunked local"
+                    " attention with the hybrid KV cache manager. Disabling"
+                    " it, by default. To enable it, set the environment "
+                    "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
+                )
+                # Hybrid KV cache manager is not yet supported with chunked
+                # local attention.
+                need_disable_hybrid_kv_cache_manager = True
+
+        if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
+            # Default to disable HMA, but only if the user didn't express a preference.
             if self.kv_transfer_config is not None:
-                # NOTE(Kuntai): turn HMA off for connector for now.
-                # TODO(Kuntai): have a more elegent solution to check and
-                # turn off HMA for connector that does not support HMA.
+                # NOTE(Kuntai): turn HMA off for connector unless specifically enabled.
+                need_disable_hybrid_kv_cache_manager = True
                 logger.warning(
                     "Turning off hybrid kv cache manager because "
                     "`--kv-transfer-config` is set. This will reduce the "
@@ -886,34 +1041,38 @@ class VllmConfig:
                     "or Mamba attention. If you are a developer of kv connector"
                     ", please consider supporting hybrid kv cache manager for "
                     "your connector by making sure your connector is a subclass"
-                    " of `SupportsHMA` defined in kv_connector/v1/base.py."
+                    " of `SupportsHMA` defined in kv_connector/v1/base.py and"
+                    " use --no-disable-hybrid-kv-cache-manager to start vLLM."
                 )
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
-            if self.kv_events_config is not None:
-                # Hybrid KV cache manager is not compatible with KV events.
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
-            if (
-                self.model_config is not None
-                and self.model_config.attention_chunk_size is not None
-            ):
-                if (
-                    self.speculative_config is not None
-                    and self.speculative_config.use_eagle()
-                ):
-                    # Hybrid KV cache manager is not yet supported with chunked
-                    # local attention + eagle.
-                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
-                elif not envs.VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE:
-                    logger.warning(
-                        "There is a latency regression when using chunked local"
-                        " attention with the hybrid KV cache manager. Disabling"
-                        " it, by default. To enable it, set the environment "
-                        "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE=1."
-                    )
-                    # Hybrid KV cache manager is not yet supported with chunked
-                    # local attention.
-                    self.scheduler_config.disable_hybrid_kv_cache_manager = True
+            self.scheduler_config.disable_hybrid_kv_cache_manager = (
+                need_disable_hybrid_kv_cache_manager
+            )
+        elif (
+            self.scheduler_config.disable_hybrid_kv_cache_manager is False
+            and need_disable_hybrid_kv_cache_manager
+        ):
+            raise ValueError(
+                "Hybrid KV cache manager was explicitly enabled but is not "
+                "supported in this configuration. Consider omitting the "
+                "--no-disable-hybrid-kv-cache-manager flag to let vLLM decide"
+                " automatically."
+            )
 
+        if self.scheduler_config.disable_hybrid_kv_cache_manager is None:
+            # Default to enable HMA if not explicitly disabled by user or logic above.
+            self.scheduler_config.disable_hybrid_kv_cache_manager = False
+
+        if self.cache_config.mamba_cache_mode == "align":
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                assert (
+                    self.scheduler_config.long_prefill_token_threshold
+                    >= self.cache_config.block_size
+                )
+            assert not self.scheduler_config.disable_chunked_mm_input, (
+                "Chunked MM input is required because we need the flexibility to "
+                "schedule a multiple of block_size tokens even if they are in the "
+                "middle of a mm input"
+            )
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()
@@ -980,7 +1139,7 @@ class VllmConfig:
         max_graph_size = min(max_num_seqs * 2, 512)
         # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
         # up to max_graph_size
-        cuda_graph_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
+        cudagraph_capture_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
             range(256, max_graph_size + 1, 16))
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
@@ -1021,8 +1180,14 @@ class VllmConfig:
                 self.compilation_config.max_cudagraph_capture_size
             )
             if max_cudagraph_capture_size is None:
+                decode_query_len = 1
+                if (
+                    self.speculative_config
+                    and self.speculative_config.num_speculative_tokens
+                ):
+                    decode_query_len += self.speculative_config.num_speculative_tokens
                 max_cudagraph_capture_size = min(
-                    self.scheduler_config.max_num_seqs * 2, 512
+                    self.scheduler_config.max_num_seqs * decode_query_len * 2, 512
                 )
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
@@ -1119,11 +1284,53 @@ class VllmConfig:
         # complete the remaining process.
         self.compilation_config.post_init_cudagraph_sizes()
 
-    def recalculate_max_model_len(self, max_model_len: int):
-        # Can only be called in try_verify_and_update_config
-        model_config = self.model_config
-        max_model_len = model_config.get_and_verify_max_len(max_model_len)
-        self.model_config.max_model_len = max_model_len
+    def _set_compile_ranges(self):
+        """
+        Set the compile ranges for the compilation config.
+        """
+        compilation_config = self.compilation_config
+        computed_compile_ranges_split_points = []
+
+        # The upper bound of the compile ranges is the max_num_batched_tokens.
+        # For speculative decoding with draft model, the compile range must be extended
+        # by 1 for each sequence.
+        compile_range_end = self.scheduler_config.max_num_batched_tokens
+        if compile_range_end is not None:
+            do_extend: bool = (
+                self.speculative_config is not None
+                and self.speculative_config.uses_draft_model()
+            )
+            if do_extend:
+                compile_range_end += self.scheduler_config.max_num_seqs
+
+            computed_compile_ranges_split_points.append(compile_range_end)
+
+        # Add the compile ranges for flashinfer
+        if compilation_config.pass_config.fuse_allreduce_rms:
+            tp_size = self.parallel_config.tensor_parallel_size
+            max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
+            if max_size is not None:
+                max_token_num = max_size // (
+                    self.model_config.get_hidden_size()
+                    * self.model_config.dtype.itemsize
+                )
+                if compile_range_end is not None and max_token_num < compile_range_end:
+                    computed_compile_ranges_split_points.append(max_token_num)
+                else:
+                    logger.debug(
+                        "Max num batched tokens below allreduce-rms fusion threshold, "
+                        "allreduce-rms fusion will be enabled for all num_tokens."
+                    )
+
+        if compilation_config.compile_ranges_split_points is not None:
+            for x in compilation_config.compile_ranges_split_points:
+                assert isinstance(x, int)
+                assert x > 0, f"Invalid compile range split point: {x}"
+                if compile_range_end is not None and x < compile_range_end and x > 1:
+                    computed_compile_ranges_split_points.append(x)
+        compilation_config.compile_ranges_split_points = sorted(
+            computed_compile_ranges_split_points
+        )
 
     def try_verify_and_update_config(self):
         if self.model_config is None:
@@ -1183,15 +1390,18 @@ class VllmConfig:
         if self.compilation_config.debug_dump_path is None:
             return None
         tp_rank = self.parallel_config.rank
-        dp_rank = self.parallel_config.data_parallel_rank
-        data_parallel_size = self.parallel_config.data_parallel_size
-        append_path = (
-            f"rank_{tp_rank}"
-            if data_parallel_size == 1
-            else f"rank_{tp_rank}_dp_{dp_rank}"
-        )
+        dp_rank = self.parallel_config.data_parallel_index
+        append_path = f"rank_{tp_rank}_dp_{dp_rank}"
         path = self.compilation_config.debug_dump_path / append_path
         return path
+
+    def replace(self, **kwargs):
+        """
+        Replace attributes of the config, and 'recompute' the config.
+        dataclass.replace() calls __init__() and __post_init__(), source:
+        https://docs.python.org/3/library/dataclasses.html#dataclasses.replace
+        """
+        return replace(self, **kwargs)
 
     def __str__(self):
         return (
@@ -1213,6 +1423,7 @@ class VllmConfig:
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
+            f"enable_return_routed_experts={self.model_config.enable_return_routed_experts}, "  # noqa
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
             f"structured_outputs_config={self.structured_outputs_config!r}, "
@@ -1262,6 +1473,11 @@ def set_current_vllm_config(
 
     num_models_seen = compilation_counter.num_models_seen
     try:
+        # Clear the compilation config cache when context changes.
+        # This is needed since the old config may have been accessed
+        # and cached before the new config is set.
+        get_cached_compilation_config.cache_clear()
+
         _current_vllm_config = vllm_config
         _current_prefix = prefix
         yield
@@ -1302,11 +1518,18 @@ def get_cached_compilation_config():
 
 def get_current_vllm_config() -> VllmConfig:
     if _current_vllm_config is None:
-        # in ci, usually when we test custom ops/modules directly,
-        # we don't set the vllm config. In that case, we set a default
-        # config.
-        logger.warning("Current vLLM config is not set.")
-        return VllmConfig()
+        raise AssertionError(
+            "Current vLLM config is not set. This typically means "
+            "get_current_vllm_config() was called outside of a "
+            "set_current_vllm_config() context, or a CustomOp was instantiated "
+            "at module import time or model forward time when config is not set. "
+            "For tests that directly test custom ops/modules, use the "
+            "'default_vllm_config' pytest fixture from tests/conftest.py."
+        )
+    return _current_vllm_config
+
+
+def get_current_vllm_config_or_none() -> VllmConfig | None:
     return _current_vllm_config
 
 

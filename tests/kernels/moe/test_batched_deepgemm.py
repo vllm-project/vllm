@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularK
 from vllm.utils.deep_gemm import calc_diff, is_deep_gemm_supported
 
 from .test_deepgemm import make_block_quant_fp8_weights
+from .utils import make_dummy_moe_config
 
 BLOCK_SIZE = [128, 128]
 
@@ -27,7 +28,7 @@ BLOCK_SIZE = [128, 128]
 @pytest.mark.parametrize("N", [512, 1024])  # intermediate dim per expert
 @pytest.mark.parametrize("topk", [2, 4])
 def test_batched_deepgemm_vs_triton(
-    E: int, T: int, K: int, N: int, topk: int, monkeypatch
+    E: int, T: int, K: int, N: int, topk: int, monkeypatch, workspace_init
 ):
     """Compare BatchedDeepGemmExperts to BatchedTritonExperts."""
 
@@ -71,6 +72,7 @@ def test_batched_deepgemm_vs_triton(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
     mk_triton = FusedMoEModularKernel(prep_finalize, triton_experts)
 
@@ -89,6 +91,7 @@ def test_batched_deepgemm_vs_triton(
         max_num_tokens=max_num_tokens,
         num_dispatchers=1,
         quant_config=quant_config,
+        moe_config=make_dummy_moe_config(),
     )
     mk_deepgemm = FusedMoEModularKernel(prep_finalize, deepgemm_experts)
 

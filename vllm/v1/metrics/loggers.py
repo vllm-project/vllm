@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
+from vllm.v1.metrics.perf import PerfMetricsLogging
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     CachingMetrics,
@@ -118,6 +119,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.engine_is_idle = False
         self.aggregated = False
 
+        if self._enable_perf_stats():
+            self.perf_metrics_logging = PerfMetricsLogging(vllm_config)
+
     def _reset(self, now):
         self.last_log_time = now
 
@@ -126,6 +130,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.num_generation_tokens: int = 0
         self.num_corrupted_reqs: int = 0
         self.num_preemptions: int = 0
+
+    def _enable_perf_stats(self) -> bool:
+        return self.vllm_config.observability_config.enable_mfu_metrics
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
@@ -175,6 +182,8 @@ class LoggingStatLogger(StatLoggerBase):
                 self.cudagraph_logging.observe(scheduler_stats.cudagraph_stats)
             if not self.aggregated:
                 self.last_scheduler_stats = scheduler_stats
+            if (perf_stats := scheduler_stats.perf_stats) and self._enable_perf_stats():
+                self.perf_metrics_logging.observe(perf_stats)
         if mm_cache_stats:
             self.mm_caching_metrics.observe(mm_cache_stats)
 
@@ -211,7 +220,7 @@ class LoggingStatLogger(StatLoggerBase):
             "Running: %d reqs",
             "Waiting: %d reqs",
         ]
-        log_args = [
+        log_args: list[int | float | str] = [
             self.last_prompt_throughput,
             self.last_generation_throughput,
             self.last_scheduler_stats.num_running_reqs,
@@ -254,6 +263,8 @@ class LoggingStatLogger(StatLoggerBase):
         self.kv_connector_logging.log(log_fn=log_fn)
         if self.cudagraph_logging is not None:
             self.cudagraph_logging.log(log_fn=log_fn)
+        if self._enable_perf_stats():
+            self.perf_metrics_logging.log(log_fn=log_fn, log_prefix=self.log_prefix)
 
     def log_engine_initialized(self):
         if self.vllm_config.cache_config.num_gpu_blocks:
@@ -281,6 +292,10 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
     @property
     def log_prefix(self):
         return "{} Engines Aggregated: ".format(len(self.engine_indexes))
+
+    def _enable_perf_stats(self) -> bool:
+        # Adding per_gpu perf stats across engines can lead to misleading numbers.
+        return False
 
     def record(
         self,
@@ -700,43 +715,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_time_to_first_token, engine_indexes, model_name
         )
 
-        # Deprecated in 0.11 - Renamed as vllm:inter_token_latency_seconds
-        # With 0.12.x you can enable with --show-hidden-metrics-for-version=0.11
-        # TODO: remove in 0.13.0
-        if self.show_hidden_metrics:
-            histogram_time_per_output_token = self._histogram_cls(
-                name="vllm:time_per_output_token_seconds",
-                documentation=(
-                    "Histogram of time per output token in seconds."
-                    "DEPRECATED: Use vllm:inter_token_latency_seconds instead."
-                ),
-                buckets=[
-                    0.01,
-                    0.025,
-                    0.05,
-                    0.075,
-                    0.1,
-                    0.15,
-                    0.2,
-                    0.3,
-                    0.4,
-                    0.5,
-                    0.75,
-                    1.0,
-                    2.5,
-                    5.0,
-                    7.5,
-                    10.0,
-                    20.0,
-                    40.0,
-                    80.0,
-                ],
-                labelnames=labelnames,
-            )
-            self.histogram_time_per_output_token = make_per_engine(
-                histogram_time_per_output_token, engine_indexes, model_name
-            )
-
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
             documentation="Histogram of inter-token latency in seconds.",
@@ -870,6 +848,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_decode_time_request, engine_indexes, model_name
         )
 
+        histogram_prefill_kv_computed_request = self._histogram_cls(
+            name="vllm:request_prefill_kv_computed_tokens",
+            documentation=(
+                "Histogram of new KV tokens computed during prefill "
+                "(excluding cached tokens)."
+            ),
+            buckets=build_1_2_5_buckets(max_model_len),
+            labelnames=labelnames,
+        )
+        self.histogram_prefill_kv_computed_request = make_per_engine(
+            histogram_prefill_kv_computed_request, engine_indexes, model_name
+        )
+
         #
         # KV Cache residency metrics
         #
@@ -952,7 +943,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_lora_info: Gauge | None = None
         if vllm_config.lora_config is not None:
             if len(self.engine_indexes) > 1:
-                raise NotImplementedError("LoRA in DP mode is not supported yet.")
+                logger.warning(
+                    "vllm:lora_requests_info prometheus metrics may be "
+                    "incorrect/misleading with data parallel deployments."
+                )
             self.labelname_max_lora = "max_lora"
             self.labelname_waiting_lora_adapters = "waiting_lora_adapters"
             self.labelname_running_lora_adapters = "running_lora_adapters"
@@ -1093,8 +1087,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
-            if self.show_hidden_metrics:
-                self.histogram_time_per_output_token[engine_idx].observe(itl)
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason][
@@ -1114,6 +1106,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.histogram_decode_time_request[engine_idx].observe(
                 finished_request.decode_time
+            )
+            # Calculate prefill KV compute (excludes cached tokens)
+            prefill_kv_computed = finished_request.num_prompt_tokens - max(
+                finished_request.num_cached_tokens, 0
+            )
+            self.histogram_prefill_kv_computed_request[engine_idx].observe(
+                prefill_kv_computed
             )
             self.histogram_num_prompt_tokens_request[engine_idx].observe(
                 finished_request.num_prompt_tokens

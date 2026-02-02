@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
@@ -182,7 +181,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        return 75
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
@@ -241,7 +240,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
@@ -277,7 +276,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         sym = quant_config.get("sym")
         desc_act = quant_config.get("desc_act")
 
-        if not current_platform.is_cuda():
+        if not (current_platform.is_cuda() or current_platform.is_cpu()):
             return False
 
         if quant_method != "gptq":
@@ -733,6 +732,14 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             is_a_8bit=is_a_8bit,
         )
         replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
+
+        # The modular kernel expects w13_weight and w2_weight,
+        # but GPTQ uses w13_qweight and w2_qweight
+        # Alias for modular kernel
+        layer.w13_weight = layer.w13_qweight
+        # Alias for modular kernel
+        layer.w2_weight = layer.w2_qweight
+
         # Repack scales
         marlin_w13_scales = marlin_moe_permute_scales(
             s=layer.w13_scales,
@@ -783,38 +790,117 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        return None
+        from vllm.model_executor.layers.fused_moe.config import (
+            gptq_marlin_moe_quant_config,
+        )
+
+        return gptq_marlin_moe_quant_config(
+            w1_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            weight_bits=self.quant_config.weight_bits,
+            group_size=self.quant_config.group_size,
+            w1_zp=getattr(layer, "w13_qzeros", None)
+            if not self.quant_config.is_sym
+            else None,
+            w2_zp=getattr(layer, "w2_qzeros", None)
+            if not self.quant_config.is_sym
+            else None,
+            w1_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
+        )
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize,
+        layer: torch.nn.Module,
+    ):
+        """
+        Select the GEMM implementation for GPTQ-Marlin MoE.
+
+        Returns MarlinExperts configured for GPTQ quantization.
+        This is ONLY used when LoRA is enabled.
+        Without LoRA, GPTQ uses its own apply() method.
+        """
+        # Only use modular kernels when LoRA is enabled
+        # Without LoRA, GPTQ's own apply() method works fine and is more efficient
+        if not self.moe.is_lora_enabled:
+            raise NotImplementedError(
+                "GPTQ-Marlin uses its own apply() method when LoRA is not enabled. "
+                "Modular kernels are only used for LoRA support."
+            )
+
+        # The modular marlin kernels do not support 8-bit weights.
+        if self.quant_config.weight_bits == 8:
+            raise NotImplementedError(
+                "GPTQ-Marlin kernel does not support 8-bit weights."
+            )
+
+        from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+            BatchedMarlinExperts,
+            MarlinExperts,
+        )
+
+        # Ensure quant config is initialized
+        assert self.moe_quant_config is not None, (
+            "moe_quant_config must be initialized before select_gemm_impl"
+        )
+
+        w13_g_idx = (
+            getattr(layer, "w13_g_idx", None) if self.quant_config.desc_act else None
+        )
+        w2_g_idx = (
+            getattr(layer, "w2_g_idx", None) if self.quant_config.desc_act else None
+        )
+        w13_g_idx_sort_indices = (
+            getattr(layer, "w13_g_idx_sort_indices", None)
+            if self.quant_config.desc_act
+            else None
+        )
+        w2_g_idx_sort_indices = (
+            getattr(layer, "w2_g_idx_sort_indices", None)
+            if self.quant_config.desc_act
+            else None
+        )
+
+        # Check if using batched expert format (for Expert Parallelism)
+        if (
+            prepare_finalize.activation_format
+            == mk.FusedMoEActivationFormat.BatchedExperts
+        ):
+            # For batched format, use BatchedMarlinExperts
+            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens_per_rank is not None
+            return BatchedMarlinExperts(
+                max_num_tokens=max_num_tokens_per_rank,
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
+                w13_g_idx=w13_g_idx,
+                w2_g_idx=w2_g_idx,
+                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+                is_k_full=self.is_k_full,
+            )
+        else:
+            # Standard Marlin experts for GPTQ
+            return MarlinExperts(
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
+                w13_g_idx=w13_g_idx,
+                w2_g_idx=w2_g_idx,
+                w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+                is_k_full=self.is_k_full,
+            )
 
     def apply(
         self,
         layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert activation == "silu", "Only SiLU activation is supported."
-
-        topk_weights, topk_ids, _ = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
         return fused_marlin_moe(
             x,
             layer.w13_qweight,
@@ -823,15 +909,14 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             getattr(layer, "w2_bias", None),
             layer.w13_scales,
             layer.w2_scales,
-            router_logits,
             topk_weights,
             topk_ids,
             input_global_scale1=getattr(layer, "w13_input_global_scale", None),
             input_global_scale2=getattr(layer, "w2_input_global_scale", None),
             quant_type_id=self.quant_type.id,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
             g_idx1=layer.w13_g_idx,
             g_idx2=layer.w2_g_idx,
             sort_indices1=layer.w13_g_idx_sort_indices,

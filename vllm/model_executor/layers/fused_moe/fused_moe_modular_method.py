@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
 
 import torch
 
@@ -21,20 +20,24 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 logger = init_logger(__name__)
 
 
+# --8<-- [start:modular_fused_moe]
 @CustomOp.register("modular_fused_moe")
 class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
+    # --8<-- [end:modular_fused_moe]
+
     def __init__(
         self, old_quant_method: FusedMoEMethodBase, experts: FusedMoEModularKernel
     ):
         super().__init__(old_quant_method.moe)
         self.moe_quant_config = old_quant_method.moe_quant_config
-        self.fused_experts = experts
+        self.moe_mk = experts
         self.disable_expert_map = getattr(
             old_quant_method,
             "disable_expert_map",
-            not self.fused_experts.supports_expert_map(),
+            not self.moe_mk.supports_expert_map(),
         )
         self.old_quant_method = old_quant_method
+        assert not self.old_quant_method.is_monolithic
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
 
     @staticmethod
@@ -50,13 +53,9 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
                 prepare_finalize,
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
                 shared_experts,
-                getattr(moe_layer, "shared_experts_stream", None),
+                moe_parallel_config=moe_layer.moe_parallel_config,
             ),
         )
-
-    @property
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        return self.fused_experts.prepare_finalize.topk_indices_dtype()
 
     @property
     def supports_eplb(self) -> bool:
@@ -90,47 +89,19 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         self,
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: int | None = None,
-        num_expert_group: int | None = None,
-        global_num_experts: int = -1,
-        expert_map: torch.Tensor | None = None,
-        custom_routing_function: Callable | None = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: torch.Tensor | None = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: torch.Tensor | None = None,
-        logical_to_physical_map: torch.Tensor | None = None,
-        logical_replica_count: torch.Tensor | None = None,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        topk_weights, topk_ids, zero_expert_result = layer.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-        )
-
-        result = self.fused_experts(
+        assert self.moe_mk is not None
+        return self.moe_mk(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=self.allow_inplace,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=None if self.disable_expert_map else expert_map,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            expert_map=None if self.disable_expert_map else layer.expert_map,
         )
-
-        if layer.zero_expert_num != 0 and layer.zero_expert_type is not None:
-            assert not isinstance(result, tuple), (
-                "Shared + zero experts are mutually exclusive not yet supported"
-            )
-            return result, zero_expert_result
-        else:
-            return result

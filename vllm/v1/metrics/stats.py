@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
+from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -172,6 +173,7 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+    encoder_cache_usage: float = 0.0
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -185,6 +187,8 @@ class SchedulerStats:
     running_lora_adapters: dict[str, int] = field(default_factory=dict)
 
     cudagraph_stats: CUDAGraphStat | None = None
+
+    perf_stats: PerfStats | None = None
 
 
 @dataclass
@@ -224,6 +228,7 @@ class FinishedRequestStats:
     decode_time: float = 0.0
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
+    num_cached_tokens: int = 0
 
 
 class IterationStats:
@@ -330,6 +335,7 @@ class IterationStats:
         num_prompt_tokens: int,
         max_tokens_param: int | None,
         req_stats: RequestStateStats,
+        num_cached_tokens: int = 0,
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
@@ -367,6 +373,7 @@ class IterationStats:
             decode_time=decode_time,
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
+            num_cached_tokens=num_cached_tokens,
         )
         self.finished_requests.append(finished_req)
 

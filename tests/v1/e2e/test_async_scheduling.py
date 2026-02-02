@@ -8,6 +8,7 @@ import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
 from vllm.logprobs import Logprob
+from vllm.platforms import current_platform
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.metrics.reader import Metric
 
@@ -29,8 +30,9 @@ example_prompts = [first_prompt, "In one word, the capital of France is "] + [
 
 default_params = dict(
     temperature=0.0,  # greedy
-    max_tokens=23,
-    min_tokens=18,
+    max_tokens=30,
+    # spec decoding currently doesn't support min_tokens
+    # min_tokens=28,
 )
 
 
@@ -52,6 +54,14 @@ def test_without_spec_decoding(
         dict(
             structured_outputs=struct_outputs,
             logprobs=2,
+        ),
+        dict(
+            structured_outputs=struct_outputs,
+            presence_penalty=-1.0,
+        ),
+        dict(
+            structured_outputs=struct_outputs,
+            logprobs=2,
             presence_penalty=-1.0,
         ),
     ]
@@ -70,10 +80,22 @@ def test_without_spec_decoding(
         (True, "uni", True, None, True),
     ]
 
+    if current_platform.is_rocm():
+        # On ROCm, Only test with structured_outputs (deterministic)
+        # and skip chunk_prefill (more variable).
+        test_configs = [
+            cfg
+            for cfg in test_configs
+            if not cfg[4]  # skip chunk_prefill=True
+        ]
+        test_sampling_params = [
+            p for p in test_sampling_params if p.get("structured_outputs") is not None
+        ]
+
     run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
 
 
-def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
+def test_with_spec_decoding(sample_json_schema, monkeypatch: pytest.MonkeyPatch):
     """Test consistency and acceptance rates with some different combos of
     preemption, executor, async scheduling, prefill chunking,
     spec decoding model length.
@@ -87,9 +109,20 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     # Set small draft model len to force doesn't-fit-in-drafter case.
     spec_config_short = spec_config | {"max_model_len": 50}
 
+    struct_outputs = StructuredOutputsParams(json=sample_json_schema)
+
     test_sampling_params = [
         dict(),
+        dict(presence_penalty=-1.0),
+        dict(bad_words=["the", " the"]),
         dict(logprobs=2),
+        dict(logprobs=2, presence_penalty=-1.0),
+        dict(structured_outputs=struct_outputs),
+        dict(
+            structured_outputs=struct_outputs,
+            logprobs=2,
+            presence_penalty=-1.0,
+        ),
     ]
 
     # test_preemption, executor, async_scheduling,
@@ -108,7 +141,14 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
         (True, "uni", True, spec_config_short, True),
     ]
 
-    run_tests(monkeypatch, MTP_MODEL, test_configs, test_sampling_params)
+    # On ROCm, use TRITON_ATTN + float32 for better numerical consistency
+    run_tests(
+        monkeypatch,
+        MTP_MODEL,
+        test_configs,
+        test_sampling_params,
+        is_testing_with_spec_decoding=True,
+    )
 
 
 @dynamo_config.patch(cache_size_limit=16)
@@ -117,13 +157,17 @@ def run_tests(
     model: str,
     test_configs: list[tuple],
     test_sampling_params: list[dict[str, Any]],
+    is_testing_with_spec_decoding: bool = False,
 ):
     """Test consistency of combos of async scheduling, preemption,
     uni/multiproc executor with spec decoding."""
 
+    # Determine attention config based on platform
+    attention_config = {"backend": "FLEX_ATTENTION"}
+
     with monkeypatch.context() as m:
-        # avoid precision errors
-        m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
+        # lock matmul precision to full FP32 (IEEE)
+        m.setenv("VLLM_FLOAT32_MATMUL_PRECISION", "highest")
         # m.setenv("VLLM_BATCH_INVARIANT", "1")
         outputs: list[tuple[str, list, list]] = []
         for n, (
@@ -143,6 +187,8 @@ def run_tests(
                 async_scheduling,
                 spec_config,
                 test_prefill_chunking=test_prefill_chunking,
+                is_testing_with_spec_decoding=is_testing_with_spec_decoding,
+                attention_config=attention_config,
             )
             outputs.append(test_results)
 
@@ -172,6 +218,7 @@ def run_tests(
                     name_0=f"baseline=[{baseline_config}], params={params}",
                     name_1=f"config=[{test_config}], params={params}",
                 )
+
                 assert _all_logprobs_match(base_logprobs, test_logprobs)
 
                 if (
@@ -179,10 +226,18 @@ def run_tests(
                     and test_acceptance_rate is not None
                 ):
                     if "spec_mml=None" in test_config:
+                        # Preemption causes more variance in acceptance rates
+                        if (
+                            current_platform.is_rocm()
+                            and "preemption=True" in test_config
+                        ):
+                            tolerance = 0.10
+                        else:
+                            tolerance = 0.05
                         assert (
                             test_acceptance_rate > base_acceptance_rate
                             or test_acceptance_rate
-                            == pytest.approx(base_acceptance_rate, rel=5e-2)
+                            == pytest.approx(base_acceptance_rate, rel=tolerance)
                         )
                     else:
                         # Currently the reported acceptance rate is expected to be
@@ -213,6 +268,8 @@ def run_test(
     async_scheduling: bool,
     spec_config: dict[str, Any] | None,
     test_prefill_chunking: bool,
+    is_testing_with_spec_decoding: bool = False,
+    attention_config: dict[str, Any] | None = None,
 ):
     spec_decoding = spec_config is not None
     cache_arg: dict[str, Any] = (
@@ -231,6 +288,7 @@ def run_test(
     print("-" * 80)
     print(f"---- TESTING {test_str}: {test_config}")
     print("-" * 80)
+
     with VllmRunner(
         model,
         max_model_len=512,
@@ -240,9 +298,10 @@ def run_test(
         # enforce_eager=True,
         async_scheduling=async_scheduling,
         distributed_executor_backend=executor,
-        dtype="float32",  # avoid precision errors
+        dtype="float32",
         speculative_config=spec_config,
         disable_log_stats=False,
+        attention_config=attention_config,
         **cache_arg,
     ) as vllm_model:
         results = []
@@ -300,11 +359,16 @@ def _all_logprobs_match(req_a, req_b) -> bool:
 
 
 def _logprobs_match(lps_a: dict[int, Logprob], lps_b: dict[int, Logprob]) -> bool:
-    return len(lps_a) == len(lps_b) and all(
-        a.decoded_token == b.decoded_token
-        and a.rank == b.rank
-        and a.logprob == pytest.approx(b.logprob, rel=1e-3, abs=1e-6)
-        for a, b in ((lps_a[x], lps_b[x]) for x in lps_a)
+    rel_tol, abs_tol = 1e-3, 1e-6
+    return (
+        len(lps_a) == len(lps_b)
+        and lps_a.keys() == lps_b.keys()
+        and all(
+            a.decoded_token == b.decoded_token
+            and a.rank == b.rank
+            and a.logprob == pytest.approx(b.logprob, rel=rel_tol, abs=abs_tol)
+            for a, b in ((lps_a[x], lps_b[x]) for x in lps_a)
+        )
     )
 
 

@@ -111,9 +111,8 @@ class RayDistributedExecutor(Executor):
         """Ray distributed executor supports pipeline parallelism,
         meaning that it allows PP size batches to be executed concurrently.
         """
-        if self.scheduler_config.async_scheduling:
-            return 2
-        return self.parallel_config.pipeline_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def shutdown(self) -> None:
         if logger:
@@ -208,9 +207,7 @@ class RayDistributedExecutor(Executor):
                     num_gpus=num_gpus,
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(  # type: ignore[attr-defined]
-                    vllm_config=self.vllm_config, rpc_rank=rank
-                )
+                )(RayWorkerWrapper).remote(rpc_rank=rank)
             else:
                 worker = ray.remote(
                     num_cpus=0,
@@ -218,9 +215,8 @@ class RayDistributedExecutor(Executor):
                     resources={current_platform.ray_device_key: num_gpus},
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(  # type: ignore[attr-defined]
-                    vllm_config=self.vllm_config, rpc_rank=rank
-                )
+                )(RayWorkerWrapper).remote(rpc_rank=rank)
+
             worker_metadata.append(RayWorkerMetaData(worker=worker, created_rank=rank))
 
         worker_ips = ray.get(
@@ -413,7 +409,7 @@ class RayDistributedExecutor(Executor):
         self,
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         """Execute the model on the Ray workers.
 
         The scheduler output to use should have been provided in
@@ -428,7 +424,7 @@ class RayDistributedExecutor(Executor):
         """
         scheduler_output = self.scheduler_output
         if scheduler_output is None:
-            return COMPLETED_NONE_FUTURE if non_block else None  # noqa
+            return COMPLETED_NONE_FUTURE if non_block else None
 
         self.scheduler_output = None
 
@@ -439,7 +435,7 @@ class RayDistributedExecutor(Executor):
         scheduler_output: SchedulerOutput,
         grammar_output: "GrammarOutput | None",
         non_block: bool = False,
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         # Build the compiled DAG for the first time.
         if self.forward_dag is None:  # type: ignore
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)

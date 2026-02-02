@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fla.ops.layernorm_guard import (
     layernorm_fn,
     rms_norm_ref,
 )
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 
 def layer_norm_ref(
@@ -114,7 +114,7 @@ def test_layer_norm_fwd_basic(
     is_rms_norm: bool,
 ) -> None:
     """Test basic layer norm forward pass without z (gate) tensor."""
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     device = torch.device("cuda:0")
 
     # Create inputs
@@ -156,7 +156,7 @@ def test_layer_norm_fwd_with_gate(
     is_rms_norm: bool,
 ) -> None:
     """Test layer norm forward pass with z (gate) tensor."""
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     device = torch.device("cuda:0")
 
     # Create inputs
@@ -213,7 +213,7 @@ def test_layer_norm_fwd_with_groups(
             f"hidden_size {hidden_size} not divisible by group_size {group_size}"
         )
 
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     device = torch.device("cuda:0")
 
     # Create inputs
@@ -253,7 +253,7 @@ def test_layer_norm_rows_per_block(
     dtype: torch.dtype,
 ) -> None:
     """Test that rows_per_block logic works correctly for various M sizes."""
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     device = torch.device("cuda:0")
     hidden_size = 1024
 
@@ -278,7 +278,7 @@ def test_layer_norm_rows_per_block(
 def test_strided_input(dtype: torch.dtype) -> None:
     """Test that the kernel handles non-contiguous (strided)
     inputs correctly."""
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     device = torch.device("cuda:0")
     num_tokens = 128
     hidden_size = 1024
@@ -318,7 +318,7 @@ def test_output_buffer_provided(
     dtype: torch.dtype,
 ) -> None:
     """Test that the kernel works when an output buffer is provided."""
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     device = torch.device("cuda:0")
 
     # Create inputs
@@ -359,7 +359,7 @@ def test_multidimensional_input(
     dtype: torch.dtype,
 ) -> None:
     """Test that the autograd function handles multidimensional inputs."""
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     device = torch.device("cuda:0")
     hidden_size = shape[-1]
 

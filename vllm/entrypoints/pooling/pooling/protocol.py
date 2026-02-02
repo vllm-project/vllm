@@ -1,108 +1,107 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Generic, TypeAlias, TypeVar
+from typing import Any, Generic, TypeAlias, TypeVar
 
-from pydantic import (
-    Field,
-)
+from pydantic import Field
 
 from vllm import PoolingParams
-from vllm.config.pooler import get_use_activation
-from vllm.entrypoints.openai.protocol import OpenAIBaseModel, UsageInfo
-from vllm.entrypoints.pooling.embed.protocol import (
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
+from vllm.config import ModelConfig
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
+from vllm.entrypoints.pooling.base.protocol import (
+    ChatRequestMixin,
+    ClassifyRequestMixin,
+    CompletionRequestMixin,
+    EmbedRequestMixin,
+    EncodingRequestMixin,
+    PoolingBasicRequestMixin,
 )
+from vllm.logger import init_logger
+from vllm.renderers import TokenizeParams
 from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
-from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
+
+logger = init_logger(__name__)
 
 
-class PoolingCompletionRequest(EmbeddingCompletionRequest):
+class PoolingCompletionRequest(
+    PoolingBasicRequestMixin,
+    CompletionRequestMixin,
+    EmbedRequestMixin,
+    ClassifyRequestMixin,
+):
     task: PoolingTask | None = None
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "If it is a classify or token_classify task, the default is True; "
-        "for other tasks, this value should be None.",
-    )
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+        )
 
     def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=self.use_activation,
             dimensions=self.dimensions,
-            normalize=self.normalize,
-            use_activation=get_use_activation(self),
         )
 
 
-class PoolingChatRequest(EmbeddingChatRequest):
+class PoolingChatRequest(
+    PoolingBasicRequestMixin, ChatRequestMixin, EmbedRequestMixin, ClassifyRequestMixin
+):
     task: PoolingTask | None = None
-    softmax: bool | None = Field(
+
+    mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "If it is a classify or token_classify task, the default is True; "
-        "for other tasks, this value should be None.",
+        description=("Additional kwargs to pass to the HF processor."),
     )
 
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=self.add_special_tokens,
+            max_total_tokens_param="max_model_len",
+        )
+
     def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=self.use_activation,
             dimensions=self.dimensions,
-            normalize=self.normalize,
-            use_activation=get_use_activation(self),
         )
 
 
 T = TypeVar("T")
 
 
-class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
-    model: str | None = None
-
-    priority: int = Field(default=0)
-    """
-    The priority of the request (lower means earlier handling;
-    default: 0). Any priority other than 0 will raise an error
-    if the served model does not use priority scheduling.
-    """
+class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic[T]):
     data: T
-
     task: PoolingTask = "plugin"
-    encoding_format: EncodingFormat = "float"
-    embed_dtype: EmbedDType = Field(
-        default="float32",
-        description=(
-            "What dtype to use for encoding. Default to using float32 for base64 "
-            "encoding to match the OpenAI python client behavior. "
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
-    endianness: Endianness = Field(
-        default="native",
-        description=(
-            "What endianness to use for encoding. Default to using native for "
-            "base64 encoding to match the OpenAI python client behavior."
-            "This parameter will affect base64 and binary_response."
-        ),
-    )
 
     def to_pooling_params(self):
         return PoolingParams()
@@ -143,6 +142,6 @@ class PoolingResponse(OpenAIBaseModel):
 
 
 class PoolingBytesResponse(OpenAIBaseModel):
-    body: list[bytes]
-    metadata: str
+    content: list[bytes]
+    headers: dict[str, str] | None = None
     media_type: str = "application/octet-stream"

@@ -59,6 +59,25 @@ class ObservabilityConfig:
     """Enable CUDA graph metrics (number of padded/unpadded tokens, runtime cudagraph
     dispatch modes, and their observed frequencies at every logging interval)."""
 
+    enable_layerwise_nvtx_tracing: bool = False
+    """Enable layerwise NVTX tracing. This traces the execution of each layer or
+    module in the model and attach informations such as input/output shapes to
+    nvtx range markers. Noted that this doesn't work with CUDA graphs enabled."""
+
+    enable_mfu_metrics: bool = False
+    """Enable Model FLOPs Utilization (MFU) metrics."""
+
+    enable_mm_processor_stats: bool = False
+    """Enable collection of timing statistics for multimodal processor operations.
+    This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
+    argument."""
+
+    enable_logging_iteration_details: bool = False
+    """Enable detailed logging of iteration details.
+    If set, vllm EngineCore will log iteration details
+    This includes number of context/generation requests and tokens
+    and the elapsed cpu time for the iteration."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""

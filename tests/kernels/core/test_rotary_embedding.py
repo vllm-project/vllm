@@ -36,6 +36,7 @@ def rotary_embedding_opcheck(
 @pytest.mark.parametrize("use_key", [True, False])
 @pytest.mark.parametrize("head_stride_is_contiguous", [True, False])
 def test_rotary_embedding_opcheck(
+    default_vllm_config,
     dist_init,
     device,
     max_position,

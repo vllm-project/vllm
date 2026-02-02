@@ -5,7 +5,7 @@ import pytest
 
 from tests.reasoning.utils import run_reasoning_extraction_mistral
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.tokenizers import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 
 parser_name = "mistral"
 
@@ -18,47 +18,53 @@ def mistral_tokenizer():
     return mistral_tokenizer
 
 
-SIMPLE_REASONING = {
+INVALID_SIMPLE_REASONING = {
     "output": "This is a reasoning section[/THINK]This is the rest",
-    "reasoning": "This is a reasoning section",
-    "content": "This is the rest",
-    "is_reasoning_end": True,
+    "reasoning": None,
+    "content": "This is a reasoning sectionThis is the rest",
+    "is_reasoning_end": False,
 }
-COMPLETE_REASONING = {
+INVALID_COMPLETE_REASONING = {
     "output": "This is a reasoning section[/THINK]",
-    "reasoning": "This is a reasoning section",
-    "content": None,
-    "is_reasoning_end": True,
+    "reasoning": None,
+    "content": "This is a reasoning section",
+    "is_reasoning_end": False,
 }
 NO_CONTENT = {
-    "output": "This is content",
-    "reasoning": "This is content",
+    "output": "[THINK]This is reasoning",
+    "reasoning": "This is reasoning",
     "content": None,
+    "is_reasoning_end": False,
+}
+NO_REASONING = {
+    "output": "This is content",
+    "reasoning": None,
+    "content": "This is content",
     "is_reasoning_end": False,
 }
 NO_REASONING_STREAMING = {
     "output": "This is a reasoning section",
-    "reasoning": "This is a reasoning section",
-    "content": None,
+    "reasoning": None,
+    "content": "This is a reasoning section",
     "is_reasoning_end": False,
 }
-MULTIPLE_LINES = {
+INVALID_MULTIPLE_LINES = {
     "output": "This\nThat[/THINK]This is the rest\nThat",
-    "reasoning": "This\nThat",
-    "content": "This is the rest\nThat",
-    "is_reasoning_end": True,
+    "reasoning": None,
+    "content": "This\nThatThis is the rest\nThat",
+    "is_reasoning_end": False,
 }
-SHORTEST_REASONING_NO_STREAMING = {
-    "output": "[/THINK]This is the rest",
-    "reasoning": "",
-    "content": "This is the rest",
-    "is_reasoning_end": True,
-}
-SHORTEST_REASONING = {
+INVALID_SHORTEST_REASONING_NO_STREAMING = {
     "output": "[/THINK]This is the rest",
     "reasoning": None,
     "content": "This is the rest",
-    "is_reasoning_end": True,
+    "is_reasoning_end": False,
+}
+INVALID_SHORTEST_REASONING = {
+    "output": "[/THINK]This is the rest",
+    "reasoning": None,
+    "content": "This is the rest",
+    "is_reasoning_end": False,
 }
 REASONING_WITH_THINK = {
     "output": "[THINK]This is a reasoning section[/THINK]This is the rest",
@@ -78,17 +84,17 @@ MULTIPLE_LINES_WITH_THINK = {
     "content": "This is the rest\nThat",
     "is_reasoning_end": True,
 }
-SHORTEST_REASONING_NO_STREAMING_WITH_THINK = {
-    "output": "[/THINK]This is the rest",
-    "reasoning": "",
-    "content": "This is the rest",
-    "is_reasoning_end": True,
-}
-SHORTEST_REASONING_WITH_THINK = {
+INVALID_SHORTEST_REASONING_NO_STREAMING_WITH_THINK = {
     "output": "[/THINK]This is the rest",
     "reasoning": None,
     "content": "This is the rest",
-    "is_reasoning_end": True,
+    "is_reasoning_end": False,
+}
+INVALID_SHORTEST_REASONING_WITH_THINK = {
+    "output": "[/THINK]This is the rest",
+    "reasoning": None,
+    "content": "This is the rest",
+    "is_reasoning_end": False,
 }
 THINK_NO_END = {
     "output": "[THINK]This is a reasoning section",
@@ -98,8 +104,8 @@ THINK_NO_END = {
 }
 EMPTY = {
     "output": "",
-    "reasoning": "",
-    "content": None,
+    "reasoning": None,
+    "content": "",
     "is_reasoning_end": False,
 }
 EMPTY_STREAMING = {
@@ -109,47 +115,48 @@ EMPTY_STREAMING = {
     "is_reasoning_end": False,
 }
 NEW_LINE = {
-    "output": "\n[THINK]This is a reasoning section[/THINK]\nThis is the rest",
+    "output": "Before\n[THINK]This is a reasoning section[/THINK]\nThis is the rest",
     "reasoning": "This is a reasoning section",
-    "content": "\nThis is the rest",
+    "content": "Before\n\nThis is the rest",
     "is_reasoning_end": True,
 }
-# Streaming cannot handle new lines at the beginning of the output
-# because we need to support [THINK]...[/THINK] and [/THINK]...
-# We cannot know if the text before [THINK] is reasoning content
-# or not.
 NEW_LINE_STREAMING = {
-    "output": "\n[THINK]This is a reasoning section[/THINK]\nThis is the rest",
-    "reasoning": "\nThis is a reasoning section",
-    "content": "\nThis is the rest",
+    "output": "Before\n[THINK]This is a reasoning section[/THINK]\nThis is the rest",
+    "reasoning": "This is a reasoning section",
+    "content": "Before\n\nThis is the rest",
     "is_reasoning_end": True,
 }
 
 TEST_CASES = [
     pytest.param(
         False,
-        SIMPLE_REASONING,
-        id="simple_reasoning",
+        INVALID_SIMPLE_REASONING,
+        id="invalid_simple_reasoning",
     ),
     pytest.param(
         True,
-        SIMPLE_REASONING,
-        id="simple_reasoning_streaming",
+        INVALID_SIMPLE_REASONING,
+        id="invalid_simple_reasoning_streaming",
     ),
     pytest.param(
         False,
-        COMPLETE_REASONING,
-        id="complete_reasoning",
+        INVALID_COMPLETE_REASONING,
+        id="invalid_complete_reasoning",
     ),
     pytest.param(
         True,
-        COMPLETE_REASONING,
-        id="complete_reasoning_streaming",
+        INVALID_COMPLETE_REASONING,
+        id="invalid_complete_reasoning_streaming",
     ),
     pytest.param(
         False,
         NO_CONTENT,
-        id="no_content_token",
+        id="no_content",
+    ),
+    pytest.param(
+        False,
+        NO_REASONING,
+        id="no_reasoning",
     ),
     pytest.param(
         True,
@@ -158,23 +165,23 @@ TEST_CASES = [
     ),
     pytest.param(
         False,
-        MULTIPLE_LINES,
-        id="multiple_lines",
+        INVALID_MULTIPLE_LINES,
+        id="invalid_multiple_lines",
     ),
     pytest.param(
         True,
-        MULTIPLE_LINES,
-        id="multiple_lines_streaming",
+        INVALID_MULTIPLE_LINES,
+        id="invalid_multiple_lines_streaming",
     ),
     pytest.param(
         True,
-        SHORTEST_REASONING,
-        id="shortest",
+        INVALID_SHORTEST_REASONING,
+        id="invalid_shortest",
     ),
     pytest.param(
         False,
-        SHORTEST_REASONING_NO_STREAMING,
-        id="shortest_streaming",
+        INVALID_SHORTEST_REASONING_NO_STREAMING,
+        id="invalid_shortest_streaming",
     ),
     pytest.param(
         False,
@@ -208,13 +215,13 @@ TEST_CASES = [
     ),
     pytest.param(
         False,
-        SHORTEST_REASONING_NO_STREAMING_WITH_THINK,
-        id="shortest_with_think",
+        INVALID_SHORTEST_REASONING_NO_STREAMING_WITH_THINK,
+        id="invalid_shortest_with_think",
     ),
     pytest.param(
         True,
-        SHORTEST_REASONING_WITH_THINK,
-        id="shortest_with_think_streaming",
+        INVALID_SHORTEST_REASONING_WITH_THINK,
+        id="invalid_shortest_with_think_streaming",
     ),
     pytest.param(
         False,
@@ -316,10 +323,26 @@ def test_mistral_reasoning(
 
     # Test extract_content
     if param_dict["content"] is not None:
-        content = parser.extract_content_ids(output_tokens)
-        assert content == mistral_tokenizer.tokenizer.encode(
-            param_dict["content"], bos=False, eos=False
+        # Handle the case where there are tokens outputted before Thinking.
+        # This should not occur if the model is well trained and prompted.
+        if "[THINK]" in param_dict["output"] and not param_dict["output"].startswith(
+            "[THINK]"
+        ):
+            before_content = param_dict["output"].split("[THINK]")[0]
+            before_token_ids = mistral_tokenizer.tokenizer.encode(
+                before_content, bos=False, eos=False
+            )
+            left_to_encode = param_dict["content"][len(before_content) :]
+        # Normal situation.
+        else:
+            before_token_ids = []
+            left_to_encode = param_dict["content"]
+
+        content_tokens = parser.extract_content_ids(output_tokens)
+        expected_token_ids = before_token_ids + mistral_tokenizer.tokenizer.encode(
+            left_to_encode, bos=False, eos=False
         )
+        assert content_tokens == expected_token_ids
     else:
         content = parser.extract_content_ids(output_tokens)
         assert content == []

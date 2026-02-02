@@ -3,7 +3,7 @@
 
 import importlib
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, cast
 
 from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase,
@@ -44,7 +44,7 @@ class KVConnectorFactory:
         cls,
         config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ) -> KVConnectorBase:
         kv_transfer_config = config.kv_transfer_config
         if kv_transfer_config is None:
@@ -144,9 +144,9 @@ class KVConnectorFactory:
 # only load the files corresponding to the current connector.
 
 KVConnectorFactory.register_connector(
-    "SharedStorageConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector",
-    "SharedStorageConnector",
+    "ExampleConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.example_connector",
+    "ExampleConnector",
 )
 
 KVConnectorFactory.register_connector(
@@ -177,6 +177,12 @@ KVConnectorFactory.register_connector(
     "MultiConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector",
     "MultiConnector",
+)
+
+KVConnectorFactory.register_connector(
+    "MoRIIOConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector",
+    "MoRIIOConnector",
 )
 
 KVConnectorFactory.register_connector(

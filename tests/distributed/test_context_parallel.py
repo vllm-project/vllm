@@ -123,8 +123,11 @@ class CPTestSettings:
 
 CP_TEXT_GENERATION_MODELS = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+        CPTestSettings.detailed(dcp_multipliers=[1]),
         CPTestSettings.detailed(
-            dcp_multipliers=[0.5, 1], cp_kv_cache_interleave_size=64
+            dcp_multipliers=[0.5],
+            cp_kv_cache_interleave_size=64,
+            attn_backend="FLASHMLA",
         ),
     ],
     "Qwen/Qwen2.5-1.5B-Instruct": [
@@ -216,14 +219,12 @@ def _test_cp_gsm8k(
         ]
     )
 
-    server_env = {}
     if attn_backend:
-        server_env["VLLM_ATTENTION_BACKEND"] = attn_backend
+        server_args.append(f"--attention-backend={attn_backend}")
 
     with RemoteOpenAIServer(
         model_id,
         server_args,
-        env_dict=server_env,
         max_wait_seconds=720,
     ) as remote_server:
         host = f"http://{remote_server.host}"

@@ -16,7 +16,7 @@ from typing import Literal, NamedTuple, TypeAlias, TypedDict, get_args
 from PIL.Image import Image
 
 from vllm import LLM, EngineArgs
-from vllm.entrypoints.score_utils import ScoreMultiModalParam
+from vllm.entrypoints.pooling.score.utils import ScoreMultiModalParam
 from vllm.multimodal.utils import fetch_image
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -130,6 +130,36 @@ def run_jinavl_reranker(query: Query) -> ModelRequestData:
         engine_args=engine_args,
         query=query["text"],
         documents=query["image"],
+    )
+
+
+def run_qwen3_vl(query: Query) -> ModelRequestData:
+    image_placeholder = "<vision_start><|image_pad|><vision_end>"
+    if query["modality"] == "text":
+        prompt = query["text"]
+        image = None
+    elif query["modality"] == "image":
+        prompt = image_placeholder
+        image = query["image"]
+    elif query["modality"] == "text+image":
+        text = query["text"]
+        prompt = f"{image_placeholder}\n{text}"
+        image = query["image"]
+    else:
+        modality = query["modality"]
+        raise ValueError(f"Unsupported query modality: '{modality}'")
+
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-VL-Embedding-2B",
+        runner="pooling",
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
     )
 
 
@@ -305,7 +335,7 @@ def get_query(modality: QueryModality):
     raise ValueError(msg)
 
 
-def run_encode(model: str, modality: QueryModality, seed: int | None):
+def run_encode(model: str, modality: QueryModality, seed: int):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -335,7 +365,7 @@ def run_encode(model: str, modality: QueryModality, seed: int | None):
         print("-" * 50)
 
 
-def run_score(model: str, modality: QueryModality, seed: int | None):
+def run_score(model: str, modality: QueryModality, seed: int):
     query = get_query(modality)
     req_data = model_example_map[model](query)
 
@@ -353,6 +383,7 @@ model_example_map = {
     "clip": run_clip,
     "e5_v": run_e5_v,
     "jinavl_reranker": run_jinavl_reranker,
+    "qwen3_vl": run_qwen3_vl,
     "siglip": run_siglip,
     "vlm2vec_phi3v": run_vlm2vec_phi3v,
     "vlm2vec_qwen2vl": run_vlm2vec_qwen2vl,
@@ -390,7 +421,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
     return parser.parse_args()

@@ -31,6 +31,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
@@ -38,7 +39,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -52,6 +52,7 @@ from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
+    get_layer_index,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -369,27 +370,13 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
     num_hidden_layers = hf_config.vision_config.num_hidden_layers
     # If we have one feature layer, initialize up to that layer
     if isinstance(feature_layers, int):
-        return _get_layer_index(feature_layers, num_hidden_layers)
+        return get_layer_index(feature_layers, num_hidden_layers)
     # If we have multiple feature layers, initialize up to the deepest one
     elif isinstance(feature_layers, (list, tuple)):
-        return max(_get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
+        return max(get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
     raise TypeError(
         f"vision_layer_feature type: {type(feature_layers)} is not supported"
     )
-
-
-def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
-    """Given a signed vision feature layer, get the number of hidden layers
-    needed to leverage it.
-
-    Args:
-        feature_layer_index: Index of a required layer in the visual encoder.
-        num_hidden_layers: The total number of hidden layers in the visual
-            encoder.
-    """
-    if feature_layer_index < 0:
-        return num_hidden_layers + feature_layer_index + 1
-    return feature_layer_index
 
 
 def init_vision_tower_for_llava(
@@ -423,8 +410,6 @@ def init_vision_tower_for_llava(
 class Mistral3ForConditionalGeneration(
     nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
 ):
-    merge_by_field_config = True
-
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -470,11 +455,10 @@ class Mistral3ForConditionalGeneration(
         ):
             config.projector_hidden_act = "gelu"
 
-        # TODO: Optionally initializes this for supporting embeddings.
-        if multimodal_config.get_limit_per_prompt("image"):
+        with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = init_vision_tower_for_llava(
                 config,
-                quant_config,
+                quant_config=quant_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -488,15 +472,13 @@ class Mistral3ForConditionalGeneration(
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
-        else:
-            self.vision_tower = None
-            self.multi_modal_projector = None
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -546,9 +528,6 @@ class Mistral3ForConditionalGeneration(
             image_embeds = (image_embeds,)
         return image_embeds
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -560,7 +539,7 @@ class Mistral3ForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -619,11 +598,7 @@ class Mistral3ForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.vision_tower is None and self.multi_modal_projector is None:
-            skip_prefixes = ["vision_tower.", "multi_modal_projector."]
-
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

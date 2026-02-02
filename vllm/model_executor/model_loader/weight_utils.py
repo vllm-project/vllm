@@ -23,6 +23,7 @@ import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
 from safetensors.torch import load, load_file, safe_open, save_file
 from tqdm.auto import tqdm
+from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -232,7 +233,7 @@ def get_quant_config(
     quant_cls = get_quantization_config(model_config.quantization)
 
     # GGUF doesn't have config file
-    if model_config.quantization in ("gguf", "inc"):
+    if model_config.quantization == "gguf":
         return quant_cls()
 
     # Read the quantization config from the HF model config, if available.
@@ -244,6 +245,23 @@ def get_quant_config(
     if hf_quant_config is None:
         # compressed-tensors uses a compressions_config
         hf_quant_config = getattr(model_config.hf_config, "compression_config", None)
+
+    # Pipe information about heads to enable TP-aware loading of attn_head scales
+    if (
+        hf_quant_config is not None
+        and hf_quant_config.get("quant_method") == "compressed-tensors"
+    ):
+        if hf_text_config is not None:
+            n_heads = getattr(hf_text_config, "num_attention_heads", None)
+            n_kv_heads = getattr(hf_text_config, "num_key_value_heads", None)
+        else:
+            n_heads = getattr(model_config.hf_config, "num_attention_heads", None)
+            n_kv_heads = getattr(model_config.hf_config, "num_key_value_heads", None)
+
+        hf_quant_config["total_num_heads"] = n_heads
+        hf_quant_config["total_num_kv_heads"] = (
+            n_kv_heads if n_kv_heads is not None else n_heads
+        )
 
     if hf_quant_config is not None:
         return quant_cls.from_config(hf_quant_config)
@@ -448,12 +466,31 @@ def download_weights_from_hf(
             fs = HfFileSystem()
             file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
 
-            # Use the first pattern found in the HF repo's files.
-            for pattern in allow_patterns:
-                matching = fnmatch.filter(file_list, pattern)
-                if len(matching) > 0:
-                    allow_patterns = [pattern]
-                break
+            # If downloading safetensors and an index file exists, use the
+            # specific file names from the index to avoid downloading
+            # unnecessary files (e.g., from subdirectories like "original/").
+            index_file = f"{model_name_or_path}/{SAFE_WEIGHTS_INDEX_NAME}"
+            if "*.safetensors" in allow_patterns and index_file in file_list:
+                index_path = hf_hub_download(
+                    repo_id=model_name_or_path,
+                    filename=SAFE_WEIGHTS_INDEX_NAME,
+                    cache_dir=cache_dir,
+                    revision=revision,
+                )
+                with open(index_path) as f:
+                    weight_map = json.load(f)["weight_map"]
+                if weight_map:
+                    # Extra [] so that weight_map files are treated as a
+                    # single allow_pattern in the loop below
+                    allow_patterns = [list(set(weight_map.values()))]  # type: ignore[list-item]
+                else:
+                    allow_patterns = ["*.safetensors"]
+            else:
+                # Use the first pattern found in the HF repo's files.
+                for pattern in allow_patterns:
+                    if fnmatch.filter(file_list, pattern):
+                        allow_patterns = [pattern]
+                        break
         except Exception as e:
             logger.warning(
                 "Failed to get file list for '%s'. Trying each pattern in "
@@ -480,6 +517,9 @@ def download_weights_from_hf(
             )
             # If we have downloaded weights for this allow_pattern,
             # we don't need to check the rest.
+            # allow_pattern can be a list (from weight_map) or str (glob)
+            if isinstance(allow_pattern, list):
+                break
             if any(Path(hf_folder).glob(allow_pattern)):
                 break
         time_taken = time.perf_counter() - start_time
@@ -641,7 +681,6 @@ def safetensors_weights_iterator(
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
 
-    state_dict = {}
     leftover_state_dict: dict[str, torch.Tensor] = {}
 
     for st_file in tqdm(
@@ -659,14 +698,15 @@ def safetensors_weights_iterator(
             # instead we reconstruct the subclasses here before returning
             if not torchao_version_at_least("0.15.0"):
                 raise ValueError(
-                    "Please use torchao version >= 0.15.0 \
-                        to load torchao safetensors checkpoint"
+                    "Please use torchao version >= 0.15.0 "
+                    "to load torchao safetensors checkpoint"
                 )
             from torchao.prototype.safetensors.safetensors_support import (
                 unflatten_tensor_state_dict,
             )
 
             with safe_open(st_file, framework="pt") as f:
+                state_dict = {}
                 for name in f.keys():  # noqa: SIM118
                     state_dict[name] = f.get_tensor(name)
 
@@ -1130,12 +1170,25 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
         # .self_attn.attn.{k,v}_scale
         (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # NemotronH format: .mixer.{k,v}_proj.{k,v}_scale ->
+        # .mixer.attn.{k,v}_scale
+        (r"\.mixer\.[kv]_proj\.([kv])_scale$", r".mixer.attn.\1_scale"),
         # Default format: .{k,v}_scale -> .attn.{k,v}_scale
-        (r"\.([kv])_scale$", r".attn.\1_scale"),
+        (r"\.([qkv])_scale$", r".attn.\1_scale"),
+        (r"\.([qkv])_zero_point$", r".attn.\1_zero_point"),
     ]
 
     # Check if name ends with k_scale or v_scale
-    if name.endswith((".k_scale", ".v_scale")):
+    if name.endswith(
+        (
+            ".k_scale",
+            ".v_scale",
+            ".q_scale",
+            ".k_zero_point",
+            ".v_zero_point",
+            ".q_zero_point",
+        )
+    ):
         import regex as re
 
         for pattern, replacement in scale_mapping_patterns:

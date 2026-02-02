@@ -3,21 +3,29 @@ set -xe
 
 # Parse command line arguments
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
+ATTENTION_BACKEND=""  # Default to empty (use vllm default)
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)
       KV_BUFFER_DEVICE="$2"
       shift 2
       ;;
+    --attention-backend)
+      ATTENTION_BACKEND="$2"
+      shift 2
+      ;;
     *)
       echo "Unknown option $1"
-      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>]"
+      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>] [--attention-backend <backend>]"
       exit 1
       ;;
   esac
 done
 
 echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
+if [[ -n "$ATTENTION_BACKEND" ]]; then
+  echo "Using attention backend: $ATTENTION_BACKEND"
+fi
 
 DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
 if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
@@ -148,6 +156,11 @@ run_tests_for_model() {
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config '$KV_CONFIG'"
 
+    # Add attention backend config if specified
+    if [[ -n "$ATTENTION_BACKEND" ]]; then
+      BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
+    fi
+
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
     else
@@ -188,7 +201,12 @@ run_tests_for_model() {
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --kv-transfer-config '$KV_CONFIG'"
-  
+
+    # Add attention backend config if specified
+    if [[ -n "$ATTENTION_BACKEND" ]]; then
+      BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
+    fi
+
   # DP-EP attention mode
   if [[ -z "$DP_EP" ]]; then
     BASE_CMD="${BASE_CMD} --tensor-parallel-size $DECODER_TP_SIZE"
