@@ -185,15 +185,6 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
-    VLLM_ALL2ALL_BACKEND: Literal[
-        "naive",
-        "pplx",
-        "deepep_high_throughput",
-        "deepep_low_latency",
-        "mori",
-        "allgather_reducescatter",
-        "flashinfer_all2allv",
-    ] = "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
@@ -1305,30 +1296,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
-    ),
-    # [DEPRECATED - will be removed in v0.15.0] all2all backend for vllm's
-    # expert parallel communication. Use --all2all-backend CLI argument instead.
-    # Available options:
-    # - "naive": naive all2all implementation using broadcasts
-    # - "allgather_reducescatter": all2all implementation based on allgather and
-    #  reducescatter
-    # - "pplx": use pplx kernels
-    # - "deepep_high_throughput", use deepep high-throughput kernels
-    # - "deepep_low_latency", use deepep low-latency kernels
-    # - "mori", use MoRI kernels
-    # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
-    "VLLM_ALL2ALL_BACKEND": env_with_choices(
-        "VLLM_ALL2ALL_BACKEND",
-        None,
-        [
-            "naive",
-            "pplx",
-            "deepep_high_throughput",
-            "deepep_low_latency",
-            "mori",
-            "allgather_reducescatter",
-            "flashinfer_all2allv",
-        ],
     ),
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
