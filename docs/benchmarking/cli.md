@@ -134,7 +134,7 @@ vllm bench serve --port 9001 --save-result --save-detailed \
 
 You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
 
-#### Custom mulmtimodal dataset
+#### Custom multimodal dataset
 
 If the muliimodal dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomMMDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" and "image_files" field per entry, e.g., `mm_data.jsonl`:
 
