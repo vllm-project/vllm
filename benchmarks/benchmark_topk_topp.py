@@ -21,7 +21,10 @@ from dataclasses import dataclass
 import torch
 
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p_pytorch
-from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+from vllm.v1.sample.ops.topk_topp_triton import (
+    apply_top_k_top_p_triton,
+    reset_buffer_cache,
+)
 
 
 @dataclass
@@ -78,6 +81,7 @@ def measure_memory() -> tuple[int, int]:
 
 def reset_memory_stats():
     """Reset peak memory statistics."""
+    reset_buffer_cache()
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.empty_cache()
     gc.collect()
