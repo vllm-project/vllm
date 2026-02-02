@@ -40,7 +40,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.pooling.score.utils import (
-    ScoreContentPartParam,
+    ScoreInputs,
     ScoreMultiModalParam,
     _cosine_similarity,
     _validate_score_input_lens,
@@ -1362,8 +1362,8 @@ class LLM:
 
     def _cross_encoding_score(
         self,
-        data_1: list[str] | list[ScoreContentPartParam],
-        data_2: list[str] | list[ScoreContentPartParam],
+        data_1: ScoreInputs,
+        data_2: ScoreInputs,
         *,
         use_tqdm: bool | Callable[..., tqdm],
         pooling_params: PoolingParams | None,
@@ -1424,8 +1424,14 @@ class LLM:
 
     def score(
         self,
-        data_1: SingletonPrompt | Sequence[SingletonPrompt] | ScoreMultiModalParam,
-        data_2: SingletonPrompt | Sequence[SingletonPrompt] | ScoreMultiModalParam,
+        data_1: SingletonPrompt
+        | Sequence[SingletonPrompt]
+        | ScoreMultiModalParam
+        | list[ScoreMultiModalParam],
+        data_2: SingletonPrompt
+        | Sequence[SingletonPrompt]
+        | ScoreMultiModalParam
+        | list[ScoreMultiModalParam],
         /,
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
