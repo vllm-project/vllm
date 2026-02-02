@@ -1083,6 +1083,8 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
     def process_weights_after_loading(self, layer: Module) -> None:
         self.weight_loader.process_weights_after_loading(layer)
+        # stash the correct device for `patched_weight_loader`
+        layer._load_device = torch.get_default_device()
 
     def create_scale_tensors(
         self,
