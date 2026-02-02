@@ -218,6 +218,8 @@ class VoxtralRealtimeBuffer:
 @support_torch_compile
 class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
+    # transformers' currently has limited support for MistralCommon backend
+    # and cached_get_processor. Let's skip until fixed
     skip_warmup = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
