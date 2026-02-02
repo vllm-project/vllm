@@ -106,6 +106,7 @@ def main(args):
         "model": model,
         "queries": query,
         "documents": [
+            document,
             {"content": [documents[0]]},
             {"content": [documents[1]]},
             {"content": [documents[0], documents[1]]},
@@ -116,6 +117,7 @@ def main(args):
 
     print("Query: list & Document: list")
     data = [
+        document,
         {"content": [documents[0]]},
         {"content": [documents[1]]},
         {"content": [documents[0], documents[1]]},

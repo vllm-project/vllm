@@ -99,6 +99,40 @@ def _validate_score_input_lens(
         raise ValueError("At least one text_pair element must be given")
 
 
+def _validate_mm_score_input(
+    data: list[str | ScoreMultiModalParam],
+    is_multimodal_model: bool,
+    architecture: str,
+) -> list[str | list[ScoreContentPartParam]]:
+    out = []
+    for d in data:
+        if isinstance(d, str):
+            out.append(d)
+        else:
+            if not is_multimodal_model:
+                raise ValueError(f"MultiModalParam is not supported for {architecture}")
+            out.append(d.get("content", []))
+    return out
+
+
+def validate_score_input(
+    data_1: ScoreInputs,
+    data_2: ScoreInputs,
+    is_multimodal_model: bool,
+    architecture: str,
+):
+    if not isinstance(data_1, list):
+        data_1 = [data_1]
+
+    if not isinstance(data_2, list):
+        data_2 = [data_2]
+
+    data_1 = _validate_mm_score_input(data_1, is_multimodal_model, architecture)
+    data_2 = _validate_mm_score_input(data_2, is_multimodal_model, architecture)
+    _validate_score_input_lens(data_1, data_2)
+    return data_1, data_2
+
+
 def parse_score_data(
     data_1: ScoreData,
     data_2: ScoreData,

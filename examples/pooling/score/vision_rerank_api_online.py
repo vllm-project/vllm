@@ -103,6 +103,7 @@ def main(args):
         "model": model,
         "query": query,
         "documents": [
+            document,
             {"content": [documents[0]]},
             {"content": [documents[1]]},
             {"content": [documents[0], documents[1]]},
