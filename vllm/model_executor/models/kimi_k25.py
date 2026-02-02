@@ -96,9 +96,13 @@ class MoonshotKimiVAutoProcessor(ProcessorMixin):
     attributes = ["tokenizer"]
     tokenizer_class = "AutoTokenizer"
 
-    def __init__(self, media_processor=None, tokenizer=None):
+    def __init__(
+        self, media_processor=None, tokenizer=None, media_token_id: int | None = None
+    ):
         super().__init__(tokenizer)
         self.media_processor = media_processor
+        self.media_token_id = media_token_id
+        assert self.media_token_id is not None
 
     # We do not support str input for text here
     def __call__(
@@ -122,15 +126,30 @@ class MoonshotKimiVAutoProcessor(ProcessorMixin):
             - **grid_thws** -- list of image 3D grid in LLM. Returned when `vision_chunks` is not `None`.
         """
         mm_inputs = {}
-        if isinstance(text, str):
-            text = self.tokenizer.encode(text)
+        input_ids = self.tokenizer.encode(text) if isinstance(text, str) else text
         if vision_chunks is not None:
             assert isinstance(vision_chunks, list)
             mm_inputs = self.media_processor.preprocess(vision_chunks)
+
+            num_tokens_per_chunk = [
+                self.media_processor.media_tokens_calculator(chunk)
+                for chunk in vision_chunks
+            ]
+
+            new_input_ids = []
+            for token in input_ids:
+                if token == self.media_token_id:
+                    new_input_ids.extend(
+                        [self.media_token_id] * num_tokens_per_chunk.pop(0)
+                    )
+                else:
+                    new_input_ids.append(token)
+            input_ids = new_input_ids
+
         # XXX: _apply_hf_processor_text_mm will call tolist() on input_ids
         return BatchFeature(
             data={
-                "input_ids": torch.tensor([text]),
+                "input_ids": torch.tensor([input_ids]),
                 **mm_inputs,
             }
         )
@@ -154,6 +173,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         self.hf_processor = MoonshotKimiVAutoProcessor(
             media_processor=self.media_processor,
             tokenizer=self.get_tokenizer(),
+            media_token_id=self.media_token_id,
         )
         self.media_tokens_calculator = self.media_processor.media_tokens_calculator
 
