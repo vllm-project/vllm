@@ -660,7 +660,7 @@ class NemotronParseMultiModalProcessor(
     def create_encoder_prompt(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
     ) -> str | list[int]:
         return [0]
 
