@@ -5,14 +5,15 @@
 
 ## Profile with PyTorch Profiler
 
-We support tracing vLLM workers using the `torch.profiler` module. You can enable tracing by setting the `VLLM_TORCH_PROFILER_DIR` environment variable to the directory where you want to save the traces: `VLLM_TORCH_PROFILER_DIR=/mnt/traces/`. Additionally, you can control the profiling content by specifying the following environment variables:
+We support tracing vLLM workers using the `torch.profiler` module. You can enable the torch profiler by setting `--profiler-config`
+when launching the server, and setting the entries `profiler` to `'torch'` and `torch_profiler_dir` to the directory where you want to save the traces. Additionally, you can control the profiling content by specifying the following additional arguments in the config:
 
-- `VLLM_TORCH_PROFILER_RECORD_SHAPES=1` to enable recording Tensor Shapes, off by default
-- `VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1` to record memory, off by default
-- `VLLM_TORCH_PROFILER_WITH_STACK=1` to enable recording stack information, on by default
-- `VLLM_TORCH_PROFILER_WITH_FLOPS=1` to enable recording FLOPs, off by default
-
-The OpenAI server also needs to be started with the `VLLM_TORCH_PROFILER_DIR` environment variable set.
+- `torch_profiler_record_shapes` to enable recording Tensor Shapes, off by default
+- `torch_profiler_with_memory` to record memory, off by default
+- `torch_profiler_with_stack` to enable recording stack information, on by default
+- `torch_profiler_with_flops` to enable recording FLOPs, off by default
+- `torch_profiler_use_gzip` to control gzip-compressing profiling files, on by default
+- `torch_profiler_dump_cuda_time_total` to control dumping and printing the aggregated CUDA self time table, on by default
 
 When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 
@@ -38,8 +39,7 @@ Refer to [examples/offline_inference/simple_profiling.py](../../examples/offline
 #### OpenAI Server
 
 ```bash
-VLLM_TORCH_PROFILER_DIR=./vllm_profile \
-    vllm serve meta-llama/Llama-3.1-8B-Instruct
+vllm serve meta-llama/Llama-3.1-8B-Instruct --profiler-config '{"profiler": "torch", "torch_profiler_dir": "./vllm_profile"}'
 ```
 
 vllm bench command:
@@ -52,6 +52,29 @@ vllm bench serve \
     --dataset-path sharegpt.json \
     --profile \
     --num-prompts 2
+```
+
+Or use http request:
+
+```shell
+# We need first call /start_profile api to start profile.
+$ curl -X POST http://localhost:8000/start_profile
+
+# Call model generate.
+curl -X POST http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+                "model": "meta-llama/Llama-3.1-8B-Instruct",
+                "messages": [
+                        {
+                                "role": "user",
+                                "content": "San Francisco is a"
+                        }
+                ]
+    }'
+
+# After need call /stop_profile api to stop profile.
+$ curl -X POST http://localhost:8000/stop_profile
 ```
 
 ## Profile with NVIDIA Nsight Systems
@@ -102,13 +125,12 @@ To profile the server, you will want to prepend your `vllm serve` command with `
 
 ```bash
 # server
-VLLM_TORCH_CUDA_PROFILE=1 \
 nsys profile \
     --trace-fork-before-exec=true \
     --cuda-graph-trace=node \
     --capture-range=cudaProfilerApi \
     --capture-range-end repeat \
-    vllm serve meta-llama/Llama-3.1-8B-Instruct
+    vllm serve meta-llama/Llama-3.1-8B-Instruct --profiler-config.profiler cuda
 
 # client
 vllm bench serve \

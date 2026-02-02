@@ -37,9 +37,12 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+# --8<-- [start:transformers_fused_moe]
 @CustomOp.register("transformers_fused_moe")
 class TransformersFusedMoE(FusedMoE):
     """Custom FusedMoE for the Transformers modeling backend."""
+
+    # --8<-- [end:transformers_fused_moe]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -115,7 +118,7 @@ direct_register_custom_op(
 
 class MoEMixin(MixtureOfExperts):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        self.check_version("5.0.0.dev0", "MoE models support")
+        self.check_version("5.0.0", "MoE models support")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -165,6 +168,7 @@ class MoEMixin(MixtureOfExperts):
         for gate_proj, down_proj, up_proj in ckpt_names:
             expert_mapping.extend(
                 FusedMoE.make_expert_params_mapping(
+                    self,
                     ckpt_gate_proj_name=gate_proj,
                     ckpt_down_proj_name=down_proj,
                     ckpt_up_proj_name=up_proj,
@@ -256,7 +260,14 @@ class MoEMixin(MixtureOfExperts):
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
-                if child_name == "experts" and isinstance(child_module, nn.ModuleList):
+                # Naive implementations will have experts as ModuleList
+                is_modulelist = isinstance(child_module, nn.ModuleList)
+                # Packed implementations will have experts as 3D tensors of shapes like:
+                # gate_up_proj = (num_experts, 2 * intermediate_size, hidden_size)
+                # down_proj = (num_experts, intermediate_size, hidden_size)
+                params = list(child_module.parameters())
+                is_3d = len(params) > 0 and all(p.ndim == 3 for p in params)
+                if child_name == "experts" and (is_modulelist or is_3d):
                     # Alias for readability
                     mlp = module
                     experts = child_module

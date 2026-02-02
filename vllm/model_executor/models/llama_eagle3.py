@@ -23,7 +23,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 
 from .utils import (
@@ -121,13 +120,12 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
 
 @support_torch_compile(
-    # torch.compile is disabled for multimodal EAGLE3 models due to constraint
-    # violations with dynamic shapes during tensor concatenation operations.
-    # See: https://github.com/vllm-project/vllm/pull/22872/files#r2362028132
-    # Non-multimodal EAGLE3 models can still use torch.compile safely.
-    enable_if=lambda vllm_config: not MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-        vllm_config.model_config
-    ),
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "hidden_states": 0,
+        "input_embeds": 0,
+    }
 )
 class LlamaModel(nn.Module):
     def __init__(
@@ -143,6 +141,12 @@ class LlamaModel(nn.Module):
 
         # Get drafter's quantization config
         self.quant_config = get_draft_quant_config(vllm_config)
+
+        eagle_config = getattr(self.config, "eagle_config", None)
+        if eagle_config is not None and "use_aux_hidden_state" in eagle_config:
+            self.use_aux_hidden_state = eagle_config["use_aux_hidden_state"]
+        else:
+            self.use_aux_hidden_state = True
 
         current_vllm_config = get_current_vllm_config()
 
@@ -163,20 +167,20 @@ class LlamaModel(nn.Module):
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
         )
-        if hasattr(self.config, "target_hidden_size"):
-            fc_input_size = self.config.target_hidden_size * 3
-        else:
-            fc_input_size = self.config.hidden_size * 3
-        self.fc = ReplicatedLinear(
-            input_size=fc_input_size,
-            output_size=self.config.hidden_size,
-            bias=False,
-            params_dtype=vllm_config.model_config.dtype,
-            quant_config=self.quant_config,
-            prefix=maybe_prefix(prefix, "fc"),
-            return_bias=False,
-        )
-
+        if self.use_aux_hidden_state:
+            if hasattr(self.config, "target_hidden_size"):
+                fc_input_size = self.config.target_hidden_size * 3
+            else:
+                fc_input_size = self.config.hidden_size * 3
+            self.fc = ReplicatedLinear(
+                input_size=fc_input_size,
+                output_size=self.config.hidden_size,
+                bias=False,
+                params_dtype=vllm_config.model_config.dtype,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "fc"),
+                return_bias=False,
+            )
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -234,8 +238,8 @@ class LlamaModel(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            # Remapping the name FP8 kv-scale
-            if "scale" in name:
+            # Remapping the name FP8 kv-scale or zero point.
+            if "scale" in name or "zero_point" in name:
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
@@ -334,6 +338,8 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if not self.model.use_aux_hidden_state:
+            return hidden_states
         # combine multiple auxiliary hidden states returned by eagle3
         return self.model.fc(hidden_states)
 
@@ -359,6 +365,8 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             skip_substrs.append("draft_id_to_target_id")
         if not includes_embed_tokens:
             skip_substrs.append("embed_tokens")
+        if not self.model.use_aux_hidden_state:
+            skip_substrs.append("fc.")
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,

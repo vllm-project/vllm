@@ -6,16 +6,14 @@ within a vision language model."""
 from collections.abc import Iterable
 
 import torch
-from einops import rearrange, repeat
 from torch import nn
 from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -25,10 +23,13 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding.common import (
+    ApplyRotaryEmb,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
-from .vision import get_vit_attn_backend
+from .vision import is_vit_use_data_parallel
 
 
 class VisionRotaryEmbedding(nn.Module):
@@ -147,57 +148,27 @@ class Siglip2VisionEmbeddings(nn.Module):
         return patch_embeds
 
 
-# copy from flash_attn/layers/rotary.py
-def rotate_half(x, interleaved=False):
-    if not interleaved:
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
-    else:
-        x1, x2 = x[..., ::2], x[..., 1::2]
-        return rearrange(
-            torch.stack((-x2, x1), dim=-1), "... d two -> ... (d two)", two=2
-        )
-
-
-def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
-    """
-    x: (batch_size, seqlen, nheads, headdim)
-    cos, sin: (seqlen, rotary_dim / 2) or (batch_size, seqlen, rotary_dim / 2)
-    """
-    ro_dim = cos.shape[-1] * 2
-    assert ro_dim <= x.shape[-1]
-    cos = repeat(
-        cos, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)"
-    )
-    sin = repeat(
-        sin, "... d -> ... 1 (2 d)" if not interleaved else "... d -> ... 1 (d 2)"
-    )
-    return torch.cat(
-        [
-            x[..., :ro_dim] * cos + rotate_half(x[..., :ro_dim], interleaved) * sin,
-            x[..., ro_dim:],
-        ],
-        dim=-1,
-    )
-
-
 def apply_rotary_pos_emb(
     q: torch.Tensor,
     k: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
-    is_flash_attn_backend: bool = False,
+    is_flash_attn_backend: bool,
+    apply_rotary_emb: ApplyRotaryEmb,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     cos = cos.chunk(2, dim=-1)[0].contiguous()
     sin = sin.chunk(2, dim=-1)[0].contiguous()
-    if is_flash_attn_backend and not current_platform.is_xpu():
-        from flash_attn.layers.rotary import apply_rotary_emb
 
-        apply_rotary_emb_func = apply_rotary_emb
+    if is_flash_attn_backend and current_platform.is_cuda():
+        apply_rotary_emb_func = apply_rotary_emb.forward_cuda
+    elif is_flash_attn_backend and current_platform.is_rocm():
+        apply_rotary_emb_func = apply_rotary_emb.forward_hip
     else:
-        apply_rotary_emb_func = apply_rotary_emb_torch
-    q_embed = apply_rotary_emb_func(q.float(), cos.float(), sin.float()).type_as(q)
-    k_embed = apply_rotary_emb_func(k.float(), cos.float(), sin.float()).type_as(k)
+        apply_rotary_emb_func = apply_rotary_emb.forward_native
+
+    q_embed = apply_rotary_emb_func(q, cos, sin)
+    k_embed = apply_rotary_emb_func(k, cos, sin)
+
     return q_embed, k_embed
 
 
@@ -209,8 +180,6 @@ class Siglip2Attention(nn.Module):
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -220,27 +189,27 @@ class Siglip2Attention(nn.Module):
         if self.head_dim * self.num_heads != self.embed_dim:
             raise ValueError(
                 f"embed_dim must be divisible by num_heads "
-                f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
-                f" {self.num_heads})."
+                f"(got `embed_dim`: {self.embed_dim} and "
+                f"`num_heads`: {self.num_heads})."
             )
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
-        self.is_causal = False
 
-        # TODO(Isotr0py): Enable data parallel after we support
-        # disabling TP on parallel linear layer
+        use_data_parallel = is_vit_use_data_parallel()
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
             total_num_heads=self.num_heads,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
         )
         self.out_proj = RowParallelLinear(
             input_size=self.embed_dim,
             output_size=self.embed_dim,
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
+            disable_tp=use_data_parallel,
         )
 
         self.tp_size = (
@@ -249,32 +218,17 @@ class Siglip2Attention(nn.Module):
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
         self.use_rope = config.use_rope
 
-        # Detect attention implementation.
-        self.attn_backend = get_vit_attn_backend(
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_heads_per_partition,
             head_size=self.head_dim,
-            dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
-        )
-        self.use_upstream_fa = False
-
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-                self.use_upstream_fa,
-                attn_backend_override=attn_backend_override,
-            )
+            scale=self.scale,
+            prefix=f"{prefix}.attn",
         )
 
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            self.attn_backend = AttentionBackendEnum.TORCH_SDPA
-        self.is_flash_attn_backend = self.attn_backend in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }
+        self.apply_rotary_emb = ApplyRotaryEmb(
+            enforce_enable=True,
+            enable_fp32_compute=True,
+        )
 
     def forward(
         self,
@@ -300,46 +254,24 @@ class Siglip2Attention(nn.Module):
                 keys.unsqueeze(0),
                 cos,
                 sin,
-                self.is_flash_attn_backend,
+                self.attn.is_flash_attn_backend,
+                self.apply_rotary_emb,
             )
             queries = queries.squeeze(0)
             keys = keys.squeeze(0)
 
-        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        if self.is_flash_attn_backend:
-            attn_output = self.flash_attn_varlen_func(
-                queries,
-                keys,
-                values,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seqlen,
-                max_seqlen_k=max_seqlen,
-            ).reshape(seq_length, -1)
-        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
-            # Execute attention entry by entry for speed & less VRAM.
-            batch_size = cu_seqlens.shape[0] - 1
-            outputs = []
-            cu = cu_seqlens.tolist()
-            for i in range(batch_size):
-                start_idx = cu[i]
-                end_idx = cu[i + 1]
+        max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+        attn_output = self.attn(
+            query=queries.unsqueeze(0),
+            key=keys.unsqueeze(0),
+            value=values.unsqueeze(0),
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+        )
+        attn_output = attn_output.reshape(
+            seq_length, self.num_heads_per_partition * self.head_dim
+        )
 
-                # Each sequence is processed independently.
-                q_i = queries[start_idx:end_idx].unsqueeze(0)
-                k_i = keys[start_idx:end_idx].unsqueeze(0)
-                v_i = values[start_idx:end_idx].unsqueeze(0)
-
-                # (1, seq_len, num_heads, head_dim) ->
-                # (1, num_heads, seq_len, head_dim)
-                q_i, k_i, v_i = [x.transpose(1, 2) for x in (q_i, k_i, v_i)]
-
-                output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-                # (1, num_heads, seq_len, head_dim) -> (seq_len, embed_dim)
-                output_i = output_i.transpose(1, 2).reshape(end_idx - start_idx, -1)
-                outputs.append(output_i)
-
-            attn_output = torch.cat(outputs, dim=0)
         attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
@@ -350,24 +282,24 @@ class Siglip2MLP(nn.Module):
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ):
         super().__init__()
         self.config = config
+        use_data_parallel = is_vit_use_data_parallel()
         self.activation_fn = get_act_fn(config.hidden_act)
-        # TODO(Isotr0py): Enable data parallel after we support
-        # disabling TP on parallel linear layer
         self.fc1 = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.fc1",
+            disable_tp=use_data_parallel,
         )
         self.fc2 = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             quant_config=quant_config,
             prefix=f"{prefix}.fc2",
+            disable_tp=use_data_parallel,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -383,8 +315,6 @@ class Siglip2EncoderLayer(nn.Module):
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -393,15 +323,12 @@ class Siglip2EncoderLayer(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            use_data_parallel=use_data_parallel,
-            attn_backend_override=attn_backend_override,
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = Siglip2MLP(
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
-            use_data_parallel=use_data_parallel,
         )
 
     def forward(
@@ -447,8 +374,6 @@ class Siglip2Encoder(nn.Module):
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -458,8 +383,6 @@ class Siglip2Encoder(nn.Module):
                     config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{idx}",
-                    use_data_parallel=use_data_parallel,
-                    attn_backend_override=attn_backend_override,
                 )
                 for idx in range(config.num_hidden_layers)
             ]
@@ -633,8 +556,6 @@ class Siglip2VisionTransformer(nn.Module):
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -645,8 +566,6 @@ class Siglip2VisionTransformer(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.encoder",
-            use_data_parallel=use_data_parallel,
-            attn_backend_override=attn_backend_override,
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
 
@@ -674,8 +593,6 @@ class Siglip2NavitModel(torch.nn.Module):
         config: Siglip2VisionConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
-        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
 
@@ -683,8 +600,6 @@ class Siglip2NavitModel(torch.nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.vision_model",
-            use_data_parallel=use_data_parallel,
-            attn_backend_override=attn_backend_override,
         )
 
     def forward(

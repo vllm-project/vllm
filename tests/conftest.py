@@ -27,7 +27,7 @@ import threading
 from collections.abc import Generator
 from contextlib import nullcontext
 from enum import Enum
-from typing import Any, Callable, TypedDict, TypeVar, cast
+from typing import Any, Callable, TypedDict, TypeVar, cast, TYPE_CHECKING, Optional
 
 import numpy as np
 import pytest
@@ -45,7 +45,11 @@ from transformers import (
 )
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
-from tests.models.utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
+from tests.models.utils import (
+    TokensTextLogprobs,
+    TokensTextLogprobsPromptLogprobs,
+    softmax,
+)
 from vllm import LLM, SamplingParams, envs
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -59,12 +63,21 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
+
+from torch._inductor.utils import fresh_cache
+
+
+if TYPE_CHECKING:
+    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+    from transformers.generation.utils import GenerateOutput
+
 
 logger = init_logger(__name__)
 
@@ -176,6 +189,17 @@ def dist_init():
     cleanup_dist_env_and_memory()
 
 
+@pytest.fixture
+def default_vllm_config():
+    """Set a default VllmConfig for tests that directly test CustomOps or pathways
+    that use get_current_vllm_config() outside of a full engine context.
+    """
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        yield
+
+
 @pytest.fixture()
 def should_do_global_cleanup_after_test(request) -> bool:
     """Allow subdirectories to skip global cleanup by overriding this fixture.
@@ -193,6 +217,27 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
         cleanup_dist_env_and_memory()
 
 
+@pytest.fixture
+def workspace_init():
+    """Initialize the workspace manager for tests that need it.
+
+    This fixture initializes the workspace manager with a CUDA device
+    if available, and resets it after the test completes. Tests that
+    create a full vLLM engine should NOT use this fixture as the engine
+    will initialize the workspace manager itself.
+    """
+    from vllm.v1.worker.workspace import (
+        init_workspace_manager,
+        reset_workspace_manager,
+    )
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        init_workspace_manager(device)
+    yield
+    reset_workspace_manager()
+
+
 @pytest.fixture(autouse=True)
 def dynamo_reset():
     yield
@@ -201,10 +246,7 @@ def dynamo_reset():
 
 @pytest.fixture
 def example_prompts() -> list[str]:
-    prompts = []
-    for filename in _TEST_PROMPTS:
-        prompts += _read_prompts(filename)
-    return prompts
+    return [prompt for filename in _TEST_PROMPTS for prompt in _read_prompts(filename)]
 
 
 @pytest.fixture
@@ -223,10 +265,7 @@ class DecoderPromptType(Enum):
 
 @pytest.fixture
 def example_long_prompts() -> list[str]:
-    prompts = []
-    for filename in _LONG_PROMPTS:
-        prompts += _read_prompts(filename)
-    return prompts
+    return [prompt for filename in _LONG_PROMPTS for prompt in _read_prompts(filename)]
 
 
 @pytest.fixture(scope="session")
@@ -326,6 +365,7 @@ class HfRunner:
             self.config,
             dtype=dtype,
             is_pooling_model=is_sentence_transformer or is_cross_encoder,
+            config_format="hf",
         )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
@@ -352,10 +392,13 @@ class HfRunner:
                 trust_remote_code=trust_remote_code,
             )
         else:
-            model = auto_cls.from_pretrained(
-                model_name,
-                trust_remote_code=trust_remote_code,
-                **model_kwargs,
+            model = cast(
+                nn.Module,
+                auto_cls.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                    **model_kwargs,
+                ),
             )
 
             # in case some unquantized custom models are not in same dtype
@@ -373,15 +416,17 @@ class HfRunner:
             self.model = model
 
         if not skip_tokenizer_init:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                model_name,
-                dtype=dtype,
-                trust_remote_code=trust_remote_code,
+            self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
+                AutoTokenizer.from_pretrained(
+                    model_name,
+                    dtype=dtype,
+                    trust_remote_code=trust_remote_code,
+                )
             )
 
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
-        from transformers import AutoProcessor  # noqa: F401
+        from transformers import AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
@@ -397,6 +442,7 @@ class HfRunner:
         images: PromptImageInput | None = None,
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]]:
         if images is not None:
             assert len(prompts) == len(images)
@@ -410,10 +456,18 @@ class HfRunner:
         all_inputs: list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]] = []
         for i, prompt in enumerate(prompts):
             if isinstance(prompt, str):
-                processor_kwargs: dict[str, Any] = {
-                    "text": prompt,
-                    "return_tensors": "pt",
-                }
+                # Create a copy to avoid modifying the original dict
+                processor_kwargs = (
+                    tokenization_kwargs.copy()
+                    if tokenization_kwargs is not None
+                    else {}
+                )
+                processor_kwargs.update(
+                    {
+                        "text": prompt,
+                        "return_tensors": "pt",
+                    }
+                )
                 if images is not None and (image := images[i]) is not None:
                     processor_kwargs["images"] = image
                 if videos is not None and (video := videos[i]) is not None:
@@ -459,20 +513,23 @@ class HfRunner:
             embeddings.append(embedding)
         return embeddings
 
-    def classify(self, prompts: list[str]) -> list[str]:
+    def classify(self, prompts: list[str]) -> list[list[float]]:
         # output is final logits
         all_inputs = self.get_inputs(prompts)
-        outputs = []
+        outputs: list[list[float]] = []
         problem_type = getattr(self.config, "problem_type", "")
 
         for inputs in all_inputs:
             output = self.model(**self.wrap_device(inputs))
+
+            assert isinstance(output.logits, torch.Tensor)
+
             if problem_type == "regression":
                 logits = output.logits[0].tolist()
             elif problem_type == "multi_label_classification":
                 logits = output.logits.sigmoid()[0].tolist()
             else:
-                logits = output.logits.softmax(dim=-1)[0].tolist()
+                logits = softmax(output.logits)[0].tolist()
             outputs.append(logits)
 
         return outputs
@@ -491,7 +548,7 @@ class HfRunner:
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
         for inputs in all_inputs:
-            output_ids = self.model.generate(
+            output_ids: torch.Tensor = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
                 **kwargs,
@@ -501,8 +558,7 @@ class HfRunner:
                 skip_special_tokens=True,
                 clean_up_tokenization_spaces=False,
             )
-            output_ids = output_ids.cpu().tolist()
-            outputs.append((output_ids, output_str))
+            outputs.append((output_ids.cpu().tolist(), output_str))
         return outputs
 
     def generate_greedy(
@@ -570,7 +626,7 @@ class HfRunner:
 
         all_logprobs: list[list[torch.Tensor]] = []
         for inputs in all_inputs:
-            output = self.model.generate(
+            output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
                 use_cache=True,
                 do_sample=False,
@@ -641,6 +697,7 @@ class HfRunner:
         images: PromptImageInput | None = None,
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
+        use_cache: bool = True,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
         all_inputs = self.get_inputs(
@@ -652,9 +709,9 @@ class HfRunner:
         all_output_strs: list[str] = []
 
         for inputs in all_inputs:
-            output = self.model.generate(
+            output: "GenerateOutput" = self.model.generate(
                 **self.wrap_device(inputs),
-                use_cache=True,
+                use_cache=use_cache,
                 do_sample=False,
                 max_new_tokens=max_tokens,
                 output_hidden_states=True,
@@ -662,10 +719,16 @@ class HfRunner:
                 **kwargs,
             )
 
+            # Encoder-decoder models return decoder_hidden_states instead of
+            # hidden_states
+            hidden_states = (
+                getattr(output, "hidden_states", None) or output.decoder_hidden_states
+            )
+
             (
                 seq_logprobs_lst,
                 output_len,
-            ) = self._hidden_states_to_logprobs(output.hidden_states, num_logprobs)
+            ) = self._hidden_states_to_logprobs(hidden_states, num_logprobs)
 
             all_logprobs.append(seq_logprobs_lst)
             seq_ids = output.sequences[0]
@@ -722,7 +785,7 @@ class VllmRunner:
         tokenizer_name: str | None = None,
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = True,
-        seed: int | None = 0,
+        seed: int = 0,
         max_model_len: int | None = 1024,
         dtype: str = "auto",
         disable_log_stats: bool = True,
@@ -747,6 +810,14 @@ class VllmRunner:
             # set to larger than max_num_seqs, then it will lead to *no* graphs
             # being captured which can trigger edge cases that we don't handle yet.
             kwargs["compilation_config"] = {"cudagraph_capture_sizes": [4]}
+
+            # Make sure we have atleast one cudagraph large enough for a single decode.
+            if (speculative_config := kwargs.get("speculative_config")) and (
+                num_speculative_tokens := speculative_config["num_speculative_tokens"]
+            ):
+                kwargs["compilation_config"]["cudagraph_capture_sizes"].append(
+                    num_speculative_tokens + 1
+                )
 
         with init_ctx:
             self.llm = LLM(
@@ -845,6 +916,7 @@ class VllmRunner:
     @staticmethod
     def _final_steps_generate_w_logprobs(
         req_outputs: list[RequestOutput],
+        include_prompt_token_ids: bool = False,
     ) -> list[TokensTextLogprobsPromptLogprobs]:
         outputs: list[TokensTextLogprobsPromptLogprobs] = []
         for req_output in req_outputs:
@@ -853,9 +925,26 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 output_logprobs = sample.logprobs
-            outputs.append(
-                (output_ids, output_str, output_logprobs, req_output.prompt_logprobs)
-            )
+            if include_prompt_token_ids:
+                outputs.append(
+                    (  # type: ignore[arg-type]
+                        output_ids,
+                        output_str,
+                        output_logprobs,
+                        req_output.prompt_token_ids,
+                        req_output.prompt_logprobs,
+                    )
+                )
+            else:
+                outputs.append(
+                    (
+                        output_ids,
+                        output_str,
+                        output_logprobs,
+                        req_output.prompt_logprobs,
+                    )
+                )
+
         return outputs
 
     def generate_w_logprobs(
@@ -865,6 +954,7 @@ class VllmRunner:
         images: PromptImageInput | None = None,
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
+        include_prompt_token_ids: bool = False,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs] | list[TokensTextLogprobsPromptLogprobs]:
         inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
@@ -874,7 +964,7 @@ class VllmRunner:
         )
 
         toks_str_logsprobs_prompt_logprobs = self._final_steps_generate_w_logprobs(
-            req_outputs
+            req_outputs, include_prompt_token_ids
         )
         # Omit prompt logprobs if not required by sampling params
         return (
@@ -934,7 +1024,9 @@ class VllmRunner:
             **kwargs,
         )
 
-    def generate_prompt_perplexity(self, prompts: list[str]) -> list[float]:
+    def generate_prompt_perplexity(
+        self, prompts: list[str], mask: Optional[list[str]] = None
+    ) -> list[float]:
         """
         Return the perplexity score associated with generating the prompts
 
@@ -945,13 +1037,20 @@ class VllmRunner:
             prompts, max_tokens=1, num_logprobs=None, num_prompt_logprobs=0
         )
 
+        mask_prefix_lens = (
+            [len(self.llm.get_tokenizer()(prefix)["input_ids"]) for prefix in mask]
+            if mask is not None
+            else [0 for _ in range(len(prompts))]
+        )
+
         perplexities = []
-        for output in outputs:
+        for output, mask_prefix_len in zip(outputs, mask_prefix_lens):
             output = cast(TokensTextLogprobsPromptLogprobs, output)
             token_datas = cast(list[dict[int, Logprob] | None], output[3])
             assert token_datas[0] is None
+
             token_log_probs = []
-            for token_data in token_datas[1:]:
+            for token_data in token_datas[mask_prefix_len + 1 :]:
                 assert token_data is not None
                 assert len(token_data) == 1
                 token_log_prob = list(token_data.values())[0].logprob
@@ -1031,6 +1130,9 @@ class VllmRunner:
 
     def get_llm(self) -> LLM:
         return self.llm
+
+    def collective_rpc(self, *args, **kwargs):
+        return self.llm.collective_rpc(*args, **kwargs)
 
     def __enter__(self):
         return self
@@ -1144,6 +1246,7 @@ def caplog_mp_spawn(tmp_path, monkeypatch):
             "level": level,
             "filename": log_path.as_posix(),
         }
+        config["loggers"]["vllm"]["level"] = level
 
         config_path.write_text(json.dumps(config))
 
@@ -1358,7 +1461,11 @@ class LocalAssetServer:
         return f"{self.base_url}/{name}"
 
     def get_image_asset(self, name: str) -> Image.Image:
-        return fetch_image(self.url_for(name))
+        image = fetch_image(self.url_for(name))
+        # Unwrap MediaWithBytes if present
+        if isinstance(image, MediaWithBytes):
+            image = image.media
+        return image
 
 
 @pytest.fixture(scope="session")
@@ -1397,3 +1504,49 @@ def disable_deepgemm_ue8m0(monkeypatch):
         # Clear cache so the next time it is used it is processed with the
         # default VLLM_USE_DEEP_GEMM_E8M0  setting.
         is_deep_gemm_e8m0_used.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def clean_gpu_memory_between_tests():
+    if os.getenv("VLLM_TEST_CLEAN_GPU_MEMORY", "0") != "1":
+        yield
+        return
+
+    # Wait for GPU memory to be cleared before starting the test
+    import gc
+
+    from tests.utils import wait_for_gpu_memory_to_clear
+
+    num_gpus = torch.cuda.device_count()
+    if num_gpus > 0:
+        try:
+            wait_for_gpu_memory_to_clear(
+                devices=list(range(num_gpus)),
+                threshold_ratio=0.1,
+            )
+        except ValueError as e:
+            logger.info("Failed to clean GPU memory: %s", e)
+
+    yield
+
+    # Clean up GPU memory after the test
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+
+
+@pytest.fixture
+def use_fresh_inductor_cache():
+    """
+    Use a fresh inductor cache for the test.
+    This is useful to ensure that the test is not affected by the
+    previous test calls.
+    """
+    with fresh_cache():
+        yield
+
+
+@pytest.fixture(scope="function")
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")

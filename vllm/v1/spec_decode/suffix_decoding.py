@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import numpy as np
+import torch
 
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -15,6 +15,7 @@ class SuffixDecodingProposer:
 
     def __init__(self, vllm_config: VllmConfig):
         config = vllm_config.speculative_config
+        assert config is not None, "Speculative config must be set"
         self.num_speculative_tokens = config.num_speculative_tokens
         self.max_tree_depth = config.suffix_decoding_max_tree_depth
         self.max_spec_factor = config.suffix_decoding_max_spec_factor
@@ -34,27 +35,24 @@ class SuffixDecodingProposer:
     def propose(
         self,
         input_batch: InputBatch,
-        sampled_token_ids: list[np.ndarray],
+        sampled_token_ids: list[list[int]],
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,  # unused
     ) -> list[list[int]]:
         """
         Propose speculative tokens for each request in the input batch. Suffix Decoding
         will speculate a dynamic number of tokens for each request every decoding step,
         so each entry in the returned list may have different lengths.
         """
-        draft_token_ids: list[np.ndarray] = []
+        draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
-            if sampled_ids.shape[0] == 0:
+            if not sampled_ids:
                 # Skip speculative decoding for partial prefills.
                 draft_token_ids.append([])
                 continue
 
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
             req_id = input_batch.req_ids[i]
-            if req_id in input_batch.spec_decode_unsupported_reqs:
-                draft_token_ids.append([])
-                continue
-
             num_tokens = input_batch.num_tokens_no_spec[i]
             if num_tokens >= self.max_model_len:
                 # Skip requests that have already reached the max model length.
@@ -72,7 +70,7 @@ class SuffixDecodingProposer:
                 self.suffix_cache.start_request(req_id, prompt_token_ids)
 
             # Append the newly sampled ids to the suffix cache for this request.
-            self.suffix_cache.add_active_response(req_id, sampled_ids.tolist())
+            self.suffix_cache.add_active_response(req_id, sampled_ids)
 
             # Suffix decoding only uses the most recent tokens up to max_tree_depth, so
             # we extract the pattern from the end of the input.

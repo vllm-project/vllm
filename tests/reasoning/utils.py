@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer
 
 
 class StreamingReasoningReconstructor:
@@ -17,9 +17,6 @@ class StreamingReasoningReconstructor:
         # at the same time
         assert delta.content is None or delta.reasoning is None, (
             "Both content and reasoning content are present in the delta message"
-        )
-        assert delta.reasoning == delta.reasoning_content, (
-            "reasoning_content should be present for backwards compatibility"
         )
         if delta.content is not None:
             if self.other_content is None:

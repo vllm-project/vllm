@@ -113,7 +113,7 @@ Quick sanity check:
 
 - Outputs differ between baseline and disagg
 - Server startup fails
-- Encoder cache not found (should fallback to local execution)
+- Encoder cache not found (should fall back to local execution)
 - Proxy routing errors
 
 ## Notes

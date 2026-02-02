@@ -35,6 +35,7 @@ from vllm.distributed.parallel_state import (
     get_dp_group,
     get_ep_group,
     get_inner_dp_world_group,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
 )
@@ -103,27 +104,18 @@ class MultiprocExecutor(Executor):
         self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
-        self.world_size = self.parallel_config.world_size
-        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
-            f"global world_size ({self.parallel_config.world_size}) must be "
-            f"divisible by nnodes_within_dp "
-            f"({self.parallel_config.nnodes_within_dp}). "
-        )
-        self.local_world_size = self.parallel_config.local_world_size
-        tensor_parallel_size = self.parallel_config.tensor_parallel_size
-        pp_parallel_size = self.parallel_config.pipeline_parallel_size
-        assert self.world_size == tensor_parallel_size * pp_parallel_size, (
+        tp_size, pp_size, pcp_size = self._get_parallel_sizes()
+        assert self.world_size == tp_size * pp_size * pcp_size, (
             f"world_size ({self.world_size}) must be equal to the "
-            f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
-            f"_parallel_size ({pp_parallel_size}). "
+            f"tensor_parallel_size ({tp_size}) x pipeline"
+            f"_parallel_size ({pp_size}) x prefill_context"
+            f"_parallel_size ({pcp_size}). "
         )
 
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
 
-        # Multiprocessing-based executor does not support multi-node setting.
-        # Since it only works for single node, we can use the loopback address
-        # get_loopback_ip() for communication.
+        # use the loopback address get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port()
         )
@@ -153,6 +145,7 @@ class MultiprocExecutor(Executor):
             )
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
+                is_driver_worker = self._is_driver_worker(global_rank)
                 unready_workers.append(
                     WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
@@ -161,6 +154,7 @@ class MultiprocExecutor(Executor):
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
+                        is_driver_worker=is_driver_worker,
                     )
                 )
 
@@ -198,6 +192,11 @@ class MultiprocExecutor(Executor):
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
+
+            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+
+            self._post_init_executor()
+
             success = True
         finally:
             if not success:
@@ -208,9 +207,26 @@ class MultiprocExecutor(Executor):
                         uw.death_writer.close()
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
-        self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
-
         self.output_rank = self._get_output_rank()
+
+    def _get_parallel_sizes(self) -> tuple[int, int, int]:
+        self.world_size = self.parallel_config.world_size
+        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
+            f"global world_size ({self.parallel_config.world_size}) must be "
+            f"divisible by nnodes_within_dp "
+            f"({self.parallel_config.nnodes_within_dp}). "
+        )
+        self.local_world_size = self.parallel_config.local_world_size
+        tp_size = self.parallel_config.tensor_parallel_size
+        pp_size = self.parallel_config.pipeline_parallel_size
+        pcp_size = self.parallel_config.prefill_context_parallel_size
+        return tp_size, pp_size, pcp_size
+
+    def _post_init_executor(self) -> None:
+        pass
+
+    def _is_driver_worker(self, rank: int) -> bool:
+        return rank % self.parallel_config.tensor_parallel_size == 0
 
     def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
@@ -291,8 +307,8 @@ class MultiprocExecutor(Executor):
         kwargs: dict | None = None,
         non_block: bool = False,
         unique_reply_rank: int | None = None,
-        kv_output_aggregator: KVOutputAggregator = None,
-    ) -> Any | list[Any] | Future[Any | list[Any]]:
+        kv_output_aggregator: KVOutputAggregator | None = None,
+    ) -> Any:
         """Returns single result if unique_reply_rank and/or kv_output_aggregator
         is provided, otherwise list."""
         assert self.rpc_broadcast_mq is not None, (
@@ -375,14 +391,17 @@ class MultiprocExecutor(Executor):
                 time.sleep(0.1)
             return False
 
+        active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
+        # Give processes time to clean themselves up properly first
+        if wait_for_termination(active_procs(), 4):
+            return
+
         # Send SIGTERM if still running
-        active_procs = [proc for proc in worker_procs if proc.is_alive()]
-        for p in active_procs:
+        for p in active_procs():
             p.terminate()
-        if not wait_for_termination(active_procs, 4):
+        if not wait_for_termination(active_procs(), 4):
             # Send SIGKILL if still running
-            active_procs = [p for p in active_procs if p.is_alive()]
-            for p in active_procs:
+            for p in active_procs():
                 p.kill()
 
     def shutdown(self):
@@ -410,9 +429,9 @@ class MultiprocExecutor(Executor):
 
     @cached_property
     def max_concurrent_batches(self) -> int:
-        if self.scheduler_config.async_scheduling:
-            return 2
-        return self.parallel_config.pipeline_parallel_size
+        # PP requires PP-size concurrent batches to fill the pipeline.
+        pp_size = self.parallel_config.pipeline_parallel_size
+        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def _get_output_rank(self) -> int:
         # Only returns ModelRunnerOutput from TP rank=0 and PP rank=-1
@@ -424,7 +443,11 @@ class MultiprocExecutor(Executor):
         # 16-23, PP rank 2
         # 24-31, PP rank 3
         # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
-        return self.world_size - self.parallel_config.tensor_parallel_size
+        return (
+            self.world_size
+            - self.parallel_config.tensor_parallel_size
+            * self.parallel_config.prefill_context_parallel_size
+        )
 
 
 @dataclass
@@ -469,6 +492,8 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    rpc_broadcast_mq: MessageQueue | None
+    worker_response_mq: MessageQueue | None
 
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
@@ -480,7 +505,7 @@ class WorkerProc:
             )
 
             # Initializes a message queue for sending the model output
-            self.worker_response_mq: MessageQueue = MessageQueue(1, 1)
+            self.worker_response_mq = MessageQueue(1, 1)
             self.peer_response_handles = []
         else:
             # Initialize remote MessageQueue for receiving SchedulerOutput across nodes
@@ -510,16 +535,14 @@ class WorkerProc:
         distributed_init_method: str,
         input_shm_handle: Handle,
         shared_worker_lock: LockType,
+        is_driver_worker: bool,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(
-            vllm_config=vllm_config, rpc_rank=local_rank, global_rank=rank
-        )
+        wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]
-        is_driver_worker = rank % vllm_config.parallel_config.tensor_parallel_size == 0
         all_kwargs[local_rank] = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -566,6 +589,7 @@ class WorkerProc:
         distributed_init_method: str,
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
+        is_driver_worker: bool,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
         # (reader, writer)
@@ -583,6 +607,7 @@ class WorkerProc:
             "ready_pipe": (reader, writer),
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
+            "is_driver_worker": is_driver_worker,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
@@ -679,6 +704,9 @@ class WorkerProc:
             nonlocal shutdown_requested
             if not shutdown_requested:
                 shutdown_requested = True
+                logger.debug(
+                    "WorkerProc handling signal %d, raising SystemExit", signum
+                )
                 raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the worker
@@ -688,7 +716,7 @@ class WorkerProc:
         worker = None
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
-        death_pipe = kwargs.pop("death_pipe", None)
+        death_pipe: Connection | None = kwargs.pop("death_pipe", None)
         shutdown_event = threading.Event()
         # Start death monitoring thread if death_pipe is provided
         if death_pipe is not None:
@@ -699,7 +727,7 @@ class WorkerProc:
                     death_pipe.recv()
                 except EOFError:
                     # Parent process has exited, terminate this worker
-                    logger.info("Parent process exited, terminating worker")
+                    logger.info_once("Parent process exited, terminating worker")
                     # Send signal to self to trigger clean shutdown
                     shutdown_event.set()
                 except Exception as e:
@@ -713,6 +741,7 @@ class WorkerProc:
         try:
             reader.close()
             worker = WorkerProc(*args, **kwargs)
+            assert worker.worker_response_mq is not None
 
             # Send READY once we know everything is loaded
             ready_writer.send(
@@ -750,6 +779,13 @@ class WorkerProc:
             # any worker dies. Set this value so we don't re-throw
             # SystemExit() to avoid zmq exceptions in __del__.
             shutdown_requested = True
+
+        except SystemExit as e:
+            # SystemExit is raised on SIGTERM or SIGKILL, which usually indicates that
+            # the graceful shutdown process did not succeed
+            logger.warning("WorkerProc was terminated")
+            # SystemExit must never be ignored
+            raise e
 
         finally:
             if ready_writer is not None:
@@ -797,6 +833,7 @@ class WorkerProc:
 
     def worker_busy_loop(self, cancel: threading.Event | None = None):
         """Main busy loop for Multiprocessing Workers"""
+        assert self.rpc_broadcast_mq is not None
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                 cancel=cancel, indefinite=True
@@ -828,6 +865,8 @@ class WorkerProc:
         dp_rank = get_dp_group().rank_in_group
         pp_size = get_pp_group().world_size
         pp_rank = get_pp_group().rank_in_group
+        pcp_size = get_pcp_group().world_size
+        pcp_rank = get_pcp_group().rank_in_group
         tp_size = get_tp_group().world_size
         tp_rank = get_tp_group().rank_in_group
         dcp_size = get_dcp_group().world_size
@@ -837,6 +876,8 @@ class WorkerProc:
             process_name += f"_DP{dp_rank}"
         if pp_size > 1:
             process_name += f"_PP{pp_rank}"
+        if pcp_size > 1:
+            process_name += f"_PCP{pcp_rank}"
         if tp_size > 1:
             process_name += f"_TP{tp_rank}"
         if dcp_size > 1:

@@ -2,4 +2,4 @@ model_name: "RedHatAI/Qwen2.5-VL-3B-Instruct-FP8-Dynamic"
 accuracy_threshold: 0.60
 num_questions: 1319
 num_fewshot: 5
-max_model_len: 4096
+server_args: "--enforce-eager --max-model-len 4096"

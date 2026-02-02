@@ -80,10 +80,18 @@ DOCKER_BUILDKIT=1 docker build . \
     If you are using Podman instead of Docker, you might need to disable SELinux labeling by
     adding `--security-opt label=disable` when running `podman build` command to avoid certain [existing issues](https://github.com/containers/buildah/discussions/4184).
 
+!!! note
+    If you have not changed any C++ or CUDA kernel code, you can use precompiled wheels to significantly reduce Docker build time.
+
+    *   **Enable the feature** by adding the build argument: `--build-arg VLLM_USE_PRECOMPILED="1"`.
+    *   **How it works**: By default, vLLM automatically finds the correct wheels from our [Nightly Builds](../contributing/ci/nightly_builds.md) by using the merge-base commit with the upstream `main` branch.
+    *   **Override commit**: To use wheels from a specific commit, provide the `--build-arg VLLM_PRECOMPILED_WHEEL_COMMIT=<commit_hash>` argument.
+
+    For a detailed explanation, refer to the documentation on 'Set up using Python-only build (without compilation)' part in [Build wheel from source](../contributing/ci/nightly_builds.md#precompiled-wheels-usage), these args are similar.
+
 ## Building for Arm64/aarch64
 
-A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper. At time of this writing, this requires the use
-of PyTorch Nightly and should be considered **experimental**. Using the flag `--platform "linux/arm64"` will attempt to build for arm64.
+A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper and Grace-Blackwell. Using the flag `--platform "linux/arm64"` will build for arm64.
 
 !!! note
     Multiple modules must be compiled, so this process can take a while. Recommend using `--build-arg max_jobs=` & `--build-arg nvcc_threads=`
@@ -94,7 +102,6 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
 
     ```bash
     # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
-    python3 use_existing_torch.py
     DOCKER_BUILDKIT=1 docker build . \
     --file docker/Dockerfile \
     --target vllm-openai \
@@ -102,7 +109,27 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     -t vllm/vllm-gh200-openai:latest \
     --build-arg max_jobs=66 \
     --build-arg nvcc_threads=2 \
-    --build-arg torch_cuda_arch_list="9.0 10.0+PTX"
+    --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
+    --build-arg RUN_WHEEL_CHECK=false
+    ```
+
+For (G)B300, we recommend using CUDA 13, as shown in the following command.
+
+??? console "Command"
+
+    ```bash
+    DOCKER_BUILDKIT=1 docker build \
+    --build-arg CUDA_VERSION=13.0.1 \
+    --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 \
+    --build-arg max_jobs=256 \
+    --build-arg nvcc_threads=2 \
+    --build-arg RUN_WHEEL_CHECK=false \
+    --build-arg torch_cuda_arch_list='9.0 10.0+PTX' \
+    --platform "linux/arm64" \
+    --tag vllm/vllm-gb300-openai:latest \
+    --target vllm-openai \
+    -f docker/Dockerfile \
+    .
     ```
 
 !!! note

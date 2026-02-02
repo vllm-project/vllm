@@ -9,10 +9,10 @@ on:
 jobs:
   macos-m1-smoke-test:
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.1
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -29,23 +29,23 @@ jobs:
 
       - name: Install dependencies and build vLLM
         run: |
+          uv pip install -r requirements/cpu-build.txt --index-strategy unsafe-best-match
           uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
-          uv pip install -e .
+          uv pip install -e . --no-build-isolation
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 4
 
       - name: Verify installation
         run: |
           python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
-          python -c "import torch; print(f'PyTorch: {torch.__version__}')"
 
       - name: Smoke test vllm serve
-        timeout-minutes: 10
         run: |
           # Start server in background
           vllm serve Qwen/Qwen3-0.6B \
-            --max-model-len=2048 \
+            --max-model-len=2K \
             --load-format=dummy \
+            --hf-overrides '{"num_hidden_layers": 2}' \
             --enforce-eager \
             --port 8000 &
 

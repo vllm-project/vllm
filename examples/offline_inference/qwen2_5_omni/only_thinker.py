@@ -112,10 +112,36 @@ def get_multi_audios_query() -> QueryResult:
     )
 
 
+def get_multi_images_query() -> QueryResult:
+    question = "What are the differences between these two images?"
+    prompt = (
+        f"<|im_start|>system\n{default_system}<|im_end|>\n"
+        "<|im_start|>user\n<|vision_bos|><|IMAGE|><|vision_eos|>"
+        "<|vision_bos|><|IMAGE|><|vision_eos|>"
+        f"{question}<|im_end|>\n"
+        f"<|im_start|>assistant\n"
+    )
+    return QueryResult(
+        inputs={
+            "prompt": prompt,
+            "multi_modal_data": {
+                "image": [
+                    convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB"),
+                    convert_image_mode(ImageAsset("stop_sign").pil_image, "RGB"),
+                ],
+            },
+        },
+        limit_mm_per_prompt={
+            "image": 2,
+        },
+    )
+
+
 query_map = {
     "mixed_modalities": get_mixed_modalities_query,
     "use_audio_in_video": get_use_audio_in_video_query,
     "multi_audios": get_multi_audios_query,
+    "multi_images": get_multi_images_query,
 }
 
 
@@ -158,7 +184,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
 

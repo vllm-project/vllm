@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import numpy as np
 
-from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
+from vllm.config import (
+    ModelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+)
 from vllm.v1.spec_decode.ngram_proposer import (
     NgramProposer,
     _find_longest_matched_ngram_and_propose_tokens,
@@ -77,33 +81,27 @@ def test_ngram_proposer():
     # No match.
     token_ids_cpu = np.array([[1, 2, 3, 4, 5]])
     result = get_ngram_proposer(min_n=2, max_n=2, k=2).propose(
-        sampled_token_ids=[np.array([0])],
-        req_ids=["0"],
+        sampled_token_ids=[[0]],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
-        spec_decode_unsupported_reqs=(),
     )
     assert len(result[0]) == 0
 
     # No match for 4-gram.
     token_ids_cpu = np.array([[1, 2, 3, 4, 1, 2, 3]])
     result = get_ngram_proposer(min_n=4, max_n=4, k=2).propose(
-        sampled_token_ids=[np.array([0])],
-        req_ids=["0"],
+        sampled_token_ids=[[0]],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
-        spec_decode_unsupported_reqs=(),
     )
     assert len(result[0]) == 0
 
     # No match for 4-gram but match for 3-gram.
     token_ids_cpu = np.array([[1, 2, 3, 4, 1, 2, 3]])
     result = get_ngram_proposer(min_n=3, max_n=4, k=2).propose(
-        sampled_token_ids=[np.array([0])],
-        req_ids=["0"],
+        sampled_token_ids=[[0]],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
-        spec_decode_unsupported_reqs=(),
     )
     assert np.array_equal(result, np.array([[4, 1]]))
 
@@ -111,44 +109,36 @@ def test_ngram_proposer():
     # In this case, the proposer should return the 4-gram match.
     token_ids_cpu = np.array([[2, 3, 4, 5, 1, 2, 3, 4, 1, 2, 3, 4]])
     result = get_ngram_proposer(min_n=3, max_n=4, k=2).propose(
-        sampled_token_ids=[np.array([0])],
-        req_ids=["0"],
+        sampled_token_ids=[[0]],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
-        spec_decode_unsupported_reqs=(),
     )
     assert np.array_equal(result, np.array([[1, 2]]))  # Not [5, 1]]
 
     # Match for 2-gram and 3-gram, but not 4-gram.
     token_ids_cpu = np.array([[3, 4, 5, 2, 3, 4, 1, 2, 3, 4]])
     result = get_ngram_proposer(min_n=2, max_n=4, k=2).propose(
-        sampled_token_ids=[np.array([0])],
-        req_ids=["0"],
+        sampled_token_ids=[[0]],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
-        spec_decode_unsupported_reqs=(),
     )
     assert np.array_equal(result, np.array([[1, 2]]))  # Not [5, 2]]
 
     # Multiple 3-gram matched, but always pick the first one.
     token_ids_cpu = np.array([[1, 2, 3, 100, 1, 2, 3, 200, 1, 2, 3, 300, 1, 2, 3]])
     result = get_ngram_proposer(min_n=3, max_n=3, k=2).propose(
-        sampled_token_ids=[np.array([0])],
-        req_ids=["0"],
+        sampled_token_ids=[[0]],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
-        spec_decode_unsupported_reqs=(),
     )
     assert np.array_equal(result, np.array([[100, 1]]))
 
     # check empty input
     token_ids_cpu = np.array([[]])
     result = get_ngram_proposer(min_n=2, max_n=2, k=2).propose(
-        sampled_token_ids=[np.array([0])],
-        req_ids=["0"],
+        sampled_token_ids=[[0]],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
-        spec_decode_unsupported_reqs=(),
     )
     assert len(result[0]) == 0
 
@@ -157,15 +147,39 @@ def test_ngram_proposer():
     # second request has 3 tokens and no match. Padded with -1 for max len 5
     token_ids_cpu = np.array([[1, 2, 3, 1, 2], [4, 5, 6, -1, -1]])
     result = get_ngram_proposer(min_n=2, max_n=2, k=2).propose(
-        sampled_token_ids=[np.array([0]), np.array([1])],
-        req_ids=["0", "1"],
+        sampled_token_ids=[[0], [1]],
         num_tokens_no_spec=np.array([5, 3]),
         token_ids_cpu=token_ids_cpu,
-        spec_decode_unsupported_reqs=(),
     )
     assert len(result[0]) == 2
     assert np.array_equal(result[0], np.array([3, 1]))
     assert np.array_equal(result[1], np.array([]))
+
+    # Test non-contiguous indices: requests 0 and 2 need proposals,
+    # request 1 is in prefill
+    proposer = get_ngram_proposer(min_n=2, max_n=2, k=2)
+    max_model_len = 20
+    token_ids_cpu = np.zeros((3, max_model_len), dtype=np.int32)
+    token_ids_cpu[0, :5] = [1, 2, 3, 1, 2]
+    token_ids_cpu[1, :3] = [4, 5, 6]
+    token_ids_cpu[2, :5] = [7, 8, 9, 7, 8]
+    num_tokens_no_spec = np.array([5, 3, 5], dtype=np.int32)
+    sampled_token_ids = [[2], [], [8]]  # Empty list for request 1 simulates prefill
+    result = proposer.propose(
+        sampled_token_ids=sampled_token_ids,
+        num_tokens_no_spec=num_tokens_no_spec,
+        token_ids_cpu=token_ids_cpu,
+    )
+    assert len(result) == 3
+    assert np.array_equal(result[0], [3, 1])
+    assert len(result[1]) == 0
+    assert np.array_equal(result[2], [9, 7])
+    # Verify internal arrays written to correct indices
+    assert proposer.valid_ngram_num_drafts[0] == 2
+    assert proposer.valid_ngram_num_drafts[1] == 0
+    assert proposer.valid_ngram_num_drafts[2] == 2
+    assert np.array_equal(proposer.valid_ngram_draft[0, :2], [3, 1])
+    assert np.array_equal(proposer.valid_ngram_draft[2, :2], [9, 7])
 
     # test if 0 threads available: can happen if TP size > CPU count
     ngram_proposer = get_ngram_proposer(min_n=2, max_n=2, k=2)
@@ -181,11 +195,9 @@ def test_ngram_proposer():
     input_2[:3] = [4, 5, 6]
     token_ids_cpu = np.array([input_1, input_2])
     result = ngram_proposer.propose(
-        sampled_token_ids=[np.array([0]), np.array([1])],
-        req_ids=["0", "1"],
+        sampled_token_ids=[[0], [1]],
         num_tokens_no_spec=np.array([len(input_1), 3]),
         token_ids_cpu=token_ids_cpu,
-        spec_decode_unsupported_reqs=(),
     )
     assert len(result[0]) == 2
     assert np.array_equal(result[0], np.array([middle_integer + 2, middle_integer + 3]))

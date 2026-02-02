@@ -16,7 +16,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
@@ -232,7 +232,7 @@ async def test_server_load(server: RemoteOpenAIServer):
 @pytest.mark.asyncio
 async def test_health_check_engine_dead_error():
     # Import the health function directly to test it in isolation
-    from vllm.entrypoints.openai.api_server import health
+    from vllm.entrypoints.serve.instrumentator.health import health
 
     # Create a mock request that simulates what FastAPI would provide
     mock_request = Mock(spec=Request)

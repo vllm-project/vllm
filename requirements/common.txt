@@ -9,7 +9,7 @@ blake3
 py-cpuinfo
 transformers >= 4.56.0, < 5
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
-protobuf # Required by LlamaTokenizer.
+protobuf # Required by LlamaTokenizer, gRPC.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
 aiohttp
 openai >= 1.99.1  # For Responses API with reasoning content
@@ -19,34 +19,37 @@ pillow  # Required for image processing
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer == 0.11.3
-llguidance >= 1.3.0, < 1.4.0; platform_machine == "x86_64" or platform_machine == "arm64" or platform_machine == "aarch64" or platform_machine == "s390x"
+llguidance >= 1.3.0, < 1.4.0; platform_machine == "x86_64" or platform_machine == "arm64" or platform_machine == "aarch64" or platform_machine == "s390x" or platform_machine == "ppc64le"
 outlines_core == 0.2.11
 # required for outlines backend disk cache
 diskcache == 5.6.3
 lark == 1.2.2
-xgrammar == 0.1.25; platform_machine == "x86_64" or platform_machine == "aarch64" or platform_machine == "arm64" or platform_machine == "s390x"
+xgrammar == 0.1.29; platform_machine == "x86_64" or platform_machine == "aarch64" or platform_machine == "arm64" or platform_machine == "s390x" or platform_machine == "ppc64le"
 typing_extensions >= 4.10
 filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
 partial-json-parser # used for parsing partial JSON outputs
 pyzmq >= 25.0.0
 msgspec
 gguf >= 0.17.0
-mistral_common[image] >= 1.8.5
-opencv-python-headless >= 4.11.0    # required for video IO
+mistral_common[image] >= 1.9.0
+opencv-python-headless >= 4.13.0    # required for video IO
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
 setuptools>=77.0.3,<81.0.0; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12
 einops # Required for Qwen2-VL.
-compressed-tensors == 0.12.2 # required for compressed-tensors
+compressed-tensors == 0.13.0 # required for compressed-tensors
 depyf==0.20.0 # required for profiling and debugging with compilation config
 cloudpickle # allows pickling lambda functions in model_executor/models/registry.py
 watchfiles # required for http server to monitor the updates of TLS files
 python-json-logger # Used by logging as per examples/others/logging_configuration.md
-scipy # Required for phi-4-multimodal-instruct
 ninja # Required for xgrammar, rocm, tpu, xpu
 pybase64 # fast base64 implementation
 cbor2 # Required for cross-language serialization of hashable objects
+ijson # Required for mistral streaming tool parser
 setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
-anthropic == 0.71.0
-model-hosting-container-standards < 1.0.0
+anthropic >= 0.71.0
+model-hosting-container-standards >= 0.1.13, < 1.0.0
+mcp
+grpcio
+grpcio-reflection

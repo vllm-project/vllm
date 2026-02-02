@@ -6,7 +6,7 @@
 #
 # The CSV file (named with current date/time) contains these columns:
 # model_name, tp_size, num_tokens, num_heads, num_kv_heads, head_dim, max_position,
-# rope_theta, is_neox_style, rope_scaling, dtype, torch_mean, torch_median, torch_p99,
+# is_neox_style, rope_parameters, dtype, torch_mean, torch_median, torch_p99,
 # torch_min, torch_max, triton_mean, triton_median, triton_p99, triton_min, triton_max,
 # speedup
 #
@@ -37,9 +37,9 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import set_random_seed
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -86,25 +86,22 @@ def benchmark_mrope(
     num_heads: int,
     num_kv_heads: int,
     max_position: int = 8192,
-    rope_theta: float = 10000,
     is_neox_style: bool = True,
-    rope_scaling: dict[str, Any] = None,
+    rope_parameters: dict[str, Any] | None = None,
     dtype: torch.dtype = torch.bfloat16,
     seed: int = 0,
     warmup_iter: int = 10,
     benchmark_iter: int = 100,
     csv_writer=None,
 ):
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
     # the parameters to compute the q k v size based on tp_size
     mrope_helper_class = get_rope(
         head_size=head_dim,
-        rotary_dim=head_dim,
         max_position=max_position,
-        base=rope_theta,
         is_neox_style=is_neox_style,
-        rope_scaling=rope_scaling,
+        rope_parameters=rope_parameters,
         dtype=dtype,
     ).to(device=device)
 
@@ -203,9 +200,8 @@ def benchmark_mrope(
             num_kv_heads,
             head_dim,
             max_position,
-            rope_theta,
             is_neox_style,
-            str(rope_scaling),
+            str(rope_parameters),
             str(dtype).split(".")[-1],
             torch_stats["mean"],
             torch_stats["median"],
@@ -255,9 +251,8 @@ if __name__ == "__main__":
             "num_kv_heads",
             "head_dim",
             "max_position",
-            "rope_theta",
             "is_neox_style",
-            "rope_scaling",
+            "rope_parameters",
             "dtype",
             "torch_mean",
             "torch_median",
@@ -303,7 +298,7 @@ if __name__ == "__main__":
                 q_size = num_heads * head_dim
                 kv_size = num_kv_heads * head_dim
                 is_neox_style = True
-                rope_theta = config.rope_theta
+                rope_parameters = config.rope_parameters
                 max_position = config.max_position_embeddings
 
                 for num_tokens in num_tokens_list:
@@ -315,9 +310,8 @@ if __name__ == "__main__":
                         num_heads=num_heads,
                         num_kv_heads=num_kv_heads,
                         max_position=max_position,
-                        rope_theta=rope_theta,
                         is_neox_style=is_neox_style,
-                        rope_scaling=config.rope_scaling,
+                        rope_parameters=rope_parameters,
                         dtype=getattr(torch, args.dtype),
                         seed=args.seed,
                         warmup_iter=args.warmup_iter,

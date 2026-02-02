@@ -3,7 +3,6 @@
 """Sampling parameters for text generation."""
 
 import copy
-import warnings
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -12,9 +11,10 @@ from typing import Annotated, Any
 import msgspec
 from pydantic.dataclasses import dataclass
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
@@ -67,6 +67,11 @@ class StructuredOutputsParams:
                 "You can only use one kind of structured outputs constraint "
                 f"but multiple are specified: {self.__dict__}"
             )
+        if count < 1:
+            raise ValueError(
+                "You must use one kind of structured outputs constraint "
+                f"but none are specified: {self.__dict__}"
+            )
 
     def all_constraints_none(self) -> bool:
         """
@@ -100,19 +105,6 @@ class StructuredOutputsParams:
         )
 
 
-@dataclass
-class GuidedDecodingParams(StructuredOutputsParams):
-    def __post_init__(self):
-        warnings.warn(
-            "GuidedDecodingParams is deprecated. This will be removed in "
-            "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-            "StructuredOutputsParams instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return super().__post_init__()
-
-
 class RequestOutputKind(Enum):
     # Return entire output so far in every RequestOutput
     CUMULATIVE = 0
@@ -144,12 +136,6 @@ class SamplingParams(
         are generated and streamed cumulatively per request. To see all `n`
         outputs upon completion, use `output_kind=RequestOutputKind.FINAL_ONLY`
         in `SamplingParams`."""
-    best_of: int | None = None
-    """Number of output sequences that are generated from the prompt. From
-    these `best_of` sequences, the top `n` sequences are returned. `best_of`
-    must be greater than or equal to `n`. By default, `best_of` is set to `n`.
-    Warning, this is only supported in V0."""
-    _real_n: int | None = None
     presence_penalty: float = 0.0
     """Penalizes new tokens based on whether they appear in the generated text
     so far. Values > 0 encourage the model to use new tokens, while values < 0
@@ -204,6 +190,12 @@ class SamplingParams(
     prompt_logprobs: int | None = None
     """Number of log probabilities to return per prompt token.
     When set to -1, return all `vocab_size` log probabilities."""
+    flat_logprobs: bool = False
+    """Whether to return logprobs in flatten format (i.e. FlatLogprob)
+    for better performance.
+    NOTE: GC costs of FlatLogprobs is significantly smaller than
+    list[dict[int, Logprob]]. After enabled, PromptLogprobs and
+    SampleLogprobs would populated as FlatLogprobs."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
@@ -225,6 +217,12 @@ class SamplingParams(
     set to an integer k, will use only the last k tokens from the prompt
     (i.e., left truncation). If set to `None`, truncation is disabled."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
+    skip_clone: bool = False
+    """Internal flag indicating that this SamplingParams instance is safe to
+    reuse without cloning. When True, clone() will return self without
+    performing a deep copy. This should only be set when the params object
+    is guaranteed to be dedicated to a single request and won't be modified
+    in ways that would affect other uses."""
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
@@ -234,8 +232,6 @@ class SamplingParams(
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
     """Parameters for configuring structured outputs."""
-    guided_decoding: GuidedDecodingParams | None = None
-    """Deprecated alias for structured_outputs."""
     logit_bias: dict[int, float] | None = None
     """If provided, the engine will construct a logits processor that applies
     these logit biases."""
@@ -254,12 +250,11 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
-    skip_reading_prefix_cache: bool = None
+    skip_reading_prefix_cache: bool | None = None
 
     @staticmethod
     def from_optional(
         n: int | None = 1,
-        best_of: int | None = None,
         presence_penalty: float | None = 0.0,
         frequency_penalty: float | None = 0.0,
         repetition_penalty: float | None = 1.0,
@@ -284,10 +279,10 @@ class SamplingParams(
         truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         structured_outputs: StructuredOutputsParams | None = None,
-        guided_decoding: GuidedDecodingParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
         extra_args: dict[str, Any] | None = None,
+        skip_clone: bool = False,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -296,20 +291,9 @@ class SamplingParams(
                 int(token): min(100.0, max(-100.0, bias))
                 for token, bias in logit_bias.items()
             }
-        if guided_decoding is not None:
-            warnings.warn(
-                "guided_decoding is deprecated. This will be removed in "
-                "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-                "structured_outputs instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            structured_outputs = guided_decoding
-            guided_decoding = None
 
         return SamplingParams(
             n=1 if n is None else n,
-            best_of=best_of,
             presence_penalty=0.0 if presence_penalty is None else presence_penalty,
             frequency_penalty=0.0 if frequency_penalty is None else frequency_penalty,
             repetition_penalty=1.0
@@ -339,25 +323,10 @@ class SamplingParams(
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
+            skip_clone=skip_clone,
         )
 
     def __post_init__(self) -> None:
-        # how we deal with `best_of`:
-        # if `best_of` is not set, we default to `n`;
-        # if `best_of` is set, we set `n` to `best_of`,
-        # and set `_real_n` to the original `n`.
-        # when we return the result, we will check
-        # if we need to return `n` or `_real_n` results
-        if self.best_of:
-            if self.best_of < self.n:
-                raise ValueError(
-                    f"best_of must be greater than or equal to n, "
-                    f"got n={self.n} and best_of={self.best_of}."
-                )
-            if not self._real_n:
-                self._real_n = self.n
-                self.n = self.best_of
-
         if 0 < self.temperature < _MAX_TEMP:
             logger.warning(
                 "temperature %s is less than %s, which may cause numerical "
@@ -405,17 +374,6 @@ class SamplingParams(
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
 
-        if self.guided_decoding is not None:
-            warnings.warn(
-                "guided_decoding is deprecated. This will be removed in "
-                "v0.12.0 or v1.0.0, which ever is soonest. Please use "
-                "structured_outputs instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            self.structured_outputs = self.guided_decoding
-            self.guided_decoding = None
-
         if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
             # the output of prompt logprobs may less than n_prompt_tokens,
@@ -427,18 +385,6 @@ class SamplingParams(
             raise ValueError(f"n must be an int, but is of type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
-        if self.best_of is not None:
-            if not isinstance(self.best_of, int):
-                raise ValueError(
-                    f"best_of must be an integer, got {type(self.best_of)}"
-                )
-            if self.best_of < 1:
-                raise ValueError(f"best_of must be at least 1, got {self.best_of}")
-            if self.best_of < self.n:
-                raise ValueError(
-                    f"best_of must be greater than or equal to n, "
-                    f"got n={self.n} and best_of={self.best_of}."
-                )
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -453,11 +399,17 @@ class SamplingParams(
                 f"{self.repetition_penalty}."
             )
         if self.temperature < 0.0:
-            raise ValueError(
-                f"temperature must be non-negative, got {self.temperature}."
+            raise VLLMValidationError(
+                f"temperature must be non-negative, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
             )
         if not 0.0 < self.top_p <= 1.0:
-            raise ValueError(f"top_p must be in (0, 1], got {self.top_p}.")
+            raise VLLMValidationError(
+                f"top_p must be in (0, 1], got {self.top_p}.",
+                parameter="top_p",
+                value=self.top_p,
+            )
         # quietly accept -1 as disabled, but prefer 0
         if self.top_k < -1:
             raise ValueError(
@@ -470,7 +422,11 @@ class SamplingParams(
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
-            raise ValueError(f"max_tokens must be at least 1, got {self.max_tokens}.")
+            raise VLLMValidationError(
+                f"max_tokens must be at least 1, got {self.max_tokens}.",
+                parameter="max_tokens",
+                value=self.max_tokens,
+            )
         if self.min_tokens < 0:
             raise ValueError(
                 f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
@@ -481,24 +437,30 @@ class SamplingParams(
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}."
             )
         if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
-            raise ValueError(
-                f"logprobs must be non-negative or -1, got {self.logprobs}."
+            raise VLLMValidationError(
+                f"logprobs must be non-negative or -1, got {self.logprobs}.",
+                parameter="logprobs",
+                value=self.logprobs,
             )
         if (
             self.prompt_logprobs is not None
             and self.prompt_logprobs != -1
             and self.prompt_logprobs < 0
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"prompt_logprobs must be non-negative or -1, got "
-                f"{self.prompt_logprobs}."
+                f"{self.prompt_logprobs}.",
+                parameter="prompt_logprobs",
+                value=self.prompt_logprobs,
             )
         if self.truncate_prompt_tokens is not None and (
             self.truncate_prompt_tokens == 0 or self.truncate_prompt_tokens < -1
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"truncate_prompt_tokens must be an integer >= 1 or -1, "
-                f"got {self.truncate_prompt_tokens}"
+                f"got {self.truncate_prompt_tokens}",
+                parameter="truncate_prompt_tokens",
+                value=self.truncate_prompt_tokens,
             )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
@@ -513,10 +475,6 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
-        if self.best_of != self._real_n and self.output_kind == (
-            RequestOutputKind.DELTA
-        ):
-            raise ValueError("best_of must equal n to use output_kind=DELTA")
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
@@ -549,7 +507,7 @@ class SamplingParams(
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
-    def update_from_tokenizer(self, tokenizer: AnyTokenizer) -> None:
+    def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
@@ -580,12 +538,14 @@ class SamplingParams(
             if token_id < 0 or token_id > tokenizer.max_token_id
         ]
         if len(invalid_token_ids) > 0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"The model vocabulary size is {tokenizer.max_token_id + 1},"
                 f" but the following tokens"
                 f" were specified as bad: {invalid_token_ids}."
                 f" All token id values should be integers satisfying:"
-                f" 0 <= token_id <= {tokenizer.max_token_id}."
+                f" 0 <= token_id <= {tokenizer.max_token_id}.",
+                parameter="bad_words",
+                value=self.bad_words,
             )
 
     @cached_property
@@ -612,7 +572,12 @@ class SamplingParams(
         data that is expensive to copy. However, if not copied, the processor
         needs to support parallel decoding for multiple sequences
         See https://github.com/vllm-project/vllm/issues/3087
+
+        If skip_clone is True, uses shallow copy instead of deep copy.
         """
+
+        if self.skip_clone:
+            return copy.copy(self)
 
         logit_processor_refs = (
             None

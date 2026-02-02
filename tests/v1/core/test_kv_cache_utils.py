@@ -36,6 +36,7 @@ from vllm.v1.core.kv_cache_utils import (
     tensor_data,
 )
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -76,7 +77,7 @@ def make_request(
         for j, position in enumerate(mm_positions):
             identifier = mm_hashes[j] if mm_hashes else f"hash_{j}"
             mm_feature = MultiModalFeatureSpec(
-                data=MultiModalKwargsItem.dummy("dummy_m"),
+                data=MultiModalKwargsItem.dummy(),
                 mm_position=position,
                 identifier=identifier,
                 modality="image",
@@ -102,26 +103,54 @@ def new_kv_cache_spec(
     num_kv_heads=2,
     head_size=64,
     dtype=torch.float32,
+    page_size_padded=None,
     sliding_window=None,
+    attention_chunk_size=None,
 ):
     return FullAttentionSpec(
         block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
+        page_size_padded=page_size_padded,
         sliding_window=sliding_window,
+        attention_chunk_size=attention_chunk_size,
     )
 
 
 def new_sliding_window_spec(
-    block_size=16, num_kv_heads=2, head_size=64, dtype=torch.float32, sliding_window=1
+    block_size=16,
+    num_kv_heads=2,
+    head_size=64,
+    dtype=torch.float32,
+    page_size_padded=None,
+    sliding_window=1,
 ):
     return SlidingWindowSpec(
         block_size=block_size,
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
+        page_size_padded=page_size_padded,
         sliding_window=sliding_window,
+    )
+
+
+def new_chunked_local_attention_spec(
+    block_size=16,
+    num_kv_heads=2,
+    head_size=64,
+    dtype=torch.float32,
+    page_size_padded=None,
+    attention_chunk_size=4,
+):
+    return ChunkedLocalAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        page_size_padded=page_size_padded,
+        attention_chunk_size=attention_chunk_size,
     )
 
 
@@ -1128,7 +1157,11 @@ def test_estimate_max_model_len(model_id, max_model_len, want_estimated_max_len)
         dtype="float16",
         max_model_len=max_model_len,
     )
-    scheduler_config = SchedulerConfig(max_num_batched_tokens=32768)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=32768,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
 
     vllm_config = VllmConfig(
         model_config=model_config,
@@ -1163,7 +1196,10 @@ def test_get_max_concurrency_for_kv_cache_config():
         max_model_len=max_model_len,
     )
     scheduler_config = SchedulerConfig(
-        max_num_batched_tokens=1024, enable_chunked_prefill=True
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=True,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
     )
 
     vllm_config = VllmConfig(
@@ -1248,7 +1284,9 @@ def test_allocate_with_lookahead():
     )
 
     # Test case 1: Requires additional lookahead tokens
-    kv_cache_manager = KVCacheManager(kv_cache_config=config, max_model_len=100)
+    kv_cache_manager = KVCacheManager(
+        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+    )
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_new_tokens=3,
@@ -1257,7 +1295,9 @@ def test_allocate_with_lookahead():
     assert len(blocks.get_block_ids()[0]) == 2  # ceil(5/4)=2 blocks
 
     # Test case 2: With precomputed blocks
-    kv_cache_manager = KVCacheManager(kv_cache_config=config, max_model_len=100)
+    kv_cache_manager = KVCacheManager(
+        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+    )
     # required_blocks = ceil((3 + 2) /4) = 2
     blocks = kv_cache_manager.allocate_slots(
         request,
@@ -1268,7 +1308,9 @@ def test_allocate_with_lookahead():
 
     # Test case 3: With precomputed blocks
     # required_blocks = ceil((3 + 4) / 4) = 2
-    kv_cache_manager = KVCacheManager(kv_cache_config=config, max_model_len=100)
+    kv_cache_manager = KVCacheManager(
+        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+    )
     blocks = kv_cache_manager.allocate_slots(
         request,
         num_new_tokens=3,
@@ -1436,7 +1478,67 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # different hidden size
+    # 6 full + 5 sliding, pad to 6 full + 6 sliding. This is a typical case for gpt-oss
+    # eagle where there is only one more full attention layer than sliding window layers
+    kv_cache_specs_hybrid = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+        "layer_3": new_kv_cache_spec(),
+        "layer_4": new_kv_cache_spec(),
+        "layer_5": new_kv_cache_spec(),
+        "layer_6": new_kv_cache_spec(),
+        "layer_7": new_sliding_window_spec(),
+        "layer_8": new_sliding_window_spec(),
+        "layer_9": new_sliding_window_spec(),
+        "layer_10": new_sliding_window_spec(),
+        "layer_11": new_sliding_window_spec(),
+    }
+
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 6 * 32]
+    )[0]
+    print(kv_cache_config_hybrid)
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_1", "layer_7"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_2", "layer_8"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_3", "layer_9"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_4", "layer_10"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_5", "layer_11"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["layer_6"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_1", "layer_2", "layer_3", "layer_4", "layer_5", "layer_6"],
+                new_kv_cache_spec(),
+            ),
+            KVCacheGroupSpec(
+                ["layer_7", "layer_8", "layer_9", "layer_10", "layer_11"],
+                new_sliding_window_spec(),
+            ),
+        ],
+    )
+
+    # different hidden size but same type, use UniformTypeKVCacheSpecs
     kv_cache_specs_hybrid = {
         "layer_1": new_kv_cache_spec(head_size=128),
         "layer_2": new_kv_cache_spec(head_size=64),
@@ -1459,6 +1561,40 @@ def test_get_kv_cache_config_one_worker():
             )
         ],
     )
+
+    # Different hidden size and different type, align by different block size
+    kv_cache_specs_hybrid = {
+        "layer_1": new_kv_cache_spec(head_size=64),
+        "layer_2": new_sliding_window_spec(head_size=32),
+    }
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 32]
+    )[0]
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32, shared_by=["layer_1", "layer_2"]
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer_1"], new_kv_cache_spec(head_size=64)),
+            KVCacheGroupSpec(
+                ["layer_2"], new_sliding_window_spec(head_size=32, block_size=32)
+            ),
+        ],
+    )
+
+    # different hidden size that cannot be aligned by using different block size
+    kv_cache_specs_hybrid = {
+        "layer_1": new_kv_cache_spec(head_size=64),
+        "layer_2": new_sliding_window_spec(head_size=96),
+    }
+
+    with pytest.raises(NotImplementedError):
+        get_kv_cache_configs(
+            vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
+        )[0]
 
     # Test num_gpu_blocks_override
     vllm_config.cache_config.num_gpu_blocks_override = 16
@@ -1691,3 +1827,127 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         )
     )
     assert block_hashes[1] == expected_hash2
+
+
+def test_auto_fit_max_model_len():
+    """Test that max_model_len=-1 auto-fits to available GPU memory."""
+    # Create config with original_max_model_len=-1 to trigger auto-fit
+    model_config = ModelConfig(max_model_len=1024)
+    # Simulate the user passing -1 by setting original_max_model_len
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+
+    # With enough memory, max_model_len stays at the derived max
+    large_available_memory = mem_per_block_per_layer * 2 * 1024  # plenty of memory
+    _kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [large_available_memory]
+    )
+    assert vllm_config.model_config.max_model_len == 1024
+
+    # Reset for next test
+    model_config = ModelConfig(max_model_len=1024)
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    # With limited memory, max_model_len should be reduced
+    # Need memory for at least max_model_len tokens
+    # 32 blocks worth of memory for 2 layers = can fit 32*16=512 tokens
+    limited_memory = mem_per_block_per_layer * 2 * 32
+    _kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [limited_memory]
+    )
+    # Should be reduced to fit in memory
+    assert vllm_config.model_config.max_model_len < 1024
+    assert vllm_config.model_config.max_model_len > 0
+
+
+def test_auto_fit_max_model_len_not_triggered():
+    """Test that auto-fit is not triggered when original_max_model_len is not -1."""
+    model_config = ModelConfig(max_model_len=16)
+    # original_max_model_len should be None by default, not -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "layer_1": new_kv_cache_spec(),
+        "layer_2": new_kv_cache_spec(),
+    }
+
+    # This should work normally without auto-fit
+    _kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
+    )
+    assert vllm_config.model_config.max_model_len == 16
+
+
+def test_unify_hybrid_kv_cache_specs():
+    # 1. has_full_attention and has_sliding_window
+    before_spec_1 = new_kv_cache_spec()
+    before_spec_2 = new_sliding_window_spec(
+        page_size_padded=32 * 1024, sliding_window=1024
+    )
+    kv_cache_spec = {
+        "layer_1": before_spec_1,
+        "layer_2": before_spec_2,
+    }
+    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    expected_spec_1 = new_kv_cache_spec()
+    expected_spec_2 = new_kv_cache_spec(page_size_padded=32 * 1024, sliding_window=1024)
+    assert kv_cache_spec["layer_1"] == expected_spec_1
+    assert kv_cache_spec["layer_2"] == expected_spec_2
+
+    # 2. has_full_attention and has_chunked_local_attention
+    before_spec_1 = new_kv_cache_spec()
+    before_spec_2 = new_chunked_local_attention_spec(
+        page_size_padded=32 * 1024, attention_chunk_size=512
+    )
+    kv_cache_spec = {
+        "layer_1": before_spec_1,
+        "layer_2": before_spec_2,
+    }
+    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    expected_spec_1 = new_kv_cache_spec()
+    expected_spec_2 = new_kv_cache_spec(
+        page_size_padded=32 * 1024, attention_chunk_size=512
+    )
+
+    assert kv_cache_spec["layer_1"] == expected_spec_1
+    assert kv_cache_spec["layer_2"] == expected_spec_2
+
+    # 3. has_full_attention, has_sliding_window and has_chunked_local_attention
+    before_spec_1 = new_kv_cache_spec()
+    before_spec_2 = new_sliding_window_spec(
+        page_size_padded=32 * 1024, sliding_window=1024
+    )
+    before_spec_3 = new_chunked_local_attention_spec(
+        page_size_padded=32 * 1024, attention_chunk_size=512
+    )
+    kv_cache_spec = {
+        "layer_1": before_spec_1,
+        "layer_2": before_spec_2,
+        "layer_3": before_spec_3,
+    }
+    kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)
+    expected_spec_1 = new_kv_cache_spec()
+    expected_spec_2 = new_kv_cache_spec(page_size_padded=32 * 1024, sliding_window=1024)
+    expected_spec_3 = new_kv_cache_spec(
+        page_size_padded=32 * 1024, attention_chunk_size=512
+    )
+    assert kv_cache_spec["layer_1"] == expected_spec_1
+    assert kv_cache_spec["layer_2"] == expected_spec_2
+    assert kv_cache_spec["layer_3"] == expected_spec_3
+
+    # 4. No FullAttentionSpec, should not convert
+    kv_cache_spec = {
+        "layer_1": new_sliding_window_spec(sliding_window=1024),
+        "layer_2": new_chunked_local_attention_spec(attention_chunk_size=512),
+    }
+
+    with pytest.raises(ValueError):
+        kv_cache_utils.unify_hybrid_kv_cache_specs(kv_cache_spec)

@@ -4,21 +4,36 @@
 import pytest
 import torch
 
-from tests.kernels.moe.utils import make_test_quant_config, make_test_weights
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from tests.kernels.moe.utils import (
+    make_dummy_moe_config,
+    make_test_quant_config,
+    make_test_weights,
+)
 from tests.kernels.quant_utils import (
     native_per_token_group_quant_fp8,
     native_w8a8_block_matmul,
 )
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe import (
+    fused_experts,
+    fused_topk,
+)
+from vllm.model_executor.layers.fused_moe.config import (
+    fp8_w8a8_moe_quant_config,
+)
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm_shape,
-    deep_gemm_moe_fp8,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
-    fused_topk,
     modular_triton_fused_moe,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
+from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+    TritonOrDeepGemmExperts,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -31,6 +46,11 @@ dg_available = has_deep_gemm()
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
+if current_platform.is_fp8_fnuz():
+    pytest.skip(
+        "Tests in this file require float8_e4m3fn and platform does not support",
+        allow_module_level=True,
+    )
 
 vllm_config = VllmConfig()
 
@@ -132,7 +152,7 @@ def setup_cuda():
 @pytest.mark.parametrize("seed", SEEDS)
 @torch.inference_mode()
 def test_w8a8_block_fp8_fused_moe(
-    M, N, K, E, topk, block_size, dtype, seed, monkeypatch
+    M, N, K, E, topk, block_size, dtype, seed, monkeypatch, workspace_init
 ):
     if topk > E:
         pytest.skip(f"Skipping test; topk={topk} > E={E}")
@@ -154,7 +174,7 @@ def test_w8a8_block_fp8_fused_moe(
         block_shape=block_size,
     )
 
-    m_fused_moe = modular_triton_fused_moe(quant_config)
+    m_fused_moe = modular_triton_fused_moe(make_dummy_moe_config(), quant_config)
 
     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
 
@@ -228,6 +248,29 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     )
 
     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
+
+    quant_config = fp8_w8a8_moe_quant_config(
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+        block_shape=block_size,
+    )
+
+    deep_gemm_experts = mk.FusedMoEModularKernel(
+        prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+        fused_experts=TritonOrDeepGemmExperts(
+            moe_config=make_dummy_moe_config(),
+            quant_config=quant_config,
+        ),
+    )
+
+    def deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids):
+        return deep_gemm_experts(
+            hidden_states=a,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+        )
 
     # Set the context to avoid lots of warning spam.
     with set_current_vllm_config(vllm_config):

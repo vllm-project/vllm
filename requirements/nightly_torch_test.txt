@@ -17,19 +17,19 @@ vocos # required for minicpmo_26 test
 peft
 pqdm
 ray[cgraph,default]>=2.48.0 # Ray Compiled Graph, required by pipeline parallelism tests
-sentence-transformers # required for embedding tests
+sentence-transformers>=5.2.0 # required for embedding tests
 soundfile # required for audio tests
 jiwer # required for audio tests
 timm # required for internvl test
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
-mistral_common[image,audio] >= 1.8.5 # required for voxtral test
+mistral_common[image,audio] >= 1.9.0 # required for voxtral test
 num2words # required for smolvlm test
-opencv-python-headless >= 4.11.0 # required for video test
+opencv-python-headless >= 4.13.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
-lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d # required for model evaluation test
+lm-eval[api]>=0.4.9.2 # required for model evaluation test
 mteb>=1.38.11, <2 # required for mteb test
-transformers==4.57.1
+transformers==4.57.5
 tokenizers==0.22.0
 schemathesis>=3.39.15 # Required for openai schema test.
 # quantization
@@ -37,11 +37,11 @@ bitsandbytes>=0.46.1
 buildkite-test-collector==0.1.9
 
 
-genai_perf==0.0.8
-tritonclient==2.51.0
+genai_perf>=0.0.8
+tritonclient>=2.51.0
 
 numba == 0.61.2 # Required for N-gram speculative decoding
 numpy
-runai-model-streamer[s3,gcs]==0.15.0
+runai-model-streamer[s3,gcs]==0.15.3
 fastsafetensors>=0.1.10
 pydantic>=2.12 # 2.11 leads to error on python 3.13

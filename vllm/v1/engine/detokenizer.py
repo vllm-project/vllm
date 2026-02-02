@@ -9,8 +9,8 @@ from tokenizers.decoders import DecodeStream
 from transformers import PreTrainedTokenizerFast
 
 from vllm.logger import init_logger
-from vllm.transformers_utils.detokenizer_utils import (
-    AnyTokenizer,
+from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
 )
@@ -45,7 +45,7 @@ class IncrementalDetokenizer:
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: AnyTokenizer | None,
+        tokenizer: TokenizerLike | None,
         request: EngineCoreRequest,
     ) -> "IncrementalDetokenizer":
         assert request.sampling_params is not None
@@ -256,7 +256,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
 
 class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
-    def __init__(self, tokenizer: AnyTokenizer, request: EngineCoreRequest):
+    def __init__(self, tokenizer: TokenizerLike, request: EngineCoreRequest):
         super().__init__(request)
 
         self.tokenizer = tokenizer
@@ -280,7 +280,7 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
             # Prompt embedding requests cannot be detokenized, in general.
             self.tokens = [""] * self.prompt_len
             self.prefix_offset = 0
-            self.read_offest = 0
+            self.read_offset = 0
 
         self.token_ids.extend(request.prompt_token_ids or [0] * self.prompt_len)
 

@@ -1,0 +1,52 @@
+group: PyTorch
+depends_on: 
+  - image-build
+steps:
+- label: PyTorch Compilation Unit Tests
+  timeout_in_minutes: 30
+  source_file_dependencies:
+    - vllm/
+    - tests/compile
+  commands:
+  # Run unit tests defined directly under compile/,
+  # not including subdirectories, which are usually heavier
+  # tests covered elsewhere.
+  # Use `find` to launch multiple instances of pytest so that
+  # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
+  # However, find does not normally propagate error codes, so we combine it with xargs
+  # (using -0 for proper path handling)
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+
+- label: PyTorch Fullgraph Smoke Test
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - vllm/
+  - tests/compile
+  commands:
+  # Run smoke tests under fullgraph directory, except test_full_graph.py
+  # as it is a heavy test that is covered in other steps.
+  # Use `find` to launch multiple instances of pytest so that
+  # they do not suffer from https://github.com/vllm-project/vllm/issues/28965
+  - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\;"
+
+- label: PyTorch Fullgraph
+  timeout_in_minutes: 40
+  source_file_dependencies:
+  - vllm/
+  - tests/compile
+  commands:
+    # fp8 kv scales not supported on sm89, tested on Blackwell instead
+  - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
+    # Limit to no custom ops to reduce running time
+    # Wrap with quotes to escape yaml and avoid starting -k string with a -
+  - "pytest -v -s compile/distributed/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
+
+- label: Pytorch Nightly Dependency Override Check # 2min
+  # if this test fails, it means the nightly torch version is not compatible with some
+  # of the dependencies. Please check the error message and add the package to whitelist
+  # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
+  soft_fail: true
+  source_file_dependencies:
+  - requirements/nightly_torch_test.txt
+  commands:
+  - bash standalone_tests/pytorch_nightly_dependency.sh
