@@ -450,7 +450,7 @@ def rms_norm_per_block_quant(
     scale_ub: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
-    has_tma_aligned_scales: bool = False,
+    tma_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
     output = torch.empty_like(input, dtype=quant_dtype)
@@ -467,6 +467,8 @@ def rms_norm_per_block_quant(
             dtype=torch.float32,
         )
 
+    assert tma_alignment in [0, 4], "Expected TMA alignment 0 or 4, but got " + str(tma_alignment)
+
     torch.ops._C.rms_norm_per_block_quant(
         output,
         input,
@@ -477,7 +479,7 @@ def rms_norm_per_block_quant(
         residual,
         group_size[1],
         is_scale_transposed,
-        has_tma_aligned_scales,
+        tma_alignment,
     )
     return output, scales
 

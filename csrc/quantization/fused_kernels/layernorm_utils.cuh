@@ -68,7 +68,7 @@ __device__ float warpReduceMaxSpecialized(volatile float* val, int64_t tid,
 }
 
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false, bool has_tma_aligned_scales = false>
+          bool is_scale_transposed = false, int64_t tma_scale_alignment = 0>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
     scalar_t const* __restrict__ input, scalar_t const* __restrict__ weight,
@@ -134,7 +134,7 @@ __device__ void compute_dynamic_per_token_scales(
       // Global output store
       if constexpr (is_scale_transposed) {
         int64_t const scale_rows =
-            has_tma_aligned_scales ? (gridDim.x + 3) / 4 * 4 : gridDim.x;
+            tma_scale_alignment > 0 ? (gridDim.x + tma_scale_alignment - 1) / tma_scale_alignment * tma_scale_alignment : gridDim.x;
         all_token_scales[(threadIdx.x / threads_per_group) * scale_rows +
                          blockIdx.x] = scale;
       } else {
@@ -182,7 +182,7 @@ __device__ void compute_dynamic_per_token_scales(
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
           bool has_residual = false, bool is_scale_transposed = false,
-          bool has_tma_aligned_scales = false>
+          int64_t tma_scale_alignment = 0>
 __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
@@ -206,7 +206,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     if (group_size > 0) {
       if constexpr (is_scale_transposed) {
         int64_t const scale_rows =
-            has_tma_aligned_scales ? (gridDim.x + 3) / 4 * 4 : gridDim.x;
+            tma_scale_alignment > 0 ? (gridDim.x + tma_scale_alignment - 1) / tma_scale_alignment * tma_scale_alignment : gridDim.x;
         scale_idx = (i / group_size) * scale_rows + blockIdx.x;
       } else {
         scale_idx = blockIdx.x * (hidden_size / group_size) + i / group_size;
@@ -286,7 +286,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 // Vectorized version of vllm::compute_dynamic_per_token_scales
 // hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
-          bool is_scale_transposed = false, bool has_tma_aligned_scales = false,
+          bool is_scale_transposed = false, int64_t tma_scale_alignment = 0,
           int32_t group_size = 0>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
@@ -389,7 +389,7 @@ __device__ void compute_dynamic_per_token_scales(
       // Global output store
       if constexpr (is_scale_transposed) {
         int64_t const scale_rows =
-            has_tma_aligned_scales ? (gridDim.x + 3) / 4 * 4 : gridDim.x;
+            tma_scale_alignment > 0 ? (gridDim.x + tma_scale_alignment - 1) / tma_scale_alignment * tma_scale_alignment : gridDim.x;
         all_token_scales[(threadIdx.x / threads_per_group) * scale_rows +
                          blockIdx.x] = scale;
       } else {
@@ -465,7 +465,7 @@ __device__ void compute_dynamic_per_token_scales(
 // hidden_size must be a multiple of 4
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
           bool has_residual = false, bool is_scale_transposed = false,
-          bool has_tma_aligned_scales = false, int32_t group_size = 0>
+          int64_t tma_scale_alignment = 0, int32_t group_size = 0>
 __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
@@ -525,7 +525,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
       int64_t scale_idx = 0;
       if constexpr (is_scale_transposed) {
         int64_t const scale_rows =
-            has_tma_aligned_scales ? (gridDim.x + 3) / 4 * 4 : gridDim.x;
+            tma_scale_alignment > 0 ? (gridDim.x + tma_scale_alignment - 1) / tma_scale_alignment * tma_scale_alignment : gridDim.x;
         scale_idx = (i * VEC_SIZE / group_size) * scale_rows + blockIdx.x;
       } else {
         scale_idx = blockIdx.x * num_groups + i * VEC_SIZE / group_size;

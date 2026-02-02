@@ -136,7 +136,7 @@ def fused_groupwise_impl(
         group_size,
         residual=residual,
         is_scale_transposed=True,
-        has_tma_aligned_scales=False,
+        tma_alignment=0,
     )
 
 
