@@ -60,6 +60,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_loader import (
+    ModelWithCustomWeightLoading,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 from vllm.sequence import IntermediateTensors
@@ -1014,7 +1017,10 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
 
 @ignore_torch_compile
-class LongcatFlashNgramForCausalLM(LongcatFlashForCausalLM):
+class LongcatFlashNgramForCausalLM(
+    LongcatFlashForCausalLM,
+    ModelWithCustomWeightLoading,
+):
     """Flash model for causal LM with N-gram embeddings."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
