@@ -703,15 +703,15 @@ class InputPreprocessor:
             efs_sparse_enabled
             and isinstance(prompt, dict)
             and "multi_modal_data" in prompt
-            and isinstance(prompt["multi_modal_data"], dict)  # type: ignore[typeddict-item]
-            and "video" in prompt["multi_modal_data"]  # type: ignore[typeddict-item]
+            and isinstance(prompt["multi_modal_data"], dict) # type: ignore[typeddict-item]
+            and "video" in prompt["multi_modal_data"] # type: ignore[typeddict-item]
         ):
             prompt_dict = cast(dict, prompt)
             videos = prompt_dict["multi_modal_data"]["video"]
             sparse_ratio = 1 - (efs_sparse_rate if efs_sparse_rate is not None else 0.0)
             detector = SimilarFrameDetector(sparse_ratio=sparse_ratio)
             videos = detector.process_video_frames(videos)
-            prompt["multi_modal_data"]["video"] = videos  # type: ignore[typeddict-item]
+            prompt["multi_modal_data"]["video"] = videos # type: ignore[typeddict-item]
         """Preprocess the input prompt."""
         res = self._preprocess(prompt, tokenization_kwargs, mm_uuids=mm_uuids)
 
