@@ -18,6 +18,9 @@ if TYPE_CHECKING:
         MLACommonPrefillMetadata,
     )
     from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.mla.prefill.selector import (
+        MLAPrefillSelectorConfig,
+    )
     from vllm.v1.kv_cache_interface import AttentionSpec
 
 
@@ -77,8 +80,11 @@ class MLAPrefillBackend(ABC):
         return MLACommonPrefillMetadata
 
     @classmethod
-    def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
+    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
         """Check if this backend supports the given compute capability.
+
+        Args:
+            device_capability: The device's compute capability.
 
         Override this method if the backend has specific hardware requirements.
         """
@@ -101,33 +107,32 @@ class MLAPrefillBackend(ABC):
     def validate_configuration(
         cls,
         device_capability: "DeviceCapability",
-        dtype: torch.dtype,
-        vllm_config: "VllmConfig",
+        selector_config: "MLAPrefillSelectorConfig",
     ) -> list[str]:
         """Validate if this backend can be used with the given configuration.
+
+        Args:
+            device_capability: The device's compute capability.
+            selector_config: Hashable configuration for backend selection.
 
         Returns:
             A list of invalid reasons. Empty list if configuration is valid.
         """
-        from vllm.v1.attention.backends.mla.prefill.selector import (
-            is_deepseek_r1_mla_compatible,
-        )
-
         invalid_reasons: list[str] = []
 
         if not cls.supports_compute_capability(device_capability):
-            major, minor = device_capability.major, device_capability.minor
-            invalid_reasons.append(f"compute capability {major}.{minor} not supported")
+            invalid_reasons.append(
+                f"compute capability {device_capability.major}."
+                f"{device_capability.minor} not supported"
+            )
 
-        if not cls.supports_dtype(dtype):
-            invalid_reasons.append(f"dtype {dtype} not supported")
+        if not cls.supports_dtype(selector_config.dtype):
+            invalid_reasons.append(f"dtype {selector_config.dtype} not supported")
 
         if not cls.is_available():
             invalid_reasons.append("required dependencies not available")
 
-        if cls.requires_r1_mla_dimensions and not is_deepseek_r1_mla_compatible(
-            vllm_config
-        ):
+        if cls.requires_r1_mla_dimensions and not selector_config.is_r1_compatible:
             invalid_reasons.append(
                 "model does not have DeepSeek R1 MLA dimensions "
                 "(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128)"

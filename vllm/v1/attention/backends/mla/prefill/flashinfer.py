@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm import envs
-from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.base import (
     MLAPrefillBackend,
     MLAPrefillBuilderState,
@@ -20,6 +19,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonPrefillMetadata,
     )
+    from vllm.platforms.interface import DeviceCapability
     from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
@@ -68,9 +68,9 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         return FlashInferPrefillMetadata
 
     @classmethod
-    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+    def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
         # FlashInfer prefill is optimized for Blackwell
-        return capability.major == 10
+        return device_capability.major == 10
 
     @classmethod
     def is_available(cls) -> bool:

@@ -7,19 +7,31 @@ backend based on device capabilities and configuration.
 """
 
 from functools import cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
 logger = init_logger(__name__)
+
+
+class MLAPrefillSelectorConfig(NamedTuple):
+    """Hashable configuration for MLA prefill backend selection.
+
+    This is analogous to AttentionSelectorConfig and contains model-specific
+    configuration needed to select an MLA prefill backend, extracted from
+    VllmConfig into a hashable form for caching.
+    """
+
+    dtype: torch.dtype
+    is_r1_compatible: bool
 
 
 def is_deepseek_r1_mla_compatible(vllm_config: "VllmConfig") -> bool:
@@ -43,7 +55,7 @@ def is_deepseek_r1_mla_compatible(vllm_config: "VllmConfig") -> bool:
 
 
 def _get_mla_prefill_backend_priorities(
-    device_capability: "DeviceCapability",
+    device_capability: DeviceCapability,
 ) -> list[MLAPrefillBackendEnum]:
     """Get MLA prefill backend priorities based on device capability.
 
@@ -93,15 +105,19 @@ def get_mla_prefill_backend(
 
     attention_config = vllm_config.attention_config
 
+    # Build hashable selector config for caching
+    selector_config = MLAPrefillSelectorConfig(
+        dtype=vllm_config.model_config.dtype,
+        is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+    )
+
     # Check for explicit backend selection (includes migrated deprecated flags)
     if attention_config.mla_prefill_backend is not None:
         backend_enum = attention_config.mla_prefill_backend
         try:
             backend_cls = backend_enum.get_class()
             invalid_reasons = backend_cls.validate_configuration(
-                device_capability=device_capability,
-                dtype=vllm_config.model_config.dtype,
-                vllm_config=vllm_config,
+                device_capability, selector_config
             )
             if not invalid_reasons:
                 logger.info_once("Using %s for MLA prefill", backend_cls.get_name())
@@ -122,38 +138,38 @@ def get_mla_prefill_backend(
             )
 
     # Auto-select based on priority
+    # Pass major/minor as ints for caching (DeviceCapability isn't hashable)
     return _auto_select_mla_prefill_backend(
-        device_capability=device_capability,
-        dtype=vllm_config.model_config.dtype,
-        vllm_config=vllm_config,
+        device_capability.major,
+        device_capability.minor,
+        selector_config,
     )
 
 
 @cache
 def _auto_select_mla_prefill_backend(
-    device_capability: "DeviceCapability",
-    dtype: torch.dtype,
-    vllm_config: "VllmConfig",
+    major: int,
+    minor: int,
+    selector_config: MLAPrefillSelectorConfig,
 ) -> "type[MLAPrefillBackend]":
     """Auto-select the best available MLA prefill backend.
 
     Args:
-        device_capability: The device's compute capability.
-        dtype: The model's data type.
-        vllm_config: The vLLM configuration.
+        major: Device capability major version (for cache key).
+        minor: Device capability minor version (for cache key).
+        selector_config: Hashable configuration for backend selection.
 
     Returns:
         The selected prefill backend class.
     """
+    device_capability = DeviceCapability(major=major, minor=minor)
     priorities = _get_mla_prefill_backend_priorities(device_capability)
 
     for backend_enum in priorities:
         try:
             backend_cls = backend_enum.get_class()
             invalid_reasons = backend_cls.validate_configuration(
-                device_capability=device_capability,
-                dtype=dtype,
-                vllm_config=vllm_config,
+                device_capability, selector_config
             )
             if not invalid_reasons:
                 logger.info_once("Using %s for MLA prefill", backend_cls.get_name())
