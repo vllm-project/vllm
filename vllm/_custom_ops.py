@@ -455,11 +455,25 @@ def rms_norm_per_block_quant(
     assert len(group_size) == 2
     output = torch.empty_like(input, dtype=quant_dtype)
     if is_scale_transposed:
-        scales = torch.empty(
-            (input.shape[-1] // group_size[1], input.numel() // input.shape[-1]),
-            device=input.device,
-            dtype=torch.float32,
-        ).transpose(0, 1)
+        if tma_alignment == 0:
+            scales = torch.empty(
+                (input.shape[-1] // group_size[1], input.numel() // input.shape[-1]),
+                device=input.device,
+                dtype=torch.float32,
+            ).transpose(0, 1)
+        else:
+            m = input.shape[-2]
+            sf_k = input.shape[-1] // group_size[1]
+            tma_aligned_m = (m + tma_alignment - 1) // tma_alignment * tma_alignment
+            shape = input.shape[:-2] + (m, sf_k)
+            stride = (
+                (1, tma_aligned_m)
+                if input.dim() == 2
+                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
+            )
+            scales = torch.empty_strided(
+                shape, stride, device=input.device, dtype=torch.float32
+            )
     else:
         scales = torch.empty(
             (input.numel() // input.shape[-1], input.shape[-1] // group_size[1]),

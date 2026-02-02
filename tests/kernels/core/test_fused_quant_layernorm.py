@@ -21,7 +21,7 @@ QUANT_DTYPES = [torch.int8, current_platform.fp8_dtype()]
 VEC_HIDDEN_SIZES = [1024, 1025, 1027, 1029]
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
-    *[(1, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5120, 5137]],
+    *[(1, i) for i in [1, 64, 128, *VEC_HIDDEN_SIZES, 5120, 5137]],
     *[(2048, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5137]],
     *[(4096, i) for i in [1, 64, 5137]],
 ]
@@ -29,6 +29,7 @@ NUM_TOKENS_HIDDEN_SIZES = [
 ADD_RESIDUAL = [False, True]
 SCALE_UBS = [True, False]
 GROUP_SIZES = [None, [1, 64], [1, 128]]
+TMA_ALIGNMENTS = [0, 4]
 SEEDS = [0]
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
@@ -110,12 +111,21 @@ def ops_dynamic_per_token_or_block_quant(
     residual: torch.Tensor | None,
     scale_ub: torch.Tensor | None,
     group_size: list[int] | None,
+    tma_alignment: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if residual is not None:
         residual = residual.clone()
     if group_size is not None:
         out, scales = ops.rms_norm_per_block_quant(
-            x, weight, EPS, quant_dtype, group_size, scale_ub, residual, True, 0
+            x,
+            weight,
+            EPS,
+            quant_dtype,
+            group_size,
+            scale_ub,
+            residual,
+            True,
+            tma_alignment,
         )
         scales = scales.contiguous()
     else:
@@ -132,9 +142,10 @@ def ops_impl(
     residual: torch.Tensor | None,
     scale_ub: torch.Tensor | None,
     group_size: list[int] | None,
+    tma_alignment: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     return ops_dynamic_per_token_or_block_quant(
-        weight, x, quant_dtype, residual, scale_ub, group_size
+        weight, x, quant_dtype, residual, scale_ub, group_size, tma_alignment
     )
 
 
@@ -144,6 +155,7 @@ def ops_impl(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
 @pytest.mark.parametrize("group_size", GROUP_SIZES)
+@pytest.mark.parametrize("tma_alignment", TMA_ALIGNMENTS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
@@ -156,6 +168,7 @@ def test_rms_norm(
     dtype: torch.dtype,
     quant_dtype: torch.dtype,
     group_size: list[int] | None,
+    tma_alignment: int,
     seed: int,
     device: str,
 ) -> None:
@@ -172,6 +185,23 @@ def test_rms_norm(
     if group_size is not None and has_scale_ub:
         # blockwise baseline doesn't support scale_ub
         return
+
+    if (
+        group_size is None or quant_dtype != current_platform.fp8_dtype()
+    ) and tma_alignment != 0:
+        # TMA alignment is only supported for groupwise fp8 kernels
+        return
+
+    if (
+        group_size is not None
+        and tma_alignment != 0
+        and hidden_size // group_size[1] % tma_alignment == 0
+    ):
+        # Skip tests where TMA alignment doesn't create extra padding to save time
+        return
+
+    if group_size is not None and tma_alignment != 0:
+        print("tma_alignment:", tma_alignment, hidden_size // group_size[1])
 
     if has_scale_ub and quant_dtype != current_platform.fp8_dtype():
         # skip
@@ -196,7 +226,7 @@ def test_rms_norm(
         layer, x, quant_dtype, residual, scale_ub, group_size
     )
     ops_out, ops_scales, ops_residual = ops_impl(
-        layer.weight, x, quant_dtype, residual, scale_ub, group_size
+        layer.weight, x, quant_dtype, residual, scale_ub, group_size, tma_alignment
     )
 
     assert ref_out.dtype == quant_dtype
