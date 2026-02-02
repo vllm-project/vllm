@@ -178,7 +178,7 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> list[int]:
         num_media = mm_counts.get("vision_chunk", 0)
-        return [self.media_token_id] * num_media
+        return "<|media_pad|>" * num_media
 
     def get_dummy_mm_items(self):
         dummy_videos = self._get_dummy_images(
