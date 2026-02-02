@@ -1704,7 +1704,7 @@ def validate_environ(hard_fail: bool) -> None:
     for env in os.environ:
         if env.startswith("VLLM_") and env not in environment_variables:
             if hard_fail:
-                raise RuntimeError(f"Unknown vLLM environment variable detected: {env}")
+                raise ValueError(f"Unknown vLLM environment variable detected: {env}")
             else:
                 logger.warning("Unknown vLLM environment variable detected: %s", env)
 
