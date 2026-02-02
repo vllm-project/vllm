@@ -10,7 +10,7 @@ import json
 import pathlib
 import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
-from dataclasses import MISSING, Field, field, fields, is_dataclass, replace
+from dataclasses import MISSING, Field, field, fields, is_dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
@@ -72,25 +72,46 @@ def get_field(cls: ConfigType, name: str) -> Field:
     default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):
         raise TypeError("The given class is not a dataclass.")
-    cls_fields = {f.name: f for f in fields(cls)}
-    if name not in cls_fields:
-        raise ValueError(f"Field '{name}' not found in {cls.__name__}.")
-    named_field: Field = cls_fields[name]
-    if (default_factory := named_field.default_factory) is not MISSING:
-        return field(default_factory=default_factory)
-    if (default := named_field.default) is not MISSING:
-        if isinstance(default, FieldInfo):
-            # Handle pydantic.Field defaults
-            if default.default_factory is not None:
-                default_factory = cast(Callable[[], Any], default.default_factory)
-                return field(default_factory=default_factory)
-            else:
-                default = default.default
-        return field(default=default)
+    try:
+        named_field = next(f for f in fields(cls) if f.name == name)
+    except StopIteration as e:
+        raise ValueError(f"Field '{name}' not found in {cls.__name__}.") from e
 
-    raise ValueError(
-        f"{cls.__name__}.{name} must have a default value or default factory."
-    )
+    # The arguments to copy to the new field
+    default = named_field.default
+    default_factory = named_field.default_factory
+    init = named_field.init
+
+    # Handle pydantic.Field
+    if isinstance(default, FieldInfo):
+        if default.init is not None:
+            init = default.init
+        if default.default_factory is not None:
+            default_factory = cast(Callable[[], Any], default.default_factory)
+            default = MISSING
+        else:
+            default = default.default
+
+    if default is MISSING and default_factory is MISSING:
+        raise ValueError(
+            f"{cls.__name__}.{name} must have a default value or default factory."
+        )
+    return field(default=default, default_factory=default_factory, init=init)
+
+
+def is_init_field(cls: ConfigType, name: str) -> bool:
+    return get_field(cls, name).init
+
+
+def replace(dataclass_instance: DataclassInstance, /, **kwargs) -> DataclassInstance:
+    """Like [`dataclasses.replace`](https://docs.python.org/3/library/dataclasses.html#dataclasses.replace),
+    but compatible with Pydantic dataclasses which use `pydantic.fields.Field` instead
+    of `dataclasses.field`"""
+    cls = type(dataclass_instance)
+    dataclass_dict = dataclass_instance.__dict__
+    dataclass_dict = {k: v for k, v in dataclass_dict.items() if is_init_field(cls, k)}
+    dataclass_dict.update(kwargs)
+    return cls(**dataclass_dict)
 
 
 def getattr_iter(
@@ -190,10 +211,6 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
             out[target.id] = doc
 
     return out
-
-
-def is_init_field(cls: ConfigType, name: str) -> bool:
-    return next(f for f in fields(cls) if f.name == name).init
 
 
 @runtime_checkable

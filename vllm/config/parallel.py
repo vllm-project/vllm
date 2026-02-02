@@ -3,7 +3,6 @@
 
 import os
 from collections.abc import Callable
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -721,6 +720,3 @@ class ParallelConfig:
             )
 
         return self
-
-    def replace(self, **kwargs) -> Self:
-        return replace(self, **kwargs)

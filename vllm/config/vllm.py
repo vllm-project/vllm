@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import is_dataclass, replace
+from dataclasses import is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -20,7 +20,6 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
-from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
@@ -40,9 +39,9 @@ from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
-from .speculative import SpeculativeConfig
+from .speculative import EagleModelTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config
+from .utils import SupportsHash, config, replace
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -1392,14 +1391,6 @@ class VllmConfig:
         append_path = f"rank_{tp_rank}_dp_{dp_rank}"
         path = self.compilation_config.debug_dump_path / append_path
         return path
-
-    def replace(self, **kwargs):
-        """
-        Replace attributes of the config, and 'recompute' the config.
-        dataclass.replace() calls __init__() and __post_init__(), source:
-        https://docs.python.org/3/library/dataclasses.html#dataclasses.replace
-        """
-        return replace(self, **kwargs)
 
     def __str__(self):
         return (
