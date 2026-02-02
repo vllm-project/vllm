@@ -120,7 +120,7 @@ def validate_score_input(
     data_2: ScoreInputs,
     is_multimodal_model: bool,
     architecture: str,
-):
+) -> tuple[list[ScoreData], list[ScoreData]]:
     if not isinstance(data_1, list):
         data_1 = [data_1]
 
