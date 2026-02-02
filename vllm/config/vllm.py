@@ -1378,12 +1378,9 @@ class VllmConfig:
         if compilation_config.pass_config.enable_sp:
             pass_config = compilation_config.pass_config
 
-            # Check if user provided explicit token override
+            # Calculate min_token_num if not explicitly provided
             # User override works regardless of hidden_size
-            if pass_config.sequence_parallelism_min_token_num is not None:
-                min_token_num = pass_config.sequence_parallelism_min_token_num
-            else:
-                # Otherwise calculate using helper function with branching logic
+            if pass_config.sp_min_token_num is None:
                 from vllm.compilation.sequence_parallelism import (
                     get_sequence_parallelism_threshold,
                 )
@@ -1391,10 +1388,11 @@ class VllmConfig:
                 tp_size = self.parallel_config.tensor_parallel_size
                 hidden_size = self.model_config.get_hidden_size()
                 element_size = self.model_config.dtype.itemsize
-                min_token_num = get_sequence_parallelism_threshold(
+                pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
                     hidden_size, tp_size, element_size
                 )
 
+            min_token_num = pass_config.sp_min_token_num
             max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
             if min_token_num is not None and (
                 max_num_batched_tokens is not None
