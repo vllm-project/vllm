@@ -98,7 +98,19 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLA V1 with FP8 KV cache not yet supported"
             )
 
-    def _forward_decode(
+    def _flash_attn_varlen_diff_headdims(
+        self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
+    ):
+        return super()._flash_attn_varlen_diff_headdims(
+            q,
+            k,
+            v,
+            return_softmax_lse=return_softmax_lse,
+            softmax_scale=softmax_scale,
+            **kwargs,
+        )
+
+    def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
@@ -131,8 +143,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 B,
                 q_num_heads,
                 num_kv_splits,
-                # NOTE(lucas) idk why the +1 is here but sglang has it so we
-                # just mirror that
+                # NOTE: the +1 stores the LogSumExp (LSE) that the stage2
+                # kernel uses to merge partial attention outputs across splits.
                 self.kv_lora_rank + 1,
             ),
             dtype=torch.float32,
