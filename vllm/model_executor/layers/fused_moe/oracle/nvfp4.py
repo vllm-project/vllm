@@ -113,7 +113,7 @@ def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
-) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts] | None]:
+) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
     """
     Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
@@ -202,7 +202,7 @@ def select_nvfp4_moe_backend(
                     )
                     if supported:
                         logger.info_once(_make_log_backend(backend), scope="local")
-                        return backend, None
+                        return backend, k_cls
                     else:
                         logger.debug_once(
                             _make_log_unsupported(backend, reason), scope="local"
