@@ -104,8 +104,6 @@ class ParallelConfig:
     --data-parallel-start-rank."""
     enable_starscream: bool = False
     """ Enable starscream for cpx partitioning. """
-    num_prompts: int = 0
-    """ batch size """
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False

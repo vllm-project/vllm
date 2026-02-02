@@ -12,7 +12,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.distributed import cpx_model_parallel_all_gather, get_starscream_parallel_world_size
+from vllm.distributed.parallel_state import get_dcp_group
 logger = init_logger(__name__)
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -1099,7 +1099,7 @@ def unified_attention(
         )
 
     if cpx_size > 1 and enable_starscream:
-        starscream_metadata = cpx_model_parallel_all_gather(starscream_meta_out.contiguous(), dim=-2).contiguous()
+        starscream_metadata = get_dcp_group().all_gather(starscream_meta_out.contiguous(), dim=-2).contiguous()
         starscream_flag = True
 
         reduce_segments[(q.shape[0], num_query_heads)](

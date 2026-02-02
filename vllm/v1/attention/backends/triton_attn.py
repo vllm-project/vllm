@@ -32,143 +32,10 @@ from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.distributed import (divide, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size, get_starscream_parallel_world_size,
-                              split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather, cpx_model_parallel_all_gather, cpx_model_parallel_all_reduce,
-                              tensor_model_parallel_all_reduce)
-import numpy as np
-
+from vllm.distributed.parallel_state import get_dcp_group
 logger = init_logger(__name__)
 
 from typing import List, Tuple
-
-@torch.jit.script
-def slice_and_stitch_three_decode(
-    t1: torch.Tensor,
-    t2: torch.Tensor,
-    t3: torch.Tensor,
-    N: int,
-    d_idx: int,
-    starscream_rank: int,
-    cpx_size: int,
-    has_A: bool,
-    prefill_decode_match: bool,
-    num_batches: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-
-    slice_idx = 0
-
-    if has_A and starscream_rank == d_idx:
-        out1 = torch.narrow(t1, 0, 0, 1)
-        out2 = torch.narrow(t2, 0, 0, 1)
-        out3 = torch.narrow(t3, 0, 0, 1)
-
-    elif prefill_decode_match:
-        start = has_A
-        length = num_batches
-        out1 = torch.narrow(t1, 0, start, num_batches)
-        out2 = torch.narrow(t2, 0, start, num_batches)
-        out3 = torch.narrow(t3, 0, start, num_batches)
-
-    else:
-        out1 = torch.empty_like(t1)
-        out2 = torch.empty_like(t2)
-        out3 = torch.empty_like(t3)
-
-    return out1, out2, out3, slice_idx
-
-@torch.jit.script
-def slice_and_stitch_three(
-    t1: torch.Tensor,
-    t2: torch.Tensor,
-    t3: torch.Tensor,
-    N: int,
-    d_idx: int,
-    starscream_rank: int,
-    cpx_size: int,
-    has_A: bool,
-    prefill_decode_match: bool,
-    prefill_match: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """
-    Slice-and-stitch along dim=0 for three tensors.
-    Handles optional special entry A at index 0 if has_A=True.
-    If has_A=False, all entries are just batches of size N.
-    Args:
-        t1, t2, t3: Tensors with shape
-            [ (B - 1) * N + 1, ... ] if has_A=True
-            [ B * N, ... ]          if has_A=False
-        N: prefill length
-        slice_idx: start index within each batch slice
-        slice_len: number of items to take
-        d_idx, starscream_rank: include entry 0 ("A") only if has_A and starscream_rank == d_idx
-        has_A: whether the tensors contain a special entry at index 0
-    Returns:
-        (out1, out2, out3): stitched tensors from t1, t2, t3
-    """
-    M1 = t1.size(0)
-
-    base = N // cpx_size
-    extra = N % cpx_size
-
-    if starscream_rank < extra:
-        slice_len = base + 1
-        slice_idx = starscream_rank * (base + 1)
-    else:
-        slice_len = base
-        slice_idx = extra * (base + 1) + (starscream_rank - extra) * base
-
-    # Number of batches depends on has_A
-    if has_A:
-        num_batches = (M1 - 1) // N
-        base_offset = 1
-    else:
-        num_batches = M1 // N
-        base_offset = 0
-
-    pieces1: list[torch.Tensor] = []
-    pieces2: list[torch.Tensor] = []
-    pieces3: list[torch.Tensor] = []
-
-    # Include A if requested
-    if has_A and starscream_rank == d_idx:
-        pieces1.append(t1[0:1])
-        pieces2.append(t2[0:1])
-        pieces3.append(t3[0:1])
-
-    # Add per-batch slices with clipping
-    if prefill_decode_match:
-        for b in range(num_batches):
-            batch_start = base_offset + b * N
-            start = batch_start + slice_idx
-            end = start + slice_len
-            batch_end = batch_start + N
-
-            if (start >= batch_end) or (start == end):
-                continue
-            if end > batch_end:
-                end = batch_end
-
-            pieces1.append(t1[start:end])
-            pieces2.append(t2[start:end])
-            pieces3.append(t3[start:end])
-
-    if (len(pieces1) == 0):
-        return (
-            torch.empty_like(t1), 
-            torch.empty_like(t2), 
-            torch.full_like(t3, -1), 
-            slice_idx,
-            )
-
-    return (
-        torch.cat(pieces1, dim=0).contiguous(),
-        torch.cat(pieces2, dim=0).contiguous(),
-        torch.cat(pieces3, dim=0).contiguous(),
-        slice_idx,
-    )
-
 
 @dataclass
 class TritonAttentionMetadata:
@@ -185,7 +52,6 @@ class TritonAttentionMetadata:
     query_start_loc: torch.Tensor
     max_seq_len: int
     seq_lens: torch.Tensor
-    seq_lens_np: list
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
@@ -244,7 +110,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-        seq_lens_np = common_attn_metadata.seq_lens_cpu.tolist()
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
@@ -271,7 +136,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
-            seq_lens_np=seq_lens_np,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
@@ -366,13 +230,11 @@ class TritonAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
-        self.cpx_size = get_starscream_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        self.starscream_rank = tp_rank % self.cpx_size
+        self.cpx_size = get_dcp_group().world_size
+        self.starscream_rank = get_dcp_group().rank_in_group
         from vllm.config import get_current_vllm_config
         config = get_current_vllm_config()
         self.enable_starscream = config.parallel_config.enable_starscream
-        self.num_prompts = config.parallel_config.num_prompts
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
@@ -457,59 +319,25 @@ class TritonAttentionImpl(AttentionImpl):
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(1)
         if self.enable_starscream:
-            query = cpx_model_parallel_all_gather(query.contiguous(), dim=-2)
+            query = get_dcp_group().all_gather(query.contiguous(), dim=-2)
 
             max_seqlen_q = attn_metadata.max_query_len
-            seqused_k = attn_metadata.seq_lens
-            batch_size = self.num_prompts
-            has_A = len(seqused_k) == batch_size
-
-            seq_lens_np = attn_metadata.seq_lens_np
-
-            d_idx = (seq_lens_np[0] - 1) % self.cpx_size
-            non_cold_location_match = (seq_lens_np[-1] - 1) % self.cpx_size
-
             prefill_match = max_seqlen_q > 1
-            decode_match = bool(non_cold_location_match == self.starscream_rank)
-            cold_start_match = bool(d_idx == self.starscream_rank)
-
-            prefill_decode_match = prefill_match or decode_match
-
-            num_batches = len(seqused_k) - has_A
 
             if (prefill_match):
-                out1, out2, out3, slice_idx = slice_and_stitch_three(
-                        key, 
-                        value, 
-                        attn_metadata.slot_mapping, 
-                        max_seqlen_q, 
-                        d_idx, 
-                        self.starscream_rank, 
-                        self.cpx_size, 
-                        has_A, 
-                        prefill_decode_match, 
-                        prefill_match, 
-                        )
-            else:
-                out1, out2, out3, slice_idx = slice_and_stitch_three_decode(
-                        key, 
-                        value, 
-                        attn_metadata.slot_mapping, 
-                        max_seqlen_q, 
-                        d_idx, 
-                        self.starscream_rank, 
-                        self.cpx_size, 
-                        has_A, 
-                        prefill_decode_match, 
-                        num_batches,
-                        )
+                N = max_seqlen_q
+                base = N // self.cpx_size
+                extra = N % self.cpx_size
+            
+                if self.starscream_rank < extra:
+                    slice_idx = self.starscream_rank * (base + 1)
+                else:
+                    slice_idx = extra * (base + 1) + (self.starscream_rank - extra) * base
 
-            location_match = cold_start_match or prefill_decode_match
+            else:
+                slice_idx = 0
+
         else:
-            location_match = True
-            out1 = key
-            out2 = value
-            out3 = attn_metadata.slot_mapping
             slice_idx = 0
             self.starscream_rank = 0
 

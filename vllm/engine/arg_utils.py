@@ -396,7 +396,6 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_starscream: bool = ParallelConfig.enable_starscream
-    num_prompts: int = ParallelConfig.num_prompts
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     all2all_backend: str | None = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
@@ -1527,7 +1526,6 @@ class EngineArgs:
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_starscream=self.enable_starscream,
-            num_prompts=self.num_prompts,
             enable_expert_parallel=self.enable_expert_parallel,
             all2all_backend=self.all2all_backend,
             enable_dbo=self.enable_dbo,
