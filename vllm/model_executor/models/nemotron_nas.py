@@ -177,10 +177,15 @@ class DeciLMDecoderLayer(nn.Module):
             else:
                 intermediate_size = block_config.ffn.intermediate_size
 
+            if hasattr(block_config.ffn, "hidden_act"):
+                hidden_act = block_config.ffn.hidden_act
+            else:
+                hidden_act = config.hidden_act
+
             self.mlp = LlamaMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
-                hidden_act=config.hidden_act,
+                hidden_act=hidden_act,
                 quant_config=quant_config,
                 bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.mlp",

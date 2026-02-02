@@ -67,8 +67,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import TokensPrompt
-from vllm.inputs.parse import get_prompt_components
+from vllm.inputs.data import EmbedsPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -185,8 +184,6 @@ class OpenAIServingChat(OpenAIServing):
         start_time = time.perf_counter()
 
         try:
-            renderer = self.engine_client.renderer
-
             # Create a minimal dummy request
             dummy_request = ChatCompletionRequest(
                 messages=[{"role": "user", "content": "warmup"}],
@@ -201,18 +198,10 @@ class OpenAIServingChat(OpenAIServing):
             # 3. Tokenizer initialization for chat
             await self._preprocess_chat(
                 dummy_request,
-                renderer,
                 dummy_request.messages,
-                chat_template=self.chat_template,
-                chat_template_content_format=self.chat_template_content_format,
-                add_generation_prompt=True,
-                continue_final_message=False,
-                tool_dicts=None,
-                documents=None,
-                chat_template_kwargs=None,
-                default_chat_template_kwargs=self.default_chat_template_kwargs,
-                tool_parser=None,
-                add_special_tokens=False,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=self.default_chat_template_kwargs,
             )
 
             elapsed = (time.perf_counter() - start_time) * 1000
@@ -225,7 +214,10 @@ class OpenAIServingChat(OpenAIServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> tuple[list[ConversationMessage], list[Any]] | ErrorResponse:
+    ) -> (
+        tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]
+        | ErrorResponse
+    ):
         """
         render chat request by validating and preprocessing inputs.
 
@@ -302,23 +294,14 @@ class OpenAIServingChat(OpenAIServing):
                 if error_check_ret is not None:
                     return error_check_ret
 
-                chat_template_kwargs = request.chat_template_kwargs or {}
-                chat_template_kwargs.update(reasoning_effort=request.reasoning_effort)
-
                 conversation, engine_prompts = await self._preprocess_chat(
                     request,
-                    renderer,
                     request.messages,
-                    chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=self.default_chat_template_kwargs,
                     tool_dicts=tool_dicts,
-                    documents=request.documents,
-                    chat_template_kwargs=chat_template_kwargs,
-                    default_chat_template_kwargs=self.default_chat_template_kwargs,
                     tool_parser=tool_parser,
-                    add_special_tokens=request.add_special_tokens,
                 )
             else:
                 # For GPT-OSS.
@@ -375,7 +358,7 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, _, _ = get_prompt_components(engine_prompt)
+                prompt_text = engine_prompt.get("prompt")
 
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
@@ -428,11 +411,15 @@ class OpenAIServingChat(OpenAIServing):
                         trace_headers=trace_headers,
                     )
                 else:
-                    engine_request, tokenization_kwargs = await self._process_inputs(
+                    tok_params = request.build_tok_params(self.model_config)
+                    tokenization_kwargs = tok_params.get_encode_kwargs()
+
+                    engine_request = self.input_processor.process_inputs(
                         sub_request_id,
                         engine_prompt,
                         sampling_params,
                         lora_request=lora_request,
+                        tokenization_kwargs=tokenization_kwargs,
                         trace_headers=trace_headers,
                         priority=request.priority,
                         data_parallel_rank=data_parallel_rank,
@@ -1186,8 +1173,8 @@ class OpenAIServingChat(OpenAIServing):
                         delta_content_parts = []
                         if delta_message.content:
                             delta_content_parts.append(delta_message.content)
-                        if delta_message.reasoning_content:
-                            reasoning = delta_message.reasoning_content
+                        if delta_message.reasoning:
+                            reasoning = delta_message.reasoning
                             delta_content_parts.append(f"[reasoning: {reasoning}]")
                         if delta_message.tool_calls:
                             tool_args = "".join(
