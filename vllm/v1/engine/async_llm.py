@@ -7,7 +7,6 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -19,6 +18,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType
+from vllm.inputs.data import StreamingInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -51,18 +51,6 @@ from vllm.v1.metrics.prometheus import shutdown_prometheus
 from vllm.v1.metrics.stats import IterationStats
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class StreamingInput:
-    """Input data for a streaming generation request.
-
-    This is used with generate() to support multi-turn streaming sessions
-    where inputs are provided via an async generator.
-    """
-
-    prompt: PromptType
-    sampling_params: SamplingParams | None = None
 
 
 class InputStreamError(Exception):
