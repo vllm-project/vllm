@@ -87,7 +87,7 @@ class Fp8BlockScaledMMKernel(MMLinearKernel[Fp8BlockMMScaledConfig, FP8BlockPara
         replace_parameter(layer, params.WEIGHT, weight.data)
         replace_parameter(layer, params.WEIGHT_SCALE_INV, weight_scale_inv.data)
 
-    def apply(
+    def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,

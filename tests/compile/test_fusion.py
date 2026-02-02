@@ -52,7 +52,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
 
-from ..utils import TestBlockFP8Layer, TestFP8Layer
+from ..utils import TestFP8Layer
 from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -116,7 +116,7 @@ class TestModel(torch.nn.Module):
         self,
         hidden_size: int,
         eps: float,
-        force_kernel: FP8ScaledMMLinearKernel | None,
+        force_kernel: type[FP8ScaledMMLinearKernel] | None,
         group_shape: GroupShape,
         use_aiter_fusion: bool = False,
         use_aiter_quant: bool = False,
@@ -124,7 +124,7 @@ class TestModel(torch.nn.Module):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.fp8_linear_layers: list[torch.nn.Module]
+        self.fp8_linear_layers: list[TestFP8Layer]
         self.group_shape = group_shape
         self.use_aiter_quant_op = use_aiter_quant
         self.use_aiter_fusion = use_aiter_fusion
@@ -142,21 +142,6 @@ class TestModel(torch.nn.Module):
             self.weight_quant_key = create_fp8_quant_key(
                 static=True, group_shape=GroupShape(hidden_size, hidden_size)
             )
-            self.fp8_linear_layers = [
-                TestBlockFP8Layer(
-                    weight_shape=(hidden_size, hidden_size),
-                    weight_quant_key=self.activation_quant_key,
-                    activation_quant_key=self.activation_quant_key,
-                    transpose_weights=use_aiter_fusion,
-                )
-                for _ in range(3)
-            ]
-
-            self.enable_quant_fp8_custom_op = (
-                False
-                if use_aiter_quant
-                else self.fp8_linear_layers[0].linear_op.input_quant_op.enabled()
-            )
 
         else:
             is_static = group_shape == GroupShape.PER_TENSOR
@@ -168,23 +153,24 @@ class TestModel(torch.nn.Module):
             self.weight_quant_key = QuantKey(
                 dtype=FP8_DTYPE, scale=w_quant_scale_desc, symmetric=True
             )
-            self.fp8_linear_layers = [
-                TestFP8Layer(
-                    weight_shape=(hidden_size, hidden_size),
-                    activation_quant_key=self.activation_quant_key,
-                    weight_quant_key=self.weight_quant_key,
-                    force_kernel=force_kernel,
-                )
-                for _ in range(3)
-            ]
 
-            # Enable aiter quantization if requested
-            for layer in self.fp8_linear_layers:
-                layer.kernel.quant_fp8.use_aiter = use_aiter_quant
+        self.fp8_linear_layers = [
+            TestFP8Layer(
+                weight_shape=(hidden_size, hidden_size),
+                activation_quant_key=self.activation_quant_key,
+                weight_quant_key=self.weight_quant_key,
+                force_kernel=force_kernel,
+            )
+            for _ in range(3)
+        ]
 
-            self.enable_quant_fp8_custom_op = self.fp8_linear_layers[
-                0
-            ].is_quant_fp8_enabled()
+        # Enable aiter quantization if requested
+        for layer in self.fp8_linear_layers:
+            layer.kernel.input_quant_op.use_aiter = use_aiter_quant
+
+        self.enable_quant_fp8_custom_op = self.fp8_linear_layers[
+            0
+        ].is_quant_fp8_enabled()
 
     def forward(self, x):
         # avoid having graph input be an arg to a pattern directly

@@ -50,7 +50,7 @@ class CudaBlockScaledMMKernel(Fp8BlockScaledMMKernel):
             return False, "only cuda devices are supported."
         return True, None
 
-    def apply(
+    def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
@@ -71,15 +71,15 @@ class CudaBlockScaledMMKernel(Fp8BlockScaledMMKernel):
             )
             and should_use_deepgemm_for_fp8_linear(output_dtype, weight, True)
         ):
-            return self.flashinfer_deepgemm_kernel.apply(layer, x, bias)
+            return self.flashinfer_deepgemm_kernel.apply_weights(layer, x, bias)
 
         if self.deepgemm_kernel is not None and should_use_deepgemm_for_fp8_linear(
             output_dtype, weight, True
         ):
-            return self.deepgemm_kernel.apply(layer, bias)
+            return self.deepgemm_kernel.apply_weights(layer, bias)
 
         assert self.default_fallback_kernel is not None
-        return self.default_fallback_kernel.apply(layer, x, bias)
+        return self.default_fallback_kernel.apply_weights(layer, x, bias)
 
     def apply_block_scaled_mm(
         self,

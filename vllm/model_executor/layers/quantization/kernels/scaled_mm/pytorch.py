@@ -49,11 +49,15 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
-            c.activation_quant_key.scale.group_shape.is_per_tensor()
+            config.activation_quant_key.scale.group_shape.is_per_tensor()
         )
-        per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
+        per_tensor_weight_scales = (
+            config.weight_quant_key.scale.group_shape.is_per_tensor()
+        )
 
         if not (per_tensor_activation_scales and per_tensor_weight_scales):
             return False, "requires per tensor activation and weight scales."
@@ -100,13 +104,17 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
-            c.activation_quant_key.scale.group_shape.is_per_tensor()
+            config.activation_quant_key.scale.group_shape.is_per_tensor()
         )
-        per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
+        per_tensor_weight_scales = (
+            config.weight_quant_key.scale.group_shape.is_per_tensor()
+        )
 
-        if c.out_dtype == torch.float16:
+        if config.out_dtype == torch.float16:
             # hipblaslt rowwise _scaled_mm only supports BFloat16
             return False, "supports BFloat16 output data type only."
 
@@ -150,11 +158,15 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
 
 class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
-            c.activation_quant_key.scale.group_shape.is_per_tensor()
+            config.activation_quant_key.scale.group_shape.is_per_tensor()
         )
-        per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
+        per_tensor_weight_scales = (
+            config.weight_quant_key.scale.group_shape.is_per_tensor()
+        )
 
         if per_tensor_activation_scales and per_tensor_weight_scales:
             return False, "cannot be used with per tensor activation and weight scales."

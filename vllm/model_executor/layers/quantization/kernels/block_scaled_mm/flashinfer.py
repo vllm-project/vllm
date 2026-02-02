@@ -83,7 +83,7 @@ class FlashInferBlockScaledMMKernel(Fp8BlockScaledMMKernel):
 
         return True, None
 
-    def apply(
+    def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,

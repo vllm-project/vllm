@@ -46,9 +46,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
-    init_fp8_block_scaled_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
@@ -343,13 +340,8 @@ class Fp8LinearMethod(LinearMethodBase):
             weight_quant_key = create_fp8_quant_key(
                 static=True, group_shape=GroupShape(*self.weight_block_size)
             )
-            self.w8a8_block_fp8_linear = init_fp8_block_scaled_linear_kernel(
-                weight_quant_key=weight_quant_key,
-                activation_quant_key=activation_quant_key,
-                out_dtype=self.out_dtype,
-                module_name=self.__class__.__name__,
-            )
         else:
+            weight_quant_key = kFp8StaticTensorSym
             # Use per-token quantization for better perf if dynamic and cutlass
             if self.act_q_static:
                 activation_quant_key = kFp8StaticTensorSym
@@ -360,7 +352,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
             self.fp8_linear = init_fp8_linear_kernel(
                 activation_quant_key=activation_quant_key,
-                weight_quant_key=kFp8StaticTensorSym,
+                weight_quant_key=weight_quant_key,
                 out_dtype=self.out_dtype,
                 module_name=self.__class__.__name__,
             )
@@ -437,7 +429,7 @@ class Fp8LinearMethod(LinearMethodBase):
             assert not self.act_q_static
             size_k_first = False
 
-            self.w8a8_block_fp8_linear.process_weights_after_loading(layer)
+            self.fp8_linear.process_weights_after_loading(layer)
 
         # If checkpoint not serialized fp8, quantize the weights.
         else:
@@ -488,7 +480,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if vllm_is_batch_invariant():
             if self.block_quant:
                 assert self.weight_block_size is not None
-                return self.w8a8_block_fp8_linear.apply(
+                return self.fp8_linear.apply_weights(
                     layer,
                     x,
                     bias,
@@ -532,15 +524,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 size_k=layer.input_size_per_partition,
                 input_dtype=self.marlin_input_dtype,
                 bias=bias,
-            )
-
-        if self.block_quant:
-            assert self.weight_block_size is not None
-
-            return self.w8a8_block_fp8_linear.apply(
-                layer,
-                x,
-                bias,
             )
 
         return self.fp8_linear.apply_weights(layer, x, bias)
