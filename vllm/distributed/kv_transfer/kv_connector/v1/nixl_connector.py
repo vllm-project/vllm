@@ -310,6 +310,9 @@ class NixlConnector(KVConnectorBase_V1):
             # does not support on HND
             return False
 
+        if get_kv_cache_layout() != "HND":
+            return False
+
         extra_config = self.kv_transfer_config.kv_connector_extra_config
         return (
             str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
@@ -1738,10 +1741,8 @@ class NixlConnectorWorker:
         """
         remote_engine_id = nixl_agent_meta.engine_id
 
-        assert (
-            self._tp_size[remote_engine_id] == remote_tp_size
-            and self.kv_topo is not None
-        )
+        assert self._tp_size[remote_engine_id] == remote_tp_size
+        assert self.kv_topo is not None
 
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
@@ -2222,6 +2223,10 @@ class NixlConnectorWorker:
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
     ):
+        """
+        Post a READ point-to-point xfer request from a single local worker to
+        a single remote worker.
+        """
         assert self.kv_topo is not None
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
         if block_size_ratio > 1:

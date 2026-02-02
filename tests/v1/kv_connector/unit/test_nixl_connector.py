@@ -1428,7 +1428,7 @@ def test_register_kv_caches(
         from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 
         backend_cls = RocmAttentionBackend
-    else:  # TRITON
+    else:  # TRITON_ATTN
         from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
         backend_cls = TritonAttentionBackend
