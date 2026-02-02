@@ -458,6 +458,30 @@ class VllmConfig:
             hf_config.architectures = architectures
 
         model_config = copy.deepcopy(self.model_config)
+
+        if (
+            model_config.is_multimodal_model
+            and hasattr(model_config.hf_config, "tie_word_embeddings")
+            and not hasattr(hf_config.get_text_config(), "tie_word_embeddings")
+        ):
+            # In Transformers v5, tie_word_embeddings belongs to the config of the class
+            # that can see both layers to be tied. For example:
+            #
+            # SomeVLModel:
+            #   self.language_model = SomeLanguageModel()
+            #   self.vision_model = SomeVisionModel()
+            #
+            # SomeVLModelForMultimodalLM:
+            #   self.model = SomeVLModel()
+            #   self.lm_head = nn.Linear()
+            #
+            # Therefore, tie_word_embeddings is defined in SomeVLModelForMultimodalLM's
+            # config and is not present in SomeVLModel's config. In vLLM, the lm_head
+            # belongs to the language_model, so we must ensure that tie_word_embeddings
+            # is set in the language_model's config.
+            tie_word_embeddings = model_config.hf_config.tie_word_embeddings
+            hf_config.get_text_config().tie_word_embeddings = tie_word_embeddings
+
         model_config.hf_config = hf_config
         model_config.model_arch_config = model_config.get_model_arch_config()
 
@@ -595,6 +619,11 @@ class VllmConfig:
                     "`external_launcher` distributed executor backend, but you chose "
                     f"`{executor_backend}`."
                 )
+            if self.cache_config.mamba_cache_mode != "none":
+                raise ValueError(
+                    "Currently, async scheduling is not compatible with "
+                    "prefix caching for Mamba models."
+                )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
             if (
@@ -624,6 +653,13 @@ class VllmConfig:
                     "with the `%s` distributed executor backend (only `mp`, `uni`, and "
                     "`external_launcher` are supported).",
                     executor_backend,
+                    scope="local",
+                )
+                self.scheduler_config.async_scheduling = False
+            elif self.cache_config.mamba_cache_mode != "none":
+                logger.warning_once(
+                    "Async scheduling is not compatible with "
+                    "prefix caching for Mamba models and will be disabled.",
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
@@ -923,6 +959,18 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
+        from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
+
+        if (
+            self.model_config
+            and vllm_is_batch_invariant()
+            and not self.model_config.disable_cascade_attn
+        ):
+            self.model_config.disable_cascade_attn = True
+            logger.warning_once(
+                "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
+                scope="local",
+            )
 
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend

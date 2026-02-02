@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Sequence
+from functools import partial
 
 import numpy as np
 import torch
@@ -81,10 +82,7 @@ class UvaBufferPool:
 
 class UvaBackedTensor:
     def __init__(
-        self,
-        size: int | Sequence[int],
-        dtype: torch.dtype,
-        max_concurrency: int = 2,
+        self, size: int | Sequence[int], dtype: torch.dtype, max_concurrency: int = 2
     ):
         self.dtype = dtype
         self.max_concurrency = max_concurrency
@@ -135,25 +133,16 @@ class StagedWriteTensor:
         self._staged_write_contents: list[int | float] = []
         self._staged_write_cu_lens: list[int] = []
 
-        self.write_indices = UvaBufferPool(
-            self.num_rows, dtype=torch.int32, max_concurrency=max_concurrency
-        )
-        self.write_starts = UvaBufferPool(
-            self.num_rows, dtype=torch.int32, max_concurrency=max_concurrency
-        )
+        new_buffer = partial(UvaBufferPool, max_concurrency=max_concurrency)
+
+        self.write_indices = new_buffer(self.num_rows, dtype=torch.int32)
+        self.write_starts = new_buffer(self.num_rows, dtype=torch.int32)
         init_size = next_power_of_2(self.num_rows)
-        self.write_contents = UvaBufferPool(
-            init_size, dtype=dtype, max_concurrency=max_concurrency
-        )
-        self.write_cu_lens = UvaBufferPool(
-            self.num_rows, dtype=torch.int32, max_concurrency=max_concurrency
-        )
+        self.write_contents = new_buffer(init_size, dtype=dtype)
+        self.write_cu_lens = new_buffer(self.num_rows, dtype=torch.int32)
 
     def stage_write(
-        self,
-        index: int,
-        start: int,
-        x: Iterable[int] | Iterable[float],
+        self, index: int, start: int, x: Iterable[int] | Iterable[float]
     ) -> None:
         assert index >= 0
         assert start >= 0

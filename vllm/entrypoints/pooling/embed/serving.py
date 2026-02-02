@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final, cast
+from typing import Any, Final, TypeAlias
 
 import torch
 from fastapi import Request
@@ -22,8 +22,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingResponse,
     EmbeddingResponseData,
 )
-from vllm.entrypoints.renderer import RenderConfig
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import EmbedsPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
@@ -37,7 +36,7 @@ from vllm.utils.serial_utils import (
 logger = init_logger(__name__)
 
 
-EmbeddingServeContext = ServeContext[EmbeddingRequest]
+EmbeddingServeContext: TypeAlias = ServeContext[EmbeddingRequest]
 
 
 class OpenAIServingEmbedding(OpenAIServing):
@@ -95,19 +94,16 @@ class OpenAIServingEmbedding(OpenAIServing):
 
                 _, ctx.engine_prompts = await self._preprocess_chat(
                     ctx.request,
-                    self.renderer,
                     ctx.request.messages,
-                    chat_template=ctx.request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    add_generation_prompt=ctx.request.add_generation_prompt,
-                    continue_final_message=ctx.request.continue_final_message,
-                    add_special_tokens=ctx.request.add_special_tokens,
+                    default_template=self.chat_template,
+                    default_template_content_format=self.chat_template_content_format,
+                    default_template_kwargs=None,
                 )
             elif isinstance(ctx.request, EmbeddingCompletionRequest):
-                renderer = self._get_completion_renderer()
-                ctx.engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=ctx.request.input,
-                    config=self._build_render_config(ctx.request),
+                ctx.engine_prompts = await self._preprocess_completion(
+                    ctx.request,
+                    prompt_input=ctx.request.input,
+                    prompt_embeds=None,
                 )
             else:
                 return self.create_error_response("Invalid classification request type")
@@ -116,19 +112,6 @@ class OpenAIServingEmbedding(OpenAIServing):
         except (ValueError, TypeError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
-
-    def _build_render_config(self, request: EmbeddingCompletionRequest) -> RenderConfig:
-        # Set max_length based on chunked processing capability
-        if self._should_use_chunked_processing(request):
-            max_length = None
-        else:
-            max_length = self.max_embed_len or self.max_model_len
-
-        return RenderConfig(
-            max_length=max_length,
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            add_special_tokens=request.add_special_tokens,
-        )
 
     def _build_response(
         self,
@@ -246,14 +229,18 @@ class OpenAIServingEmbedding(OpenAIServing):
                 lora_request=ctx.lora_request,
             )
 
+            tok_params = ctx.request.build_tok_params(self.model_config)
+            tokenization_kwargs = tok_params.get_encode_kwargs()
+
             # Create generator for this chunk and wrap it to return indices
             original_generator = self.engine_client.encode(
                 chunk_engine_prompt,
                 pooling_params,
                 chunk_request_id,
                 lora_request=ctx.lora_request,
+                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
-                priority=getattr(ctx.request, "priority", 0),
+                priority=ctx.request.priority,
             )
 
             generators.append(original_generator)
@@ -338,7 +325,7 @@ class OpenAIServingEmbedding(OpenAIServing):
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: TokensPrompt,
+        engine_prompt: TokensPrompt | EmbedsPrompt,
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,
@@ -353,23 +340,25 @@ class OpenAIServingEmbedding(OpenAIServing):
             lora_request=ctx.lora_request,
         )
 
+        tok_params = ctx.request.build_tok_params(self.model_config)
+        tokenization_kwargs = tok_params.get_encode_kwargs()
+
         # Return the original generator without wrapping
         return self.engine_client.encode(
             engine_prompt,
             pooling_params,
             request_id_item,
             lora_request=ctx.lora_request,
+            tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
-            priority=getattr(ctx.request, "priority", 0),
+            priority=ctx.request.priority,
         )
 
     async def _prepare_generators(
         self,
-        ctx: ServeContext,
+        ctx: EmbeddingServeContext,
     ) -> ErrorResponse | None:
         """Override to support chunked processing."""
-        ctx = cast(EmbeddingServeContext, ctx)
-
         # Check if we should use chunked processing
         use_chunked = self._should_use_chunked_processing(ctx.request)
 
@@ -405,7 +394,8 @@ class OpenAIServingEmbedding(OpenAIServing):
             for i, engine_prompt in enumerate(ctx.engine_prompts):
                 # Check if this specific prompt needs chunked processing
                 if "prompt_token_ids" in engine_prompt:
-                    prompt_token_ids = engine_prompt["prompt_token_ids"]
+                    prompt_token_ids = engine_prompt["prompt_token_ids"]  # type: ignore[typeddict-item]
+
                     if len(prompt_token_ids) > max_pos_embeddings:
                         # Use chunked processing for this prompt
                         chunk_generators = await self._process_chunked_request(
@@ -573,7 +563,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                                 "token IDs"
                             )
 
-                        original_token_ids = original_prompt["prompt_token_ids"]
+                        original_token_ids = original_prompt["prompt_token_ids"]  # type: ignore[typeddict-item]
 
                         pooling_request_output = PoolingRequestOutput(
                             request_id=aggregator["request_id"],

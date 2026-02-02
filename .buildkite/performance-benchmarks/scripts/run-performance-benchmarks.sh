@@ -393,6 +393,11 @@ run_serving_tests() {
       fi
     fi
 
+    # save the compilation mode and optimization level on the serving results
+    # whenever they are set
+    compilation_config_mode=$(echo "$server_params" | jq -r '."compilation_config.mode" // empty')
+    optimization_level=$(echo "$server_params" | jq -r '.optimization_level // empty')
+
     # iterate over different QPS
     for qps in $qps_list; do
       # remove the surrounding single quote from qps
@@ -406,15 +411,15 @@ run_serving_tests() {
       for max_concurrency in $max_concurrency_list; do
         new_test_name=$test_name"_qps_"$qps"_concurrency_"$max_concurrency
         echo " new test name $new_test_name"
-        # pass the tensor parallel size to the client so that it can be displayed
-        # on the benchmark dashboard
+        # pass the tensor parallel size, the compilation mode, and the optimization
+        # level to the client so that they can be used on the benchmark dashboard
         client_command="vllm bench serve \
           --save-result \
           --result-dir $RESULTS_FOLDER \
           --result-filename ${new_test_name}.json \
           --request-rate $qps \
           --max-concurrency $max_concurrency \
-          --metadata "tensor_parallel_size=$tp" \
+          --metadata tensor_parallel_size=$tp compilation_config.mode=$compilation_config_mode optimization_level=$optimization_level \
           $client_args $client_remote_args "
 
         echo "Running test case $test_name with qps $qps"

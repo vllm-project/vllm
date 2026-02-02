@@ -7,11 +7,17 @@ from typing import Annotated, Any
 from pydantic import Field, model_validator
 
 from vllm import PoolingParams
-from vllm.config.pooler import get_use_activation
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.logger import init_logger
+from vllm.renderers import ChatParams, merge_kwargs
 from vllm.utils import random_uuid
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
+
+logger = init_logger(__name__)
 
 
 class PoolingBasicRequestMixin(OpenAIBaseModel):
@@ -119,6 +125,23 @@ class ChatRequestMixin(OpenAIBaseModel):
             )
         return data
 
+    def build_chat_params(
+        self,
+        default_template: str | None,
+        default_template_content_format: ChatTemplateContentFormatOption,
+    ) -> ChatParams:
+        return ChatParams(
+            chat_template=self.chat_template or default_template,
+            chat_template_content_format=default_template_content_format,
+            chat_template_kwargs=merge_kwargs(
+                self.chat_template_kwargs,
+                dict(
+                    add_generation_prompt=self.add_generation_prompt,
+                    continue_final_message=self.continue_final_message,
+                ),
+            ),
+        )
+
 
 class EncodingRequestMixin(OpenAIBaseModel):
     # --8<-- [start:encoding-params]
@@ -151,39 +174,43 @@ class EmbedRequestMixin(EncodingRequestMixin):
     # --8<-- [end:embed-params]
 
     # --8<-- [start:embed-extra-params]
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for the pooler outputs. "
+        "`None` uses the pooler's default, which is `True` in most cases.",
+    )
     normalize: bool | None = Field(
         default=None,
-        description="Whether to normalize the embeddings outputs. Default is True.",
+        description="Deprecated; please pass `use_activation` instead",
     )
     # --8<-- [end:embed-extra-params]
 
     def to_pooling_params(self):
+        if self.normalize is not None:
+            logger.warning_once(
+                "`normalize` is deprecated and will be removed in v0.17. "
+                "Please pass `use_activation` instead."
+            )
+            self.use_activation = self.normalize
+
         return PoolingParams(
             dimensions=self.dimensions,
-            use_activation=self.normalize,
+            use_activation=self.use_activation,
             truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
         )
 
 
 class ClassifyRequestMixin(OpenAIBaseModel):
     # --8<-- [start:classify-extra-params]
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
     use_activation: bool | None = Field(
         default=None,
-        description="Whether to use activation for classification outputs. "
-        "Default is True.",
+        description="Whether to use activation for the pooler outputs. "
+        "`None` uses the pooler's default, which is `True` in most cases.",
     )
     # --8<-- [end:classify-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(
-            use_activation=get_use_activation(self),
+            use_activation=self.use_activation,
             truncate_prompt_tokens=getattr(self, "truncate_prompt_tokens", None),
         )

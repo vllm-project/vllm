@@ -188,7 +188,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     llm = LLM(
         model=model_name,
         tensor_parallel_size=tp_size,
-        max_num_seqs=32,
+        max_num_seqs=128,
         max_model_len=8192,
         dtype="bfloat16",  # not everything is supported
         gpu_memory_utilization=0.9,
@@ -197,12 +197,20 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     )
 
     # Use more realistic prompts for better token generation
-    prompts = [_random_prompt(10, 50) for i in range(32)]
+    prompts = [_random_prompt(10, 50) for _ in range(32)]
+
+    # TODO: Update prompts to have ragged lengths in order to test chunked prefill
+    #       The above tests are not currently long enough to exercise chunking.
+    # prompts = (
+    #     [_random_prompt(10, 50) for _ in range(28)]
+    #     + [_random_prompt(256, 512) for _ in range(50)]
+    #     + [_random_prompt(2048, 4096) for _ in range(50)]
+    # )
 
     sp = SamplingParams(
         temperature=0.6,
         top_p=1.0,
-        max_tokens=8,
+        max_tokens=16,
         seed=1234,
         logprobs=5,
     )

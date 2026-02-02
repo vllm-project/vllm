@@ -7,7 +7,7 @@ pynvml. However, it should not initialize cuda context.
 import os
 from collections.abc import Callable
 from functools import cache, wraps
-from typing import TYPE_CHECKING, Optional, TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 from typing_extensions import ParamSpec
@@ -362,9 +362,9 @@ class CudaPlatformBase(Platform):
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
         logger.info_once(
-            "Using %s attention backend out of potential backends: %s",
+            "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,
-            tuple(b[0].name for b in valid_backends_priorities),
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
             scope="local",
         )
 
@@ -382,7 +382,7 @@ class CudaPlatformBase(Platform):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: Optional["AttentionBackendEnum"] = None,
+        backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         if backend is not None:
             assert backend in cls.get_supported_vit_attn_backends(), (

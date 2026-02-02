@@ -668,6 +668,8 @@ class MultiModalDataParser:
             return None
         if self.is_embeddings(data):
             raise ValueError("Do not support embedding data for vision_chunk right now")
+        if isinstance(data, dict):
+            data = [data]
         return VisionChunkProcessorItems(data)
 
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:

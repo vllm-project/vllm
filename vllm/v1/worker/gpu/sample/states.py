@@ -35,22 +35,19 @@ class SamplingStates:
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         self.temperature.np[req_idx] = sampling_params.temperature
         self.top_p.np[req_idx] = sampling_params.top_p
-        if 0 < sampling_params.top_k < self.vocab_size:
-            top_k = sampling_params.top_k
-        else:
+        top_k = sampling_params.top_k
+        if top_k <= 0 or top_k > self.vocab_size:
             top_k = self.vocab_size
         self.top_k.np[req_idx] = top_k
         self.min_p.np[req_idx] = sampling_params.min_p
 
-        if sampling_params.seed is not None:
-            seed = sampling_params.seed
-        else:
+        seed = sampling_params.seed
+        if seed is None:
             seed = np.random.randint(_NP_INT64_MIN, _NP_INT64_MAX)
         self.seeds.np[req_idx] = seed
 
-        if sampling_params.logprobs is not None:
-            num_logprobs = sampling_params.logprobs
-        else:
+        num_logprobs = sampling_params.logprobs
+        if num_logprobs is None:
             num_logprobs = NO_LOGPROBS
         self.num_logprobs[req_idx] = num_logprobs
 
