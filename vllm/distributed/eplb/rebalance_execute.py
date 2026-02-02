@@ -488,6 +488,7 @@ async def transfer_layer(
     assert old_global_expert_indices.shape[1] == new_global_expert_indices.shape[1]
     num_moe_layers, num_physical_experts = old_global_expert_indices.shape
     assert len(expert_weights) == num_moe_layers
+    assert len(expert_weights[0]) >= 1
     num_local_physical_experts = expert_weights[0][0].shape[0]
     assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
     assert num_physical_experts == ep_size * num_local_physical_experts
@@ -553,6 +554,7 @@ def rearrange_expert_weights_inplace(
 
     num_moe_layers, num_physical_experts = old_global_expert_indices.shape
     assert len(expert_weights) == num_moe_layers
+    assert len(expert_weights[0]) >= 1
 
     num_local_physical_experts = expert_weights[0][0].shape[0]
     assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
