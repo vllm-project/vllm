@@ -20,6 +20,16 @@ class SimilarFrameDetector:
         downscale_factor: int = 4,
         alpha: float = 0.85,
     ):
+        """
+        Initialize SimilarFrameDetector with sampling parameters.
+
+        Args:
+            sparse_ratio: Ratio of frames to keep (0-1)
+            use_downsampled_loss: Whether to compute loss on
+            downsampled frames
+            downscale_factor: Downscale ratio for frame resolution
+            alpha: Weight coefficient for SSIM loss (1-alpha for L1 loss)
+        """
         self.sparse_ratio = sparse_ratio
         self.use_downsampled_loss = use_downsampled_loss
         self.downscale_factor = downscale_factor
