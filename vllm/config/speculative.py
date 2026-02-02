@@ -41,6 +41,7 @@ MTPModelTypes = Literal[
     "longcat_flash_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
+    "step3p5_mtp",
 ]
 EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
 SpeculativeMethod = Literal[
@@ -263,6 +264,11 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )
+
+        if hf_config.model_type == "step3p5":
+            hf_config.model_type = "step3p5_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
 
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
@@ -675,7 +681,15 @@ class SpeculativeConfig:
                 f"{self.disable_by_batch_size=}"
             )
 
-        eagle3_target_supported = ["llama", "qwen", "minicpm", "gpt_oss"]
+        eagle3_target_supported = [
+            "llama",
+            "qwen",
+            "minicpm",
+            "gpt_oss",
+            "hunyuan_vl",
+            "hunyuan_v1_dense",
+            "afmoe",
+        ]
         if (
             self.method == "eagle3"
             and self.target_model_config

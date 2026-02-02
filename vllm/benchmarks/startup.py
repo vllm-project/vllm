@@ -159,19 +159,19 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--num-iters-cold",
         type=int,
-        default=5,
+        default=3,
         help="Number of cold startup iterations.",
     )
     parser.add_argument(
         "--num-iters-warmup",
         type=int,
-        default=3,
+        default=1,
         help="Number of warmup iterations before benchmarking warm startups.",
     )
     parser.add_argument(
         "--num-iters-warm",
         type=int,
-        default=5,
+        default=3,
         help="Number of warm startup iterations.",
     )
     parser.add_argument(

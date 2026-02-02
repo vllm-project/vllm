@@ -3,13 +3,10 @@
 import time
 from typing import Any, TypeAlias
 
-from pydantic import (
-    BaseModel,
-    Field,
-)
+from pydantic import BaseModel, Field
 
 from vllm import PoolingParams
-from vllm.config.pooler import get_use_activation
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, UsageInfo
 from vllm.entrypoints.pooling.base.protocol import (
     ClassifyRequestMixin,
@@ -19,6 +16,7 @@ from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
 )
+from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 
 
@@ -30,10 +28,21 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
     )
     # --8<-- [end:score-extra-params]
 
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            max_total_tokens_param="max_model_len",
+        )
+
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            use_activation=get_use_activation(self),
+            use_activation=self.use_activation,
         )
 
 
@@ -84,6 +93,17 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
         description=("Additional kwargs to pass to the HF processor."),
     )
     # --8<-- [end:rerank-extra-params]
+
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            max_total_tokens_param="max_model_len",
+        )
 
 
 class RerankDocument(BaseModel):

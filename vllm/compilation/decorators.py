@@ -7,12 +7,11 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 from unittest.mock import patch
 
 import torch
 import torch.nn as nn
-from packaging import version
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
@@ -540,7 +539,6 @@ def _support_torch_compile(
             torch._dynamo.config.patch(**dynamo_config_patches),
             maybe_use_cudagraph_partition_wrapper(self.vllm_config),
             torch.fx.experimental._config.patch(**fx_config_patches),
-            _torch27_patch_tensor_subclasses(),
             torch._inductor.config.patch(**inductor_config_patches),
         ):
             use_aot_compile = envs.VLLM_USE_AOT_COMPILE
@@ -647,42 +645,3 @@ def maybe_use_cudagraph_partition_wrapper(
         and compilation_config.use_inductor_graph_partition
     ):
         torch._inductor.utils.set_customized_partition_wrappers(None)
-
-
-@contextlib.contextmanager
-def _torch27_patch_tensor_subclasses() -> Generator[None, None, None]:
-    """
-    Add support for using tensor subclasses (ie `BasevLLMParameter`, ect) when
-    using torch 2.7.0. This enables using weight_loader_v2 and the use of
-    `BasevLLMParameters` without having to replace them with regular tensors
-    before `torch.compile`-time.
-    """
-    from vllm.model_executor.parameter import (
-        BasevLLMParameter,
-        ModelWeightParameter,
-        RowvLLMParameter,
-        _ColumnvLLMParameter,
-    )
-
-    def return_false(*args: Any, **kwargs: Any) -> Literal[False]:
-        return False
-
-    if version.parse("2.7") <= version.parse(torch.__version__) < version.parse("2.8"):
-        yield
-        return
-
-    with (
-        torch._dynamo.config.patch(
-            "traceable_tensor_subclasses",
-            [
-                BasevLLMParameter,
-                ModelWeightParameter,
-                _ColumnvLLMParameter,
-                RowvLLMParameter,
-            ],
-        ),
-        patch(
-            "torch._dynamo.variables.torch.can_dispatch_torch_function", return_false
-        ),
-    ):
-        yield

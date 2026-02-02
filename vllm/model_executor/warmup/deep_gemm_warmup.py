@@ -14,7 +14,6 @@ from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import compute_aligned_M
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEModularMethod
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
@@ -169,9 +168,10 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         # modular kernels could invoke deep_gemm_moe_fp8
         return True
 
-    mk: FusedMoEModularKernel = module.quant_method.fused_experts
     # Further check if the ModularKernel implementation uses the DeepGemmExperts
-    return isinstance(mk.fused_experts, (DeepGemmExperts, TritonOrDeepGemmExperts))
+    return isinstance(
+        module.quant_method.moe_mk, (DeepGemmExperts, TritonOrDeepGemmExperts)
+    )
 
 
 FP8_GEMM_NT_WARMUP_CACHE: set[torch.Size] = set()

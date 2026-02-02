@@ -27,11 +27,13 @@ class MedusaProposer:
     ):
         # Save config parameters
         self.vllm_config = vllm_config
+        assert vllm_config.speculative_config is not None, (
+            "Speculative config must be set"
+        )
+        self.spec_config = vllm_config.speculative_config
         self.device = device
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.hidden_size = (
-            vllm_config.speculative_config.draft_model_config.get_hidden_size()
-        )
+        self.hidden_size = self.spec_config.draft_model_config.get_hidden_size()
         self.dtype = vllm_config.model_config.dtype
 
     def propose(
@@ -58,7 +60,7 @@ class MedusaProposer:
         with set_model_tag("medusa_head"):
             self.model = get_model(
                 vllm_config=self.vllm_config,
-                model_config=self.vllm_config.speculative_config.draft_model_config,
+                model_config=self.spec_config.draft_model_config,
             )
         assert not (
             is_mixture_of_experts(self.model)

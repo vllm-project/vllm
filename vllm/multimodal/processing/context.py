@@ -7,16 +7,20 @@ from abc import abstractmethod
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    overload,
-)
+from functools import cached_property
+from typing import TYPE_CHECKING, Any, overload
 
 import torch
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
+from vllm.multimodal.inputs import MultiModalDataDict
+from vllm.multimodal.parse import (
+    DictEmbeddingItems,
+    EmbeddingItems,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -569,6 +573,39 @@ class BaseProcessingInfo:
         """
         return self.ctx.get_hf_processor(**kwargs)
 
+    def _get_expected_hidden_size(self) -> int | None:
+        """
+        Get expected hidden size for embedding validation if `mm_embeds` are enabled.
+
+        This validates hidden dimensions to prevent a vulnerability where embeddings
+        with correct `ndim` but wrong `shape` could cause crashes at inference time.
+        """
+        model_config = self.ctx.model_config
+        mm_config = model_config.get_multimodal_config()
+
+        if mm_config.enable_mm_embeds:
+            return model_config.get_inputs_embeds_size()
+
+        return None
+
+    def get_data_parser(self) -> MultiModalDataParser:
+        """
+        Constructs a parser to preprocess multi-modal data items
+        before passing them to
+        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+
+        You can support additional modalities by creating a subclass
+        of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
+        that has additional subparsers.
+        """
+        return MultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
+    @cached_property
+    def data_parser(self) -> MultiModalDataParser:
+        return self.get_data_parser()
+
     @property
     def skip_prompt_length_check(self) -> bool:
         return False
@@ -585,13 +622,18 @@ class BaseProcessingInfo:
         """
         raise NotImplementedError
 
-    def get_allowed_mm_limits(self) -> Mapping[str, int]:
-        """Return the maximum allowed number of items for each modality."""
-        supported_mm_limits = self.get_supported_mm_limits()
+    @cached_property
+    def supported_mm_limits(self) -> Mapping[str, int | None]:
+        """The maximum supported number of items for each modality."""
+        return self.get_supported_mm_limits()
+
+    @cached_property
+    def allowed_mm_limits(self) -> Mapping[str, int]:
+        """The maximum allowed number of items for each modality."""
         mm_config = self.ctx.get_mm_config()
 
         allowed_limits = dict[str, int]()
-        for modality, supported_limit in supported_mm_limits.items():
+        for modality, supported_limit in self.supported_mm_limits.items():
             user_limit = mm_config.get_limit_per_prompt(modality)
 
             allowed_limits[modality] = (
@@ -601,6 +643,57 @@ class BaseProcessingInfo:
             )
 
         return allowed_limits
+
+    def validate_num_items(self, modality: str, num_items: int) -> None:
+        """
+        Raise `ValueError` if the number of input items for the given modality
+        is invalid.
+        """
+        supported_limit = self.supported_mm_limits.get(modality, 0)
+        allowed_limit = self.allowed_mm_limits.get(modality, 0)
+
+        if supported_limit is None:
+            supported_limit = allowed_limit
+
+        limit = min(supported_limit, allowed_limit)
+
+        if num_items > limit:
+            msg = f"At most {limit} {modality}(s) may be provided in one prompt."
+
+            if num_items <= supported_limit:
+                msg += " Set `--limit-mm-per-prompt` to increase this limit."
+
+            raise ValueError(msg)
+
+    def parse_mm_data(
+        self,
+        mm_data: MultiModalDataDict,
+        *,
+        validate: bool = True,
+    ) -> MultiModalDataItems:
+        """
+        Normalize
+        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+        to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
+        before passing them to
+        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        """
+        mm_items = self.data_parser.parse_mm_data(mm_data)
+
+        if validate:
+            mm_config = self.ctx.model_config.get_multimodal_config()
+            if not mm_config.enable_mm_embeds:
+                for modality, items in mm_items.items():
+                    if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+                        raise ValueError(
+                            f"You must set `--enable-mm-embeds` to input "
+                            f"`{modality}_embeds`"
+                        )
+
+            for modality, items in mm_items.items():
+                self.validate_num_items(modality, len(items))
+
+        return mm_items
 
     def get_mm_max_tokens_per_item(
         self,

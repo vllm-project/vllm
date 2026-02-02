@@ -18,8 +18,9 @@ from .vllm_inductor_pass import VllmInductorPass
 
 if rocm_aiter_ops.is_enabled():
     from vllm.compilation.rocm_aiter_fusion import (
-        RocmAiterRMSNormFusionPass,
+        RocmAiterRMSNormQuantFusionPass,
         RocmAiterSiluMulFp8GroupQuantFusionPass,
+        RocmAiterTritonAddRMSNormPadFusionPass,
     )
 
 if current_platform.is_cuda_alike():
@@ -123,12 +124,15 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
                 self.passes += [RMSNormQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [
-                        RocmAiterRMSNormFusionPass(config),
+                        RocmAiterRMSNormQuantFusionPass(config),
                     ]
             if self.pass_config.fuse_act_quant:
                 self.passes += [ActivationQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
                     self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
+
+            if self.pass_config.fuse_act_padding and rocm_aiter_ops.is_enabled():
+                self.passes += [RocmAiterTritonAddRMSNormPadFusionPass(config)]
 
             if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnFusionPass(config)]

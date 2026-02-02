@@ -23,6 +23,7 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import parse_safetensors_file_metadata
 
 from .config_parser_base import ConfigParserBase
@@ -48,7 +49,6 @@ except ImportError:
     from transformers.configuration_utils import (
         ALLOWED_LAYER_TYPES as ALLOWED_ATTENTION_LAYER_TYPES,
     )
-
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -77,10 +77,12 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    funaudiochat="FunAudioChatConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
+    kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     jais="JAISConfig",
@@ -95,6 +97,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
+    step3p5="Step3p5Config",
+    qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
@@ -220,19 +224,6 @@ class MistralConfigParser(ConfigParserBase):
             hf_config_dict = {}
 
         config = adapt_config_dict(config_dict, defaults=hf_config_dict)
-
-        # Mistral configs may define sliding_window as list[int]. Convert it
-        # to int and add the layer_types list[str] to make it HF compatible
-        if (sliding_window := getattr(config, "sliding_window", None)) and isinstance(
-            sliding_window, list
-        ):
-            pattern_repeats = config.num_hidden_layers // len(sliding_window)
-            layer_types = sliding_window * pattern_repeats
-            config.layer_types = [
-                "full_attention" if layer_type is None else "sliding_attention"
-                for layer_type in layer_types
-            ]
-            config.sliding_window = next(filter(None, sliding_window), None)
 
         return config_dict, config
 
@@ -578,7 +569,11 @@ def get_config(
         try:
             # First check for Mistral to avoid defaulting to
             # Transformers implementation.
-            if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
+            if is_mistral_model_repo(
+                model_name_or_path=str(model), revision=revision
+            ) and file_or_path_exists(
+                model=model, config_name=MISTRAL_CONFIG_NAME, revision=revision
+            ):
                 config_format = "mistral"
             elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
                 model, HF_CONFIG_NAME, revision=revision
@@ -827,7 +822,7 @@ def parse_pooling_type(pooling_name: str):
 @cache
 def get_sentence_transformer_tokenizer_config(
     model: str | Path, revision: str | None = "main"
-):
+) -> dict[str, Any] | None:
     """
     Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
