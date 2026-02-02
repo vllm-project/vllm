@@ -539,6 +539,9 @@ class Worker(WorkerBase):
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
 
+    def reset_encoder_cache(self) -> None:
+        self.model_runner.reset_encoder_cache()
+
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
