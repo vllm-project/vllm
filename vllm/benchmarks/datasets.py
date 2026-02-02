@@ -1335,6 +1335,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "random-rerank",
             "hf",
             "custom",
+            "custom_mm",
             "prefix_repetition",
             "spec_bench",
         ],
@@ -1362,6 +1363,11 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--skip-chat-template",
         action="store_true",
         help="Skip applying chat template to prompt for datasets that support it.",
+    )
+    parser.add_argument(
+        "--enable-multimodal-chat",
+        action="store_true",
+        help="Enable multimodal chat transformation for datasets that support it.",
     )
     parser.add_argument(
         "--disable-shuffle",
@@ -1685,6 +1691,19 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             no_oversample=args.no_oversample,
         )
 
+    elif args.dataset_name == "custom_mm":
+        dataset = CustomMMDataset(
+            dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
+        )
+        input_requests = dataset.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            output_len=args.custom_output_len,
+            enable_multimodal_chat=args.enable_multimodal_chat,
+            request_id_prefix=args.request_id_prefix,
+            no_oversample=args.no_oversample,
+        )
+
     elif args.dataset_name == "sonnet":
         dataset = SonnetDataset(
             dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
@@ -1832,6 +1851,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.hf_output_len,
+            enable_multimodal_chat=args.enable_multimodal_chat,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
             skip_chat_template=args.skip_chat_template,
@@ -1849,6 +1869,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
                 output_len=args.spec_bench_output_len,
+                enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
             ),
@@ -1860,6 +1881,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 output_len=args.sharegpt_output_len,
+                enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
             ),
@@ -1903,6 +1925,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 limit_mm_per_prompt=args.random_mm_limit_mm_per_prompt,
                 num_mm_items_range_ratio=args.random_mm_num_mm_items_range_ratio,
                 bucket_config=args.random_mm_bucket_config,
+                enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
             ),
@@ -2065,6 +2088,85 @@ class CustomDataset(BenchmarkDataset):
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=new_output_len,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+
+        return sampled_requests
+
+
+class CustomMMDataset(CustomDataset):
+    """
+    Implements the Custom MultiModal dataset. Loads data from a JSONL file and generates
+    sample requests based on conversation turns. E.g.,
+    ```
+    {
+        "prompt": "How many red blocks in the given images?",
+        "image_files": ["path/to/image1.png", "path/to/image2.png"],
+    }
+    {
+        "prompt": "Which country has the most pokemons based on the given graphs?",
+        "image_files": ["path/to/image.png"],
+    }
+    ```
+
+    NOTE: Only the first image file in "image_files" is used for each sample request.
+
+    This is used to benchmark multimodal LLMs on arbitrary datasets.
+    """
+
+    IS_MULTIMODAL = True
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        **kwargs,
+    ) -> list:
+        # load all data if needed
+        self.num_available_samples = len(self.data)
+        if num_requests <= 0:
+            num_requests = self.num_available_samples
+            logger.info(
+                "num_requests is set to 0 or negative, "
+                "so using all available samples: %d",
+                num_requests,
+            )
+
+        sampled_requests = []
+        for i, item in enumerate(self.data):
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = item["prompt"]
+
+            prompt_len = len(tokenizer(prompt).input_ids)
+            images = item["image_files"]
+            if len(images) > 1:
+                logger.warning(
+                    "Multiple image files found for sample %d. "
+                    "Only the first image will be used.",
+                    i,
+                )
+            mm_content = process_image(images[0])
+            if enable_multimodal_chat:
+                # Note: when chat is enabled the request prompt_len is no longer
+                # accurate and we will be using request output to count the
+                # actual prompt len
+                prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
                     request_id=request_id_prefix + str(i),
                 )
             )
