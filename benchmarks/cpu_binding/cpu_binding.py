@@ -257,14 +257,14 @@ class CPU_Binding:
             self.allocated_cpu_per_numa = self.num_allocated_cpu // len(self.node_to_cpus)
             node_id = rank
 
-        print("binding numa node_id %d  allocated_cpu_per_numa %d", node_id, self.allocated_cpu_per_numa)
+        print(f"binding numa node_id {node_id}  allocated_cpu_per_numa {self.allocated_cpu_per_numa}")
 
         # PCT-first selection: take first N from ranked list
         ranked = self.node_to_cpus_ranked[node_id] if self.node_to_cpus_ranked else self.node_to_cpus[node_id]
         rank_to_cpus_list = ranked[:self.allocated_cpu_per_numa]
 
         rank_to_cpus = ','.join(str(x) for x in rank_to_cpus_list)
-        print("rank %d auto thread-binding list: %s", rank, rank_to_cpus)
+        print(f"rank {rank} auto thread-binding list: {rank_to_cpus}")
 
         # Remove allocated CPUs from idle pool
         self.node_to_idle_cpus[node_id] = [
