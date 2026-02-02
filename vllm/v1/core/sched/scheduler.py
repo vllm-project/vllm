@@ -31,10 +31,10 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsReader,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.budget import MultiModalBudget
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
-    compute_encoder_budget,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -174,22 +174,22 @@ class Scheduler(SchedulerInterface):
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
-        # NOTE: For now we use the same budget for both compute and space.
-        # This can be changed when we make encoder cache for embedding caching
-        # across requests.
-        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            mm_registry=mm_registry,
+        self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(
+            vllm_config.model_config
+        )
+        self.mm_budget = mm_budget = (
+            MultiModalBudget(vllm_config, mm_registry)
+            if self.supports_mm_inputs
+            else None
         )
 
-        # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
-        # projector if needed) for MM models as well as encoder-decoder
-        # transformers.
-        self.max_num_encoder_input_tokens = encoder_compute_budget
-        # NOTE: For the models without encoder (e.g., text-only models),
-        # the encoder cache will not be initialized because cache size is 0
-        # for these models.
+        # NOTE: Text-only encoder-decoder models are implemented as
+        # multi-modal models for convenience
+        # Example: https://github.com/neuralmagic/bart-plugin
+        self.max_num_encoder_input_tokens = (
+            mm_budget.encoder_compute_budget if mm_budget else 0
+        )
+        encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
         self.encoder_cache_manager = (
             EncoderDecoderCacheManager(cache_size=encoder_cache_size)
             if self.is_encoder_decoder
@@ -199,7 +199,9 @@ class Scheduler(SchedulerInterface):
         # Attn blocks, as for Whisper its input is always padded to the maximum length.
         # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
         self._num_encoder_max_input_tokens = (
-            MULTIMODAL_REGISTRY.get_encdec_max_encoder_len(vllm_config.model_config)
+            mm_budget.mm_max_toks_per_item[mm_budget.get_modality_with_max_tokens()]
+            if mm_budget
+            else 0
         )
 
         speculative_config = vllm_config.speculative_config

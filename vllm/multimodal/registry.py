@@ -130,15 +130,13 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return False
 
-        info = self._create_processing_info(model_config, tokenizer=None)
-        supported_modalities = info.get_supported_mm_limits()
-
         mm_config = model_config.get_multimodal_config()
+        info = self._create_processing_info(model_config, tokenizer=None)
 
         # Check if all supported modalities have limit == 0
         if all(
             mm_config.get_limit_per_prompt(modality) == 0
-            for modality in supported_modalities
+            for modality in info.supported_mm_limits
         ):
             logger.info_once(
                 "All limits of multimodal modalities supported by the model "
@@ -147,70 +145,6 @@ class MultiModalRegistry:
             return False
 
         return True
-
-    def get_max_tokens_per_item_by_modality(
-        self,
-        model_config: "ModelConfig",
-        *,
-        cache: BaseMultiModalProcessorCache | None = None,
-        profiler_limits: Mapping[str, int] | None = None,
-        observability_config: ObservabilityConfig | None = None,
-    ) -> Mapping[str, int]:
-        """
-        Get the maximum number of tokens per data item from each modality based
-        on underlying model configuration.
-        """
-        if not model_config.is_multimodal_model:
-            return {}
-
-        processor = self.create_processor(
-            model_config, observability_config, cache=cache
-        )
-
-        if profiler_limits is None:
-            profiler_limits = processor.info.allowed_mm_limits
-
-        mm_counts = {
-            modality: 1 for modality, limit in profiler_limits.items() if limit > 0
-        }
-
-        max_tokens_per_item = processor.info.get_mm_max_tokens_per_item(
-            seq_len=model_config.max_model_len,
-            mm_counts=mm_counts,
-        )
-        if max_tokens_per_item is not None:
-            return {
-                modality: max_tokens
-                for modality, max_tokens in max_tokens_per_item.items()
-                if mm_counts.get(modality, 0) > 0
-            }
-
-        mm_inputs = self.get_dummy_mm_inputs(
-            model_config,
-            mm_counts=mm_counts,
-            processor=processor,
-        )
-
-        return {
-            modality: sum(item.get_num_embeds for item in placeholders)
-            for modality, placeholders in mm_inputs["mm_placeholders"].items()
-        }
-
-    def get_mm_limits_per_prompt(
-        self,
-        model_config: "ModelConfig",
-        *,
-        observability_config: ObservabilityConfig | None = None,
-    ) -> Mapping[str, int]:
-        """
-        Get the maximum number of multi-modal input instances for each modality
-        that are allowed per prompt for a model class.
-        """
-        if not model_config.is_multimodal_model:
-            return {}
-
-        info = self._create_processing_info(model_config, observability_config)
-        return info.allowed_mm_limits
 
     def register_processor(
         self,
@@ -303,10 +237,9 @@ class MultiModalRegistry:
     def get_dummy_mm_inputs(
         self,
         model_config: "ModelConfig",
-        mm_counts: Mapping[str, int] | None = None,
+        mm_counts: Mapping[str, int],
         *,
         cache: BaseMultiModalProcessorCache | None = None,
-        observability_config: ObservabilityConfig | None = None,
         processor: BaseMultiModalProcessor | None = None,
     ) -> MultiModalInputs:
         """
@@ -317,11 +250,7 @@ class MultiModalRegistry:
         seq_len = model_config.max_model_len
 
         if processor is None:
-            processor = self.create_processor(
-                model_config, observability_config, cache=cache
-            )
-        if mm_counts is None:
-            mm_counts = processor.info.allowed_mm_limits
+            processor = self.create_processor(model_config, cache=cache)
 
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=seq_len,
@@ -341,26 +270,6 @@ class MultiModalRegistry:
             prompt_token_ids.extend([0] * (seq_len - total_len))
 
         return mm_inputs
-
-    def get_encdec_max_encoder_len(self, model_config: "ModelConfig") -> int:
-        """
-        Get the maximum length of the encoder input for encoder-decoder models.
-        """
-        if not model_config.is_encoder_decoder:
-            return 0
-        max_tokens = self.get_max_tokens_per_item_by_modality(model_config)
-        if not max_tokens:
-            # TODO - this function assumes encoder-decoder models are
-            # multimodal. This will need to change when adding support for more
-            # than whisper.
-            return 0
-        assert len(max_tokens) == 1, (
-            "Encoder-decoder models are expected "
-            "to implement the multimodal interface with at most one modality."
-        )
-
-        first_modality = next(iter(max_tokens))
-        return max_tokens[first_modality]
 
     def _get_cache_type(
         self,
