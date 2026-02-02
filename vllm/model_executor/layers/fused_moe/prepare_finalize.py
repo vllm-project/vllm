@@ -169,6 +169,7 @@ class MoEPrepareAndFinalizeNaiveEP(
 
         if scales is None:
             a1q, topk_weights, topk_ids = res
+            a1q_scale = None
         else:
             a1q, topk_weights, topk_ids, scales = res
             a1q_scale = self._unwrap_scale_and_prepare_for_moe(scales, quant_config)

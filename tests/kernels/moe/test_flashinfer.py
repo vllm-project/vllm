@@ -233,6 +233,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=True,
+            routed_scaling_factor=1.0,
         )
 
         torch.testing.assert_close(output, flashinfer_output, atol=5.5e-2, rtol=1e-2)

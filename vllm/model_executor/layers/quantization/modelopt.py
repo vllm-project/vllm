@@ -1438,7 +1438,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert isinstance(self.moe_kernel, mk.FusedMoEKernelMonolithic)
-        return self.moe_kernel.forward_monolithic(
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
