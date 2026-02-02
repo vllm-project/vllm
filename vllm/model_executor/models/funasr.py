@@ -379,7 +379,9 @@ class SenseVoiceEncoderSmall(nn.Module):
     ):
         """Embed positions in tensor."""
         maxlen = xs_pad.shape[1]
-        masks = sequence_mask(ilens, maxlen=maxlen, device=ilens.device)[:, None, :]
+        masks = sequence_mask(
+            ilens, maxlen=maxlen, dtype=ilens.dtype, device=ilens.device
+        )[:, None, :]
 
         xs_pad *= self.output_size() ** 0.5
 
