@@ -947,6 +947,7 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 
 
 def _get_kv_cache_groups_uniform_page_size(
+    vllm_config: VllmConfig,
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec]:
     """
@@ -1050,19 +1051,28 @@ def _get_kv_cache_groups_uniform_page_size(
                 num_padding_layers / len(layers) * 100,
             )
         num_groups = cdiv(len(layers), group_size)
-        # In PP case, say if we have
-        # - stage 0: full.0, sw.0, sw.1
-        # - stage 1: full.1, sw.2, sw.3
-        # We should have 3 groups: (full.0, full.1), (sw.0, sw.2), (sw.1, sw.3)
-        # It can't be (full.0, full.1), (sw.0, sw.1), (sw.2, sw.3) because
-        # the 3 groups in stage 0 will be (full.0), (sw.0, sw.1), (empty group)
-        # and it will be padded to (full.0, padding), (sw.0, sw.1),
-        # (padding, padding) to ensure the number of layers in each group is
-        # the same and will cause memory waste.
-        # To avoid this, we assign layers[i::num_groups] to the i-th group
-        # instead of layers[i * group_size: (i + 1) * group_size]
-        for i in range(num_groups):
-            grouped_layers.append(layers[i::num_groups])
+        # for support multi layer mtp, we need to
+        # make all mtp layers in the same group
+        if (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.enable_multi_layers_mtp
+        ):
+            for i in range(0, len(layers), group_size):
+                grouped_layers.append(layers[i : i + group_size])
+        else:
+            # In PP case, say if we have
+            # - stage 0: full.0, sw.0, sw.1
+            # - stage 1: full.1, sw.2, sw.3
+            # We should have 3 groups: (full.0, full.1), (sw.0, sw.2), (sw.1, sw.3)
+            # It can't be (full.0, full.1), (sw.0, sw.1), (sw.2, sw.3) because
+            # the 3 groups in stage 0 will be (full.0), (sw.0, sw.1), (empty group)
+            # and it will be padded to (full.0, padding), (sw.0, sw.1),
+            # (padding, padding) to ensure the number of layers in each group is
+            # the same and will cause memory waste.
+            # To avoid this, we assign layers[i::num_groups] to the i-th group
+            # instead of layers[i * group_size: (i + 1) * group_size]
+            for i in range(num_groups):
+                grouped_layers.append(layers[i::num_groups])
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 
@@ -1247,7 +1257,9 @@ def get_kv_cache_groups(
     # have the same physical memory per block per layer. Split the layers
     # into groups with the same number of layers, and thus same total page
     # size.
-    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+    return _get_kv_cache_groups_uniform_page_size(
+        vllm_config=vllm_config, kv_cache_spec=kv_cache_spec
+    )
 
 
 def generate_scheduler_kv_cache_config(

@@ -155,6 +155,7 @@ from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.multi_layer_eagle import MultiLayerEagleProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
@@ -463,7 +464,15 @@ class GPUModelRunner(
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
-                self.drafter = EagleProposer(self.vllm_config, self.device, self)
+                if (
+                    self.speculative_config.enable_multi_layers_mtp
+                    and self.speculative_config.method == "mtp"
+                ):
+                    self.drafter = MultiLayerEagleProposer(
+                        self.vllm_config, self.device, self
+                    )
+                else:
+                    self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state
@@ -884,6 +893,10 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            if hasattr(self, "drafter") and isinstance(
+                self.drafter, MultiLayerEagleProposer
+            ):
+                self.drafter.clean_req_cache(req_id)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -4077,6 +4090,9 @@ class GPUModelRunner(
                 )
             else:
                 mm_embed_inputs = None
+
+            if isinstance(self.drafter, MultiLayerEagleProposer):
+                self.drafter.set_running_req_ids(self.input_batch.req_ids)
 
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
