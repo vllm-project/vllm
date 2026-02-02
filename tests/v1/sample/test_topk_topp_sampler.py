@@ -186,21 +186,21 @@ class TestTritonTopkTopp:
                     f"(max diff {max_diff} values out of {max_kept})"
                 )
 
-    # @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
-    # @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
-    # def test_topk_only(self, batch_size: int, vocab_size: int):
-    #     """Test top-k only (p=None)."""
-    #     logits = torch.randn(
-    #         batch_size, vocab_size, generator=self.generator, dtype=torch.float32
-    #     )
-    #     k = torch.randint(
-    #         1, min(100, vocab_size), (batch_size,), generator=self.generator
-    #     )
-    #     # Randomly disable top-k for some rows (~25%)
-    #     disable_mask = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
-    #     k.masked_fill_(disable_mask, vocab_size)
+    @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
+    @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
+    def test_topk_only(self, batch_size: int, vocab_size: int):
+        """Test top-k only (p=None)."""
+        logits = torch.randn(
+            batch_size, vocab_size, generator=self.generator, dtype=torch.float32
+        )
+        k = torch.randint(
+            1, min(100, vocab_size), (batch_size,), generator=self.generator
+        )
+        # Randomly disable top-k for some rows (~25%)
+        disable_mask = torch.randint(0, 4, (batch_size,), generator=self.generator) == 0
+        k.masked_fill_(disable_mask, vocab_size)
 
-    #     self._compare_results(logits, k, p=None)
+        self._compare_results(logits, k, p=None)
 
     # @pytest.mark.parametrize("batch_size", [1, 8, 32, 128, 512, 1024])
     # @pytest.mark.parametrize("vocab_size", [1024, 32000, 128256])
