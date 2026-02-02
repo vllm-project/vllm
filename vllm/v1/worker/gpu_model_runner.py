@@ -3921,27 +3921,50 @@ class GPUModelRunner(
             or self.input_batch.sampling_metadata.output_token_ids
         ):
             return
-        # We must also set the corresponding request ids.
-        self._draft_token_req_ids = self.input_batch.req_ids.copy()
-
+        
         draft_token_ids: torch.Tensor = self._draft_token_ids
         if not torch.is_tensor(draft_token_ids):
+            # Early exit if draft tokens are not tensors (ngram/suffix methods)
+            self._draft_token_req_ids = None
             return
+        
+        # Set request IDs after tensor check to avoid unnecessary copy
+        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+        
         assert self.draft_token_ids_event is not None
         assert self.draft_token_ids_copy_stream is not None
         assert self.draft_token_ids_cpu is not None
+        
+        num_reqs, num_draft_tokens = draft_token_ids.shape
+        
+        # Optimize: Only resize when shape changes (amortized cost)
+        cpu_buf_shape = self.draft_token_ids_cpu.shape
+        if cpu_buf_shape[1] != num_draft_tokens:
+            logger.debug(
+                "Resizing draft_token_ids_cpu from %s to (%d, %d)",
+                cpu_buf_shape,
+                cpu_buf_shape[0],
+                num_draft_tokens,
+            )
+            self.draft_token_ids_cpu = torch.empty(
+                (cpu_buf_shape[0], num_draft_tokens),
+                dtype=self.draft_token_ids_cpu.dtype,
+                device="cpu",
+                pin_memory=self.pin_memory,
+            )
+        
+        # Slice to exact dimensions (avoids over-copying)
+        cpu_view = self.draft_token_ids_cpu[:num_reqs]
+        
         default_stream = torch.cuda.current_stream()
-        num_reqs = draft_token_ids.shape[0]
         with torch.cuda.stream(self.draft_token_ids_copy_stream):
             if not zeros_only:
-                # Trigger async copy of draft token ids to cpu.
+                # Async copy: wait for GPU work to complete, then copy
                 self.draft_token_ids_copy_stream.wait_stream(default_stream)
-                self.draft_token_ids_cpu[:num_reqs].copy_(
-                    draft_token_ids, non_blocking=True
-                )
+                cpu_view.copy_(draft_token_ids, non_blocking=True)
             else:
-                # No copy needed, just zero-out cpu tensor.
-                self.draft_token_ids_cpu[:num_reqs] = 0
+                # Zero without GPU sync (faster than assignment)
+                cpu_view.zero_()
             self.draft_token_ids_event.record()
 
     def _get_draft_token_ids_cpu(self) -> tuple[list[list[int]], list[str]]:
