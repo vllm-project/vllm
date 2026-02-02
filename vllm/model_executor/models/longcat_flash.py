@@ -893,59 +893,28 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         loaded_params: set[str] = set()
 
         params_dict = dict(self.named_parameters())
-
-        def _insert_mla_attn(name: str) -> str | None:
-            token = ".self_attn."
-            if token not in name:
-                return None
-            prefix, rest = name.split(token, 1)
-            parts = rest.split(".", 1)
-            if len(parts) != 2:
-                return None
-            idx, tail = parts
-            return f"{prefix}{token}{idx}.mla_attn.{tail}"
-
-        def _resolve_param_name(name: str) -> str | None:
-            if name in params_dict:
-                return name
-            if ".self_attn." in name and ".mla_attn." not in name:
-                alt = _insert_mla_attn(name)
-                if alt is not None and alt in params_dict:
-                    return alt
-            if ".mla_attn." in name:
-                alt = name.replace(".mla_attn.", ".")
-                if alt in params_dict:
-                    return alt
-            if ".mlp.gate." in name:
-                alt = name.replace(".mlp.gate.", ".mlp.router.")
-                if alt in params_dict:
-                    return alt
-            return None
-
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
-                mapped_name = _resolve_param_name(name)
-                if mapped_name is None:
+                if "mlp" in name and "mlps" not in name:
                     continue
+                name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if (
-                    mapped_name.endswith(".bias") or mapped_name.endswith("_bias")
-                ) and mapped_name not in params_dict:
+                    name.endswith(".bias") or name.endswith("_bias")
+                ) and name not in params_dict:
                     continue
                 # Skip mtp
-                if ".mtp." in mapped_name:
+                if ".mtp." in name:
                     continue
-                if is_pp_missing_parameter(mapped_name, self):
+                if is_pp_missing_parameter(name, self):
                     continue
-                param = params_dict[mapped_name]
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                name = mapped_name
                 break
             else:
                 is_expert_weight = False
@@ -955,19 +924,16 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                         continue
                     is_expert_weight = True
                     name_mapped = name.replace(weight_name, param_name)
-                    mapped_name = _resolve_param_name(name_mapped)
-                    if mapped_name is None:
-                        continue
                     # Skip mtp
-                    if ".mtp." in mapped_name:
+                    if ".mtp." in name_mapped:
                         continue
                     if (
-                        mapped_name.endswith(".bias") or mapped_name.endswith("_bias")
-                    ) and mapped_name not in params_dict:
+                        name_mapped.endswith(".bias") or name_mapped.endswith("_bias")
+                    ) and name not in params_dict:
                         continue
-                    if is_pp_missing_parameter(mapped_name, self):
+                    if is_pp_missing_parameter(name, self):
                         continue
-                    param = params_dict[mapped_name]
+                    param = params_dict[name_mapped]
                     weight_loader = param.weight_loader
                     weight_loader = typing.cast(
                         Callable[..., bool], param.weight_loader
@@ -975,13 +941,13 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     success = weight_loader(
                         param,
                         loaded_weight,
-                        mapped_name,
+                        name_mapped,
                         shard_id=shard_id,
                         expert_id=expert_id,
                         return_success=True,
                     )
                     if success:
-                        name = mapped_name
+                        name = name_mapped
                         break
                 else:
                     if is_expert_weight:
@@ -989,31 +955,24 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                         # However it's not mapped locally to this rank
                         # So we simply skip it
                         continue
-                    mapped_name = _resolve_param_name(name)
-                    if mapped_name is None:
-                        continue
                     # Skip loading extra bias for GPTQ models.
-                    if mapped_name.endswith(".bias") and mapped_name not in params_dict:
+                    if name.endswith(".bias") and name not in params_dict:
                         continue
                     # Skip loading kv_scale from ckpts towards new design.
-                    if (
-                        mapped_name.endswith(".kv_scale")
-                        and mapped_name not in params_dict
-                    ):
+                    if name.endswith(".kv_scale") and name not in params_dict:
                         continue
                     # Skip mtp
-                    if ".mtp." in mapped_name:
+                    if ".mtp." in name:
                         continue
-                    if mapped_name is None:
+                    if name is None:
                         continue
-                    if is_pp_missing_parameter(mapped_name, self):
+                    if is_pp_missing_parameter(name, self):
                         continue
-                    param = params_dict[mapped_name]
+                    param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-                    name = mapped_name
             loaded_params.add(name)
         for layer_id in range(self.config.num_hidden_layers):
             for i in range(2):
