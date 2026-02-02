@@ -249,7 +249,7 @@ def _remap_mistral_audio_args(config: dict) -> dict:
             block_pool_size=block_pool_size,
             pos_embed=encoder_args.get("pos_embed", "sinusoidal"),
             global_log_mel_max=encoder_args["audio_encoding_args"].get(
-                "global_log_mel_norm"
+                "global_log_mel_max"
             ),
             # only needed for RoPE
             max_position_embeddings=block_pool_size * config["max_position_embeddings"],

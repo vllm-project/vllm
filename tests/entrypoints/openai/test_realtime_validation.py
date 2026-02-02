@@ -74,7 +74,7 @@ def mary_had_lamb_audio_chunks() -> list[str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Voxtral streaming is not yet public")
+# @pytest.mark.skip(reason="Voxtral streaming is not yet public")
 async def test_multi_chunk_streaming(
     model_name, mary_had_lamb_audio_chunks, rocm_aiter_fa_attention
 ):
@@ -126,8 +126,8 @@ async def test_multi_chunk_streaming(
             assert event["type"] == "transcription.done"
             assert event["text"] == full_text
             assert full_text == (
-                " He has first words I spoke in the original phonograph."
+                " First words I spoke in the original phonograph."
                 " A little piece of practical poetry. Mary had a little lamb,"
-                " it squeaked with quite a flow, and everywhere that Mary went,"
+                " it sleeps with quite a flow, and everywhere that Mary went,"
                 " the lamb was sure to go"
             )
