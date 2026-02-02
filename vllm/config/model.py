@@ -1398,6 +1398,14 @@ class ModelConfig:
         return uses_xdrope_dim(self.hf_config)
 
     @property
+    def uses_ngram_embedding(self) -> bool:
+        return self.model_arch_config.uses_ngram_embedding
+
+    @property
+    def ngram_context_len(self) -> int:
+        return self.model_arch_config.ngram_context_len
+
+    @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
 

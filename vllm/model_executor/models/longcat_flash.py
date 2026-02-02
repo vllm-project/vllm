@@ -41,7 +41,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import ignore_torch_compile, support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
@@ -187,6 +187,167 @@ class FlashConfig(PretrainedConfig):
             self.moe_intermediate_size = self.expert_ffn_hidden_size
         else:
             self.moe_intermediate_size = self.intermediate_size
+
+
+class NgramEmbedding(nn.Module):
+    """N-gram enhanced embeddings."""
+
+    def __init__(
+        self,
+        config: FlashConfig,
+        base_embeddings: VocabParallelEmbedding,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.word_embeddings = base_embeddings
+
+        if config.emb_neighbor_num is None or config.emb_split_num is None:
+            raise ValueError("N-gram embedding config is missing.")
+        if config.ngram_vocab_size_ratio is None:
+            raise ValueError("ngram_vocab_size_ratio is missing in config.")
+
+        self.n = int(config.emb_neighbor_num)
+        self.k = int(config.emb_split_num)
+        self.context_len = self.n - 1
+        if self.context_len <= 0:
+            raise ValueError("emb_neighbor_num must be >= 2 for N-gram embedding.")
+
+        self.m = config.ngram_vocab_size_ratio * config.vocab_size
+        self._vocab_mods_cache: dict[tuple[int, int], list[int]] | None = None
+
+        self._init_ngram_embeddings(prefix)
+
+    def _init_ngram_embeddings(self, prefix: str) -> None:
+        num_embedders = self.k * (self.n - 1)
+        emb_dim = self.config.hidden_size // num_embedders
+        if emb_dim * num_embedders != self.config.hidden_size:
+            raise ValueError("hidden_size must be divisible by k*(n-1).")
+
+        embedders = []
+        post_projs = []
+        for i in range(num_embedders):
+            vocab_size = int(self.m + i * 2 + 1)
+            embedders.append(
+                VocabParallelEmbedding(
+                    vocab_size,
+                    emb_dim,
+                    prefix=maybe_prefix(prefix, f"embedders.{i}"),
+                )
+            )
+            post_projs.append(
+                ReplicatedLinear(
+                    emb_dim,
+                    self.config.hidden_size,
+                    bias=False,
+                    prefix=maybe_prefix(prefix, f"post_projs.{i}"),
+                )
+            )
+
+        self.embedders = nn.ModuleList(embedders)
+        self.post_projs = nn.ModuleList(post_projs)
+
+    def _shift_right_ignore_eos(
+        self, tensor: torch.Tensor, n: int, eos_token_id: int
+    ) -> torch.Tensor:
+        """Shift tensor right by n positions, resetting at EOS tokens."""
+        batch_size, seq_len = tensor.shape
+        result = torch.zeros_like(tensor)
+        eos_mask = tensor == eos_token_id
+
+        for i in range(batch_size):
+            eos_positions = eos_mask[i].nonzero(as_tuple=True)[0]
+            prev_idx = 0
+            boundaries = torch.cat(
+                [eos_positions + 1, eos_positions.new_tensor([seq_len])]
+            )
+            for end_idx in boundaries:
+                end = int(end_idx)
+                if end - prev_idx > n:
+                    result[i, prev_idx + n : end] = tensor[i, prev_idx : end - n]
+                prev_idx = end
+
+        return result
+
+    def _precompute_vocab_mods(self) -> dict[tuple[int, int], list[int]]:
+        if self._vocab_mods_cache is not None:
+            return self._vocab_mods_cache
+
+        vocab_mods: dict[tuple[int, int], list[int]] = {}
+        vocab_size = int(self.config.vocab_size)
+
+        for i in range(2, self.n + 1):
+            for j in range(self.k):
+                index = (i - 2) * self.k + j
+                emb_vocab_dim = int(self.m + index * 2 + 1)
+
+                mods = [pow(vocab_size, p, emb_vocab_dim) for p in range(1, i)]
+
+                vocab_mods[(i, j)] = mods
+
+        self._vocab_mods_cache = vocab_mods
+        return vocab_mods
+
+    def _get_ngram_ids(
+        self,
+        input_ids: torch.Tensor,
+        shifted_ids: dict[int, torch.Tensor],
+        vocab_mods: list[int],
+        ngram: int,
+    ) -> torch.Tensor:
+        ngram_ids = input_ids.clone()
+        for k in range(2, ngram + 1):
+            ngram_ids = ngram_ids + shifted_ids[k] * vocab_mods[k - 2]
+        return ngram_ids
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        ngram_context: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if input_ids.dim() != 2:
+            raise ValueError("input_ids must be a 2D tensor.")
+
+        batch_size, seq_len = input_ids.shape
+        eos_token_id = int(self.config.eos_token_id)
+
+        x = self.word_embeddings(input_ids)
+
+        if ngram_context is None:
+            ngram_context = input_ids.new_full(
+                (batch_size, self.context_len), eos_token_id
+            )
+        elif ngram_context.shape != (batch_size, self.context_len):
+            raise ValueError("ngram_context shape mismatch.")
+
+        context = torch.cat([ngram_context, input_ids], dim=-1).to(torch.int64)
+        vocab_mods = self._precompute_vocab_mods()
+
+        ngram_range = range(2, self.n + 1)
+        shifted_ids = {
+            i: self._shift_right_ignore_eos(context, i - 1, eos_token_id)
+            for i in ngram_range
+        }
+
+        for i in ngram_range:
+            base = (i - 2) * self.k
+            for j in range(self.k):
+                index = base + j
+                emb_vocab_dim = int(self.m + index * 2 + 1)
+
+                ngram_ids = self._get_ngram_ids(
+                    context, shifted_ids, vocab_mods[(i, j)], ngram=i
+                )
+                new_ids = (ngram_ids % emb_vocab_dim)[..., -seq_len:].to(
+                    input_ids.dtype
+                )
+
+                x_ngram = self.embedders[index](new_ids)
+                x_proj, _ = self.post_projs[index](x_ngram)
+                x = x + x_proj
+
+        x = x / (1 + self.k * (self.n - 1))
+        return x
 
 
 class FlashMLP(nn.Module):
@@ -552,6 +713,91 @@ class FlashModel(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
+class FlashNgramModel(FlashModel):
+    """Flash model with N-gram enhanced embeddings."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        if get_pp_group().is_first_rank:
+            self.ngram_embeddings = NgramEmbedding(
+                self.config,
+                self.embed_tokens,
+                prefix=maybe_prefix(prefix, "ngram_embeddings"),
+            )
+        else:
+            self.ngram_embeddings = PPMissingLayer()
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if input_ids.numel() == 0:
+            return input_ids.new_empty((0, self.config.hidden_size))
+
+        query_start_loc = query_start_loc.to(torch.int64)
+        num_reqs = query_start_loc.numel() - 1
+        lengths = query_start_loc[1:] - query_start_loc[:-1]
+        max_len = int(lengths.max().item())
+        eos_token_id = int(self.config.eos_token_id)
+
+        padded_input_ids = input_ids.new_full((num_reqs, max_len), eos_token_id)
+
+        token_positions = torch.arange(input_ids.shape[0], device=input_ids.device)
+        req_indices = torch.searchsorted(
+            query_start_loc[1:], token_positions, right=True
+        )
+        col_indices = token_positions - query_start_loc[req_indices]
+        padded_input_ids[req_indices, col_indices] = input_ids
+
+        embeds = self.ngram_embeddings(padded_input_ids, ngram_context=ngram_context)
+        return embeds[req_indices, col_indices]
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+        ngram_context: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                if query_start_loc is None:
+                    raise ValueError("query_start_loc is required for N-gram input.")
+                hidden_states = self.embed_input_ids(
+                    input_ids,
+                    query_start_loc=query_start_loc,
+                    ngram_context=ngram_context,
+                )
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+            )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+
 class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     """Flash model for causal language modeling."""
 
@@ -765,3 +1011,71 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                         self.config.hidden_size / self.config.kv_lora_rank
                     ) ** 0.5
         return loaded_params
+
+
+@ignore_torch_compile
+class LongcatFlashNgramForCausalLM(LongcatFlashForCausalLM):
+    """Flash model for causal LM with N-gram embeddings."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        nn.Module.__init__(self)
+        config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
+        quant_config = vllm_config.quant_config
+
+        self.config = config
+        config.intermediate_size = (
+            config.ffn_hidden_size
+            if hasattr(config, "ffn_hidden_size")
+            else config.intermediate_size
+        )
+        self.quant_config = quant_config
+
+        self.model = FlashNgramModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+        else:
+            self.lm_head = PPMissingLayer()
+
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        *,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.model.embed_input_ids(
+            input_ids,
+            query_start_loc=query_start_loc,
+            ngram_context=ngram_context,
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        query_start_loc: torch.Tensor | None = None,
+        ngram_context: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        return self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            query_start_loc=query_start_loc,
+            ngram_context=ngram_context,
+        )
