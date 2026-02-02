@@ -20,15 +20,19 @@ class FlashinferMoeBackend(Enum):
 
 def is_gated_activation(activation: str) -> bool:
     NON_GATED_ACTIVATION_NAMES = {"relu2_no_mul"}
-    return activation not in NON_GATED_ACTIVATION_NAMES
+    return activation.lower() not in NON_GATED_ACTIVATION_NAMES
 
 
 def activation_str_to_enum_value(activation: str) -> int:
+    from vllm.utils.flashinfer import FlashinferActivationType
+
+    # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
-        "silu": 2,  # FlashInfer ActivationType.SiLU
-        "relu2_no_mul": 6,  # FlashInfer ActivationType.ReLU2NoMul
+        "silu": FlashinferActivationType.Swiglu,
+        "gelu": FlashinferActivationType.Geglu,
+        "relu2_no_mul": FlashinferActivationType.Relu2,
     }
-    return ACTIVATION_TO_FI_ACTIVATION[activation]
+    return ACTIVATION_TO_FI_ACTIVATION[activation.lower()]
 
 
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
@@ -146,6 +150,7 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
         assert layer.custom_routing_function is None, (
             "Custom routing function is only supported for Llama4"
         )
+
     activation_type = activation_str_to_enum_value(layer.activation)
 
     return torch.ops.vllm.fi_trtllm_fp8_per_tensor_moe(

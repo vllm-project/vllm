@@ -328,8 +328,10 @@ def flashinfer_trtllm_fp4_moe(
         else router_logits
     )
 
-    # Call TRT-LLM FP4 block-scale MoE kernel
+    # Determine activation type
     activation_type = activation_str_to_enum_value(layer.activation)
+
+    # Call TRT-LLM FP4 block-scale MoE kernel
     out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
         routing_logits=router_logits,
         routing_bias=routing_bias,
