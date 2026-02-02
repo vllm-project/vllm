@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Sparse tensor validation in embedding APIs.
-
 Tests verify that malicious sparse tensors are rejected before they can trigger
 out-of-bounds memory writes during to_dense() operations.
 """
@@ -13,8 +11,24 @@ import io
 import pytest
 import torch
 
-from vllm.entrypoints.renderer import CompletionRenderer
 from vllm.multimodal.media import AudioEmbeddingMediaIO, ImageEmbeddingMediaIO
+from vllm.renderers.embed_utils import safe_load_prompt_embeds
+
+
+@pytest.fixture
+def model_config():
+    """Mock ModelConfig for testing."""
+    from vllm.config import ModelConfig
+
+    return ModelConfig(
+        model="facebook/opt-125m",
+        tokenizer="facebook/opt-125m",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        dtype="float32",
+        seed=0,
+        enable_prompt_embeds=True,  # Required for prompt embeds tests
+    )
 
 
 def _encode_tensor(tensor: torch.Tensor) -> bytes:
@@ -63,15 +77,12 @@ class TestPromptEmbedsValidation:
 
     def test_valid_dense_tensor_accepted(self, model_config):
         """Baseline: Valid dense tensors should work normally."""
-        renderer = CompletionRenderer(model_config)
-
         valid_tensor = _create_valid_dense_tensor()
         encoded = _encode_tensor(valid_tensor)
 
         # Should not raise any exception
-        result = renderer.load_prompt_embeds(encoded)
-        assert len(result) == 1
-        assert result[0]["prompt_embeds"].shape == valid_tensor.shape
+        result = safe_load_prompt_embeds(model_config, encoded)
+        assert result.shape == valid_tensor.shape
 
     def test_valid_sparse_tensor_accepted(self):
         """Baseline: Valid sparse tensors should load successfully."""
@@ -86,14 +97,12 @@ class TestPromptEmbedsValidation:
 
     def test_malicious_sparse_tensor_rejected(self, model_config):
         """Security: Malicious sparse tensors should be rejected."""
-        renderer = CompletionRenderer(model_config)
-
         malicious_tensor = _create_malicious_sparse_tensor()
         encoded = _encode_tensor(malicious_tensor)
 
         # Should raise RuntimeError due to invalid sparse tensor
         with pytest.raises((RuntimeError, ValueError)) as exc_info:
-            renderer.load_prompt_embeds(encoded)
+            safe_load_prompt_embeds(model_config, encoded)
 
         # Error should indicate sparse tensor validation failure
         error_msg = str(exc_info.value).lower()
@@ -101,8 +110,6 @@ class TestPromptEmbedsValidation:
 
     def test_extremely_large_indices_rejected(self, model_config):
         """Security: Sparse tensors with extremely large indices should be rejected."""
-        renderer = CompletionRenderer(model_config)
-
         # Create tensor with indices far beyond reasonable bounds
         indices = torch.tensor([[999999], [999999]])
         values = torch.tensor([1.0])
@@ -114,12 +121,10 @@ class TestPromptEmbedsValidation:
         encoded = _encode_tensor(malicious_tensor)
 
         with pytest.raises((RuntimeError, ValueError)):
-            renderer.load_prompt_embeds(encoded)
+            safe_load_prompt_embeds(model_config, encoded)
 
     def test_negative_indices_rejected(self, model_config):
         """Security: Sparse tensors with negative indices should be rejected."""
-        renderer = CompletionRenderer(model_config)
-
         # Create tensor with negative indices
         indices = torch.tensor([[-1], [-1]])
         values = torch.tensor([1.0])
@@ -131,7 +136,7 @@ class TestPromptEmbedsValidation:
         encoded = _encode_tensor(malicious_tensor)
 
         with pytest.raises((RuntimeError, ValueError)):
-            renderer.load_prompt_embeds(encoded)
+            safe_load_prompt_embeds(model_config, encoded)
 
 
 class TestImageEmbedsValidation:
@@ -253,14 +258,12 @@ class TestSparseTensorValidationIntegration:
         3. Sends to /v1/completions with prompt_embeds parameter
         4. Server should reject before memory corruption occurs
         """
-        renderer = CompletionRenderer(model_config)
-
         # Step 1-2: Attacker creates malicious payload
         attack_payload = _encode_tensor(_create_malicious_sparse_tensor())
 
         # Step 3-4: Server processes and should reject
         with pytest.raises((RuntimeError, ValueError)):
-            renderer.load_prompt_embeds(attack_payload)
+            safe_load_prompt_embeds(model_config, attack_payload)
 
     def test_attack_scenario_chat_api_image(self):
         """
@@ -285,57 +288,3 @@ class TestSparseTensorValidationIntegration:
 
         with pytest.raises((RuntimeError, ValueError)):
             io_handler.load_base64("", attack_payload.decode("utf-8"))
-
-    def test_multiple_valid_embeddings_in_batch(self, model_config):
-        """
-        Regression test: Multiple valid embeddings should still work.
-
-        Ensures the fix doesn't break legitimate batch processing.
-        """
-        renderer = CompletionRenderer(model_config)
-
-        valid_tensors = [
-            _encode_tensor(_create_valid_dense_tensor()),
-            _encode_tensor(_create_valid_dense_tensor()),
-            _encode_tensor(_create_valid_dense_tensor()),
-        ]
-
-        # Should process all without error
-        result = renderer.load_prompt_embeds(valid_tensors)
-        assert len(result) == 3
-
-    def test_mixed_valid_and_malicious_rejected(self, model_config):
-        """
-        Security: Batch with one malicious tensor should be rejected.
-
-        Even if most tensors are valid, a single malicious one should
-        cause rejection of the entire batch.
-        """
-        renderer = CompletionRenderer(model_config)
-
-        mixed_batch = [
-            _encode_tensor(_create_valid_dense_tensor()),
-            _encode_tensor(_create_malicious_sparse_tensor()),  # Malicious
-            _encode_tensor(_create_valid_dense_tensor()),
-        ]
-
-        # Should fail on the malicious tensor
-        with pytest.raises((RuntimeError, ValueError)):
-            renderer.load_prompt_embeds(mixed_batch)
-
-
-# Pytest fixtures
-@pytest.fixture
-def model_config():
-    """Mock ModelConfig for testing."""
-    from vllm.config import ModelConfig
-
-    return ModelConfig(
-        model="facebook/opt-125m",
-        tokenizer="facebook/opt-125m",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        dtype="float32",
-        seed=0,
-        enable_prompt_embeds=True,  # Required for prompt embeds tests
-    )
