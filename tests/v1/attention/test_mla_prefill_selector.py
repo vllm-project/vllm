@@ -11,6 +11,7 @@ from vllm.config import AttentionConfig, ModelConfig, VllmConfig
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.mla.prefill.selector import (
+    MLAPrefillSelectorConfig,
     _auto_select_mla_prefill_backend,
     _get_mla_prefill_backend_priorities,
     get_mla_prefill_backend,
@@ -147,9 +148,7 @@ class TestGetMLAPrefillBackend:
         """Test fallback to FlashAttention when device capability is unavailable."""
         vllm_config = _make_vllm_config()
 
-        with patch(
-            "vllm.v1.attention.backends.mla.prefill.selector.current_platform"
-        ) as mock_platform:
+        with patch("vllm.platforms.current_platform") as mock_platform:
             mock_platform.get_device_capability.return_value = None
 
             backend = get_mla_prefill_backend(vllm_config)
@@ -166,9 +165,7 @@ class TestGetMLAPrefillBackend:
             mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
         )
 
-        with patch(
-            "vllm.v1.attention.backends.mla.prefill.selector.current_platform"
-        ) as mock_platform:
+        with patch("vllm.platforms.current_platform") as mock_platform:
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
@@ -193,9 +190,7 @@ class TestGetMLAPrefillBackend:
             mla_prefill_backend=MLAPrefillBackendEnum.FLASHINFER,
         )
 
-        with patch(
-            "vllm.v1.attention.backends.mla.prefill.selector.current_platform"
-        ) as mock_platform:
+        with patch("vllm.platforms.current_platform") as mock_platform:
             # Hopper doesn't support FlashInfer prefill
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
@@ -220,9 +215,7 @@ class TestGetMLAPrefillBackend:
 
         vllm_config = _make_vllm_config()
 
-        with patch(
-            "vllm.v1.attention.backends.mla.prefill.selector.current_platform"
-        ) as mock_platform:
+        with patch("vllm.platforms.current_platform") as mock_platform:
             mock_platform.get_device_capability.return_value = DeviceCapability(
                 major=9, minor=0
             )
@@ -243,6 +236,10 @@ class TestAutoSelectMLAPrefillBackend:
         """Test that Blackwell selects the first valid backend from priorities."""
         vllm_config = _make_vllm_config()
         capability = DeviceCapability(major=10, minor=0)
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+        )
 
         try:
             trtllm_cls = MLAPrefillBackendEnum.TRTLLM_RAGGED.get_class()
@@ -256,9 +253,9 @@ class TestAutoSelectMLAPrefillBackend:
             return_value=[],
         ):
             backend = _auto_select_mla_prefill_backend(
-                device_capability=capability,
-                dtype=torch.bfloat16,
-                vllm_config=vllm_config,
+                capability.major,
+                capability.minor,
+                selector_config,
             )
             assert backend.get_name() == "TRTLLM_RAGGED_PREFILL"
 
@@ -266,6 +263,10 @@ class TestAutoSelectMLAPrefillBackend:
         """Test Blackwell falls back when TRTLLM is unavailable."""
         vllm_config = _make_vllm_config()
         capability = DeviceCapability(major=10, minor=0)
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+        )
 
         try:
             flashinfer_cls = MLAPrefillBackendEnum.FLASHINFER.get_class()
@@ -282,9 +283,9 @@ class TestAutoSelectMLAPrefillBackend:
             patch.object(flashinfer_cls, "validate_configuration", return_value=[]),
         ):
             backend = _auto_select_mla_prefill_backend(
-                device_capability=capability,
-                dtype=torch.bfloat16,
-                vllm_config=vllm_config,
+                capability.major,
+                capability.minor,
+                selector_config,
             )
             assert backend.get_name() == "FLASHINFER_PREFILL"
 
@@ -292,6 +293,10 @@ class TestAutoSelectMLAPrefillBackend:
         """Test that Hopper only has FlashAttention available."""
         vllm_config = _make_vllm_config()
         capability = DeviceCapability(major=9, minor=0)
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+        )
 
         try:
             flash_attn_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
@@ -304,9 +309,9 @@ class TestAutoSelectMLAPrefillBackend:
             return_value=[],
         ):
             backend = _auto_select_mla_prefill_backend(
-                device_capability=capability,
-                dtype=torch.bfloat16,
-                vllm_config=vllm_config,
+                capability.major,
+                capability.minor,
+                selector_config,
             )
             assert backend.get_name() == "FLASH_ATTN_PREFILL"
 
@@ -314,6 +319,10 @@ class TestAutoSelectMLAPrefillBackend:
         """Test fallback to FlashAttention when all other backends fail."""
         vllm_config = _make_vllm_config()
         capability = DeviceCapability(major=10, minor=0)
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+        )
 
         # Make all backends fail validation except FLASH_ATTN
         def mock_get_class(backend_enum):
@@ -329,9 +338,9 @@ class TestAutoSelectMLAPrefillBackend:
             # Need to clear cache since we're changing behavior
             _auto_select_mla_prefill_backend.cache_clear()
             backend = _auto_select_mla_prefill_backend(
-                device_capability=capability,
-                dtype=torch.bfloat16,
-                vllm_config=vllm_config,
+                capability.major,
+                capability.minor,
+                selector_config,
             )
             assert backend.get_name() == "FLASH_ATTN_PREFILL"
 
@@ -474,12 +483,15 @@ class TestBackendValidation:
             )
         )
         capability = DeviceCapability(major=10, minor=0)
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+        )
 
         with patch.object(FlashInferPrefillBackend, "is_available", return_value=True):
             invalid_reasons = FlashInferPrefillBackend.validate_configuration(
-                device_capability=capability,
-                dtype=torch.bfloat16,
-                vllm_config=vllm_config,
+                capability,
+                selector_config,
             )
             assert len(invalid_reasons) == 0
 
@@ -491,12 +503,15 @@ class TestBackendValidation:
                 v_head_dim=128,
             )
         )
+        selector_config_invalid = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config_invalid),
+        )
 
         with patch.object(FlashInferPrefillBackend, "is_available", return_value=True):
             invalid_reasons = FlashInferPrefillBackend.validate_configuration(
-                device_capability=capability,
-                dtype=torch.bfloat16,
-                vllm_config=vllm_config_invalid,
+                capability,
+                selector_config_invalid,
             )
             assert len(invalid_reasons) == 1
             assert "DeepSeek R1 MLA dimensions" in invalid_reasons[0]
