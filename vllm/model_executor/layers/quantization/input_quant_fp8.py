@@ -68,9 +68,8 @@ class QuantFP8(CustomOp):
         self.use_deep_gemm_supported = is_deep_gemm_supported()
 
         self.use_aiter = rocm_aiter_ops.is_linear_fp8_enabled()
-        self.use_deepgemm = is_deep_gemm_supported()
-        self.is_group_quant = group_shape.is_per_group()
 
+        self.is_group_quant = group_shape.is_per_group()
         if self.is_group_quant:
             self.group_size = group_shape.col
         else:
@@ -172,7 +171,6 @@ class QuantFP8(CustomOp):
         x: torch.Tensor,
         scale: torch.Tensor | None = None,
         scale_ub: torch.Tensor | None = None,
-        **kwargs,
     ):
         if self.is_group_quant and not self.static:
             assert scale is None, "Dynamic group quantization does not use scale"
