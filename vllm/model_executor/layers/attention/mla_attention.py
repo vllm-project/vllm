@@ -522,9 +522,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        # Sparse MLA impls only support forward_mqa (decode-style attention)
-        is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
-
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
             ops.concat_and_cache_mla(
@@ -539,10 +536,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if fp8_attention:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
+        # Sparse MLA impls only support forward_mqa (decode-style attention)
+        is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
+
         if is_sparse_impl:
-            # Sparse MLA: all tokens go through forward_mqa, no prefill/decode split
             has_decode = True
             has_prefill = False
+            num_decode_tokens = q.size(0)
         else:
             assert (
                 attn_metadata.num_decodes is not None
@@ -553,27 +553,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             has_prefill = attn_metadata.num_prefills > 0
             num_decode_tokens = attn_metadata.num_decode_tokens
 
-            if has_prefill:
-                self.impl.forward_mha(
-                    q[num_decode_tokens:],
-                    k_c_normed[num_decode_tokens:],
-                    k_pe[num_decode_tokens:],
-                    kv_cache,
-                    attn_metadata,
-                    self._k_scale,
-                    output=output[num_decode_tokens:],
-                )
+        if has_prefill:
+            self.impl.forward_mha(
+                q[num_decode_tokens:],
+                k_c_normed[num_decode_tokens:],
+                k_pe[num_decode_tokens:],
+                kv_cache,
+                attn_metadata,
+                self._k_scale,
+                output=output[num_decode_tokens:],
+            )
 
-        if has_decode or (has_prefill and is_sparse_impl):
-            # For sparse impl, we always use forward_mqa for all tokens
-            # For non-sparse impl, we only use forward_mqa for decode tokens
-            if is_sparse_impl:
-                mqa_q = q
-                mqa_output_slice = output
-            else:
-                assert attn_metadata.decode is not None
-                mqa_q = q[:num_decode_tokens]
-                mqa_output_slice = output[:num_decode_tokens]
+        if has_decode:
+            mqa_q = q[:num_decode_tokens]
+            mqa_output_slice = output[:num_decode_tokens]
 
             mqa_q_nope, mqa_q_pe = mqa_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
@@ -642,6 +635,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
+            if not is_sparse_impl:
+                assert attn_metadata.decode is not None
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)
 
             # correct dcp attn_out with lse.
