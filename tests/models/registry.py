@@ -1044,6 +1044,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "openai/whisper-large-v3-turbo",
         extras={"v3": "openai/whisper-large-v3"},
     ),
+    "FunASRForConditionalGeneration": _HfExamplesInfo(
+        "allendou/Fun-ASR-Nano-2512-vllm",
+    ),
     # [Cross-encoder]
     "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),
 }
