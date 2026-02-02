@@ -102,8 +102,7 @@ def _topk_topp_kernel(
 
         if TOPK_ENABLED:
             k = tl.load(K + row_id)
-            if k != VOCAB_SIZE: 
-
+            if k < VOCAB_SIZE: 
                 # Zeroth pass: Compute avg and std from a sample block
                 offs = tl.arange(0, BLOCK_SIZE)
                 mask_n = offs < VOCAB_SIZE
@@ -324,6 +323,9 @@ def _topk_topp_kernel(
                 num_duplicate_logit = num_min_larger
                 num_keep = num_duplicate_logit - (k_pivots_num - k)
                 num_kept = tl.zeros((), dtype=tl.uint32)
+
+                # Top-k only path
+                final_pivot = k_pivot
                                 
                 if TOPP_ENABLED:
                     #### TOP-P SAMPLING AFTER TOP-K ####
@@ -524,10 +526,7 @@ def _topk_topp_kernel(
 
                         # Top-k + Top-p path
                         final_pivot = tl.log(p_pivot * sum_exp_logits) + max_logit
-                else:
-                    # Top-k only path
-                    final_pivot = k_pivot
-        elif TOPP_ENABLED:
+        if TOPP_ENABLED and final_pivot == -float("inf"):
             #### STANDALONE TOP-P SAMPLING ####
             p = tl.load(P + row_id)
             if p < 1.0:
