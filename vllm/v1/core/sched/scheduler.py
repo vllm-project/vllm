@@ -482,7 +482,7 @@ class Scheduler(SchedulerInterface):
             req_index += 1
 
             # Speculative decode related.
-            if request.spec_token_ids:
+            if request.spec_token_ids or request.num_spec_token_placeholders:
                 num_scheduled_spec_tokens = (
                     num_new_tokens
                     + request.num_computed_tokens
@@ -490,14 +490,26 @@ class Scheduler(SchedulerInterface):
                     - request.num_output_placeholders
                 )
                 if num_scheduled_spec_tokens > 0:
-                    # Trim spec_token_ids list to num_scheduled_spec_tokens.
-                    del request.spec_token_ids[num_scheduled_spec_tokens:]
-                    scheduled_spec_decode_tokens[request.request_id] = (
-                        request.spec_token_ids
-                    )
+                    if request.spec_token_ids:
+                        # Trim spec_token_ids list to num_scheduled_spec_tokens.
+                        del request.spec_token_ids[num_scheduled_spec_tokens:]
+                        scheduled_spec_decode_tokens[request.request_id] = (
+                            request.spec_token_ids
+                        )
+                    else:
+                        num_placeholders = min(
+                            num_scheduled_spec_tokens,
+                            request.num_spec_token_placeholders,
+                        )
+                        if num_placeholders:
+                            scheduled_spec_decode_tokens[request.request_id] = [
+                                -1
+                            ] * num_placeholders
+
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.
                 request.spec_token_ids = []
+                request.num_spec_token_placeholders = 0
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -898,6 +910,7 @@ class Scheduler(SchedulerInterface):
         request.status = RequestStatus.PREEMPTED
         request.num_computed_tokens = 0
         request.spec_token_ids.clear()
+        request.num_spec_token_placeholders = 0
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -1569,6 +1582,7 @@ class Scheduler(SchedulerInterface):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             request.spec_token_ids = spec_token_ids
+            request.num_spec_token_placeholders = 0
 
     def update_draft_token_ids_in_output(
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
@@ -1730,6 +1744,7 @@ class Scheduler(SchedulerInterface):
                 # output token on the fly to avoid a redundant repetitive output token.
                 request.num_output_placeholders = 0
                 request.discard_latest_async_tokens = True
+                request.num_spec_token_placeholders = 0
 
             # Clear scheduled request ids cache. Since we are forcing preemption
             # + resumption in the same step, we must act as if these requests were
