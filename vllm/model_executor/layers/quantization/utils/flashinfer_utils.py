@@ -113,15 +113,19 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
         and hasattr(layer, "output2_scales_scalar")
     )
 
-    # Added to the layer by: register_scales_for_trtllm_fp8_per_tensor_moe
-    assert (
-        hasattr(layer, "output1_scales_scalar")
-        and hasattr(layer, "output1_scales_gate_scalar")
-        and hasattr(layer, "output2_scales_scalar")
-    )
+    if layer.routing_method_type == RoutingMethodType.Llama4:
+        assert (
+            not layer.renormalize
+            and layer.custom_routing_function == Llama4MoE.custom_routing_function
+        ), (
+            "FusedMoE flashinfer kernels with Llama4 routing method are only "
+            "supported for Llama4"
+        )
+    else:
+        assert layer.custom_routing_function is None, (
+            "Custom routing function is only supported for Llama4"
+        )
 
-    is_llama4 = layer.custom_routing_function == Llama4MoE.custom_routing_function
-    assert is_llama4, "FusedMoE flashinfer kernels are only supported for Llama4"
     return torch.ops.vllm.fi_trtllm_fp8_per_tensor_moe(
         routing_logits=router_logits,
         routing_bias=routing_bias,
@@ -140,7 +144,7 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         use_routing_scales_on_input=apply_router_weight_on_input,
-        routing_method_type=RoutingMethodType.Llama4,
+        routing_method_type=layer.routing_method_type,
     )
 
 

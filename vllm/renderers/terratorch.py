@@ -9,28 +9,27 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import TextPrompt, TokensPrompt
+from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
-from .protocol import RendererLike
+from .params import ChatParams
+from .protocol import BaseRenderer
 
 logger = init_logger(__name__)
 
 
-class TerratorchRenderer(RendererLike):
+class TerratorchRenderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
         config: "ModelConfig",
         tokenizer_kwargs: dict[str, Any],
-    ) -> "RendererLike":
+    ) -> "BaseRenderer":
         return cls(config)
 
     def __init__(self, config: ModelConfig) -> None:
-        super().__init__()
-
-        self.config = config
+        super().__init__(config)
 
         if not config.skip_tokenizer_init:
             raise ValueError("Terratorch renderer requires `skip_tokenizer_init=True`")
@@ -45,8 +44,8 @@ class TerratorchRenderer(RendererLike):
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
 
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -55,7 +54,7 @@ class TerratorchRenderer(RendererLike):
             content_format="string",
         )
 
-        prompt = TokensPrompt(prompt_token_ids=[1])
+        prompt = self.render_completion([1])  # Dummy token IDs
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -66,8 +65,8 @@ class TerratorchRenderer(RendererLike):
     async def render_messages_async(
         self,
         messages: list[ChatCompletionMessageParam],
-        **kwargs,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt]:
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
         model_config = self.config
 
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
@@ -76,7 +75,7 @@ class TerratorchRenderer(RendererLike):
             content_format="string",
         )
 
-        prompt = TokensPrompt(prompt_token_ids=[1])  # Dummy token IDs
+        prompt = self.render_completion([1])  # Dummy token IDs
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
