@@ -706,7 +706,8 @@ class InputPreprocessor:
             and isinstance(prompt["multi_modal_data"], dict)
             and "video" in prompt["multi_modal_data"]
         ):
-            videos = prompt["multi_modal_data"]["video"]
+            prompt_dict = cast(dict, prompt)
+            videos = prompt_dict["multi_modal_data"]["video"]
             sparse_ratio = 1 - (efs_sparse_rate if efs_sparse_rate is not None else 0.0)
             detector = SimilarFrameDetector(sparse_ratio=sparse_ratio)
             videos = detector.process_video_frames(videos)
