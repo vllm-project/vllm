@@ -3,7 +3,7 @@
 
 from contextlib import suppress
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal, Optional, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 from compressed_tensors.config import (
@@ -18,7 +18,6 @@ from compressed_tensors.quantization import (
 )
 from compressed_tensors.transform import TransformConfig
 
-import vllm.envs as envs
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -63,9 +62,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    cutlass_fp4_supported,
-)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -160,7 +156,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self,
         layer: torch.nn.Module,
         prefix: str,
-    ) -> Optional["QuantizeMethodBase"]:
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -627,14 +623,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
                 input_quant
             ):
-                if cutlass_fp4_supported() or envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-                    return CompressedTensorsW4A4Fp4()
-                else:
-                    logger.warning_once(
-                        "Current platform does not support cutlass NVFP4."
-                        " Running CompressedTensorsW4A16Fp4."
-                    )
-                    return CompressedTensorsW4A16Fp4(has_input_global_scale=True)
+                return CompressedTensorsW4A4Fp4()
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(
@@ -651,7 +640,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     # note: input_quant will be present for converted models;
                     # will be ignored during inference post loading
                     return CompressedTensorsW8A16Fp8(
-                        strategy=weight_quant.strategy,
+                        weight_quant=weight_quant,
                         is_static_input_scheme=not input_quant.dynamic,
                     )
 
@@ -659,7 +648,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             if self._is_fp8_w8a16(weight_quant, input_quant):
                 is_static_input_scheme = input_quant and not input_quant.dynamic
                 return CompressedTensorsW8A16Fp8(
-                    strategy=weight_quant.strategy,
+                    weight_quant=weight_quant,
                     is_static_input_scheme=is_static_input_scheme,
                 )
 
@@ -691,7 +680,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def get_scheme(
         self, layer: torch.nn.Module, layer_name: str | None = None
-    ) -> Optional["CompressedTensorsScheme"]:
+    ) -> "CompressedTensorsScheme | None":
         """
         compressed-tensors supports non uniform in the following way:
 
@@ -751,11 +740,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                 model_compression_config=model_compression_config,
             )
         elif weight_quant is None:
-            logger.warning_once(
-                "Acceleration for non-quantized schemes is "
-                "not supported by Compressed Tensors. "
-                "Falling back to UnquantizedLinearMethod"
-            )
+            # Falling back to UnquantizedLinearMethod
             return None
 
         else:
