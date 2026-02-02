@@ -138,7 +138,7 @@ class OpenAISpeechToText(OpenAIServing):
         if not supports_transcription(self.model_cls):
             return
 
-        if getattr(self.model_cls, "skip_warmup", False):
+        if getattr(self.model_cls, "skip_warmup_audio_preprocessing", False):
             return
 
         try:

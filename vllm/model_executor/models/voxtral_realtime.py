@@ -220,7 +220,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
     requires_raw_input_tokens = True
     # transformers' currently has limited support for MistralCommon backend
     # and cached_get_processor. Let's skip until fixed
-    skip_warmup = True
+    skip_warmup_audio_preprocessing = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
