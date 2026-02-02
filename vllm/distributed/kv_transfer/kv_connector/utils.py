@@ -14,6 +14,7 @@ from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vll
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
@@ -331,36 +332,39 @@ class TpKVTopology:
             len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
         )
 
-        self._kv_heads_position: int | None = None
         self._cross_layers_blocks = False
         if self.tensor_shape is not None:
             self._cross_layers_blocks = (
                 len(self.tensor_shape) == len(kv_cache_shape) + 1
             )
 
-            if self._cross_layers_blocks:
-                # prepend layers dimension
-                _MOCK_NUM_LAYERS = 80
-                kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
-                try:
-                    kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
-                        include_num_layers_dimension=self._cross_layers_blocks
-                    )
-                except (AttributeError, NotImplementedError):
-                    kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
+        if self._cross_layers_blocks:
+            # prepend layers dimension
+            _MOCK_NUM_LAYERS = 80
+            kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
+            try:
+                kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
+                    include_num_layers_dimension=self._cross_layers_blocks
+                )
+            except (AttributeError, NotImplementedError):
+                kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
 
-                # In case of cross layers permute kv_cache_shape according to
-                # stride_order to retrieve physical position of block_size
-                kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+            # In case of cross layers permute kv_cache_shape according to
+            # stride_order to retrieve physical position of block_size
+            kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
-            # In the default non-cross layers layout the block_size position
-            # is logical while in the cross layers case it is the physical
-            # position. This matches the shape of the actual kv cache tensors
-            # passed at register_kv_caches()/register_cross_layers_kv_cache()
-            block_size_position = kv_cache_shape.index(_MOCK_BLOCK_SIZE)
+        # In the default non-cross layers layout the block_size position
+        # is logical while in the cross layers case it is the physical
+        # position. This matches the shape of the actual kv cache tensors
+        # passed at register_kv_caches()/register_cross_layers_kv_cache()
+        block_size_position = kv_cache_shape.index(_MOCK_BLOCK_SIZE)
 
-            assert block_size_position is not None
-            self._block_size_position = -(len(kv_cache_shape) - block_size_position)
+        assert block_size_position is not None
+        self._block_size_position = (
+            -(len(kv_cache_shape) - block_size_position)
+            if current_platform.device_type != "cpu"
+            else -2
+        )
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:

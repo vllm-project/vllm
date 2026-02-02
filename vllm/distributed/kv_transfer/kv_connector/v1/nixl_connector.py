@@ -306,10 +306,10 @@ class NixlConnector(KVConnectorBase_V1):
             "FLASH_ATTN",
             "FLASHINFER",
         ):
-            # For now there is no benefit to run cross layers when backend
-            # does not support on HND
             return False
 
+        # For now there is no benefit to run cross layers when backend
+        # does not support on HND
         if get_kv_cache_layout() != "HND":
             return False
 
@@ -1343,10 +1343,6 @@ class NixlConnectorWorker:
         # to better exploit the memory layout (ie num_blocks is the first dim).
         tensor_size_bytes = None
 
-        block_size_position = (
-            self.kv_topo.block_size_position if self.device_type != "cpu" else -2
-        )
-
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
@@ -1359,7 +1355,7 @@ class NixlConnectorWorker:
                 if base_addr in seen_base_addresses:
                     continue
 
-                kernel_block_size = cache.shape[block_size_position]
+                kernel_block_size = cache.shape[self.kv_topo.block_size_position]
                 if self.block_size != kernel_block_size:
                     logger.info_once(
                         "User-specified logical block size (%s) does not match"

@@ -1377,7 +1377,7 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
     llm.llm_engine.engine_core.shutdown()
 
 
-@pytest.mark.parametrize("enable_cross_layers", [False, True])
+@pytest.mark.parametrize("enable_cross_layers", ["False", "True"])
 @pytest.mark.parametrize(
     "attn_backend",
     [
