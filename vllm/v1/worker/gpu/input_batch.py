@@ -75,6 +75,9 @@ class InputBatch:
     cu_num_logits: torch.Tensor
     cu_num_logits_np: np.ndarray
 
+    # Whether any requests in batch use structured output.
+    has_structured_output_reqs: bool
+
     @classmethod
     def make_dummy(
         cls,
@@ -139,6 +142,7 @@ class InputBatch:
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
+            has_structured_output_reqs=False,
         )
 
 
