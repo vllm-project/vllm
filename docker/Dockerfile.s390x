@@ -1,5 +1,5 @@
 # Base UBI image for s390x architecture
-ARG BASE_UBI_IMAGE_TAG=9.5-1736404155
+ARG BASE_UBI_IMAGE_TAG=9.6
 ARG PYTHON_VERSION=3.12
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS base
 
@@ -14,11 +14,17 @@ ENV LANG=C.UTF-8 \
 
 # Install development utilities
 RUN microdnf install -y \
-    which procps findutils tar vim git gcc-toolset-14 gcc-toolset-14-libatomic-devel patch zlib-devel \
+    which procps findutils tar vim git gcc-toolset-14 gcc-toolset-14-binutils gcc-toolset-14-libatomic-devel patch zlib-devel \
     libjpeg-turbo-devel libtiff-devel libpng-devel libwebp-devel freetype-devel harfbuzz-devel \
     openssl-devel openblas openblas-devel autoconf automake libtool cmake numpy libsndfile \
     clang llvm-devel llvm-static clang-devel && \
     microdnf clean all
+
+ENV GCC_TOOLSET_ROOT=/opt/rh/gcc-toolset-14/root \
+    PATH=/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/bin:/usr/bin:/bin \
+    LD_LIBRARY_PATH=/opt/rh/gcc-toolset-14/root/usr/lib64:/usr/local/lib:/usr/lib64 \
+    LIBRARY_PATH=/opt/rh/gcc-toolset-14/root/usr/lib64 \
+    PKG_CONFIG_PATH=/opt/rh/gcc-toolset-14/root/usr/lib64/pkgconfig
 
 # Python Installation
 FROM base AS python-install
@@ -87,13 +93,13 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
 
 FROM python-install AS torch-vision
 # Install torchvision
-ARG TORCH_VISION_VERSION=v0.23.0
+ARG TORCH_VISION_VERSION=v0.25.0
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/pytorch/vision.git && \
     cd vision && \
     git checkout $TORCH_VISION_VERSION && \
-    uv pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu && \
     python setup.py bdist_wheel
 
 FROM python-install AS hf-xet-builder
@@ -174,7 +180,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if ! grep '#include "dynamic_annotations.h"' numba/_dispatcher.cpp; then \
        sed -i '/#include "internal\/pycore_atomic.h"/i\#include "dynamic_annotations.h"' numba/_dispatcher.cpp; \
     fi && python setup.py bdist_wheel
-    
+
+# Build OpenCV from source for s390x
+FROM python-install AS opencv-builder
+WORKDIR /tmp
+ARG MAX_JOBS
+ARG OPENCV_VERSION=90
+ARG ENABLE_HEADLESS=1
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install numpy setuptools  wheel scikit_build build && \
+    git clone --recursive https://github.com/opencv/opencv-python.git -b ${OPENCV_VERSION} && \
+    cd opencv-python && \
+    python -m build --wheel --installer=uv --outdir /tmp/opencv-python/dist
+
 # Build Outlines Core
 FROM python-install AS outlines-core-builder
 WORKDIR /tmp
@@ -198,7 +216,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Final build stage
 FROM python-install AS vllm-cpu
 ARG PYTHON_VERSION
-
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 # Set correct library path for torch and numactl
 ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:/opt/rh/gcc-toolset-14/root/usr/lib64:$LD_LIBRARY_PATH"
 ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
@@ -209,7 +227,8 @@ ENV GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 ENV PCP_DIR=/opt/rh/gcc-toolset-14/root
 ENV PKG_CONFIG_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64/pkgconfig:/usr/local/lib/pkgconfig/"
 ENV PATH="${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}:/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/bin:$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
-
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 COPY . /workspace/vllm
 WORKDIR /workspace/vllm
 
@@ -225,23 +244,25 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=hf-xet-builder,source=/tmp/hf-xet/dist,target=/tmp/hf-xet-wheels/ \
     --mount=type=bind,from=numba-builder,source=/tmp/llvmlite/dist,target=/tmp/llvmlite-wheels/ \
     --mount=type=bind,from=numba-builder,source=/tmp/numba/dist,target=/tmp/numba-wheels/ \
+    --mount=type=bind,from=opencv-builder,source=/tmp/opencv-python/dist,target=/tmp/opencv-wheels/ \
     --mount=type=bind,from=outlines-core-builder,source=/tmp/outlines-core/dist,target=/tmp/outlines-core/dist/ \
-     sed -i '/^torch/d' requirements/build.txt && \
      ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/pyarrow-*.whl) && \
      VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl) && \
      HF_XET_WHL_FILE=$(ls /tmp/hf-xet-wheels/*.whl) && \
      LLVM_WHL_FILE=$(ls /tmp/llvmlite-wheels/*.whl) && \
      NUMBA_WHL_FILE=$(ls /tmp/numba-wheels/*.whl) && \
+     OPENCV_WHL_FILE=$(ls /tmp/opencv-wheels/*.whl) && \
      OUTLINES_CORE_WHL_FILE=$(ls /tmp/outlines-core/dist/*.whl) && \
-    uv pip install -v \    
+     uv pip install -v \    
         $ARROW_WHL_FILE  \
         $VISION_WHL_FILE \
         $HF_XET_WHL_FILE \
         $LLVM_WHL_FILE \
         $NUMBA_WHL_FILE \
+        $OPENCV_WHL_FILE \
         $OUTLINES_CORE_WHL_FILE \
         --index-strategy unsafe-best-match \
-        -r requirements/build.txt \
+        -r requirements/cpu-build.txt \
         -r requirements/cpu.txt
 
 
@@ -252,7 +273,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # setup non-root user for vllm
 RUN umask 002 && \
-    useradd --uid 2000 --gid 0 vllm && \
+    /usr/sbin/useradd --uid 2000 --gid 0 vllm && \
     mkdir -p /home/vllm && \
     chmod g+rwx /home/vllm
 
