@@ -42,7 +42,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
-    kFp8Dynamic128x128Sym,
+    create_fp8_quant_key,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
@@ -136,13 +136,16 @@ class TestModel(torch.nn.Module):
 
         if is_blockwise:
             act_quant_scale_desc = ScaleDesc(torch.float32, False, group_shape)
-            self.activation_quant_key = QuantKey(
-                dtype=FP8_DTYPE, scale=act_quant_scale_desc, symmetric=True
+            self.activation_quant_key = create_fp8_quant_key(
+                static=False, group_shape=group_shape
+            )
+            self.weight_quant_key = create_fp8_quant_key(
+                static=True, group_shape=GroupShape(hidden_size, hidden_size)
             )
             self.fp8_linear_layers = [
                 TestBlockFP8Layer(
                     weight_shape=(hidden_size, hidden_size),
-                    weight_quant_key=kFp8Dynamic128x128Sym,
+                    weight_quant_key=self.activation_quant_key,
                     activation_quant_key=self.activation_quant_key,
                     transpose_weights=use_aiter_fusion,
                 )
