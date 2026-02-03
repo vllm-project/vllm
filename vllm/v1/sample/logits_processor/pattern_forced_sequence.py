@@ -106,20 +106,21 @@ class PatternForcedSequenceLogitsProcessor(LogitsProcessor):
             trigger_pattern = req_state.trigger_pattern
             forced_sequence = req_state.forced_sequence
 
-            real_tokens = [t for t in output_ids if t != -1]
-
-            if state == ForcingState.NORMAL and len(real_tokens) >= len(
-                trigger_pattern
+            # output_ids is front-padded with -1; since -1 is never a valid
+            # trigger token, we can compare the tail directly without filtering.
+            n = len(trigger_pattern)
+            if (
+                state == ForcingState.NORMAL
+                and len(output_ids) >= n
+                and output_ids[-n:] == trigger_pattern
             ):
-                tail = real_tokens[-len(trigger_pattern) :]
-                if tail == trigger_pattern:
-                    req_state = req_state._replace(
-                        state=ForcingState.FORCING,
-                        forcing_pos=0,
-                    )
-                    self.req_states[index] = req_state
-                    state = ForcingState.FORCING
-                    pos = 0
+                req_state = req_state._replace(
+                    state=ForcingState.FORCING,
+                    forcing_pos=0,
+                )
+                self.req_states[index] = req_state
+                state = ForcingState.FORCING
+                pos = 0
 
             if state == ForcingState.FORCING:
                 if pos < len(forced_sequence):
