@@ -590,7 +590,7 @@ class LoRAModelManager:
             # HACK Temporary solution for the pool model.
             if self.is_pooling_model and not lora_model.check_lora_name(module_name):
                 replaced_module_name = module_name.replace("model.", "")
-                if lora_model.check_lora_name(module_name):
+                if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
                 if self._is_non_gated_moe and len(replacement_loras) > 0:
