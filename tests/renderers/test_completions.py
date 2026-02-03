@@ -9,7 +9,6 @@ import pybase64
 import pytest
 import torch
 
-from vllm.inputs.data import is_embeds_prompt
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import tokenizer_args_from_config
@@ -362,7 +361,6 @@ class TestRenderEmbedPrompt:
         )
 
         assert len(results) == 1
-        assert is_embeds_prompt(results[0])
         assert torch.equal(results[0]["prompt_embeds"], tensor_input)
 
     def test_multiple_prompt_embeds(self):
@@ -384,7 +382,6 @@ class TestRenderEmbedPrompt:
 
         assert len(results) == 2
         for i, result in enumerate(results):
-            assert is_embeds_prompt(result)
             assert torch.allclose(result["prompt_embeds"], tensor_inputs[i])
 
     def test_prompt_embed_truncation(self):
@@ -464,7 +461,6 @@ class TestRenderEmbedPrompt:
 
         assert len(results) == 2
         # First should be embed prompt
-        assert is_embeds_prompt(results[0])
         assert torch.equal(results[0]["prompt_embeds"], tensor_input)
         # Second should be tokens prompt
         assert "prompt_token_ids" in results[1]

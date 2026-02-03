@@ -90,8 +90,8 @@ struct cutlass_3x_gemm_sm100_fp8 {
   // -----------------------------------------------------------
   // Kernel definition
   // -----------------------------------------------------------
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
+  using GemmKernel = enable_sm100f_only<cutlass::gemm::kernel::GemmUniversal<
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>>;
 };
 
 template <typename InType, typename OutType, bool EnableBias>
