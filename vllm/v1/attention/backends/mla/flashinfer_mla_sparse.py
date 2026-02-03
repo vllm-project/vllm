@@ -161,9 +161,9 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     seq_lens: torch.Tensor
 
     # Sparse-specific
+    topk_tokens_tensor: torch.Tensor
     block_size: int = 64
     topk_tokens: int = 2048
-    topk_tokens_tensor: torch.Tensor | None = None
 
 
 class FlashInferMLASparseMetadataBuilder(
@@ -194,8 +194,11 @@ class FlashInferMLASparseMetadataBuilder(
             dtype=torch.int32,
             device=device,
         )
-        self.topk_tokens_tensor = torch.tensor(
-            [self.topk_tokens], dtype=torch.int32, device=device
+        self.topk_tokens_tensor = torch.full(
+            (vllm_config.scheduler_config.max_num_batched_tokens,),
+            self.topk_tokens,
+            dtype=torch.int32,
+            device=device,
         )
 
     def build(
@@ -340,18 +343,17 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         if self.bmm2_scale is None:
             self.bmm2_scale = layer._v_scale_float
 
-        q_reshaped = q.view(1, num_actual_toks, q.shape[-2], q.shape[-1])
-        indices_reshaped = topk_indices_physical.view(1, num_actual_toks, -1)
+        seq_lens = attn_metadata.topk_tokens_tensor[:num_actual_toks]
 
         o = trtllm_batch_decode_with_kv_cache_mla(
-            query=q_reshaped,
+            query=q.unsqueeze(1),
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=indices_reshaped,
-            seq_lens=attn_metadata.topk_tokens_tensor,
+            block_tables=topk_indices_physical.unsqueeze(1),
+            seq_lens=seq_lens,
             max_seq_len=attn_metadata.topk_tokens,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
