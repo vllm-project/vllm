@@ -306,6 +306,7 @@ class EagleSpeculator:
         )
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Run full CUDA graph.
+            assert cudagraph_size is not None
             self.cudagraph_manager.run(cudagraph_size)
             return self.draft_tokens[:num_reqs]
 
