@@ -162,39 +162,8 @@ class Base(
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
-        # Create weight mapper
-        self.hf_to_vllm_mapper = WeightsMapper()
-        orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
-
-        if Version(transformers.__version__) >= Version("5.0.0"):
-            from transformers.conversion_mapping import (
-                WeightRenaming,
-                get_model_conversion_mapping,
-            )
-
-            for mapping in get_model_conversion_mapping(self.model):
-                # Handle weights which have been renamed in Transformers
-                if isinstance(mapping, WeightRenaming):
-                    compiled_sources = mapping.compiled_sources
-                    target_pattern = mapping.target_patterns[0]
-                    orig_to_new_regex[compiled_sources] = target_pattern
-                # TODO: Handle WeightConverter to enable layer merging
-
-        # Standardise base model prefix
-        bmp = self.model.base_model_prefix
-        expected_bmp = r"model.\1"
-        # Handle checkpoints saved with different base model prefix
-        if bmp and bmp != "model":
-            different_bmp_pattern = re.compile(rf"^{bmp}\.(.+)")
-            orig_to_new_regex[different_bmp_pattern] = expected_bmp
-        # Handle checkpoints saved without base model prefix
-        model_children = "|".join(name for name, _ in self.model.named_children())
-        missing_bmp_pattern = re.compile(rf"^(?!model\.)(({model_children}).+)")
-        orig_to_new_regex[missing_bmp_pattern] = expected_bmp
-
-        # Apply mapping to quantization config if needed
-        self._maybe_apply_model_mapping()
-
+        # Create weight name to module qualname mapper
+        self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
         # Substitute remaining layers with vLLM's layers as needed
@@ -226,6 +195,49 @@ class Base(
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], self.text_config.hidden_size
         )
+
+    def _create_hf_to_vllm_mapper(self):
+        """
+        Create a WeightsMapper to map checkpoint weight names to module qualnames.
+
+        This handles:
+
+        - Transformers weight renaming from `WeightRenaming`
+        - Checkpoints saved with a base model prefix that is not `model`
+        - Checkpoints saved with no base model prefix
+        - Any quantization config specific mappings
+        """
+        self.hf_to_vllm_mapper = WeightsMapper()
+        orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
+
+        if Version(transformers.__version__) >= Version("5.0.0"):
+            from transformers.conversion_mapping import (
+                WeightRenaming,
+                get_model_conversion_mapping,
+            )
+
+            for mapping in get_model_conversion_mapping(self.model):
+                # Handle weights which have been renamed in Transformers
+                if isinstance(mapping, WeightRenaming):
+                    compiled_sources = mapping.compiled_sources
+                    target_pattern = mapping.target_patterns[0]
+                    orig_to_new_regex[compiled_sources] = target_pattern
+                # TODO: Handle WeightConverter to enable layer merging
+
+        # Standardise base model prefix
+        bmp = self.model.base_model_prefix
+        expected_bmp = r"model.\1"
+        # Handle checkpoints saved with different base model prefix
+        if bmp and bmp != "model":
+            different_bmp_pattern = re.compile(rf"^{bmp}\.(.+)")
+            orig_to_new_regex[different_bmp_pattern] = expected_bmp
+        # Handle checkpoints saved without base model prefix
+        model_children = "|".join(name for name, _ in self.model.named_children())
+        missing_bmp_pattern = re.compile(rf"^(?!model\.)(({model_children}).+)")
+        orig_to_new_regex[missing_bmp_pattern] = expected_bmp
+
+        # Apply mapping to quantization config if needed
+        self._maybe_apply_model_mapping()
 
     def pipeline_parallel(self):
         """
