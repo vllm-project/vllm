@@ -253,8 +253,7 @@ class TestAutoSelectMLAPrefillBackend:
             return_value=[],
         ):
             backend = _auto_select_mla_prefill_backend(
-                capability.major,
-                capability.minor,
+                capability,
                 selector_config,
             )
             assert backend.get_name() == "TRTLLM_RAGGED_PREFILL"
@@ -283,8 +282,7 @@ class TestAutoSelectMLAPrefillBackend:
             patch.object(flashinfer_cls, "validate_configuration", return_value=[]),
         ):
             backend = _auto_select_mla_prefill_backend(
-                capability.major,
-                capability.minor,
+                capability,
                 selector_config,
             )
             assert backend.get_name() == "FLASHINFER_PREFILL"
@@ -309,8 +307,7 @@ class TestAutoSelectMLAPrefillBackend:
             return_value=[],
         ):
             backend = _auto_select_mla_prefill_backend(
-                capability.major,
-                capability.minor,
+                capability,
                 selector_config,
             )
             assert backend.get_name() == "FLASH_ATTN_PREFILL"
@@ -338,8 +335,7 @@ class TestAutoSelectMLAPrefillBackend:
             # Need to clear cache since we're changing behavior
             _auto_select_mla_prefill_backend.cache_clear()
             backend = _auto_select_mla_prefill_backend(
-                capability.major,
-                capability.minor,
+                capability,
                 selector_config,
             )
             assert backend.get_name() == "FLASH_ATTN_PREFILL"
