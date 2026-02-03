@@ -307,9 +307,13 @@ class CudagraphDispatcher:
                 # so we must use max_loras + 1 for dispatch to find a matching graph.
                 effective_num_active_loras = self.vllm_config.lora_config.max_loras + 1
 
-        batch_desc = self._create_padded_batch_descriptor(
-            num_tokens, uniform_decode, has_lora, effective_num_active_loras, is_mm_encoder
-        )
+                batch_desc = self._create_padded_batch_descriptor(
+                    num_tokens,
+                    uniform_decode,
+                    has_lora,
+                    effective_num_active_loras,
+                    is_mm_encoder,
+                )
         relaxed_batch_desc = batch_desc.relax_for_mixed_batch_cudagraphs()
 
         if not disable_full:
