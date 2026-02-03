@@ -190,27 +190,35 @@ def test_multi_example_connector_consistency():
         )
 
     events = get_connector_events()
-    # get_num_new_matched_tokens and update_state_after_alloc will be called
-    # on each connector in turn.
-    assert events["storage1-SCHEDULER"][:3] == [
+    # First event is set_xfer_handshake_metadata from initialization, then
+    # get_num_new_matched_tokens and update_state_after_alloc from generate().
+    assert events["storage1-SCHEDULER"][:4] == [
+        "set_xfer_handshake_metadata",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
-    assert events["storage1-WORKER"][:5] == [
+    # First three events are from initialization (register_kv_caches,
+    # set_host_xfer_buffer_ops, get_handshake_metadata), then generate() events.
+    assert events["storage1-WORKER"][:7] == [
         "register_kv_caches",
+        "set_host_xfer_buffer_ops",
+        "get_handshake_metadata",
         "bind_connector_metadata",
         "start_load_kv",
         "wait_for_layer_load",
         "save_kv_layer",
     ]
-    assert events["storage2-SCHEDULER"][:3] == [
+    assert events["storage2-SCHEDULER"][:4] == [
+        "set_xfer_handshake_metadata",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
-    assert events["storage2-WORKER"][:5] == [
+    assert events["storage2-WORKER"][:7] == [
         "register_kv_caches",
+        "set_host_xfer_buffer_ops",
+        "get_handshake_metadata",
         "bind_connector_metadata",
         "start_load_kv",
         "wait_for_layer_load",
