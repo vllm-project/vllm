@@ -64,10 +64,7 @@ from vllm.model_executor.model_loader.reload import (
     initialize_layerwise_reload,
 )
 from vllm.model_executor.models.interfaces import (
-    MultiModalEmbeddingOutput,
-    MultiModalEmbeddingReturn,
     MultiModalEmbeddings,
-    MultiModalEmbeddingsPostProc,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsXDRoPE,
@@ -438,7 +435,7 @@ class GPUModelRunner(
         # self.kv_cache_config: KVCacheConfig
 
         # mm_hash ->  encoder_output
-        self.encoder_cache: dict[str, torch.Tensor | dict[str, torch.Tensor]] = {}
+        self.encoder_cache: dict[str, torch.Tensor] = {}
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -2371,7 +2368,6 @@ class GPUModelRunner(
                 )
 
         encoder_outputs: list[torch.Tensor] = []
-        encoder_positions: list[torch.Tensor | None] = []
         # Track the current index in mm_kwargs/mm_lora_refs to map groups to request IDs
         current_item_idx = 0
         for modality, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
@@ -2396,7 +2392,6 @@ class GPUModelRunner(
                 and num_items > 1
             ):
                 curr_group_outputs_lst = list[torch.Tensor]()
-                curr_group_positions_lst: list[torch.Tensor | None] = []
                 for video_idx in range(num_items):
                     video_mm_kwargs_item = mm_kwargs[current_item_idx + video_idx]
                     with self.timed_encoder_operation(
@@ -2413,28 +2408,10 @@ class GPUModelRunner(
                         micro_batch_outputs = model.embed_multimodal(
                             **micro_batch_mm_inputs
                         )
-                        (
-                            micro_batch_outputs,
-                            postprocess,
-                            micro_batch_positions,
-                        ) = self._unwrap_mm_outputs(micro_batch_outputs)
-                        if postprocess is not None:
-                            micro_batch_outputs = postprocess(micro_batch_outputs)
-                            (
-                                micro_batch_outputs,
-                                _,
-                                micro_batch_positions,
-                            ) = self._unwrap_mm_outputs(micro_batch_outputs)
 
-                        if micro_batch_positions is None:
-                            micro_batch_positions = [None] * len(micro_batch_outputs)
-                        else:
-                            micro_batch_positions = list(micro_batch_positions)
                         curr_group_outputs_lst.extend(micro_batch_outputs)
-                        curr_group_positions_lst.extend(micro_batch_positions)
 
                 curr_group_outputs = curr_group_outputs_lst
-                curr_group_positions = curr_group_positions_lst
             else:
                 # Run the encoder.
                 # `curr_group_outputs` is either of the following:
@@ -2448,66 +2425,22 @@ class GPUModelRunner(
                     should_time, mm_lora_refs, current_item_idx, num_items
                 ):
                     curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
-                    (
-                        curr_group_outputs,
-                        postprocess,
-                        curr_group_positions,
-                    ) = self._unwrap_mm_outputs(  # type: ignore
-                        curr_group_outputs
-                    )
-                    if postprocess is not None:
-                        curr_group_outputs = postprocess(curr_group_outputs)
-                        (
-                            curr_group_outputs,
-                            _,
-                            curr_group_positions,
-                        ) = self._unwrap_mm_outputs(curr_group_outputs)  # type: ignore[assignment]
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
                 expected_num_items=num_items,
             )
-            if curr_group_positions is None:
-                curr_group_positions = [None] * len(curr_group_outputs)
-            else:
-                curr_group_positions = list(curr_group_positions)
-                if len(curr_group_positions) != len(curr_group_outputs):
-                    raise ValueError(
-                        "Mismatched multimodal outputs and positions lengths: "
-                        f"{len(curr_group_outputs)} != {len(curr_group_positions)}"
-                    )
             encoder_outputs.extend(curr_group_outputs)
-            encoder_positions.extend(curr_group_positions)
 
             current_item_idx += num_items
 
         # Cache the encoder outputs by mm_hash
-        for mm_hash, output, positions in zip(
-            mm_hashes, encoder_outputs, encoder_positions
-        ):
-            if positions is not None:
-                self.encoder_cache[mm_hash] = {
-                    "embeddings": output,
-                    "positions": positions,
-                }
-            else:
-                self.encoder_cache[mm_hash] = output
+        for mm_hash, output in zip(mm_hashes, encoder_outputs):
+            self.encoder_cache[mm_hash] = output
             logger.debug("Finish execute for mm hash %s", mm_hash)
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
         return encoder_outputs
-
-    @staticmethod
-    def _unwrap_mm_outputs(
-        outputs: MultiModalEmbeddingReturn,
-    ) -> tuple[
-        MultiModalEmbeddings,
-        MultiModalEmbeddingsPostProc | None,
-        MultiModalEmbeddings | None,
-    ]:
-        if isinstance(outputs, MultiModalEmbeddingOutput):
-            return outputs.embeddings, outputs.postprocess, outputs.positions
-        return outputs, None, None
 
     def _gather_mm_embeddings(
         self,
@@ -2531,7 +2464,6 @@ class GPUModelRunner(
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
-            mm_positions_req: list[torch.Tensor | None] = []
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
@@ -2569,32 +2501,14 @@ class GPUModelRunner(
                     continue
 
                 mm_hash = mm_feature.identifier
-                encoder_cache_entry = self.encoder_cache.get(mm_hash, None)
-                assert encoder_cache_entry is not None, (
-                    f"Encoder cache miss for {mm_hash}."
-                )
-                if isinstance(encoder_cache_entry, dict):
-                    encoder_output = encoder_cache_entry["embeddings"]
-                    encoder_positions = encoder_cache_entry.get("positions")
-                else:
-                    encoder_output = encoder_cache_entry
-                    encoder_positions = None
+                encoder_output = self.encoder_cache.get(mm_hash, None)
+                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
                     mm_embeds_item = encoder_output[curr_embeds_start:curr_embeds_end]
                 else:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
-
-                if encoder_positions is not None:
-                    if is_embed is not None:
-                        mm_positions_item = encoder_positions[
-                            curr_embeds_start:curr_embeds_end
-                        ]
-                    else:
-                        mm_positions_item = encoder_positions[start_idx:end_idx]
-                else:
-                    mm_positions_item = None
 
                 req_start_pos = req_start_idx + start_pos - num_computed_tokens
                 # OR mask for overlapping mm_features (use_audio_in_video)
@@ -2607,21 +2521,14 @@ class GPUModelRunner(
                         req_start_pos + start_idx : req_start_pos + end_idx
                     ] |= is_embed
                 mm_embeds_req.append(mm_embeds_item)
-                mm_positions_req.append(mm_positions_item)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
                 should_sync_mrope_positions = True
-                multimodal_positions = None
-                if mm_positions_req and all(
-                    positions is not None for positions in mm_positions_req
-                ):
-                    multimodal_positions = cast(list[torch.Tensor], mm_positions_req)
                 mm_embeds_req, new_mrope_positions, new_delta = (
                     self.model.recompute_mrope_positions(
                         input_ids=req_state.prompt_token_ids,
                         multimodal_embeddings=mm_embeds_req,
-                        multimodal_positions=multimodal_positions,
                         mrope_positions=req_state.mrope_positions,
                         num_computed_tokens=req_state.num_computed_tokens,
                     )
@@ -5233,9 +5140,6 @@ class GPUModelRunner(
                     # Run multimodal encoder.
                     dummy_encoder_outputs = self.model.embed_multimodal(
                         **batched_dummy_mm_inputs
-                    )
-                    dummy_encoder_outputs, _, _ = self._unwrap_mm_outputs(
-                        dummy_encoder_outputs
                     )
 
                     sanity_check_mm_encoder_outputs(

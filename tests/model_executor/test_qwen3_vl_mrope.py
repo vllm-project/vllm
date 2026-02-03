@@ -88,7 +88,6 @@ def make_video_embedding(
 @pytest.mark.parametrize("num_suffix_tokens", [0, 7])
 @pytest.mark.parametrize("video_pruning_rate", [0, 0.25, 0.75])
 @pytest.mark.parametrize("interleave_text_tokens", [(0, 0), (1, 4)])
-@pytest.mark.parametrize("split_positions", [True, False])
 def test_match_qwen3vl_mrope_evs_on(
     spatial_merge_size: int,
     num_prefix_tokens: int,
@@ -96,7 +95,6 @@ def test_match_qwen3vl_mrope_evs_on(
     num_suffix_tokens: int,
     video_pruning_rate: float,
     interleave_text_tokens: tuple[int, int],
-    split_positions: bool,
 ):
     hf_config = DummyConfig()
     hf_config.vision_config.spatial_merge_size = spatial_merge_size
@@ -194,19 +192,14 @@ def test_match_qwen3vl_mrope_evs_on(
         (len(video_tokens_pruned), hidden_size), device=video_mrope.device
     )
 
-    if split_positions:
-        multimodal_embeddings = [video_embeddings]
-        multimodal_positions = [expanded_positions]
-    else:
-        video_embeddings = torch.cat(
-            [
-                video_embeddings,
-                expanded_positions.float(),
-            ],
-            dim=1,
-        )
-        multimodal_embeddings = [video_embeddings]
-        multimodal_positions = None
+    video_embeddings = torch.cat(
+        [
+            video_embeddings,
+            expanded_positions.float(),
+        ],
+        dim=1,
+    )
+    multimodal_embeddings = [video_embeddings]
 
     expected_mrope_masked = expected_mrope[:, whole_sequence_retention_mask]
 
@@ -222,7 +215,6 @@ def test_match_qwen3vl_mrope_evs_on(
     _, actual_mrope, _ = Qwen3VLForConditionalGeneration._recompute_mrope_positions(
         input_ids=input_tokens_pruned,
         multimodal_embeddings=multimodal_embeddings,
-        multimodal_positions=multimodal_positions,
         mrope_positions=computed_mrope,
         num_computed_tokens=len(prefix_tokens),
         vision_start_token_id=hf_config.vision_start_token_id,

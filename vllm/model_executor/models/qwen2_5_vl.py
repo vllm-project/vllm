@@ -1350,7 +1350,6 @@ class Qwen2_5_VLForConditionalGeneration(
         self,
         input_ids: list[int],
         multimodal_embeddings: tuple[torch.Tensor, ...],
-        multimodal_positions: Sequence[torch.Tensor] | None,
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, int]:
@@ -1365,8 +1364,6 @@ class Qwen2_5_VLForConditionalGeneration(
             input_ids: (N,) All input tokens of the prompt (Containing
                 entire sequence).
             multimodal_embeddings: Tuple of multimodal embeddings.
-            multimodal_positions: Optional multimodal position sidecar tensors,
-                aligned with multimodal_embeddings.
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
             num_computed_tokens: A number of computed tokens so far.
@@ -1389,22 +1386,10 @@ class Qwen2_5_VLForConditionalGeneration(
         # Tensors
         input_ids_t = torch.as_tensor(input_ids, device=device, dtype=torch.long)
 
-        if multimodal_positions is None:
-            mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
-            mm_embeddings_pos = [
-                mm[:, -4:].permute(1, 0).long() for mm in multimodal_embeddings
-            ]
-        else:
-            if len(multimodal_positions) != len(multimodal_embeddings):
-                raise ValueError(
-                    "Mismatched multimodal embeddings and positions lengths "
-                    f"for Qwen2.5VL: {len(multimodal_embeddings)} != "
-                    f"{len(multimodal_positions)}"
-                )
-            mm_embeddings_out = list(multimodal_embeddings)
-            mm_embeddings_pos = [
-                positions.permute(1, 0).long() for positions in multimodal_positions
-            ]
+        mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
+        mm_embeddings_pos = [
+            mm[:, -4:].permute(1, 0).long() for mm in multimodal_embeddings
+        ]
 
         positions, mrope_positions_delta = recompute_mrope_positions(
             input_ids_t,

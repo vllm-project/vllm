@@ -25,7 +25,6 @@
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
 from functools import lru_cache, partial
 from itertools import islice
 from typing import Any
@@ -99,7 +98,6 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
-    MultiModalEmbeddingOutput,
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
@@ -142,20 +140,6 @@ logger = init_logger(__name__)
 # We use 2048 dummy video frames that would generate vision embeddings
 # of the maximum size.
 DUMMY_VIDEO_NUM_FRAMES = 2048
-
-
-@dataclass
-class Qwen3VLVideoEmbeddingMetadata:
-    """Metadata for video embeddings that need final processing.
-
-    This is used to build a postprocessing function that creates the final
-    combined embeddings with text embeddings for timestamps and markers.
-    """
-
-    num_tokens_per_frame: list[int]
-    timestamps: list[float]
-    video_grid_thw: list[int]
-    retention_mask: torch.Tensor | None
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
@@ -1593,15 +1577,14 @@ class Qwen3VLForConditionalGeneration(
 
         Returns:
             Tuple of image embeddings for each image item.
-            Resulting embeddings will have extra 4 channels for
-            computed mrope positions.
+            Resulting embeddings will have extra 5 channels for
+            computed mrope positions, consistent with video embeddings.
         """
         if self.is_multimodal_pruning_enabled:
             merge_size = self.visual.spatial_merge_size
             grid_thw = image_input["image_grid_thw"]
             grid_thw_list = grid_thw.tolist()
             image_embeds_out = []
-            image_positions_out = []
             for emb, size in zip(image_embeds_split, grid_thw_list):
                 positions = compute_mrope_for_media(size, merge_size).to(emb.device)
                 positions = torch.cat(
@@ -1613,31 +1596,28 @@ class Qwen3VLForConditionalGeneration(
                     ],
                     dim=1,
                 )
+                emb = torch.cat([emb, positions], dim=1)
                 image_embeds_out.append(emb)
-                image_positions_out.append(positions)
             image_embeds_split = tuple(image_embeds_out)
-            return image_embeds_split, tuple(image_positions_out)
-        return image_embeds_split, None
+        return image_embeds_split
 
     def _postprocess_video_embeds_evs(
         self,
         video_embeds_split: tuple[torch.Tensor, ...],
         video_input: Qwen2_5_VLVideoInputs,
-    ) -> tuple[tuple[torch.Tensor, ...], list[Qwen3VLVideoEmbeddingMetadata]]:
+    ) -> tuple[torch.Tensor, ...]:
         """
-        Applies Efficient Video Sampling (EVS) to prune video embeddings
-        and collects metadata for each video item.
+        Prunes video embeddings via Efficient Video Sampling (EVS)
+        and then appends mrope positions for each retained embeddings
 
         Args:
             video_embeds_split: Tuple of video embeddings for each video item.
-            video_input: Video input data containing grid dimensions and timestamps.
+            video_input: Video input data.
 
         Returns:
-            A tuple containing:
-            - Tuple of pruned video embeddings for each video item.
-            - List of Qwen3VLVideoEmbeddingMetadata objects containing
-              per-frame token counts, timestamps, grid dimensions, and
-              retention masks for each video.
+            Tuple of video embeddings for each video item.
+            Resulting embeddings will have extra 5 channels for computed mrope
+            positions, and whether the index corresponds to a video embedding.
         """
         grid_thw = video_input["video_grid_thw"]
         assert grid_thw.ndim == 2
@@ -1646,7 +1626,6 @@ class Qwen3VLForConditionalGeneration(
 
         # Apply EVS to each video.
         video_embeds_out = []
-        video_metadata = []
         for video_idx, (emb, size) in enumerate(zip(video_embeds_split, grid_thw_list)):
             # Compute positions.
             timestamps = video_input.timestamps[video_idx]
@@ -1680,67 +1659,17 @@ class Qwen3VLForConditionalGeneration(
                 num_tokens_per_frame = [feature_size] * num_frames
                 retention_mask = None
 
-            video_metadata.append(
-                Qwen3VLVideoEmbeddingMetadata(
-                    num_tokens_per_frame=num_tokens_per_frame,
-                    timestamps=timestamps,
-                    video_grid_thw=size,
-                    retention_mask=retention_mask,
-                )
+            emb = self._create_final_video_embeddings(
+                video_embeddings=emb,
+                num_tokens_per_frame=num_tokens_per_frame,
+                timestamps=timestamps,
+                video_grid_thw=size,
+                retention_mask=retention_mask,
             )
 
             video_embeds_out.append(emb)
 
-        return tuple(video_embeds_out), video_metadata
-
-    def _postprocess_video_embeddings(
-        self,
-        multimodal_embeddings: MultiModalEmbeddings,
-        *,
-        video_metadata: Sequence[Qwen3VLVideoEmbeddingMetadata],
-        video_indices: Sequence[int],
-        multimodal_positions: Sequence[torch.Tensor | None] | None,
-    ) -> MultiModalEmbeddingOutput:
-        if not video_metadata:
-            return MultiModalEmbeddingOutput(
-                embeddings=multimodal_embeddings,
-                positions=tuple(multimodal_positions)
-                if multimodal_positions is not None
-                else None,
-            )
-
-        if len(video_metadata) != len(video_indices):
-            raise ValueError(
-                "Mismatched metadata and index lengths for Qwen3VL video "
-                f"postprocessing: {len(video_metadata)} != {len(video_indices)}"
-            )
-
-        embeddings_list = list(multimodal_embeddings)
-        if multimodal_positions is None:
-            positions_list: list[torch.Tensor | None] = [None] * len(embeddings_list)
-        else:
-            positions_list = list(multimodal_positions)
-            if len(positions_list) != len(embeddings_list):
-                raise ValueError(
-                    "Mismatched embeddings and positions lengths for "
-                    "Qwen3VL video postprocessing: "
-                    f"{len(embeddings_list)} != {len(positions_list)}"
-                )
-        for idx, metadata in zip(video_indices, video_metadata):
-            final_embeddings, final_positions = self._create_final_video_embeddings(
-                video_embeddings=embeddings_list[idx],
-                num_tokens_per_frame=metadata.num_tokens_per_frame,
-                timestamps=metadata.timestamps,
-                video_grid_thw=metadata.video_grid_thw,
-                retention_mask=metadata.retention_mask,
-            )
-            embeddings_list[idx] = final_embeddings
-            positions_list[idx] = final_positions
-
-        return MultiModalEmbeddingOutput(
-            embeddings=tuple(embeddings_list),
-            positions=tuple(positions_list),
-        )
+        return tuple(video_embeds_out)
 
     def _create_final_video_embeddings(
         self,
@@ -1749,7 +1678,7 @@ class Qwen3VLForConditionalGeneration(
         timestamps: list[float],
         video_grid_thw: list[int],
         retention_mask: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
         """Create final embeddings that combine video embeddings with
         text embeddings of indicator tokens.
 
@@ -1823,10 +1752,11 @@ class Qwen3VLForConditionalGeneration(
                 is_video_embed=is_video_embed,
                 retention_mask=retention_mask,
             )
+            to_concat.append(expanded_positions)
 
         final_video_embeddings = torch.cat(to_concat, dim=-1)
 
-        return final_video_embeddings, expanded_positions
+        return final_video_embeddings
 
     def _get_expanded_positions(
         self,
@@ -2180,7 +2110,6 @@ class Qwen3VLForConditionalGeneration(
         self,
         input_ids: list[int],
         multimodal_embeddings: MultiModalEmbeddings,
-        multimodal_positions: Sequence[torch.Tensor] | None,
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
     ) -> tuple[MultiModalEmbeddings, torch.Tensor, int]:
@@ -2196,8 +2125,6 @@ class Qwen3VLForConditionalGeneration(
                 entire sequence.
             multimodal_embeddings: Tuple of multimodal embeddings that
                 fits into the prefill chunk that is being processed.
-            multimodal_positions: Optional multimodal position sidecar tensors,
-                aligned with multimodal_embeddings.
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
             num_computed_tokens: A number of computed tokens so far.
@@ -2209,7 +2136,6 @@ class Qwen3VLForConditionalGeneration(
         return self._recompute_mrope_positions(
             input_ids=input_ids,
             multimodal_embeddings=multimodal_embeddings,
-            multimodal_positions=multimodal_positions,
             mrope_positions=mrope_positions,
             num_computed_tokens=num_computed_tokens,
             image_token_id=self.config.image_token_id,
@@ -2221,7 +2147,6 @@ class Qwen3VLForConditionalGeneration(
     def _recompute_mrope_positions(
         input_ids: list[int],
         multimodal_embeddings: MultiModalEmbeddings,
-        multimodal_positions: Sequence[torch.Tensor] | None,
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
         vision_start_token_id: int,
@@ -2240,34 +2165,19 @@ class Qwen3VLForConditionalGeneration(
 
         mm_embeddings_out = []
         mm_embeddings_pos = []
-        if multimodal_positions is None:
-            # Strip position information from embeddings (last 5 channels)
-            # For Qwen3 VL, handle potentially empty frames (from unpacking)
-            for mm in multimodal_embeddings:
-                if mm.shape[0] > 0:  # Only process non-empty frames
-                    mm_embeddings_out.append(mm[:, :-5])
-                    mm_embeddings_pos.append(mm[:, -5:].permute(1, 0).long())
-                else:
-                    # Empty frame - keep as is
-                    mm_embeddings_out.append(mm)
-                    # Create empty position tensor with correct shape
-                    mm_embeddings_pos.append(
-                        torch.empty(5, 0, device=device, dtype=torch.long)
-                    )
-        else:
-            if len(multimodal_positions) != len(multimodal_embeddings):
-                raise ValueError(
-                    "Mismatched multimodal embeddings and positions lengths "
-                    f"for Qwen3VL: {len(multimodal_embeddings)} != "
-                    f"{len(multimodal_positions)}"
-                )
-            for mm, positions in zip(multimodal_embeddings, multimodal_positions):
-                if positions is None:
-                    raise ValueError(
-                        "Missing multimodal positions for Qwen3VL pruning."
-                    )
+        # Strip position information from embeddings (last 5 channels)
+        # For Qwen3 VL, handle potentially empty frames (from unpacking)
+        for mm in multimodal_embeddings:
+            if mm.shape[0] > 0:  # Only process non-empty frames
+                mm_embeddings_out.append(mm[:, :-5])
+                mm_embeddings_pos.append(mm[:, -5:].permute(1, 0).long())
+            else:
+                # Empty frame - keep as is
                 mm_embeddings_out.append(mm)
-                mm_embeddings_pos.append(positions.permute(1, 0).long())
+                # Create empty position tensor with correct shape
+                mm_embeddings_pos.append(
+                    torch.empty(5, 0, device=device, dtype=torch.long)
+                )
 
         positions, mrope_positions_delta = recompute_mrope_positions(
             input_ids_t,
@@ -2281,9 +2191,7 @@ class Qwen3VLForConditionalGeneration(
 
         return tuple(mm_embeddings_out), positions, mrope_positions_delta
 
-    def embed_multimodal(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | MultiModalEmbeddingOutput | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return None
@@ -2291,9 +2199,6 @@ class Qwen3VLForConditionalGeneration(
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor corresponding to a multimodal data item (image or video).
         multimodal_embeddings: list[torch.Tensor] = []
-        multimodal_positions: list[torch.Tensor | None] = []
-        video_metadata: list[Qwen3VLVideoEmbeddingMetadata] = []
-        video_indices: list[int] = []
 
         # NOTE: It is important to iterate over the keys in this dictionary
         # to preserve the order of the modalities.
@@ -2301,47 +2206,19 @@ class Qwen3VLForConditionalGeneration(
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 image_embeddings = self._process_image_input(multimodal_input)
-                image_embeddings, image_positions = self._postprocess_image_embeds_evs(
+                image_embeddings = self._postprocess_image_embeds_evs(
                     image_embeddings, multimodal_input
                 )
                 multimodal_embeddings.extend(image_embeddings)
-                if image_positions is None:
-                    multimodal_positions.extend([None] * len(image_embeddings))
-                else:
-                    multimodal_positions.extend(image_positions)
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
                 if self.is_multimodal_pruning_enabled:
-                    video_embeddings, metadata = self._postprocess_video_embeds_evs(
+                    video_embeddings = self._postprocess_video_embeds_evs(
                         video_embeddings, multimodal_input
                     )
-                    start_idx = len(multimodal_embeddings)
-                    video_metadata.extend(metadata)
-                    video_indices.extend(
-                        range(start_idx, start_idx + len(video_embeddings))
-                    )
                 multimodal_embeddings.extend(video_embeddings)
-                multimodal_positions.extend([None] * len(video_embeddings))
 
         embeddings_tuple = tuple(multimodal_embeddings)
-        positions_tuple = tuple(multimodal_positions)
-        has_positions = any(pos is not None for pos in positions_tuple)
-        if video_metadata:
-            return MultiModalEmbeddingOutput(
-                embeddings=embeddings_tuple,
-                postprocess=partial(
-                    self._postprocess_video_embeddings,
-                    video_metadata=tuple(video_metadata),
-                    video_indices=tuple(video_indices),
-                    multimodal_positions=positions_tuple,
-                ),
-            )
-
-        if has_positions:
-            return MultiModalEmbeddingOutput(
-                embeddings=embeddings_tuple, positions=positions_tuple
-            )
-
         return embeddings_tuple
 
     def _compute_deepstack_embeds(

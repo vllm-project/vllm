@@ -8,7 +8,6 @@ from typing import (
     TYPE_CHECKING,
     ClassVar,
     Literal,
-    NamedTuple,
     Protocol,
     TypeAlias,
     overload,
@@ -56,26 +55,6 @@ The output embeddings must be one of the following formats:
     each input multimodal data item (e.g, image).
 - A single 3D tensor, with the batch dimension grouping the 2D tensors.
 """
-
-
-MultiModalPositions: TypeAlias = list[Tensor] | Tensor | tuple[Tensor, ...]
-
-MultiModalEmbeddingsPostProc: TypeAlias = Callable[
-    [MultiModalEmbeddings], "MultiModalEmbeddingReturn"
-]
-
-
-class MultiModalEmbeddingOutput(NamedTuple):
-    """Embed outputs with optional postprocessing for GPU runners."""
-
-    embeddings: MultiModalEmbeddings
-    postprocess: MultiModalEmbeddingsPostProc | None = None
-    positions: MultiModalPositions | None = None
-
-
-MultiModalEmbeddingReturn: TypeAlias = (
-    MultiModalEmbeddings | MultiModalEmbeddingOutput | None
-)
 
 
 def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
@@ -151,7 +130,7 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddingReturn:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """
         Returns multimodal embeddings generated from multimodal kwargs
         to be merged with text embeddings.
@@ -413,7 +392,6 @@ class SupportsMultiModalPruning(Protocol):
         self,
         input_ids: list[int],
         multimodal_embeddings: MultiModalEmbeddings,
-        multimodal_positions: MultiModalPositions | None,
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
     ) -> tuple[MultiModalEmbeddings, Tensor, int]:
@@ -429,8 +407,6 @@ class SupportsMultiModalPruning(Protocol):
                 entire sequence.
             multimodal_embeddings: Tuple of multimodal embeddings that
                 fits into the prefill chunk that is being processed.
-            multimodal_positions: Optional multimodal position sidecar tensors,
-                aligned with multimodal_embeddings.
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
             num_computed_tokens: A number of computed tokens so far.

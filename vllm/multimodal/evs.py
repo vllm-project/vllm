@@ -319,7 +319,6 @@ def recompute_mrope_positions(
 
             # Adjust global_mm_start to point to the first timestamp token
             # instead of the vision_start token.
-            # TODO: validate `num_timestamp_tokens`.
             global_mm_start -= num_timestamp_tokens
             adjusted_for_timestamps = True
 
