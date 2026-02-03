@@ -28,7 +28,6 @@ from vllm.entrypoints.pooling.score.protocol import (
 )
 from vllm.entrypoints.pooling.score.utils import (
     ScoreData,
-    ScoreDataList,
     ScoreInputs,
     _cosine_similarity,
     compress_token_type_ids,
@@ -77,8 +76,8 @@ class ServingScores(OpenAIServing):
 
     async def _embedding_score(
         self,
-        data_1: ScoreDataList,
-        data_2: ScoreDataList,
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         lora_request: LoRARequest | None | None = None,
@@ -175,8 +174,8 @@ class ServingScores(OpenAIServing):
 
     async def _cross_encoding_score(
         self,
-        data_1: ScoreDataList,
-        data_2: ScoreDataList,
+        data_1: list[ScoreData],
+        data_2: list[ScoreData],
         request: RerankRequest | ScoreRequest,
         request_id: str,
         lora_request: LoRARequest | None | None = None,
