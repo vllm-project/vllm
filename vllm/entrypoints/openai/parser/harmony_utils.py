@@ -329,13 +329,9 @@ def parse_chat_input_to_harmony_message(
             commentary_msg = commentary_msg.with_channel("commentary")
             msgs.append(commentary_msg)
 
-        reasoning_content = chat_msg.get("reasoning") or chat_msg.get(
-            "reasoning_content"
-        )
-        if reasoning_content:
-            analysis_msg = Message.from_role_and_content(
-                Role.ASSISTANT, reasoning_content
-            )
+        reasoning = chat_msg.get("reasoning")
+        if reasoning:
+            analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning)
             analysis_msg = analysis_msg.with_channel("analysis")
             msgs.append(analysis_msg)
 
@@ -370,9 +366,9 @@ def parse_chat_input_to_harmony_message(
         return [msg]
 
     # Non-tool reasoning content
-    reasoning_content = chat_msg.get("reasoning") or chat_msg.get("reasoning_content")
-    if role == "assistant" and reasoning_content:
-        analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning_content)
+    reasoning = chat_msg.get("reasoning")
+    if role == "assistant" and reasoning:
+        analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning)
         analysis_msg = analysis_msg.with_channel("analysis")
         msgs.append(analysis_msg)
 
@@ -553,7 +549,7 @@ def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutpu
     return output_items
 
 
-def _parse_reasoning_content(message: Message) -> list[ResponseOutputItem]:
+def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
     """Parse reasoning/analysis content into reasoning items."""
     output_items = []
     for content in message.content:
@@ -658,7 +654,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
 
         # Built-in MCP tools (python, browser, container)
         elif recipient in _BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
-            output_items.extend(_parse_reasoning_content(message))
+            output_items.extend(_parse_reasoning(message))
 
         # All other recipients are MCP calls
         else:
@@ -666,12 +662,12 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
 
     # No recipient - handle based on channel for non-tool messages
     elif message.channel == "analysis":
-        output_items.extend(_parse_reasoning_content(message))
+        output_items.extend(_parse_reasoning(message))
 
     elif message.channel == "commentary":
         # Per Harmony format, commentary channel can contain preambles to calling
         # multiple functions - explanatory text with no recipient
-        output_items.extend(_parse_reasoning_content(message))
+        output_items.extend(_parse_reasoning(message))
 
     elif message.channel == "final":
         output_items.append(_parse_final_message(message))

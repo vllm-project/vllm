@@ -48,6 +48,7 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (
+    Qwen3MoeDecoderLayer,
     Qwen3MoeForCausalLM,
     Qwen3MoeModel,
     Qwen3MoeSparseMoeBlock,
@@ -82,8 +83,18 @@ class Qwen3VLMoeProcessingInfo(Qwen3VLProcessingInfo):
     }
 )
 class Qwen3MoeLLMModel(Qwen3MoeModel):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        decoder_layer_type: type[torch.nn.Module] = Qwen3MoeDecoderLayer,
+    ):
+        super().__init__(
+            vllm_config=vllm_config,
+            prefix=prefix,
+            decoder_layer_type=decoder_layer_type,
+        )
         if not get_pp_group().is_first_rank:
             assert self.start_layer >= len(
                 vllm_config.model_config.hf_config.vision_config.deepstack_visual_indexes
@@ -94,7 +105,7 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -446,7 +457,6 @@ class Qwen3VLMoeForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
