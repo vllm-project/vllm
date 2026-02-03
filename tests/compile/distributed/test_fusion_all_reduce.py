@@ -7,7 +7,7 @@ import torch
 
 import vllm.envs as envs
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.compilation.passes.fusion.collective_fusion import AllReduceFusionPass
+from vllm.compilation.passes.fusion.allreduce_rms_fusion import AllReduceFusionPass
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,
 )

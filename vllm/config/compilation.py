@@ -170,7 +170,7 @@ class PassConfig:
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
-        from vllm.compilation.passes.fusion.collective_fusion import (
+        from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
             FI_ALLREDUCE_FUSION_MAX_SIZE_MB,
         )
         from vllm.platforms import current_platform

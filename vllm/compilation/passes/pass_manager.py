@@ -31,7 +31,8 @@ if current_platform.is_cuda_alike():
     from .fusion.sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_cuda():
-    from .fusion.collective_fusion import AllReduceFusionPass, AsyncTPPass
+    from .fusion.allreduce_rms_fusion import AllReduceFusionPass
+    from .fusion.collective_fusion import AsyncTPPass
 
 from .inductor_pass import (
     CustomGraphPass,
