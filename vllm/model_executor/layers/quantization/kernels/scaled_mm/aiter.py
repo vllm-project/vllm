@@ -7,6 +7,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .cutlass import CutlassInt8ScaledMMLinearKernel
@@ -58,7 +59,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         """
         `AiterInt8ScaledMMLinearKernel` implements a fused version of
-            `output = torch.mm((scale_a * a), (scale_b * b)).to(out_dtype)`
+            `output = torch.mm((scale_a* a), (scale_b * b)).to(out_dtype)`
         where scale_a * a and scale_b * b are implemented using numpy-style
         broadcasting.
         Currently only support per-tensor-per-tensor GEMM
@@ -151,14 +152,24 @@ class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not (c.N % 16 == 0 and c.K % 16 == 0):
             return (
                 False,
-                f"requires N and K dimensions to be divisible by 16, recived "
-                f"N={c.N} and k={c.K}.",
+                f"requires N and K dimensions to be divisible by 16, recieved "
+                f"N={c.N} and K={c.K}.",
             )
+        if c.out_dtype is not torch.bfloat16:
+            return False, "requires bfloat16 ouput dtype."
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = torch.nn.Parameter(
-            rocm_aiter_ops.shuffle_weight(layer.weight.data), requires_grad=False
+        w_name, _, _, _ = self.layer_param_names
+        w, _, _, _ = self._get_layer_params(layer)
+
+        replace_parameter(
+            layer,
+            w_name,
+            torch.nn.Parameter(
+                rocm_aiter_ops.shuffle_weight(w.t().contiguous()).data,
+                requires_grad=False,
+            ),
         )
 
     def apply_scaled_mm(
@@ -172,7 +183,7 @@ class AiterBpreshufflePerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        return rocm_aiter_ops.gemm_a8w8_bpreshuffle(A, B.t(), As, Bs, bias, out_dtype)
+        return rocm_aiter_ops.gemm_a8w8_bpreshuffle(A, B, As, Bs, bias, out_dtype)
 
 
 class AiterCKPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):

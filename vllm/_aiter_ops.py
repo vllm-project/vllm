@@ -428,15 +428,12 @@ def _rocm_aiter_gemm_a8w8_bpreshuffle_impl(
     bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    from aiter import gemm_a8w8_bpreshuffle_ck
+    from aiter import gemm_a8w8_bpreshuffle
 
-    m = A.shape[0]
-    n = B.shape[0]
-    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
-    gemm_a8w8_bpreshuffle_ck(A, B, As, Bs, Y)
+    output = gemm_a8w8_bpreshuffle(A, B, As, Bs, None, output_dtype)
     if bias is not None:
-        Y.add_(bias)
-    return Y
+        output.add_(bias)
+    return output
 
 
 def _rocm_aiter_gemm_a8w8_bpreshuffle_fake(
