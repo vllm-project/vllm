@@ -467,8 +467,8 @@ async def send_turn(
         # Request failed
         return None
 
-    # RFC: Use API's usage info for accurate token counting (matches actual API behavior)
-    # Fallback to tokenizer if usage info is not available
+    # RFC: Use API's usage info for accurate token counting
+    # (matches actual API behavior). Fallback to tokenizer if unavailable.
     if response.prompt_tokens is not None:
         input_num_tokens = response.prompt_tokens
     else:
