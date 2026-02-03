@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import pybase64
 import torch
@@ -73,9 +74,9 @@ def encode_pooling_bytes(
     pooling_outputs: list[PoolingRequestOutput],
     embed_dtype: EmbedDType,
     endianness: Endianness,
-) -> tuple[list[bytes], list[dict[str, int]], dict[str, int]]:
+) -> tuple[list[bytes], list[dict[str, Any]], dict[str, Any]]:
     num_prompt_tokens = 0
-    items: list[dict[str, int]] = []
+    items: list[dict[str, Any]] = []
     body: list[bytes] = []
     offset = 0
     for idx, output in enumerate(pooling_outputs):
