@@ -49,6 +49,7 @@ from .interfaces import (
     is_hybrid,
     requires_raw_input_tokens,
     supports_cross_encoding,
+    supports_late_interaction,
     supports_mamba_prefix_caching,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
@@ -205,6 +206,7 @@ _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
+    "ColBERTModel": ("colbert", "ColBERTModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
@@ -593,6 +595,7 @@ class _ModelInfo:
     default_seq_pooling_type: SequencePoolingType
     default_tok_pooling_type: TokenPoolingType
     supports_cross_encoding: bool
+    supports_late_interaction: bool
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
     requires_raw_input_tokens: bool
@@ -616,6 +619,7 @@ class _ModelInfo:
             default_tok_pooling_type=get_default_tok_pooling_type(model),
             attn_type=get_attn_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
+            supports_late_interaction=supports_late_interaction(model),
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input_only=supports_multimodal_raw_input_only(
                 model
