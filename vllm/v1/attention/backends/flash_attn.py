@@ -313,9 +313,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if self.use_full_cuda_graph and self.aot_schedule:
             # Times 4 due to:
             #  https://github.com/vllm-project/flash-attention/blob/3223650ccabe622a0fcae65eec706a50186a89f7/hopper/flash_api.cpp#L650-L653
+            # For some tests max_cudagraph_size > max_num_seqs,
+            #   so we need to use the larger one.
             self.scheduler_metadata = torch.zeros(
-                # For some tests max_cudagraph_size > max_num_seqs,
-                #   so we need to use the larger one.
                 max(self.max_cudagraph_size or 0, max_num_seqs) * 4 + 1,
                 dtype=torch.int32,
                 device=self.device,
