@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import pybase64
 import torch
 
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.outputs import PoolingRequestOutput
 from vllm.utils.serial_utils import (
     EMBED_DTYPES,
@@ -74,7 +73,7 @@ def encode_pooling_bytes(
     pooling_outputs: list[PoolingRequestOutput],
     embed_dtype: EmbedDType,
     endianness: Endianness,
-) -> tuple[list[bytes], list[MetadataItem], UsageInfo]:
+) -> tuple[list[bytes], list[MetadataItem], dict[str, int]]:
     num_prompt_tokens = 0
     items: list[MetadataItem] = []
     body: list[bytes] = []
@@ -102,7 +101,8 @@ def encode_pooling_bytes(
         num_prompt_tokens += len(prompt_token_ids)
         offset += size
 
-    usage = UsageInfo(
+    # Dictionary form of UsageInfo
+    usage = dict(
         prompt_tokens=num_prompt_tokens,
         total_tokens=num_prompt_tokens,
     )
