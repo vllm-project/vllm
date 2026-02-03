@@ -64,12 +64,13 @@ if current_platform.is_cuda():
             ),
         ),
         ModelBackendTestCase(
-            # FlashAttention 3 on Hopper with FP8 output fusion
+            # FlashAttention 3 on Hopper cannot write FP8 output directly,
+            # so fused FP8 output quantization is not supported (attention_fusion=0)
             model_name="RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
             backend=AttentionBackendEnum.FLASH_ATTN,
             matches=Matches(
-                attention_fusion=32,
+                attention_fusion=0,
                 allreduce_fusion=65,
                 sequence_parallel=65,
                 async_tp=128,

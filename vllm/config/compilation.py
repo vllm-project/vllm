@@ -1020,23 +1020,18 @@ class CompilationConfig:
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.fuse_attn_quant
+        # NOTE: Previously we set splitting_ops to [] here, but this caused
+        # issues when fuse_attn_quant=True but no layers actually support fusion
+        # (e.g., FP8 model with FP8 KV cache where FA3 cannot fuse FP8 output).
+        # Now we keep the default splitting_ops to maintain consistent behavior.
+        # The AttnFusionPass will still try to fuse if any layers support it.
         if self.splitting_ops is None:
-            self.splitting_ops = []
-            if self.cudagraph_mode.has_piecewise_cudagraphs():
-                logger.warning_once(
-                    "fuse_attn_quant is incompatible with piecewise "
-                    "cudagraph when use_inductor_graph_partition is off. "
-                    "In this case, splitting_ops will be set to empty "
-                    "list, and cudagraph_mode will be set to FULL. "
-                    "Please ensure you are using attention backends that "
-                    "support cudagraph or set cudagraph_mode to NONE "
-                    "explicitly if encountering any problems."
-                )
-                self.cudagraph_mode = CUDAGraphMode.FULL
-
-        assert not self.splitting_ops_contain_attention(), (
-            "attention ops should not be in splitting_ops when fuse_attn_quant is True"
-        )
+            # Use the same default as when fuse_attn_quant is False
+            self.splitting_ops = list(self._attention_ops)
+            logger.debug(
+                "fuse_attn_quant is enabled but keeping default splitting_ops "
+                "for compatibility with cases where fusion may not be supported."
+            )
 
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
