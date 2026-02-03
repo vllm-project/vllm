@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import contextlib
 from collections.abc import Sequence
 
 from transformers import PreTrainedTokenizerBase
@@ -121,30 +120,29 @@ class KimiK2ReasoningParser(ReasoningParser):
         if self._is_identity_mode():
             return self._identity_parser.extract_content_ids(input_ids)
 
-        # Find the last occurrence of end token or tool section start
-        end_index = -1
+        if self._end_token_id in input_ids:
+            end_token_index = (
+                len(input_ids) - 1 - input_ids[::-1].index(self._end_token_id)
+            )
 
-        # Look for explicit end token
-        with contextlib.suppress(ValueError):
-            end_index = len(input_ids) - 1 - input_ids[::-1].index(self._end_token_id)
+            if end_token_index != -1:
+                return input_ids[end_token_index + 1 :]
 
-        # Look for implicit tool section start
-        if self._tool_section_start_token_id is not None:
-            try:
-                tool_start_index = (
-                    len(input_ids)
-                    - 1
-                    - input_ids[::-1].index(self._tool_section_start_token_id)
-                )
-                if tool_start_index > end_index:
-                    end_index = tool_start_index
-            except ValueError:
-                pass
+        if (
+            self._tool_section_start_token_id is not None
+            and self._tool_section_start_token_id in input_ids
+        ):
+            tool_section_index = (
+                len(input_ids)
+                - 1
+                - input_ids[::-1].index(self._tool_section_start_token_id)
+            )
 
-        if end_index < 0 or end_index >= len(input_ids) - 1:
-            return []
+            if tool_section_index != -1:
+                return input_ids[tool_section_index:]
 
-        return input_ids[end_index + 1 :]
+        # still reasoning (no content)
+        return []
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
@@ -155,35 +153,29 @@ class KimiK2ReasoningParser(ReasoningParser):
         if self._is_identity_mode():
             return self._identity_parser.extract_reasoning(model_output, request)
 
-        # Check if the start token is present in the model output
-        if self._start_token in model_output:
-            # Extract content after start token
-            reasoning_content = model_output.split(self._start_token, 1)[1]
+        # thinking does not require a think start token but consume it if present
+        start_token_index = model_output.find(self._start_token)
+        start_token_index = 0 if start_token_index != 0 else len(self._start_token)
+        end_token_index = model_output.find(self._end_token)
 
-            # Check for explicit end token
-            if self._end_token in reasoning_content:
-                reasoning, _, content = reasoning_content.partition(self._end_token)
-                return reasoning, content if content else None
+        if end_token_index != -1:
+            return (
+                model_output[start_token_index:end_token_index],
+                model_output[end_token_index + len(self._end_token) :] or None,
+            )
 
-            # Check for implicit tool section start
-            if self._tool_section_start_token in reasoning_content:
-                reasoning, _, _ = reasoning_content.partition(
-                    self._tool_section_start_token
-                )
-                # Content is empty when tool section starts implicitly
-                return reasoning, None
+        tool_section_index = model_output.find(self._tool_section_start_token)
+        if tool_section_index != -1:
+            return (
+                model_output[start_token_index:tool_section_index],
+                model_output[tool_section_index:] or None,
+            )
 
-            # Neither end token nor tool section found - all reasoning
-            return reasoning_content, None
-
-        # No start token found - check if there's implicit tool section
-        if self._tool_section_start_token in model_output:
-            reasoning, _, _ = model_output.partition(self._tool_section_start_token)
-            # Content is empty when tool section starts implicitly
-            return reasoning if reasoning else None, None
-
-        # No reasoning markers found - default to reasoning mode
-        return model_output, None
+        # still reasoning (no content)
+        return (
+            model_output[start_token_index:],
+            None,
+        )
 
     def extract_reasoning_streaming(
         self,
@@ -211,77 +203,22 @@ class KimiK2ReasoningParser(ReasoningParser):
         if len(delta_token_ids) == 1 and delta_token_ids[0] in [
             self._start_token_id,
             self._end_token_id,
-            self._tool_section_start_token_id,
         ]:
             return None
 
-        start_in_prev = self._start_token_id in previous_token_ids
-        start_in_delta = self._start_token_id in delta_token_ids
-        end_in_prev = self._end_token_id in previous_token_ids
-        end_in_delta = self._end_token_id in delta_token_ids
-        tool_in_delta = (
-            self._tool_section_start_token_id is not None
-            and self._tool_section_start_token_id in delta_token_ids
-        )
+        if self._end_token_id in delta_token_ids:
+            end_index = delta_text.find(self._end_token)
+            reasoning = delta_text[:end_index]
+            content = delta_text[end_index + len(self._end_token) :]
+            return DeltaMessage(
+                reasoning=reasoning, content=content if content else None
+            )
 
-        # Case 1: Start token was already seen
-        if start_in_prev:
-            if end_in_delta:
-                # Explicit end found in delta
-                end_index = delta_text.find(self._end_token)
-                reasoning = delta_text[:end_index]
-                content = delta_text[end_index + len(self._end_token) :]
-                return DeltaMessage(
-                    reasoning=reasoning, content=content if content else None
-                )
-            elif tool_in_delta:
-                # Implicit end via tool section
-                tool_index = delta_text.find(self._tool_section_start_token)
-                reasoning = delta_text[:tool_index]
-                # Don't include content - tool parser will handle it
-                return DeltaMessage(reasoning=reasoning, content=None)
-            elif end_in_prev:
-                # Already past reasoning
-                return DeltaMessage(content=delta_text)
-            else:
-                # Still in reasoning
-                return DeltaMessage(reasoning=delta_text)
+        if self._tool_section_start_token_id in delta_token_ids:
+            tool_index = delta_text.find(self._tool_section_start_token)
+            reasoning = delta_text[:tool_index]
+            content = delta_text[tool_index:]
+            return DeltaMessage(reasoning=reasoning, content=content)
 
-        # Case 2: Start token in current delta
-        elif start_in_delta:
-            if end_in_delta:
-                # Both start and end in same delta
-                start_index = delta_text.find(self._start_token)
-                end_index = delta_text.find(self._end_token)
-                reasoning = delta_text[start_index + len(self._start_token) : end_index]
-                content = delta_text[end_index + len(self._end_token) :]
-                return DeltaMessage(
-                    reasoning=reasoning, content=content if content else None
-                )
-            elif tool_in_delta:
-                # Start and tool section in same delta - unlikely but handle it
-                start_index = delta_text.find(self._start_token)
-                tool_index = delta_text.find(self._tool_section_start_token)
-                reasoning = delta_text[
-                    start_index + len(self._start_token) : tool_index
-                ]
-                return DeltaMessage(reasoning=reasoning, content=None)
-            else:
-                # Only start in delta - beginning of reasoning
-                start_index = delta_text.find(self._start_token)
-                reasoning = delta_text[start_index + len(self._start_token) :]
-                return DeltaMessage(reasoning=reasoning)
-
-        # Case 3: No start token seen yet - default to reasoning mode
-        else:
-            # Check if tool section starts without explicit reasoning markers
-            if tool_in_delta:
-                # Tool section starts implicitly - any text before it is reasoning
-                tool_index = delta_text.find(self._tool_section_start_token)
-                if tool_index > 0:
-                    reasoning = delta_text[:tool_index]
-                    return DeltaMessage(reasoning=reasoning, content=None)
-                else:
-                    # Tool section at start - no reasoning to extract
-                    return None
-            return DeltaMessage(reasoning=delta_text)
+        # still reasoning (no end token)
+        return DeltaMessage(reasoning=delta_text)
