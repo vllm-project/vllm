@@ -232,22 +232,41 @@ jobs:
 
       - name: Regenerate complete index
         run: |
-          pip install regex
+          pip install packaging
           
           cat > /tmp/generate_index.py << 'EOF'
           import os
           import sys
           from pathlib import Path
           from datetime import datetime
+          from urllib.parse import quote
           
           INDEX_HTML_TEMPLATE = """<!DOCTYPE html>
           <html>
-            <head><title>vLLM ROCm Wheels</title></head>
+            <head>
+              <meta name="pypi:repository-version" content="1.0">
+              <title>ROCm Wheels</title>
+              <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                       max-width: 800px; margin: 40px auto; padding: 0 20px; }}
+                code {{ background: #f4f4f4; padding: 2px 6px; border-radius: 3px; }}
+                pre {{ background: #f4f4f4; padding: 12px; border-radius: 6px; overflow-x: auto; }}
+                a {{ color: #0366d6; }}
+              </style>
+            </head>
             <body>
-              <h1>vLLM ROCm Wheels</h1>
-              <p>Generated: {timestamp}</p>
-              <p>Install with: <code>pip install vllm --extra-index-url {base_url}</code></p>
-              <h2>Packages</h2>
+              <h1>ROCm Wheels</h1>
+              <p>Pre-built wheels for AMD ROCm (gfx11 / Strix Halo / RDNA3+)</p>
+              <p><em>Generated: {timestamp}</em></p>
+              
+              <h2>Installation</h2>
+              <p><strong>Step 1:</strong> Install ROCm PyTorch first:</p>
+              <pre>pip install torch --index-url https://rocm.nightlies.amd.com/v2-staging/gfx1151</pre>
+              
+              <p><strong>Step 2:</strong> Install packages:</p>
+              <pre>pip install vllm flash-attn --extra-index-url {base_url}</pre>
+              
+              <h2>Available Packages</h2>
           {items}
             </body>
           </html>
@@ -255,13 +274,27 @@ jobs:
           
           PACKAGE_INDEX_TEMPLATE = """<!DOCTYPE html>
           <html>
-            <head><title>vllm</title></head>
+            <head>
+              <meta name="pypi:repository-version" content="1.0">
+              <title>{package_name}</title>
+            </head>
             <body>
-              <h1>vllm</h1>
           {items}
             </body>
           </html>
           """
+          
+          def parse_wheel_name(filename):
+              """Extract package name from wheel filename."""
+              # Format: {package}-{version}-{python}-{abi}-{platform}.whl
+              base = filename.removesuffix(".whl")
+              parts = base.split("-")
+              # Package name is everything before the version
+              # Handle packages with dashes by finding where version starts
+              for i, part in enumerate(parts):
+                  if part[0].isdigit():
+                      return "-".join(parts[:i]).replace("_", "-")
+              return parts[0].replace("_", "-")
           
           wheels_dir = Path("gh-pages/wheels")
           wheels_dir.mkdir(parents=True, exist_ok=True)
@@ -269,29 +302,50 @@ jobs:
           # Find all wheel files
           wheel_files = list(wheels_dir.glob("*.whl"))
           
-          # Create vllm package directory
-          vllm_dir = wheels_dir / "vllm"
-          vllm_dir.mkdir(exist_ok=True)
+          # Group wheels by package name
+          packages = {}
+          for whl in wheel_files:
+              pkg_name = parse_wheel_name(whl.name)
+              if pkg_name not in packages:
+                  packages[pkg_name] = []
+              packages[pkg_name].append(whl.name)
           
-          # Generate package index with links to wheels
-          wheel_links = []
-          for whl in sorted(wheel_files, key=lambda x: x.name, reverse=True):
-              # Link points to parent directory where wheels are stored
-              wheel_links.append(f'    <a href="../{whl.name}">{whl.name}</a><br/>')
+          print(f"Found {len(wheel_files)} wheels in {len(packages)} packages")
+          for pkg, wheels in packages.items():
+              print(f"  {pkg}: {len(wheels)} wheels")
           
-          package_index = PACKAGE_INDEX_TEMPLATE.format(items="\n".join(wheel_links))
-          (vllm_dir / "index.html").write_text(package_index)
+          # Generate package directories and indices
+          for pkg_name, wheel_names in packages.items():
+              pkg_dir = wheels_dir / pkg_name
+              pkg_dir.mkdir(exist_ok=True)
+              
+              # Generate wheel links
+              wheel_links = []
+              for whl_name in sorted(wheel_names, reverse=True):
+                  encoded = quote(whl_name, safe="")
+                  wheel_links.append(f'    <a href="../{encoded}">{whl_name}</a><br/>')
+              
+              package_index = PACKAGE_INDEX_TEMPLATE.format(
+                  package_name=pkg_name,
+                  items="\n".join(wheel_links)
+              )
+              (pkg_dir / "index.html").write_text(package_index)
           
           # Generate top-level index
           base_url = os.environ.get("BASE_URL", "https://example.github.io/vllm/wheels")
+          package_links = "\n".join(
+              f'    <a href="{pkg}/">{pkg}</a><br/>' 
+              for pkg in sorted(packages.keys())
+          )
+          
           top_index = INDEX_HTML_TEMPLATE.format(
               timestamp=datetime.now().isoformat(),
               base_url=base_url,
-              items='    <a href="vllm/">vllm</a><br/>'
+              items=package_links
           )
           (wheels_dir / "index.html").write_text(top_index)
           
-          print(f"Generated index with {len(wheel_files)} wheels")
+          print(f"Generated index with {len(packages)} packages")
           EOF
           
           BASE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/wheels" \
