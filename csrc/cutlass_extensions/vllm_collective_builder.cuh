@@ -1,6 +1,6 @@
 #pragma once
 
-#include "cutlass_extensions/gemm/collective/collective_builder.hpp"
+#include "cutlass/gemm/collective/collective_builder.hpp"
 
 namespace cutlass::gemm::collective {
 using namespace cute;

@@ -3,4 +3,4 @@ Meta-Llama-3-70B-Instruct.yaml
 Mixtral-8x7B-Instruct-v0.1.yaml
 Qwen2-57B-A14-Instruct.yaml
 DeepSeek-V2-Lite-Chat.yaml
-Meta-Llama-3-8B-QQQ.yaml
+NVIDIA-Nemotron-3-Nano-30B-A3B-BF16.yaml

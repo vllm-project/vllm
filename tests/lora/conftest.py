@@ -3,25 +3,25 @@
 
 import tempfile
 from collections import OrderedDict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
 
-import vllm
-from vllm.config import LoRAConfig
-from vllm.distributed import (cleanup_dist_env_and_memory,
-                              init_distributed_environment,
-                              initialize_model_parallel)
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               RowParallelLinear)
+from vllm.distributed import (
+    cleanup_dist_env_and_memory,
+    init_distributed_environment,
+    initialize_model_parallel,
+)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
 
@@ -51,11 +51,13 @@ def dist_init():
     if current_platform.is_cpu() or current_platform.is_tpu():
         backend = "gloo"
 
-    init_distributed_environment(world_size=1,
-                                 rank=0,
-                                 distributed_init_method=f"file://{temp_file}",
-                                 local_rank=0,
-                                 backend=backend)
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"file://{temp_file}",
+        local_rank=0,
+        backend=backend,
+    )
     initialize_model_parallel(1, 1)
     yield
     cleanup_dist_env_and_memory(shutdown_ray=True)
@@ -70,10 +72,9 @@ def dist_init_torch_only():
         backend = "gloo"
 
     temp_file = tempfile.mkstemp()[1]
-    torch.distributed.init_process_group(world_size=1,
-                                         rank=0,
-                                         init_method=f"file://{temp_file}",
-                                         backend=backend)
+    torch.distributed.init_process_group(
+        world_size=1, rank=0, init_method=f"file://{temp_file}", backend=backend
+    )
 
 
 class DummyLoRAModel(nn.Sequential, SupportsLoRA):
@@ -81,54 +82,65 @@ class DummyLoRAModel(nn.Sequential, SupportsLoRA):
 
 
 @pytest.fixture
-def dummy_model() -> nn.Module:
+def dummy_model(default_vllm_config) -> nn.Module:
     model = DummyLoRAModel(
-        OrderedDict([
-            ("dense1", ColumnParallelLinear(764, 100)),
-            ("dense2", RowParallelLinear(100, 50)),
-            (
-                "layer1",
-                nn.Sequential(
-                    OrderedDict([
-                        ("dense1", ColumnParallelLinear(100, 10)),
-                        ("dense2", RowParallelLinear(10, 50)),
-                    ])),
-            ),
-            ("act2", nn.ReLU()),
-            ("output", ColumnParallelLinear(50, 10)),
-            ("outact", nn.Sigmoid()),
-            # Special handling for lm_head & sampler
-            ("lm_head", ParallelLMHead(512, 10)),
-            ("logits_processor", LogitsProcessor(512)),
-            ("sampler", Sampler())
-        ]))
+        OrderedDict(
+            [
+                ("dense1", ColumnParallelLinear(764, 100)),
+                ("dense2", RowParallelLinear(100, 50)),
+                (
+                    "layer1",
+                    nn.Sequential(
+                        OrderedDict(
+                            [
+                                ("dense1", ColumnParallelLinear(100, 10)),
+                                ("dense2", RowParallelLinear(10, 50)),
+                            ]
+                        )
+                    ),
+                ),
+                ("act2", nn.ReLU()),
+                ("output", ColumnParallelLinear(50, 10)),
+                ("outact", nn.Sigmoid()),
+                # Special handling for lm_head & sampler
+                ("lm_head", ParallelLMHead(512, 10)),
+                ("logits_processor", LogitsProcessor(512)),
+            ]
+        )
+    )
     model.config = MagicMock()
     model.embedding_modules = {"lm_head": "lm_head"}
+    model.unpadded_vocab_size = 32000
     return model
 
 
 @pytest.fixture
-def dummy_model_gate_up() -> nn.Module:
+def dummy_model_gate_up(default_vllm_config) -> nn.Module:
     model = DummyLoRAModel(
-        OrderedDict([
-            ("dense1", ColumnParallelLinear(764, 100)),
-            ("dense2", RowParallelLinear(100, 50)),
-            (
-                "layer1",
-                nn.Sequential(
-                    OrderedDict([
-                        ("dense1", ColumnParallelLinear(100, 10)),
-                        ("dense2", RowParallelLinear(10, 50)),
-                    ])),
-            ),
-            ("act2", nn.ReLU()),
-            ("gate_up_proj", MergedColumnParallelLinear(50, [5, 5])),
-            ("outact", nn.Sigmoid()),
-            # Special handling for lm_head & sampler
-            ("lm_head", ParallelLMHead(512, 10)),
-            ("logits_processor", LogitsProcessor(512)),
-            ("sampler", Sampler())
-        ]))
+        OrderedDict(
+            [
+                ("dense1", ColumnParallelLinear(764, 100)),
+                ("dense2", RowParallelLinear(100, 50)),
+                (
+                    "layer1",
+                    nn.Sequential(
+                        OrderedDict(
+                            [
+                                ("dense1", ColumnParallelLinear(100, 10)),
+                                ("dense2", RowParallelLinear(10, 50)),
+                            ]
+                        )
+                    ),
+                ),
+                ("act2", nn.ReLU()),
+                ("gate_up_proj", MergedColumnParallelLinear(50, [5, 5])),
+                ("outact", nn.Sigmoid()),
+                # Special handling for lm_head & sampler
+                ("lm_head", ParallelLMHead(512, 10)),
+                ("logits_processor", LogitsProcessor(512)),
+            ]
+        )
+    )
     model.config = MagicMock()
     model.packed_modules_mapping = {
         "gate_up_proj": [
@@ -137,24 +149,9 @@ def dummy_model_gate_up() -> nn.Module:
         ],
     }
     model.embedding_modules = {"lm_head": "lm_head"}
+    model.unpadded_vocab_size = 32000
+
     return model
-
-
-@pytest.fixture(scope="session")
-def llama_2_7b_base_huggingface_id():
-    # used as a base model for testing with sql lora adapter
-    return "meta-llama/Llama-2-7b-hf"
-
-
-@pytest.fixture(scope="session")
-def sql_lora_huggingface_id():
-    # huggingface repo id is used to test lora runtime downloading.
-    return "yard1/llama-2-7b-sql-lora-test"
-
-
-@pytest.fixture(scope="session")
-def sql_lora_files(sql_lora_huggingface_id):
-    return snapshot_download(repo_id=sql_lora_huggingface_id)
 
 
 @pytest.fixture(scope="session")
@@ -212,36 +209,81 @@ def qwen25vl_lora_files():
 
 
 @pytest.fixture(scope="session")
+def qwen2vl_language_lora_files():
+    return snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-language")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_vision_tower_connector_lora_files():
+    return snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-tower-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen2vl_vision_tower_lora_files():
+    return snapshot_download(repo_id="prashanth058/qwen2vl-flickr-lora-tower")
+
+
+@pytest.fixture(scope="session")
+def qwen25vl_vision_lora_files():
+    return snapshot_download(repo_id="EpochEcho/qwen2.5-3b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen3vl_vision_lora_files():
+    return snapshot_download(repo_id="EpochEcho/qwen3-4b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen3_meowing_lora_files():
+    """Download Qwen3 Meow LoRA files once per test session."""
+    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Meow-LoRA")
+
+
+@pytest.fixture(scope="session")
+def qwen3_woofing_lora_files():
+    """Download Qwen3 Woof LoRA files once per test session."""
+    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Woof-LoRA")
+
+
+@pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
 
 
 @pytest.fixture(scope="session")
-def phi2_lora_files():
-    return snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora")
+def deepseekv2_lora_files():
+    return snapshot_download(repo_id="wuchen01/DeepSeek-V2-Lite-Chat-All-LoRA")
 
 
-@pytest.fixture
-def llama_2_7b_engine_extra_embeddings():
-    cleanup_dist_env_and_memory(shutdown_ray=True)
-    get_model_old = get_model
-
-    def get_model_patched(**kwargs):
-        kwargs["vllm_config"].lora_config = LoRAConfig(max_loras=4,
-                                                       max_lora_rank=8)
-        return get_model_old(**kwargs)
-
-    with patch("vllm.worker.model_runner.get_model", get_model_patched):
-        engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
-    yield engine.llm_engine
-    del engine
-    cleanup_dist_env_and_memory(shutdown_ray=True)
+@pytest.fixture(scope="session")
+def gptoss20b_lora_files():
+    return snapshot_download(repo_id="jeeejeee/gpt-oss-20b-lora-adapter-text2sql")
 
 
-@pytest.fixture
-def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
-    yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
-           model_runner.model)
+@pytest.fixture(scope="session")
+def qwen3moe_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen3-moe-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def olmoe_lora_files():
+    return snapshot_download(repo_id="jeeejeee/olmoe-instruct-text2sql-spider")
+
+
+@pytest.fixture(scope="session")
+def qwen3_lora_files():
+    return snapshot_download(repo_id="charent/self_cognition_Alice")
+
+
+@pytest.fixture(scope="session")
+def llama32_lora_huggingface_id():
+    # huggingface repo id is used to test lora runtime downloading.
+    return "jeeejeee/llama32-3b-text2sql-spider"
+
+
+@pytest.fixture(scope="session")
+def llama32_lora_files(llama32_lora_huggingface_id):
+    return snapshot_download(repo_id=llama32_lora_huggingface_id)
 
 
 @pytest.fixture

@@ -109,7 +109,7 @@ void computeExpertFirstTokenOffset(int const* sorted_indices,
       sorted_indices, total_indices, num_experts, expert_first_token_offset);
 }
 
-void sortAndScanExpert(int* expert_for_source_row, const int* source_rows,
+void sortAndScanExpert(const int* expert_for_source_row, const int* source_rows,
                        int* permuted_experts, int* permuted_rows,
                        int64_t* expert_first_token_offset, int num_rows,
                        int num_experts, int num_experts_per_node, int k,
@@ -177,7 +177,7 @@ __global__ void getMIndicesKernel(int64_t* expert_first_token_offset,
   int tidx = threadIdx.x;
   extern __shared__ int64_t smem_expert_first_token_offset[];
   for (int i = tidx; i <= num_local_expert; i += blockDim.x) {
-    smem_expert_first_token_offset[tidx] = __ldg(expert_first_token_offset + i);
+    smem_expert_first_token_offset[i] = __ldg(expert_first_token_offset + i);
   }
   __syncthreads();
   auto last_token_offset = smem_expert_first_token_offset[eidx + 1];

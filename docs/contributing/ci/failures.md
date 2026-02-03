@@ -20,19 +20,19 @@ the failure?
 
 - **Use this title format:**
 
-    ```
+    ```text
     [CI Failure]: failing-test-job - regex/matching/failing:test
     ```
 
 - **For the environment field:**
 
-    ```
- Still failing on main as of commit abcdef123
+    ```text
+    Still failing on main as of commit abcdef123
     ```
 
 - **In the description, include failing tests:**
 
-    ```
+    ```text
     FAILED failing/test.py:failing_test1 - Failure description
     FAILED failing/test.py:failing_test2 - Failure description
     https://github.com/orgs/vllm-project/projects/20
@@ -64,7 +64,7 @@ Download the full log file from Buildkite locally.
 
 Strip timestamps and colorization:
 
-<gh-file:.buildkite/scripts/ci-clean-log.sh>
+[.buildkite/scripts/ci-clean-log.sh](../../../.buildkite/scripts/ci-clean-log.sh)
 
 ```bash
 ./ci-clean-log.sh ci.log
@@ -87,7 +87,7 @@ tail -525 ci_build.log | wl-copy
 
 CI test failures may be flaky. Use a bash loop to run repeatedly:
 
-<gh-file:.buildkite/scripts/rerun-test.sh>
+[.buildkite/scripts/rerun-test.sh](../../../.buildkite/scripts/rerun-test.sh)
 
 ```bash
 ./rerun-test.sh tests/v1/engine/test_engine_core_client.py::test_kv_cache_events[True-tcp]

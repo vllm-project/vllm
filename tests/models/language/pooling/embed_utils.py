@@ -1,20 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import Optional
 
+import openai
 import pytest
 
 from tests.conftest import HfRunner
-from tests.models.utils import (EmbedModelInfo, check_embeddings_close,
-                                matryoshka_fy)
+from tests.models.utils import EmbedModelInfo, check_embeddings_close, matryoshka_fy
 
 
 def run_embedding_correctness_test(
     hf_model: "HfRunner",
     inputs: list[str],
     vllm_outputs: Sequence[list[float]],
-    dimensions: Optional[int] = None,
+    dimensions: int | None = None,
 ):
     hf_outputs = hf_model.encode(inputs)
     if dimensions:
@@ -29,16 +28,15 @@ def run_embedding_correctness_test(
     )
 
 
-def correctness_test_embed_models(hf_runner,
-                                  vllm_runner,
-                                  model_info: EmbedModelInfo,
-                                  example_prompts,
-                                  vllm_extra_kwargs=None,
-                                  hf_model_callback=None):
-    if not model_info.enable_test:
-        # A model family has many models with the same architecture,
-        # and we don't need to test each one.
-        pytest.skip("Skipping test.")
+def correctness_test_embed_models(
+    hf_runner,
+    vllm_runner,
+    model_info: EmbedModelInfo,
+    example_prompts,
+    vllm_extra_kwargs=None,
+    hf_model_callback=None,
+):
+    pytest.skip("Debug only, ci prefers to use mteb test.")
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
@@ -51,19 +49,33 @@ def correctness_test_embed_models(hf_runner,
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
-    with vllm_runner(model_info.name,
-                     task="embed",
-                     max_model_len=None,
-                     **vllm_extra_kwargs) as vllm_model:
+    if model_info.hf_overrides is not None:
+        vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
+
+    with vllm_runner(
+        model_info.name, runner="pooling", max_model_len=None, **vllm_extra_kwargs
+    ) as vllm_model:
         vllm_outputs = vllm_model.embed(example_prompts)
 
     with hf_runner(
-            model_info.name,
-            dtype="float32",
-            is_sentence_transformer=True,
+        model_info.name,
+        dtype=model_info.hf_dtype,
+        is_sentence_transformer=True,
     ) as hf_model:
-
         if hf_model_callback is not None:
             hf_model_callback(hf_model)
 
         run_embedding_correctness_test(hf_model, example_prompts, vllm_outputs)
+
+
+async def run_client_embeddings(
+    client: openai.AsyncOpenAI,
+    model_name: str,
+    queries: list[str],
+    instruction: str = "",
+) -> list[list[float]]:
+    outputs = await client.embeddings.create(
+        model=model_name,
+        input=[instruction + q for q in queries],
+    )
+    return [data.embedding for data in outputs.data]

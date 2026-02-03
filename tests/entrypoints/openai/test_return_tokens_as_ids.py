@@ -7,40 +7,56 @@
 
 import pytest
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
-from .test_completion import default_server_args  # noqa: F401
-from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
-from .test_completion import zephyr_lora_files  # noqa: F401
-from .test_completion import zephyr_pa_files  # noqa: F401
-from .test_completion import MODEL_NAME
+
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
 @pytest.fixture(scope="module")
-def server_fixture(request, default_server_args):  # noqa: F811
+def default_server_args(qwen3_lora_files):
+    return [
+        # use half precision for speed and memory savings in CI environment
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "8192",
+        "--max-num-seqs",
+        "128",
+        "--enforce-eager",
+        # lora config
+        "--enable-lora",
+        "--lora-modules",
+        f"qwen3-lora={qwen3_lora_files}",
+        "--max-lora-rank",
+        "64",
+        "--max-cpu-loras",
+        "2",
+    ]
+
+
+@pytest.fixture(scope="module")
+def server_fixture(request, default_server_args):
     use_server_flag = request.param
     if use_server_flag:
         args_with_flag = default_server_args + ["--return-tokens-as-token-ids"]
         with RemoteOpenAIServer(MODEL_NAME, args_with_flag) as remote_server:
             yield (remote_server, True)
     else:
-        with RemoteOpenAIServer(MODEL_NAME,
-                                default_server_args) as remote_server:
+        with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
             yield (remote_server, False)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("server_fixture", [True, False], indirect=True)
-async def test_completion_return_tokens_as_token_ids_completion(
-        server_fixture):
+async def test_completion_return_tokens_as_token_ids_completion(server_fixture):
     server, use_server_flag = server_fixture
     request_args = {}
     if not use_server_flag:
         request_args["return_tokens_as_token_ids"] = True
 
     async with server.get_async_client() as client:
-
         completion = await client.completions.create(
             model=MODEL_NAME,
             # Include Unicode characters to test for dividing a single
@@ -51,7 +67,8 @@ async def test_completion_return_tokens_as_token_ids_completion(
             temperature=0,
             max_tokens=10,
             logprobs=1,
-            extra_body=request_args)
+            extra_body=request_args,
+        )
 
         text = completion.choices[0].text
         token_strs = completion.choices[0].logprobs.tokens
@@ -85,22 +102,61 @@ async def test_chat_return_tokens_as_token_ids_completion(server_fixture):
             # Include Unicode characters to test for dividing a single
             # character across multiple tokens: 🎉 is [28705, 31862] for the
             # Zephyr tokenizer
-            messages=[{
-                "role": "system",
-                "content": "You like to respond in only emojis, like 🎉"
-            }, {
-                "role": "user",
-                "content": "Please write some emojis: 🐱🐶🎉"
-            }],
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You like to respond in only emojis, like 🎉",
+                },
+                {"role": "user", "content": "Please write some emojis: 🐱🐶🎉"},
+            ],
             temperature=0,
             max_tokens=8,
             logprobs=True,
-            extra_body=request_args)
+            extra_body=request_args,
+        )
 
         text = response.choices[0].message.content
         tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
         token_ids = []
         for logprob_content in response.choices[0].logprobs.content:
-            token_ids.append(
-                int(logprob_content.token.removeprefix("token_id:")))
+            token_ids.append(int(logprob_content.token.removeprefix("token_id:")))
         assert tokenizer.decode(token_ids, skip_special_tokens=True) == text
+
+
+def test_responses_api_logprobs_with_return_tokens_as_token_ids():
+    """Test that return_tokens_as_token_ids works in Responses API logprobs."""
+    from unittest.mock import MagicMock
+
+    from vllm.entrypoints.openai.engine.serving import OpenAIServing
+    from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
+    from vllm.logprobs import Logprob as SampleLogprob
+
+    serving = MagicMock(spec=OpenAIServingResponses)
+    serving.return_tokens_as_token_ids = True
+    serving._get_decoded_token = OpenAIServing._get_decoded_token
+
+    tokenizer = MagicMock()
+    tokenizer.decode = lambda token_id: "decoded"
+
+    token_ids = [100, 200, 300]
+    sample_logprobs = [
+        {100: SampleLogprob(logprob=-0.5, decoded_token="hello")},
+        {200: SampleLogprob(logprob=-1.2, decoded_token="world")},
+        {300: SampleLogprob(logprob=-0.8, decoded_token="!")},
+    ]
+
+    result = OpenAIServingResponses._create_response_logprobs(
+        serving,
+        token_ids=token_ids,
+        logprobs=sample_logprobs,
+        tokenizer=tokenizer,
+        top_logprobs=1,
+    )
+
+    assert len(result) == 3
+    assert result[0].token == "token_id:100"
+    assert result[1].token == "token_id:200"
+    assert result[2].token == "token_id:300"
+    assert result[0].logprob == -0.5
+    assert result[1].logprob == -1.2
+    assert result[2].logprob == -0.8

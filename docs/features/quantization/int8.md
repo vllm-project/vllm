@@ -6,7 +6,11 @@ This quantization method is particularly useful for reducing model size while ma
 Please visit the HF collection of [quantized INT8 checkpoints of popular LLMs ready to use with vLLM](https://huggingface.co/collections/neuralmagic/int8-llms-for-vllm-668ec32c049dca0369816415).
 
 !!! note
-    INT8 computation is supported on NVIDIA GPUs with compute capability > 7.5 (Turing, Ampere, Ada Lovelace, Hopper, Blackwell).
+    INT8 computation is supported on NVIDIA GPUs with compute capability > 7.5 (Turing, Ampere, Ada Lovelace, Hopper).
+
+!!! warning
+    **Blackwell GPU Limitation**: INT8 is not supported on compute capability >= 100 (e.g., RTX 6000 Blackwell).
+    Use [FP8 quantization](fp8.md) instead, or run on Hopper/Ada/Ampere architectures.
 
 ## Prerequisites
 
@@ -19,7 +23,7 @@ pip install llmcompressor
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm lm-eval==0.4.4
+pip install vllm "lm-eval[api]>=0.4.9.2"
 ```
 
 ## Quantization Process
@@ -40,7 +44,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"
 model = AutoModelForCausalLM.from_pretrained(
-    MODEL_ID, device_map="auto", torch_dtype="auto",
+    MODEL_ID,
+    device_map="auto",
+    dtype="auto",
 )
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 ```
@@ -81,7 +87,7 @@ Now, apply the quantization algorithms:
 ??? code
 
     ```python
-    from llmcompressor.transformers import oneshot
+    from llmcompressor import oneshot
     from llmcompressor.modifiers.quantization import GPTQModifier
     from llmcompressor.modifiers.smoothquant import SmoothQuantModifier
 

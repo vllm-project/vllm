@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import gc
 import json
+import os
 import time
 from contextlib import nullcontext
 from datetime import datetime
@@ -13,13 +15,69 @@ import ray
 import torch
 from ray.experimental.tqdm_ray import tqdm
 
+from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    RoutingMethodType,
+    _get_config_dtype_str,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import *
-from vllm.platforms import current_platform
+from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+    TritonOrDeepGemmExperts,
+)
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import set_random_seed
 
 FP8_DTYPE = current_platform.fp8_dtype()
+
+# Default interval for clearing Triton JIT cache during tuning
+# Set to 0 to disable automatic cache clearing
+_CACHE_CLEAR_INTERVAL_ENV = "VLLM_MOE_TUNE_CACHE_CLEAR_INTERVAL"
+TRITON_CACHE_CLEAR_INTERVAL = int(os.environ.get(_CACHE_CLEAR_INTERVAL_ENV, "50"))
+
+
+def clear_triton_cache():
+    """Clear Triton JIT compilation cache and Python/CUDA memory.
+
+    This helps prevent OOM during tuning with large models (many experts).
+    """
+    # Force Python garbage collection
+    gc.collect()
+
+    # Clear CUDA memory cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    # Try to clear Triton's runtime cache
+    try:
+        if (
+            hasattr(triton, "runtime")
+            and hasattr(triton.runtime, "cache")
+            and hasattr(triton.runtime.cache, "clear")
+        ):
+            triton.runtime.cache.clear()
+    except ImportError:
+        # Triton not installed, skip cache clearing
+        pass
+    except AttributeError:
+        # Triton version doesn't have expected cache API
+        pass
+    except Exception as e:
+        print(f"Warning: Failed to clear Triton cache: {e}")
+
+    # Additional garbage collection after clearing caches
+    gc.collect()
+
+
+def ensure_divisibility(numerator, denominator, text):
+    """Ensure that numerator is divisible by the denominator."""
+    assert numerator % denominator == 0, "{} {} is not divisible by tp {}.".format(
+        text, numerator, denominator
+    )
 
 
 class BenchmarkConfig(TypedDict):
@@ -126,43 +184,61 @@ def benchmark_config(
     def run():
         from vllm.model_executor.layers.fused_moe import override_config
 
+        if use_fp8_w8a8:
+            quant_dtype = torch.float8_e4m3fn
+        elif use_int8_w8a16:
+            quant_dtype = torch.int8
+        else:
+            quant_dtype = None
+
+        quant_config = FusedMoEQuantConfig.make(
+            quant_dtype=quant_dtype,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=block_quant_shape,
+        )
+
+        deep_gemm_experts = None
+        if use_deep_gemm:
+            deep_gemm_experts = mk.FusedMoEModularKernel(
+                prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+                fused_experts=TritonOrDeepGemmExperts(
+                    moe_config=FusedMoEConfig(
+                        num_experts=num_experts,
+                        experts_per_token=topk,
+                        hidden_dim=hidden_size,
+                        intermediate_size_per_partition=shard_intermediate_size,
+                        num_local_experts=num_experts,
+                        activation="silu",
+                        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+                        in_dtype=init_dtype,
+                        routing_method=RoutingMethodType.TopK,
+                        device="cuda",
+                    ),
+                    quant_config=quant_config,
+                ),
+            )
+
         with override_config(config):
+            topk_weights, topk_ids, token_expert_indices = fused_topk(
+                x, input_gating, topk, renormalize=not use_deep_gemm
+            )
+
             if use_deep_gemm:
-                topk_weights, topk_ids, token_expert_indices = fused_topk(
-                    x, input_gating, topk, False
+                return deep_gemm_experts(
+                    x, w1, w2, topk_weights, topk_ids, inplace=True
                 )
-                return fused_experts(
-                    x,
-                    w1,
-                    w2,
-                    topk_weights,
-                    topk_ids,
-                    inplace=True,
-                    use_fp8_w8a8=use_fp8_w8a8,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    a1_scale=a1_scale,
-                    a2_scale=a2_scale,
-                    block_shape=block_quant_shape,
-                    allow_deep_gemm=True,
-                )
-            else:
-                fused_moe(
-                    x,
-                    w1,
-                    w2,
-                    input_gating,
-                    topk,
-                    renormalize=True,
-                    inplace=True,
-                    use_fp8_w8a8=use_fp8_w8a8,
-                    use_int8_w8a16=use_int8_w8a16,
-                    w1_scale=w1_scale,
-                    w2_scale=w2_scale,
-                    a1_scale=a1_scale,
-                    a2_scale=a2_scale,
-                    block_shape=block_quant_shape,
-                )
+            return fused_experts(
+                x,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                inplace=True,
+                quant_config=quant_config,
+            )
 
     # JIT compilation & warmup
     run()
@@ -180,8 +256,8 @@ def benchmark_config(
         graph.replay()
     torch.cuda.synchronize()
 
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch.Event(enable_timing=True)
+    end_event = torch.Event(enable_timing=True)
 
     latencies: list[float] = []
     for i in range(num_iters):
@@ -206,7 +282,7 @@ def get_rocm_tuning_space(use_fp16):
     num_warps_range = [1, 2, 4, 8]
     group_m_range = [1, 4, 8, 16, 32]
     num_stage_range = [2]
-    waves_per_eu_range = [0]
+    waves_per_eu_range = [0, 1, 2, 4]
     matrix_instr_nonkdim_range = [16, 32] if use_fp16 else []
     kpack_range = [1, 2] if use_fp16 else []
 
@@ -385,7 +461,7 @@ def merge_unique_dicts(list1, list2):
 class BenchmarkWorker:
     def __init__(self, seed: int) -> None:
         torch.set_default_device("cuda")
-        current_platform.seed_everything(seed)
+        set_random_seed(seed)
         self.seed = seed
         # Get the device ID to allocate tensors and kernels
         # on the respective GPU. This is required for Ray to work
@@ -405,14 +481,18 @@ class BenchmarkWorker:
         block_quant_shape: list[int] = None,
         use_deep_gemm: bool = False,
     ) -> tuple[dict[str, int], float]:
-        current_platform.seed_everything(self.seed)
-        dtype_str = get_config_dtype_str(
+        # local import to allow serialization by ray
+
+        set_random_seed(self.seed)
+        dtype_str = _get_config_dtype_str(
             dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
         )
         # NOTE(woosuk): The current naming convention uses w2.shape[2], which
         # is the intermediate size after silu_and_mul.
+        block_n = block_quant_shape[0] if block_quant_shape else None
+        block_k = block_quant_shape[1] if block_quant_shape else None
         op_config = get_moe_configs(
-            num_experts, shard_intermediate_size // 2, dtype_str
+            num_experts, shard_intermediate_size // 2, dtype_str, block_n, block_k
         )
         if op_config is None:
             config = get_default_config(
@@ -422,7 +502,7 @@ class BenchmarkWorker:
                 hidden_size,
                 topk,
                 dtype_str,
-                is_marlin=False,
+                block_quant_shape,
             )
         else:
             config = op_config[min(op_config.keys(), key=lambda x: abs(x - num_tokens))]
@@ -456,6 +536,9 @@ class BenchmarkWorker:
         block_quant_shape: list[int],
         use_deep_gemm: bool,
     ) -> dict[str, int]:
+        # local import to allow serialization by ray
+        from vllm.platforms import current_platform
+
         best_config = None
         best_time = float("inf")
         if current_platform.is_rocm():
@@ -476,7 +559,7 @@ class BenchmarkWorker:
                 need_device_guard = True
 
         with torch.cuda.device(self.device_id) if need_device_guard else nullcontext():
-            for config in tqdm(search_space):
+            for idx, config in enumerate(tqdm(search_space)):
                 try:
                     kernel_time = benchmark_config(
                         config,
@@ -499,6 +582,19 @@ class BenchmarkWorker:
                 if kernel_time < best_time:
                     best_time = kernel_time
                     best_config = config
+
+                # Periodically clear Triton JIT cache to prevent OOM
+                # This is especially important for large models with many experts
+                if (
+                    TRITON_CACHE_CLEAR_INTERVAL > 0
+                    and idx > 0
+                    and idx % TRITON_CACHE_CLEAR_INTERVAL == 0
+                ):
+                    clear_triton_cache()
+
+        # Final cleanup after tuning completes
+        clear_triton_cache()
+
         now = datetime.now()
         print(f"{now.ctime()}] Completed tuning for batch_size={num_tokens}")
         assert best_config is not None
@@ -535,8 +631,9 @@ def save_configs(
     use_fp8_w8a8: bool,
     use_int8_w8a16: bool,
     block_quant_shape: list[int],
+    save_dir: str,
 ) -> None:
-    dtype_str = get_config_dtype_str(
+    dtype_str = _get_config_dtype_str(
         dtype, use_int8_w8a16=use_int8_w8a16, use_fp8_w8a8=use_fp8_w8a8
     )
 
@@ -545,18 +642,97 @@ def save_configs(
     filename = get_config_file_name(
         num_experts, shard_intermediate_size // 2, dtype_str, block_quant_shape
     )
-
+    os.makedirs(save_dir, exist_ok=True)
+    filename = os.path.join(save_dir, filename)
     print(f"Writing best config to {filename}...")
     with open(filename, "w") as f:
-        json.dump(configs, f, indent=4)
+        json.dump({"triton_version": triton.__version__, **configs}, f, indent=4)
         f.write("\n")
+
+
+def get_compressed_tensors_block_structure(config, default_value=None):
+    config_groups = config.get("config_groups", {})
+    if len(config_groups) != 1:
+        return default_value
+    group = next(iter(config_groups.values()))
+    weights = group.get("weights", {})
+    block_structure = weights.get("block_structure", default_value)
+    return block_structure
 
 
 def get_weight_block_size_safety(config, default_value=None):
     quantization_config = getattr(config, "quantization_config", {})
     if isinstance(quantization_config, dict):
-        return quantization_config.get("weight_block_size", default_value)
+        if "weight_block_size" in quantization_config:
+            return quantization_config["weight_block_size"]
+        return get_compressed_tensors_block_structure(
+            quantization_config, default_value
+        )
     return default_value
+
+
+def get_model_params(config):
+    if config.architectures[0] == "DbrxForCausalLM":
+        E = config.ffn_config.moe_num_experts
+        topk = config.ffn_config.moe_top_k
+        intermediate_size = config.ffn_config.ffn_hidden_size
+        hidden_size = config.hidden_size
+    elif config.architectures[0] == "JambaForCausalLM":
+        E = config.num_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.intermediate_size
+        hidden_size = config.hidden_size
+    elif config.architectures[0] in (
+        "DeepseekV2ForCausalLM",
+        "DeepseekV3ForCausalLM",
+        "DeepseekV32ForCausalLM",
+        "Glm4MoeForCausalLM",
+        "Glm4MoeLiteForCausalLM",
+        "NemotronHForCausalLM",
+        "MistralLarge3ForCausalLM",
+    ):
+        E = config.n_routed_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.moe_intermediate_size
+        hidden_size = config.hidden_size
+    elif config.architectures[0] in (
+        "Qwen2MoeForCausalLM",
+        "Qwen3MoeForCausalLM",
+        "Qwen3NextForCausalLM",
+    ):
+        E = config.num_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.moe_intermediate_size
+        hidden_size = config.hidden_size
+    elif config.architectures[0] == "Qwen3VLMoeForConditionalGeneration":
+        text_config = config.get_text_config()
+        E = text_config.num_experts
+        topk = text_config.num_experts_per_tok
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
+    elif config.architectures[0] == "HunYuanMoEV1ForCausalLM":
+        E = config.num_experts
+        topk = config.moe_topk[0]
+        intermediate_size = config.moe_intermediate_size[0]
+        hidden_size = config.hidden_size
+    elif config.architectures[0] == "Qwen3OmniMoeForConditionalGeneration":
+        E = config.thinker_config.text_config.num_experts
+        topk = config.thinker_config.text_config.num_experts_per_tok
+        intermediate_size = config.thinker_config.text_config.moe_intermediate_size
+        hidden_size = config.thinker_config.text_config.hidden_size
+    elif config.architectures[0] == "PixtralForConditionalGeneration":
+        # Pixtral can contain different LLM architectures,
+        # recurse to get their parameters
+        return get_model_params(config.get_text_config())
+    else:
+        # Support for llama4
+        config = config.get_text_config()
+        # Default: Mixtral.
+        E = config.num_local_experts
+        topk = config.num_experts_per_tok
+        intermediate_size = config.intermediate_size
+        hidden_size = config.hidden_size
+    return E, topk, intermediate_size, hidden_size
 
 
 def main(args: argparse.Namespace):
@@ -565,47 +741,16 @@ def main(args: argparse.Namespace):
     config = get_config(model=args.model, trust_remote_code=args.trust_remote_code)
     if args.model_prefix:
         config = getattr(config, args.model_prefix)
-
-    if config.architectures[0] == "DbrxForCausalLM":
-        E = config.ffn_config.moe_num_experts
-        topk = config.ffn_config.moe_top_k
-        intermediate_size = config.ffn_config.ffn_hidden_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    elif config.architectures[0] == "JambaForCausalLM":
-        E = config.num_experts
-        topk = config.num_experts_per_tok
-        intermediate_size = config.intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    elif config.architectures[0] in (
-        "DeepseekV3ForCausalLM",
-        "DeepseekV2ForCausalLM",
-        "Glm4MoeForCausalLM",
-    ):
-        E = config.n_routed_experts
-        topk = config.num_experts_per_tok
-        intermediate_size = config.moe_intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    elif config.architectures[0] in ("Qwen2MoeForCausalLM", "Qwen3MoeForCausalLM"):
-        E = config.num_experts
-        topk = config.num_experts_per_tok
-        intermediate_size = config.moe_intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    elif config.architectures[0] in ("HunYuanMoEV1ForCausalLM"):
-        E = config.num_experts
-        topk = config.moe_topk[0]
-        intermediate_size = config.moe_intermediate_size[0]
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+    E, topk, intermediate_size, hidden_size = get_model_params(config)
+    enable_ep = bool(args.enable_expert_parallel)
+    if enable_ep:
+        ensure_divisibility(E, args.tp_size, "Number of experts")
+        E = E // args.tp_size
+        shard_intermediate_size = 2 * intermediate_size
     else:
-        # Support for llama4
-        config = config.get_text_config()
-        # Default: Mixtral.
-        E = config.num_local_experts
-        topk = config.num_experts_per_tok
-        intermediate_size = config.intermediate_size
+        ensure_divisibility(intermediate_size, args.tp_size, "intermediate_size")
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-
-    hidden_size = config.hidden_size
-    dtype = torch.float16 if current_platform.is_rocm() else config.torch_dtype
+    dtype = torch.float16 if current_platform.is_rocm() else config.dtype
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
     block_quant_shape = get_weight_block_size_safety(config)
@@ -665,7 +810,11 @@ def main(args: argparse.Namespace):
         is_fp16 = not (use_fp8_w8a8 or use_int8_w8a16)
         search_space = get_configs_compute_bound(is_fp16, block_quant_shape)
         print(f"Start tuning over {len(search_space)} configurations...")
-
+        if use_deep_gemm:
+            raise ValueError(
+                "Tuning with --use-deep-gemm is not supported as it only tunes Triton "
+                "kernels. Please remove the flag."
+            )
         start = time.time()
         configs = _distribute(
             "tune",
@@ -699,6 +848,7 @@ def main(args: argparse.Namespace):
             use_fp8_w8a8,
             use_int8_w8a16,
             block_quant_shape,
+            args.save_dir,
         )
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
@@ -735,10 +885,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tp-size", "-tp", "--tensor-parallel-size", type=int, default=2
     )
+    parser.add_argument("--enable-expert-parallel", "-enable-ep", action="store_true")
     parser.add_argument(
         "--dtype", type=str, choices=["auto", "fp8_w8a8", "int8_w8a16"], default="auto"
     )
     parser.add_argument("--use-deep-gemm", action="store_true")
+    parser.add_argument(
+        "--save-dir", type=str, default="./", help="Directory to save tuned results"
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--batch-size", type=int, nargs="+", required=False)
     parser.add_argument("--tune", action="store_true")

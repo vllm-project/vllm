@@ -19,9 +19,9 @@ We currently support `/v1/chat/completions`, `/v1/embeddings`, and `/v1/score` e
 ## Pre-requisites
 
 * The examples in this document use `meta-llama/Meta-Llama-3-8B-Instruct`.
-  - Create a [user access token](https://huggingface.co/docs/hub/en/security-tokens)
-  - Install the token on your machine (Run `huggingface-cli login`).
-  - Get access to the gated model by [visiting the model card](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and agreeing to the terms and conditions.
+    * Create a [user access token](https://huggingface.co/docs/hub/en/security-tokens)
+    * Install the token on your machine (Run `huggingface-cli login`).
+    * Get access to the gated model by [visiting the model card](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) and agreeing to the terms and conditions.
 
 ## Example 1: Running with a local file
 
@@ -105,7 +105,7 @@ To integrate with cloud blob storage, we recommend using presigned urls.
 
 * [Create an S3 bucket](https://docs.aws.amazon.com/AmazonS3/latest/userguide/creating-bucket.html).
 * The `awscli` package (Run `pip install awscli`) to configure your credentials and interactively use s3.
-  - [Configure your credentials](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-quickstart.html).
+    * [Configure your credentials](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-quickstart.html).
 * The `boto3` python package (Run `pip install boto3`) to generate presigned urls.
 
 ### Step 1: Upload your input script
@@ -152,7 +152,9 @@ def generate_presigned_url(s3_client, client_method, method_parameters, expires_
     """
     try:
         url = s3_client.generate_presigned_url(
-            ClientMethod=client_method, Params=method_parameters, ExpiresIn=expires_in
+            ClientMethod=client_method,
+            Params=method_parameters,
+            ExpiresIn=expires_in,
         )
     except ClientError:
         raise
@@ -161,10 +163,16 @@ def generate_presigned_url(s3_client, client_method, method_parameters, expires_
 
 s3_client = boto3.client("s3")
 input_url = generate_presigned_url(
-    s3_client, "get_object", {"Bucket": "MY_BUCKET", "Key": "MY_INPUT_FILE.jsonl"}, 3600
+    s3_client,
+    "get_object",
+    {"Bucket": "MY_BUCKET", "Key": "MY_INPUT_FILE.jsonl"},
+    expires_in=3600,
 )
 output_url = generate_presigned_url(
-    s3_client, "put_object", {"Bucket": "MY_BUCKET", "Key": "MY_OUTPUT_FILE.jsonl"}, 3600
+    s3_client,
+    "put_object",
+    {"Bucket": "MY_BUCKET", "Key": "MY_OUTPUT_FILE.jsonl"},
+    expires_in=3600,
 )
 print(f"{input_url=}")
 print(f"{output_url=}")
@@ -247,8 +255,8 @@ cat results.jsonl
 Add score requests to your batch file. The following is an example:
 
 ```text
-{"custom_id": "request-1", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "text_1": "What is the capital of France?", "text_2": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
-{"custom_id": "request-2", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "text_1": "What is the capital of France?", "text_2": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
+{"custom_id": "request-1", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "queries": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
+{"custom_id": "request-2", "method": "POST", "url": "/v1/score", "body": {"model": "BAAI/bge-reranker-v2-m3", "queries": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}
 ```
 
 You can mix chat completion, embedding, and score requests in the batch file, as long as the model you are using supports them all (note that all requests must use the same model).

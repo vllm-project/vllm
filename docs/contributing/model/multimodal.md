@@ -16,96 +16,110 @@ Further update the model as follows:
             ...
 
             @classmethod
-            def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+            def get_placeholder_str(cls, modality: str, i: int) -> str | None:
                 if modality.startswith("image"):
                     return "<image>"
 
                 raise ValueError("Only image modality is supported")
         ```
 
-- Reserve a keyword parameter in [forward][torch.nn.Module.forward] for each input tensor that corresponds to a multi-modal input, as shown in the following example:
+- Inside `__init__` method, initialize the language components of the model inside [_mark_language_model][vllm.model_executor.models.interfaces.SupportsMultiModal._mark_language_model], and the multimodal components of the model inside [_mark_tower_model][vllm.model_executor.models.interfaces.SupportsMultiModal._mark_tower_model], e.g.:
 
-  ```diff
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-  +     pixel_values: torch.Tensor,
-    ) -> SamplerOutput:
-  ```
+    ```python
+        def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+            super().__init__()
+
+            config = vllm_config.model_config.hf_config
+
+            with self._mark_tower_model(vllm_config, "image"):
+                self.vision_encoder = ...
+                self.multi_modal_projector = ...
+
+            with self._mark_language_model(vllm_config):
+                self.language_model = init_vllm_registered_model(
+                    vllm_config=vllm_config,
+                    hf_config=config.text_config,
+                    prefix=maybe_prefix(prefix, "language_model"),
+                )
+    ```
+
+- Remove the embedding part from the [forward][torch.nn.Module.forward] method:
+    - Move the multi-modal embedding to [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal].
+    - The text embedding and embedding merge are handled automatically by a default implementation of [embed_input_ids][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids]. It does not need to be overridden in most cases.
+
+    ```diff
+      def forward(
+          self,
+          input_ids: torch.Tensor | None,
+    -     pixel_values: torch.Tensor,
+          positions: torch.Tensor,
+          intermediate_tensors: IntermediateTensors | None = None,
+          inputs_embeds: torch.Tensor | None = None,
+      ) -> torch.Tensor:
+    -     if inputs_embeds is None:
+    -         inputs_embeds = self.get_input_embeddings()(input_ids)
+    -
+    -     if pixel_values is not None:
+    -         image_features = self.get_image_features(
+    -             pixel_values=pixel_values,
+    -         )
+    -         special_image_mask = self.get_placeholder_mask(
+    -             input_ids,
+    -             inputs_embeds=inputs_embeds,
+    -             image_features=image_features,
+    -         )
+    -         inputs_embeds = inputs_embeds.masked_scatter(
+    -             special_image_mask,
+    -             image_features,
+    -         )
+
+           hidden_states = self.language_model(
+               input_ids,
+               positions,
+               intermediate_tensors,
+               inputs_embeds=inputs_embeds,
+           )
+         ...
   
-  More conveniently, you can simply pass `**kwargs` to the [forward][torch.nn.Module.forward] method and retrieve the keyword parameters for multimodal inputs from it.
+    +  def embed_multimodal(
+    +      self,
+    +      pixel_values: torch.Tensor,
+    +  ) -> MultiModalEmbeddings | None:
+    +      return self.get_image_features(
+    +          pixel_values=pixel_values,
+    +      )
+    ```
 
-- Implement [get_multimodal_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_multimodal_embeddings] that returns the embeddings from running the multimodal inputs through the multimodal tokenizer of the model. Below we provide a boilerplate of a typical implementation pattern, but feel free to adjust it to your own needs.
+    Below we provide a boilerplate of a typical implementation pattern of [embed_multimodal][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_multimodal], but feel free to adjust it to your own needs.
 
-    ??? code
+    ```python
+    def _process_image_input(self, image_input: YourModelImageInputs) -> torch.Tensor:
+        image_features = self.vision_encoder(image_input)
+        return self.multi_modal_projector(image_features)
 
-        ```python
-        class YourModelForImage2Seq(nn.Module):
-            ...
+    def embed_multimodal(
+        self,
+        **kwargs: object,
+    ) -> MultiModalEmbeddings | None:
+        # Validate the multimodal input keyword arguments
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
 
-            def _process_image_input(self, image_input: YourModelImageInputs) -> torch.Tensor:
-
-                assert self.vision_encoder is not None
-                image_features = self.vision_encoder(image_input)
-                return self.multi_modal_projector(image_features)
-
-            def get_multimodal_embeddings(
-                    self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
-
-                # Validate the multimodal input keyword arguments
-                image_input = self._parse_and_validate_image_input(**kwargs)
-                if image_input is None:
-                    return None
-
-                # Run multimodal inputs through encoder and projector
-                vision_embeddings = self._process_image_input(image_input)
-                return vision_embeddings
-        ```
+        # Run multimodal inputs through encoder and projector
+        vision_embeddings = self._process_image_input(image_input)
+        return vision_embeddings
+    ```
 
 !!! important
     The returned `multimodal_embeddings` must be either a **3D [torch.Tensor][]** of shape `(num_items, feature_size, hidden_size)`, or a **list / tuple of 2D [torch.Tensor][]'s** of shape `(feature_size, hidden_size)`, so that `multimodal_embeddings[i]` retrieves the embeddings generated from the `i`-th multimodal data item (e.g, image) of the request.
 
-- Implement [get_input_embeddings][vllm.model_executor.models.interfaces.SupportsMultiModal.get_input_embeddings] to merge `multimodal_embeddings` with text embeddings from the `input_ids`. If input processing for the model is implemented correctly (see sections below), then you can leverage the utility function we provide to easily merge the embeddings.
+!!! note
+    By default, vLLM merges the multimodal embeddings into text embeddings depending on the information of their locations defined in
+    [PlaceholderRange][vllm.multimodal.inputs.PlaceholderRange] from input processing.
+    This logic can be found at [embed_input_ids][vllm.model_executor.models.interfaces.SupportsMultiModal.embed_input_ids].
 
-    ??? code
-
-        ```python
-        from .utils import merge_multimodal_embeddings
-
-        class YourModelForImage2Seq(nn.Module):
-            ...
-
-            def get_input_embeddings(
-                self,
-                input_ids: torch.Tensor,
-                multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-            ) -> torch.Tensor:
-
-                # `get_input_embeddings` should already be implemented for the language 
-                # model as one of the requirements of basic vLLM model implementation.
-                inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-
-                if multimodal_embeddings is not None:
-                    inputs_embeds = merge_multimodal_embeddings(
-                        input_ids=input_ids, 
-                        inputs_embeds=inputs_embeds, 
-                        multimodal_embeddings=multimodal_embeddings,
-                        placeholder_token_id=self.config.image_token_index)
-
-                return inputs_embeds
-        ```
-
-- Implement [get_language_model][vllm.model_executor.models.interfaces.SupportsMultiModal.get_language_model] getter to provide stable access to the underlying language model.
-
-    ```python
-    class YourModelForImage2Seq(nn.Module):
-        ...
-
-        def get_language_model(self) -> torch.nn.Module:
-            # Change `language_model` according to your implementation.
-            return self.language_model
-    ```
+    You may override this method if additional logic is required for your model when merging embeddings.
 
 - Once the above steps are done, update the model class with the [SupportsMultiModal][vllm.model_executor.models.interfaces.SupportsMultiModal] interface.
 
@@ -133,18 +147,16 @@ to return the maximum number of input items for each modality supported by the m
 For example, if the model supports any number of images but only one video per prompt:
 
 ```python
-def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+def get_supported_mm_limits(self) -> Mapping[str, int | None]:
     return {"image": None, "video": 1}
 ```
 
 ## 3. Specify dummy inputs
 
-Then, inherit [BaseDummyInputsBuilder][vllm.multimodal.profiling.BaseDummyInputsBuilder] to construct dummy inputs for
-HF processing as well as memory profiling.
+Then, inherit [BaseDummyInputsBuilder][vllm.multimodal.processing.BaseDummyInputsBuilder] to construct dummy inputs for
+HF processing. The processed outputs are also used for memory profiling.
 
-### For memory profiling
-
-Override the abstract methods [get_dummy_text][vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_text] and [get_dummy_mm_data][vllm.multimodal.profiling.BaseDummyInputsBuilder.get_dummy_mm_data] to construct dummy inputs for memory profiling. These dummy inputs should result in the worst-case memory usage of the model so that vLLM can reserve the correct amount of memory for it.
+Override the abstract methods [get_dummy_text][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_text] and [get_dummy_mm_data][vllm.multimodal.processing.BaseDummyInputsBuilder.get_dummy_mm_data] to construct dummy inputs. These dummy inputs should result in the worst-case memory usage of the model so that vLLM can reserve the correct amount of memory for it.
 
 Assuming that the memory usage increases with the number of tokens, the dummy inputs can be constructed to maximize the number of output embeddings, which is the same number as placeholder feature tokens.
 
@@ -281,17 +293,21 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
             self,
             seq_len: int,
             mm_counts: Mapping[str, int],
+            mm_options: Mapping[str, BaseDummyOptions] | None = None,
         ) -> MultiModalDataDict:
             num_images = mm_counts.get("image", 0)
 
             target_width, target_height = \
                 self.info.get_image_size_with_most_features()
 
+            image_overrides = mm_options.get("image") if mm_options else None
+
             return {
                 "image":
                 self._get_dummy_images(width=target_width,
                                     height=target_height,
-                                    num_images=num_images)
+                                    num_images=num_images,
+                                    overrides=image_overrides)
             }
         ```
 
@@ -440,8 +456,10 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
     ```python
     def get_image_size_with_most_features(self) -> ImageSize:
         image_processor = self.get_image_processor()
-        return ImageSize(width=image_processor.size["width"],
-                            height=image_processor.size["height"])
+        return ImageSize(
+            width=image_processor.size["width"],
+            height=image_processor.size["height"],
+        )
     ```
 
     Fuyu does not expect image placeholders in the inputs to HF processor, so
@@ -461,16 +479,22 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
             self,
             seq_len: int,
             mm_counts: Mapping[str, int],
+            mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
         ) -> MultiModalDataDict:
             target_width, target_height = \
                 self.info.get_image_size_with_most_features()
             num_images = mm_counts.get("image", 0)
 
+            image_overrides = mm_options.get("image") if mm_options else None
+
             return {
                 "image":
-                self._get_dummy_images(width=target_width,
-                                    height=target_height,
-                                    num_images=num_images)
+                self._get_dummy_images(
+                    width=target_width,
+                    height=target_height,
+                    num_images=num_images,
+                    overrides=image_overrides,
+                )
             }
         ```
 
@@ -518,7 +542,7 @@ return a schema of the tensors outputted by the HF processor that are related to
     ```
 
     !!! note
-        Our [actual code](gh-file:vllm/model_executor/models/llava.py) additionally supports
+        Our [actual code](../../../vllm/model_executor/models/llava.py) additionally supports
         pre-computed image embeddings, which can be passed to be model via the `image_embeds` argument.
 
 === "With postprocessing: Fuyu"
@@ -540,8 +564,10 @@ return a schema of the tensors outputted by the HF processor that are related to
     The shape of `image_patches` outputted by `FuyuImageProcessor` is therefore
     `(1, num_images, num_patches, patch_width * patch_height * num_channels)`.
 
-    In order to support the use of [MultiModalFieldConfig.batched][] like in LLaVA,
-    we remove the extra batch dimension by overriding [BaseMultiModalProcessor._call_hf_processor][]:
+    In order to support the use of
+    [MultiModalFieldConfig.batched][vllm.multimodal.inputs.MultiModalFieldConfig.batched]
+    like in LLaVA, we remove the extra batch dimension by overriding
+    [BaseMultiModalProcessor._call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor]:
 
     ??? code
 
@@ -578,7 +604,7 @@ return a schema of the tensors outputted by the HF processor that are related to
         ```
 
     !!! note
-        Our [actual code](gh-file:vllm/model_executor/models/fuyu.py) has special handling
+        Our [actual code](../../../vllm/model_executor/models/fuyu.py) has special handling
         for text-only inputs to prevent unnecessary warnings from HF processor.
 
     !!! note
@@ -627,7 +653,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
             self,
             mm_items: MultiModalDataItems,
             hf_processor_mm_kwargs: Mapping[str, object],
-            out_mm_kwargs: MultiModalKwargs,
+            out_mm_kwargs: MultiModalKwargsItems,
         ) -> Sequence[PromptUpdate]:
             hf_config = self.info.get_hf_config()
             image_token_id = hf_config.image_token_index
@@ -757,8 +783,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
-            image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
-                            [_NEWLINE_TOKEN_ID]) * nrows
+            image_tokens = ([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows
 
             return PromptUpdateDetails.select_token_id(
                 image_tokens + [bos_token_id],
@@ -776,7 +801,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
             self,
             mm_items: MultiModalDataItems,
             hf_processor_mm_kwargs: Mapping[str, object],
-            out_mm_kwargs: MultiModalKwargs,
+            out_mm_kwargs: MultiModalKwargsItems,
         ) -> Sequence[PromptUpdate]:
             hf_config = self.info.get_hf_config()
             bos_token_id = hf_config.bos_token_id
@@ -794,8 +819,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
                     image_width=image_size.width,
                     image_height=image_size.height,
                 )
-                image_tokens = ([_IMAGE_TOKEN_ID] * ncols +
-                                [_NEWLINE_TOKEN_ID]) * nrows
+                image_tokens = ([_IMAGE_TOKEN_ID] * ncols + [_NEWLINE_TOKEN_ID]) * nrows
 
                 return PromptUpdateDetails.select_token_id(
                     image_tokens + [bos_token_id],
@@ -814,18 +838,20 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
 ## 5. Register processor-related classes
 
 After you have defined [BaseProcessingInfo][vllm.multimodal.processing.BaseProcessingInfo] (Step 2),
-[BaseDummyInputsBuilder][vllm.multimodal.profiling.BaseDummyInputsBuilder] (Step 3),
+[BaseDummyInputsBuilder][vllm.multimodal.processing.BaseDummyInputsBuilder] (Step 3),
 and [BaseMultiModalProcessor][vllm.multimodal.processing.BaseMultiModalProcessor] (Step 4),
-decorate the model class with [MULTIMODAL_REGISTRY.register_processor][vllm.multimodal.processing.MultiModalRegistry.register_processor]
+decorate the model class with [MULTIMODAL_REGISTRY.register_processor][vllm.multimodal.registry.MultiModalRegistry.register_processor]
 to register them to the multi-modal registry:
 
 ```diff
   from vllm.model_executor.models.interfaces import SupportsMultiModal
 + from vllm.multimodal import MULTIMODAL_REGISTRY
 
-+ @MULTIMODAL_REGISTRY.register_processor(YourMultiModalProcessor,
-+                                         info=YourProcessingInfo,
-+                                         dummy_inputs=YourDummyInputsBuilder)
++ @MULTIMODAL_REGISTRY.register_processor(
++     YourMultiModalProcessor,
++     info=YourProcessingInfo,
++     dummy_inputs=YourDummyInputsBuilder,
++ )
   class YourModelForImage2Seq(nn.Module, SupportsMultiModal):
 ```
 
@@ -837,9 +863,8 @@ Some HF processors directly insert feature tokens without replacing anything in 
 
 Examples:
 
-- BLIP-2 (insert at start of prompt): <gh-file:vllm/model_executor/models/blip2.py>
-- Florence2 (insert at start of prompt): <gh-file:vllm/model_executor/models/florence2.py>
-- Molmo (insert after `<|endoftext|>` token): <gh-file:vllm/model_executor/models/molmo.py>
+- BLIP-2 (insert at start of prompt): [vllm/model_executor/models/blip2.py](../../../vllm/model_executor/models/blip2.py)
+- Molmo (insert after `<|endoftext|>` token): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Handling prompt updates unrelated to multi-modal data
 
@@ -847,16 +872,16 @@ Examples:
 
 Examples:
 
-- Chameleon (appends `sep_token`): <gh-file:vllm/model_executor/models/chameleon.py>
-- Fuyu (appends `boa_token`): <gh-file:vllm/model_executor/models/fuyu.py>
-- Molmo (applies chat template which is not defined elsewhere): <gh-file:vllm/model_executor/models/molmo.py>
+- Chameleon (appends `sep_token`): [vllm/model_executor/models/chameleon.py](../../../vllm/model_executor/models/chameleon.py)
+- Fuyu (appends `boa_token`): [vllm/model_executor/models/fuyu.py](../../../vllm/model_executor/models/fuyu.py)
+- Molmo (applies chat template which is not defined elsewhere): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Custom HF processor
 
-Some models don't define a HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor].
+Some models don't define an HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor].
 
 Examples:
 
-- DeepSeek-VL2: <gh-file:vllm/model_executor/models/deepseek_vl2.py>
-- InternVL: <gh-file:vllm/model_executor/models/internvl.py>
-- Qwen-VL: <gh-file:vllm/model_executor/models/qwen_vl.py>
+- DeepSeek-VL2: [vllm/model_executor/models/deepseek_vl2.py](../../../vllm/model_executor/models/deepseek_vl2.py)
+- InternVL: [vllm/model_executor/models/internvl.py](../../../vllm/model_executor/models/internvl.py)
+- Qwen-VL: [vllm/model_executor/models/qwen_vl.py](../../../vllm/model_executor/models/qwen_vl.py)

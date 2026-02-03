@@ -3,54 +3,54 @@
 """Common tests for testing .generate() functionality for single / multiple
 image, embedding, and video support for different VLMs in vLLM.
 """
+
 import math
-import os
 from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
-from transformers import (AutoModel, AutoModelForImageTextToText,
-                          AutoModelForTextToWaveform, AutoModelForVision2Seq)
+from packaging.version import Version
+from transformers import (
+    AutoModel,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoModelForTextToWaveform,
+)
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
-from vllm.utils import identity
+from vllm.utils.func_utils import identity
 
-from ....conftest import (IMAGE_ASSETS, AudioTestAssets, HfRunner,
-                          ImageTestAssets, VideoTestAssets, VllmRunner)
-from ....utils import (create_new_process_for_each_test, large_gpu_mark,
-                       multi_gpu_marks)
+from ....conftest import (
+    IMAGE_ASSETS,
+    AudioTestAssets,
+    HfRunner,
+    ImageTestAssets,
+    VideoTestAssets,
+    VllmRunner,
+)
+from ....utils import create_new_process_for_each_test, large_gpu_mark, multi_gpu_marks
 from ...utils import check_outputs_equal
 from .vlm_utils import custom_inputs, model_utils, runners
 from .vlm_utils.case_filtering import get_parametrized_options
-from .vlm_utils.types import (CustomTestOptions, ExpandableVLMTestArgs,
-                              VLMTestInfo, VLMTestType)
+from .vlm_utils.types import (
+    CustomTestOptions,
+    ExpandableVLMTestArgs,
+    VLMTestInfo,
+    VLMTestType,
+)
 
-# This hack is needed for phi3v & paligemma models
-# ROCm Triton FA can run into shared memory issues with these models,
-# use other backends in the meantime
-# FIXME (mattwong, gshtrasb, hongxiayan)
-if current_platform.is_rocm():
-    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
-
-REQUIRES_V0_MODELS = [
-    # V1 Test: not enough KV cache space in C1.
-    "fuyu",
-    # V1 Test: Deadlock issue when processing mm_inputs
-    "llava-onevision-transformers",
-]
-
-# yapf: disable
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VLMTestType.IMAGE,
     "dtype": "half",
     "max_tokens": 5,
     "tensor_parallel_size": 2,
     "hf_model_kwargs": {"device_map": "auto"},
-    "image_size_factors": [(.25, 0.5, 1.0)],
+    "image_size_factors": [(0.25, 0.5, 1.0)],
     "distributed_executor_backend": (
         "ray",
         "mp",
-    )
+    ),
 }
 
 ### Test configuration for specific models
@@ -90,81 +90,101 @@ VLM_TEST_SETTINGS = {
     #### Core tests to always run in the CI
     "llava": VLMTestInfo(
         models=["llava-hf/llava-1.5-7b-hf"],
-        test_type=(
-            VLMTestType.EMBEDDING,
-            VLMTestType.IMAGE,
-            VLMTestType.CUSTOM_INPUTS
-        ),
+        test_type=(VLMTestType.EMBEDDING, VLMTestType.IMAGE, VLMTestType.CUSTOM_INPUTS),
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         convert_assets_to_embeddings=model_utils.get_llava_embeddings,
         max_model_len=4096,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
-        custom_test_opts=[CustomTestOptions(
-            inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
-                formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:"
-            ),
-            limit_mm_per_prompt={"image": 4},
-        )],
-        # TODO: Revert to "auto" when CPU backend can use torch > 2.6
-        dtype="bfloat16" if current_platform.is_cpu() else "auto",
+        custom_test_opts=[
+            CustomTestOptions(
+                inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
+                    formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:"
+                ),
+                limit_mm_per_prompt={"image": 4},
+            )
+        ],
+        vllm_runner_kwargs={"enable_mm_embeds": True},
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "paligemma": VLMTestInfo(
         models=["google/paligemma-3b-mix-224"],
         test_type=VLMTestType.IMAGE,
         prompt_formatter=identity,
-        img_idx_to_prompt = lambda idx: "",
+        img_idx_to_prompt=lambda idx: "",
         # Paligemma uses its own sample prompts because the default one fails
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "caption es",
-            "cherry_blossom": "What is in the picture?",
-        }),
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "caption es",
+                "cherry_blossom": "What is in the picture?",
+            }
+        ),
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
-        dtype="bfloat16",
-        marks=[pytest.mark.skip(reason="vLLM does not support PrefixLM attention mask")],  # noqa: E501
     ),
     "qwen2_5_vl": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],
-        test_type=(
-            VLMTestType.IMAGE,
-            VLMTestType.MULTI_IMAGE,
-            VLMTestType.VIDEO
-        ),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>", # noqa: E501
-        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",
+        enforce_eager=False,
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "qwen2_5_omni": VLMTestInfo(
         models=["Qwen/Qwen2.5-Omni-3B"],
-        test_type=(
-            VLMTestType.IMAGE,
-            VLMTestType.MULTI_IMAGE,
-            VLMTestType.VIDEO
-        ),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<|vision_bos|><|IMAGE|><|vision_eos|>", # noqa: E501
-        video_idx_to_prompt=lambda idx: "<|vision_bos|><|VIDEO|><|vision_eos|>", # noqa: E501
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_bos|><|IMAGE|><|vision_eos|>",
+        video_idx_to_prompt=lambda idx: "<|vision_bos|><|VIDEO|><|vision_eos|>",
         max_model_len=4096,
         max_num_seqs=2,
-        num_logprobs= 6 if current_platform.is_cpu() else 5,
+        num_logprobs=6 if current_platform.is_cpu() else 5,
         auto_cls=AutoModelForTextToWaveform,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen2_5_omni_patch_hf_runner,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
+    "qwen3_vl": VLMTestInfo(
+        models=["Qwen/Qwen3-VL-4B-Instruct"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO,
+        ),
+        enforce_eager=False,
+        needs_video_metadata=True,
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",  # noqa: E501
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",  # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        num_logprobs=20,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
+        vllm_runner_kwargs={
+            "attention_config": {
+                "backend": "ROCM_AITER_FA",
+            },
+        }
+        if current_platform.is_rocm()
+        else None,
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[
+            pytest.mark.core_model,
+        ],
+    ),
     "ultravox": VLMTestInfo(
-        models = ["fixie-ai/ultravox-v0_5-llama-3_2-1b"],
+        models=["fixie-ai/ultravox-v0_5-llama-3_2-1b"],
         test_type=VLMTestType.AUDIO,
-        prompt_formatter=lambda audio_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{audio_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", # noqa: E501
+        prompt_formatter=lambda audio_prompt: f"<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n{audio_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
         audio_idx_to_prompt=lambda idx: "<|audio|>",
         max_model_len=4096,
         max_num_seqs=2,
@@ -178,40 +198,57 @@ VLM_TEST_SETTINGS = {
     "llava-onevision-transformers": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
         test_type=VLMTestType.IMAGE,
-        prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
+        prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
         max_model_len=16384,
-        hf_model_kwargs=model_utils.llava_onevision_hf_model_kwargs("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),   # noqa: E501
+        hf_model_kwargs=model_utils.llava_onevision_hf_model_kwargs(
+            "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+        ),
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
+        image_size_factors=[(0.25, 0.5, 1.0)],
+        vllm_runner_kwargs={
+            "model_impl": "transformers",
+            "default_torch_num_threads": 1,
+        },
+        # FIXME: Investigate why the test hangs
+        # when processing the 3rd prompt in vLLM
+        marks=[pytest.mark.core_model, pytest.mark.skip(reason="Test hangs")],
+    ),
+    # Gemma3 has bidirectional mask on images
+    "gemma3-transformers": VLMTestInfo(
+        models=["google/gemma-3-4b-it"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=lambda vid_prompt: f"<'<bos><start_of_turn>user\n{vid_prompt}<start_of_image><end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
+        max_model_len=4096,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.gemma3_vllm_to_hf_output,
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
         },
         marks=[pytest.mark.core_model],
     ),
-    # FIXME(Isotr0py): Enable this test after
-    # https://github.com/huggingface/transformers/pull/39470 released
-    # "idefics3-transformers": VLMTestInfo(
-    #     models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
-    #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-    #     prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
-    #     img_idx_to_prompt=lambda idx: "<image>",
-    #     max_model_len=8192,
-    #     max_num_seqs=2,
-    #     auto_cls=AutoModelForImageTextToText,
-    #     hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
-    #     image_size_factors=[(0.25, 0.5, 1.0)],
-    #     vllm_runner_kwargs={
-    #         "model_impl": "transformers",
-    #     },
-    #     marks=[pytest.mark.core_model],
-    # ),
+    "idefics3-transformers": VLMTestInfo(
+        models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
+        image_size_factors=[(0.25, 0.5, 1.0)],
+        vllm_runner_kwargs={
+            "model_impl": "transformers",
+        },
+        marks=[pytest.mark.core_model],
+    ),
     # Pixel values from processor are not 4D or 5D arrays
     "qwen2_5_vl-transformers": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],
         test_type=VLMTestType.IMAGE,
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
@@ -219,66 +256,68 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25, 0.2, 0.15)],
         vllm_runner_kwargs={
             "model_impl": "transformers",
+            # TODO: [ROCm] Revert this once issue #30167 is resolved
+            **(
+                {
+                    "mm_processor_kwargs": {
+                        "min_pixels": 256 * 28 * 28,
+                        "max_pixels": 1280 * 28 * 28,
+                    },
+                }
+                if current_platform.is_rocm()
+                else {}
+            ),
         },
-        marks=[large_gpu_mark(min_gb=32)],
-    ),
-    # Check "auto" with fallback to transformers
-    "internvl-transformers": VLMTestInfo(
-        models=["OpenGVLab/InternVL3-1B-hf"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<IMG_CONTEXT>",
-        max_model_len=4096,
-        use_tokenizer_eos=True,
-        image_size_factors=[(0.25, 0.5, 1.0)],
-        vllm_runner_kwargs={
-            "model_impl": "auto",
-        },
-        auto_cls=AutoModelForImageTextToText,
-        marks=[pytest.mark.core_model],
+        marks=[large_gpu_mark(min_gb=80 if current_platform.is_rocm() else 32)],
     ),
     #### Extended model tests
     "aria": VLMTestInfo(
         models=["rhymes-ai/Aria"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n ",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<fim_prefix><|img|><fim_suffix>\n",
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<vlm_image>Please describe the image shortly.",
-            "cherry_blossom": "<vlm_image>Please infer the season with reason.",  # noqa: E501
-        }),
-        multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",    # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<vlm_image>Please describe the image shortly.",
+                "cherry_blossom": "<vlm_image>Please infer the season with reason.",
+            }
+        ),
+        multi_image_prompt="<vlm_image><vlm_image>Describe the two images shortly.",
         stop_str=["<|im_end|>"],
         image_size_factors=[(0.10, 0.15)],
         max_tokens=64,
         marks=[large_gpu_mark(min_gb=64)],
     ),
     "aya_vision": VLMTestInfo(
-        models=["CohereForAI/aya-vision-8b"],
+        models=["CohereLabs/aya-vision-8b"],
         test_type=(VLMTestType.IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>", # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<image>What's the content in the center of the image?",  # noqa: E501
-            "cherry_blossom": "<image>What is the season?",  # noqa: E501
-        }),
-        multi_image_prompt="<image><image>Describe the two images in detail.",  # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<image>What's the content in the center of the image?",
+                "cherry_blossom": "<image>What is the season?",
+            }
+        ),
+        multi_image_prompt="<image><image>Describe the two images in detail.",
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
     ),
     "aya_vision-multi_image": VLMTestInfo(
-        models=["CohereForAI/aya-vision-8b"],
+        models=["CohereLabs/aya-vision-8b"],
         test_type=(VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>", # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<image>What's the content in the center of the image?",  # noqa: E501
-            "cherry_blossom": "<image>What is the season?",  # noqa: E501
-        }),
-        multi_image_prompt="<image><image>Describe the two images in detail.",  # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<image>What's the content in the center of the image?",
+                "cherry_blossom": "<image>What is the season?",
+            }
+        ),
+        multi_image_prompt="<image><image>Describe the two images in detail.",
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
@@ -303,27 +342,29 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         # For chameleon, we only compare the sequences
-        vllm_output_post_proc = lambda vllm_output, model: vllm_output[:2],
-        hf_output_post_proc = lambda hf_output, model: hf_output[:2],
+        vllm_output_post_proc=lambda vllm_output, model: vllm_output[:2],
+        hf_output_post_proc=lambda hf_output, model: hf_output[:2],
         comparator=check_outputs_equal,
         max_tokens=8,
         dtype="bfloat16",
     ),
     "deepseek_vl_v2": VLMTestInfo(
-        models=["Isotr0py/deepseek-vl2-tiny"], # model repo using dynamic module
+        models=["Isotr0py/deepseek-vl2-tiny"],  # model repo using dynamic module
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|User|>: {img_prompt}\n\n<|Assistant|>: ", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|User|>: {img_prompt}\n\n<|Assistant|>: ",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<image>\nWhat's the content in the center of the image?", # noqa: E501
-            "cherry_blossom": "<image>\nPlease infer the season with reason in details.",   # noqa: E501
-        }),
-        multi_image_prompt="image_1:<image>\nimage_2:<image>\nWhich image can we see the car and the tower?",    # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<image>\nWhat's the content in the center of the image?",
+                "cherry_blossom": "<image>\nPlease infer the season with reason in details.",  # noqa: E501
+            }
+        ),
+        multi_image_prompt="image_1:<image>\nimage_2:<image>\nWhich image can we see the car and the tower?",  # noqa: E501
         patch_hf_runner=model_utils.deepseekvl2_patch_hf_runner,
         hf_output_post_proc=model_utils.deepseekvl2_trunc_hf_output,
-        stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],  # noqa: E501
-        image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
+        stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],
+        image_size_factors=[(1.0,), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
@@ -337,31 +378,43 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[large_gpu_mark(min_gb=32)],
     ),
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n", # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<start_of_image>What's the content in the center of the image?",  # noqa: E501
-            "cherry_blossom": "<start_of_image>What is the season?",  # noqa: E501
-        }),
+        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<start_of_image>What's the content in the center of the image?",  # noqa: E501
+                "cherry_blossom": "<start_of_image>What is the season?",
+            }
+        ),
         multi_image_prompt="<start_of_image><start_of_image>Describe the two images in detail.",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
-        num_logprobs=10,
+    ),
+    "granite_vision": VLMTestInfo(
+        models=["ibm-granite/granite-vision-3.3-2b"],
+        test_type=(VLMTestType.IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}\n<|assistant|>\n",
+        max_model_len=8192,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
     ),
     "glm4v": VLMTestInfo(
-        models=["THUDM/glm-4v-9b"],
+        models=["zai-org/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
-        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",  # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<|begin_of_image|><|endoftext|><|end_of_image|>What's the content in the center of the image?",  # noqa: E501
-            "cherry_blossom": "<|begin_of_image|><|endoftext|><|end_of_image|>What is the season?",  # noqa: E501
-        }),
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<|begin_of_image|><|endoftext|><|end_of_image|>What's the content in the center of the image?",  # noqa: E501
+                "cherry_blossom": "<|begin_of_image|><|endoftext|><|end_of_image|>What is the season?",  # noqa: E501
+            }
+        ),
         max_model_len=2048,
         max_num_seqs=2,
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
@@ -371,14 +424,15 @@ VLM_TEST_SETTINGS = {
         # So, we need to reduce the number of tokens for the test to pass.
         max_tokens=8,
         num_logprobs=10,
+        auto_cls=AutoModelForCausalLM,
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "glm4_1v": VLMTestInfo(
-        models=["THUDM/GLM-4.1V-9B-Thinking"],
+        models=["zai-org/GLM-4.1V-9B-Thinking"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|assistant|>",  # noqa: E501
-        img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>", # noqa: E501
-        video_idx_to_prompt=lambda idx: "<|begin_of_video|><|video|><|end_of_video|>", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"[gMASK]<|user|>\n{img_prompt}<|assistant|>\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>",
+        video_idx_to_prompt=lambda idx: "<|begin_of_video|><|video|><|end_of_video|>",
         max_model_len=2048,
         max_num_seqs=2,
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
@@ -388,30 +442,49 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "glm4_1v-video": VLMTestInfo(
-        models=["THUDM/GLM-4.1V-9B-Thinking"],
+        models=["zai-org/GLM-4.1V-9B-Thinking"],
         # GLM4.1V require include video metadata for input
         test_type=VLMTestType.CUSTOM_INPUTS,
+        prompt_formatter=lambda vid_prompt: f"[gMASK]<|user|>\n{vid_prompt}<|assistant|>\n",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         patch_hf_runner=model_utils.glm4_1v_patch_hf_runner,
-        custom_test_opts=[CustomTestOptions(
-            inputs=custom_inputs.video_with_metadata_glm4_1v(),
-            limit_mm_per_prompt={"video": 1},
-        )],
+        custom_test_opts=[
+            CustomTestOptions(
+                inputs=custom_inputs.video_with_metadata_glm4_1v(),
+                limit_mm_per_prompt={"video": 1},
+            )
+        ],
+        marks=[large_gpu_mark(min_gb=32)],
+    ),
+    "glm_ocr": VLMTestInfo(
+        models=["zai-org/GLM-OCR"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"[gMASK]<|user|>\n{img_prompt}<|assistant|>\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|begin_of_image|><|image|><|end_of_image|>",
+        video_idx_to_prompt=lambda idx: "<|begin_of_video|><|video|><|end_of_video|>",
+        max_model_len=2048,
+        max_num_seqs=2,
+        get_stop_token_ids=lambda tok: [151329, 151336, 151338],
+        num_logprobs=10,
+        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        auto_cls=AutoModelForImageTextToText,
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "h2ovl": VLMTestInfo(
-        models = [
+        models=[
             "h2oai/h2ovl-mississippi-800m",
             "h2oai/h2ovl-mississippi-2b",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|prompt|>{img_prompt}<|end|><|answer|>", # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<image>\nWhat's the content in the center of the image?",  # noqa: E501
-            "cherry_blossom": "<image>\nWhat is the season?",
-        }),
+        prompt_formatter=lambda img_prompt: f"<|prompt|>{img_prompt}<|end|><|answer|>",
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<image>\nWhat's the content in the center of the image?",
+                "cherry_blossom": "<image>\nWhat is the season?",
+            }
+        ),
         multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
         max_model_len=8192,
         use_tokenizer_eos=True,
@@ -421,7 +494,7 @@ VLM_TEST_SETTINGS = {
     "idefics3": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<image>",
         max_model_len=8192,
         max_num_seqs=2,
@@ -436,11 +509,13 @@ VLM_TEST_SETTINGS = {
             # "OpenGVLab/Mono-InternVL-2B",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<image>\nWhat's the content in the center of the image?",  # noqa: E501
-            "cherry_blossom": "<image>\nWhat is the season?",
-        }),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<image>\nWhat's the content in the center of the image?",
+                "cherry_blossom": "<image>\nWhat is the season?",
+            }
+        ),
         multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
         max_model_len=4096,
         use_tokenizer_eos=True,
@@ -451,16 +526,59 @@ VLM_TEST_SETTINGS = {
             "OpenGVLab/InternVL3-1B",
         ],
         test_type=VLMTestType.VIDEO,
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
         video_idx_to_prompt=lambda idx: "<video>",
         max_model_len=8192,
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
+        num_logprobs=10 if current_platform.is_rocm() else 5,
+    ),
+    "intern_vl-hf": VLMTestInfo(
+        models=["OpenGVLab/InternVL3-1B-hf"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO,
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<IMG_CONTEXT>",
+        video_idx_to_prompt=lambda idx: "<video>",
+        max_model_len=8192,
+        use_tokenizer_eos=True,
+        auto_cls=AutoModelForImageTextToText,
+    ),
+    "isaac": VLMTestInfo(
+        models=[
+            "PerceptronAI/Isaac-0.1",
+            "PerceptronAI/Isaac-0.2-2B-Preview",
+        ],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: (
+            f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n"
+        ),
+        img_idx_to_prompt=lambda idx: "<image>",
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<vlm_image>Please describe the image shortly.",
+                "cherry_blossom": "<vlm_image>Please infer the season with reason.",
+            }
+        ),
+        multi_image_prompt=(
+            "Picture 1: <vlm_image>\n"
+            "Picture 2: <vlm_image>\n"
+            "Describe these two images with one paragraph respectively."
+        ),
+        enforce_eager=False,
+        max_model_len=4096,
+        max_num_seqs=2,
+        hf_model_kwargs={"device_map": "auto"},
+        patch_hf_runner=model_utils.isaac_patch_hf_runner,
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|im_user|>user<|im_middle|>{img_prompt}<|im_end|><|im_assistant|>assistant<|im_middle|>", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|im_user|>user<|im_middle|>{img_prompt}<|im_end|><|im_assistant|>assistant<|im_middle|>",  # noqa: E501
         img_idx_to_prompt=lambda _: "<|media_start|>image<|media_content|><|media_pad|><|media_end|>",  # noqa: E501
         max_model_len=8192,
         max_num_seqs=2,
@@ -471,11 +589,11 @@ VLM_TEST_SETTINGS = {
     ),
     "llama4": VLMTestInfo(
         models=["meta-llama/Llama-4-Scout-17B-16E-Instruct"],
-        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{img_prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|header_start|>user<|header_end|>\n\n{img_prompt}<|eot|><|header_start|>assistant<|header_end|>\n\n",  # noqa: E501
         img_idx_to_prompt=lambda _: "<|image|>",
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         distributed_executor_backend="mp",
-        image_size_factors=[(.25, 0.5, 1.0)],
+        image_size_factors=[(0.25, 0.5, 1.0)],
         hf_model_kwargs={"device_map": "auto"},
         max_model_len=8192,
         max_num_seqs=4,
@@ -491,28 +609,34 @@ VLM_TEST_SETTINGS = {
         max_model_len=10240,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
-        custom_test_opts=[CustomTestOptions(
-            inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
-                formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]"
-            ),
-            limit_mm_per_prompt={"image": 4},
-        )],
+        custom_test_opts=[
+            CustomTestOptions(
+                inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
+                    formatter=lambda img_prompt: f"[INST] {img_prompt} [/INST]"
+                ),
+                limit_mm_per_prompt={"image": 4},
+            )
+        ],
     ),
     "llava_onevision": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
-        prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
+        prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
         num_video_frames=16,
         max_model_len=16384,
-        hf_model_kwargs=model_utils.llava_onevision_hf_model_kwargs("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),   # noqa: E501
-        auto_cls=AutoModelForVision2Seq,
+        hf_model_kwargs=model_utils.llava_onevision_hf_model_kwargs(
+            "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+        ),
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
-        custom_test_opts=[CustomTestOptions(
-            inputs=custom_inputs.multi_video_multi_aspect_ratio_inputs(
-                formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
-            ),
-            limit_mm_per_prompt={"video": 4},
-        )],
+        custom_test_opts=[
+            CustomTestOptions(
+                inputs=custom_inputs.multi_video_multi_aspect_ratio_inputs(
+                    formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+                ),
+                limit_mm_per_prompt={"video": 4},
+            )
+        ],
     ),
     "llava_next_video": VLMTestInfo(
         models=["llava-hf/LLaVA-NeXT-Video-7B-hf"],
@@ -521,7 +645,7 @@ VLM_TEST_SETTINGS = {
         num_video_frames=16,
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
     ),
     "mantis": VLMTestInfo(
@@ -554,10 +678,12 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
         max_model_len=4096,
         max_num_seqs=2,
-        get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
+        get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(
+            ["<|im_end|>", "<|endoftext|>"]
+        ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmo_26_patch_hf_runner,
-        # FIXME: https://huggingface.co/openbmb/MiniCPM-V-2_6/discussions/55
+        # FIXME: https://huggingface.co/openbmb/MiniCPM-o-2_6/discussions/49
         marks=[pytest.mark.skip("HF import fails")],
     ),
     "minicpmv_26": VLMTestInfo(
@@ -567,15 +693,15 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "(<image>./</image>)\n",
         max_model_len=4096,
         max_num_seqs=2,
-        get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(['<|im_end|>', '<|endoftext|>']),  # noqa: E501
+        get_stop_token_ids=lambda tok: tok.convert_tokens_to_ids(
+            ["<|im_end|>", "<|endoftext|>"]
+        ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
-        # FIXME: https://huggingface.co/openbmb/MiniCPM-V-2_6/discussions/55
-        marks=[pytest.mark.skip("HF import fails")],
     ),
     "minimax_vl_01": VLMTestInfo(
         models=["MiniMaxAI/MiniMax-VL-01"],
-        prompt_formatter=lambda img_prompt: f"<beginning_of_sentence>user: {img_prompt} assistant:<end_of_sentence>", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<beginning_of_sentence>user: {img_prompt} assistant:<end_of_sentence>",  # noqa: E501
         img_idx_to_prompt=lambda _: "<image>",
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         max_model_len=8192,
@@ -584,7 +710,17 @@ VLM_TEST_SETTINGS = {
         hf_output_post_proc=model_utils.minimax_vl_01_hf_output,
         patch_hf_runner=model_utils.minimax_vl_01_patch_hf_runner,
         auto_cls=AutoModelForImageTextToText,
-        marks=[large_gpu_mark(min_gb=80)],
+        marks=[
+            large_gpu_mark(min_gb=80),
+            # TODO: [ROCm] Fix pickle issue with ROCm spawn and tp>1
+            pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason=(
+                    "ROCm: Model too large for single GPU; "
+                    "multi-GPU blocked by HF _LazyConfigMapping pickle issue with spawn"
+                ),
+            ),
+        ],
     ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
@@ -597,8 +733,8 @@ VLM_TEST_SETTINGS = {
     "ovis1_6-gemma2": VLMTestInfo(
         models=["AIDC-AI/Ovis1.6-Gemma2-9B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n",
         max_model_len=4096,
         max_num_seqs=2,
         dtype="half",
@@ -607,11 +743,11 @@ VLM_TEST_SETTINGS = {
         patch_hf_runner=model_utils.ovis_patch_hf_runner,
         marks=[large_gpu_mark(min_gb=32)],
     ),
-    "ovis1_6": VLMTestInfo(
-        models=["AIDC-AI/Ovis1.6-Llama3.2-3B"],
+    "ovis2": VLMTestInfo(
+        models=["AIDC-AI/Ovis2-1B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\nYou are a helpful and honest multimodal assistant.<|eot_id|><|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n",
         max_model_len=4096,
         max_num_seqs=2,
         dtype="half",
@@ -619,26 +755,50 @@ VLM_TEST_SETTINGS = {
         hf_model_kwargs={"llm_attn_implementation": "sdpa"},
         patch_hf_runner=model_utils.ovis_patch_hf_runner,
     ),
-    "ovis2": VLMTestInfo(
-        models=["AIDC-AI/Ovis2-1B"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+    "ovis2_5": VLMTestInfo(
+        models=["AIDC-AI/Ovis2.5-2B"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n",
+        video_idx_to_prompt=lambda idx: "<video>\n",
         max_model_len=4096,
         max_num_seqs=2,
         dtype="half",
-        # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
-        hf_model_kwargs={"llm_attn_implementation": "sdpa"},
-        patch_hf_runner=model_utils.ovis_patch_hf_runner,
+        num_logprobs=10,
+        patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
+        hf_model_kwargs={"revision": "refs/pr/5"},
+    ),
+    "paddleocr_vl": VLMTestInfo(
+        models=["PaddlePaddle/PaddleOCR-VL"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        img_idx_to_prompt=lambda idx: (
+            "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+        ),
+        multi_image_prompt=(
+            "Image-1: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
+            "Image-2: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
+            "Describe these two images separately."
+        ),
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForCausalLM,
+        image_size_factors=[(0.25,)],
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) == Version("4.57.3"),
+                reason="This model is broken in Transformers v4.57.3",
+            )
+        ],
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}<|end|>\n<|assistant|>\n",  # noqa: E501
         img_idx_to_prompt=lambda idx: f"<|image_{idx}|>\n",
         max_model_len=4096,
         max_num_seqs=2,
-        task="generate",
+        runner="generate",
         # use sdpa mode for hf runner since phi3v didn't work with flash_attn
         hf_model_kwargs={"_attn_implementation": "sdpa"},
         use_tokenizer_eos=True,
@@ -653,7 +813,13 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
-        marks=[large_gpu_mark(min_gb=48)],
+        marks=[
+            large_gpu_mark(min_gb=48),
+            pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Model produces a vector of <UNK> output in HF on ROCm",
+            ),
+        ],
     ),
     "qwen_vl": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
@@ -664,35 +830,32 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
-        # FIXME: https://github.com/huggingface/transformers/issues/38358
-        marks=[pytest.mark.skip("Model initialization fails")],
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],
-        test_type=(
-            VLMTestType.IMAGE,
-            VLMTestType.MULTI_IMAGE,
-            VLMTestType.VIDEO
-        ),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
-        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>", # noqa: E501
-        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",
+        multi_image_prompt="Picture 1: <vlm_image>\nPicture 2: <vlm_image>\nDescribe these two images with one paragraph respectively.",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[pytest.mark.cpu_model],
     ),
     "skywork_r1v": VLMTestInfo(
         models=["Skywork/Skywork-R1V-38B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<｜begin▁of▁sentence｜><｜User｜>\n{img_prompt}<｜Assistant｜><think>\n", # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "<image>\nWhat's the content in the center of the image?",  # noqa: E501
-            "cherry_blossom": "<image>\nWhat is the season?",
-        }),
-        multi_image_prompt="<image>\n<image>\nDescribe the two images in short.",  # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<｜begin▁of▁sentence｜><｜User｜>\n{img_prompt}<｜Assistant｜><think>\n",  # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<image>\nWhat's the content in the center of the image?",
+                "cherry_blossom": "<image>\nWhat is the season?",
+            }
+        ),
+        multi_image_prompt="<image>\n<image>\nDescribe the two images in short.",
         max_model_len=4096,
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.skyworkr1v_patch_hf_runner,
@@ -701,12 +864,38 @@ VLM_TEST_SETTINGS = {
     "smolvlm": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM2-2.2B-Instruct"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt:f"<|im_start|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
         img_idx_to_prompt=lambda idx: "<image>",
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         hf_output_post_proc=model_utils.smolvlm_trunc_hf_output,
+        num_logprobs=10,
+    ),
+    "tarsier": VLMTestInfo(
+        models=["omni-research/Tarsier-7b"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt} ASSISTANT:",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        patch_hf_runner=model_utils.tarsier_patch_hf_runner,
+    ),
+    "tarsier2": VLMTestInfo(
+        models=["omni-research/Tarsier2-Recap-7b"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO,
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[pytest.mark.skip("Model initialization hangs")],
     ),
     ### Tensor parallel / multi-gpu broadcast tests
     "chameleon-broadcast": VLMTestInfo(
@@ -714,11 +903,11 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForImageTextToText,
-        vllm_output_post_proc = lambda vllm_output, model: vllm_output[:2],
-        hf_output_post_proc = lambda hf_output, model: hf_output[:2],
+        vllm_output_post_proc=lambda vllm_output, model: vllm_output[:2],
+        hf_output_post_proc=lambda hf_output, model: hf_output[:2],
         comparator=check_outputs_equal,
         marks=multi_gpu_marks(num_gpus=2),
-        **COMMON_BROADCAST_SETTINGS # type: ignore
+        **COMMON_BROADCAST_SETTINGS,  # type: ignore
     ),
     "llava-broadcast": VLMTestInfo(
         models=["llava-hf/llava-1.5-7b-hf"],
@@ -727,7 +916,7 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         marks=multi_gpu_marks(num_gpus=2),
-        **COMMON_BROADCAST_SETTINGS # type: ignore
+        **COMMON_BROADCAST_SETTINGS,  # type: ignore
     ),
     "llava_next-broadcast": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
@@ -736,12 +925,12 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
         marks=multi_gpu_marks(num_gpus=2),
-        **COMMON_BROADCAST_SETTINGS # type: ignore
+        **COMMON_BROADCAST_SETTINGS,  # type: ignore
     ),
     ### Custom input edge-cases for specific models
     "intern_vl-diff-patches": VLMTestInfo(
         models=["OpenGVLab/InternVL2-2B"],
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=4096,
         use_tokenizer_eos=True,
@@ -750,7 +939,8 @@ VLM_TEST_SETTINGS = {
             CustomTestOptions(
                 inputs=inp,
                 limit_mm_per_prompt={"image": 2},
-            ) for inp in custom_inputs.different_patch_input_cases_internvl()
+            )
+            for inp in custom_inputs.different_patch_input_cases_internvl()
         ],
     ),
     "llava_onevision-multiple-images": VLMTestInfo(
@@ -758,15 +948,25 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
-        hf_model_kwargs=model_utils.llava_onevision_hf_model_kwargs("llava-hf/llava-onevision-qwen2-0.5b-ov-hf"),   # noqa: E501
+        auto_cls=AutoModelForImageTextToText,
+        hf_model_kwargs=model_utils.llava_onevision_hf_model_kwargs(
+            "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
+        ),
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
-        custom_test_opts=[CustomTestOptions(
-            inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
-                formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
-            ),
-            limit_mm_per_prompt={"image": 4},
-        )],
+        custom_test_opts=[
+            CustomTestOptions(
+                inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
+                    formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+                ),
+                limit_mm_per_prompt={"image": 4},
+            )
+        ],
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) == Version("4.57.1"),
+                reason="This model is broken in Transformers v4.57.1",
+            )
+        ],
     ),
     # regression test for https://github.com/vllm-project/vllm/issues/15122
     "qwen2_5_vl-windows-attention": VLMTestInfo(
@@ -774,15 +974,16 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=4096,
         max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
+        auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        custom_test_opts=[CustomTestOptions(
-            inputs=custom_inputs.windows_attention_image_qwen2_5_vl(),
-            limit_mm_per_prompt={"image": 1},
-        )],
+        custom_test_opts=[
+            CustomTestOptions(
+                inputs=custom_inputs.windows_attention_image_qwen2_5_vl(),
+                limit_mm_per_prompt={"image": 1},
+            )
+        ],
     ),
 }
-# yapf: enable
 
 
 def _mark_splits(
@@ -803,7 +1004,7 @@ def _mark_splits(
     new_test_settings = dict[str, VLMTestInfo]()
 
     for i in range(num_groups):
-        models_in_group = models[i * split_size:(i + 1) * split_size]
+        models_in_group = models[i * split_size : (i + 1) * split_size]
 
         for model in models_in_group:
             for info in test_infos_by_model[model]:
@@ -834,14 +1035,16 @@ VLM_TEST_SETTINGS = _mark_splits(VLM_TEST_SETTINGS, num_groups=2)
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.IMAGE,
         create_new_process_for_each_test=False,
-    ))
-def test_single_image_models(tmp_path: PosixPath, model_type: str,
-                             test_case: ExpandableVLMTestArgs,
-                             hf_runner: type[HfRunner],
-                             vllm_runner: type[VllmRunner],
-                             image_assets: ImageTestAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+    ),
+)
+def test_single_image_models(
+    tmp_path: PosixPath,
+    model_type: str,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    image_assets: ImageTestAssets,
+):
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_single_image_test(
         tmp_path=tmp_path,
@@ -859,14 +1062,16 @@ def test_single_image_models(tmp_path: PosixPath, model_type: str,
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.MULTI_IMAGE,
         create_new_process_for_each_test=False,
-    ))
-def test_multi_image_models(tmp_path: PosixPath, model_type: str,
-                            test_case: ExpandableVLMTestArgs,
-                            hf_runner: type[HfRunner],
-                            vllm_runner: type[VllmRunner],
-                            image_assets: ImageTestAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+    ),
+)
+def test_multi_image_models(
+    tmp_path: PosixPath,
+    model_type: str,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    image_assets: ImageTestAssets,
+):
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_multi_image_test(
         tmp_path=tmp_path,
@@ -884,14 +1089,15 @@ def test_multi_image_models(tmp_path: PosixPath, model_type: str,
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.EMBEDDING,
         create_new_process_for_each_test=False,
-    ))
-def test_image_embedding_models(model_type: str,
-                                test_case: ExpandableVLMTestArgs,
-                                hf_runner: type[HfRunner],
-                                vllm_runner: type[VllmRunner],
-                                image_assets: ImageTestAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+    ),
+)
+def test_image_embedding_models(
+    model_type: str,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    image_assets: ImageTestAssets,
+):
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_embedding_test(
         model_test_info=model_test_info,
@@ -908,12 +1114,15 @@ def test_image_embedding_models(model_type: str,
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.VIDEO,
         create_new_process_for_each_test=False,
-    ))
-def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
-                      hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
-                      video_assets: VideoTestAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+    ),
+)
+def test_video_models(
+    model_type: str,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    video_assets: VideoTestAssets,
+):
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
         model_test_info=model_test_info,
@@ -930,12 +1139,15 @@ def test_video_models(model_type: str, test_case: ExpandableVLMTestArgs,
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.AUDIO,
         create_new_process_for_each_test=False,
-    ))
-def test_audio_models(model_type: str, test_case: ExpandableVLMTestArgs,
-                      hf_runner: type[HfRunner], vllm_runner: type[VllmRunner],
-                      audio_assets: AudioTestAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+    ),
+)
+def test_audio_models(
+    model_type: str,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    audio_assets: AudioTestAssets,
+):
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_audio_test(
         model_test_info=model_test_info,
@@ -952,16 +1164,14 @@ def test_audio_models(model_type: str, test_case: ExpandableVLMTestArgs,
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.CUSTOM_INPUTS,
         create_new_process_for_each_test=False,
-    ))
+    ),
+)
 def test_custom_inputs_models(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    monkeypatch,
 ):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_custom_inputs_test(
         model_test_info=model_test_info,
@@ -978,15 +1188,17 @@ def test_custom_inputs_models(
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.IMAGE,
         create_new_process_for_each_test=True,
-    ))
+    ),
+)
 @create_new_process_for_each_test()
-def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
-                                   test_case: ExpandableVLMTestArgs,
-                                   hf_runner: type[HfRunner],
-                                   vllm_runner: type[VllmRunner],
-                                   image_assets: ImageTestAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+def test_single_image_models_heavy(
+    tmp_path: PosixPath,
+    model_type: str,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    image_assets: ImageTestAssets,
+):
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_single_image_test(
         tmp_path=tmp_path,
@@ -1004,15 +1216,17 @@ def test_single_image_models_heavy(tmp_path: PosixPath, model_type: str,
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.MULTI_IMAGE,
         create_new_process_for_each_test=True,
-    ))
+    ),
+)
 @create_new_process_for_each_test()
-def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
-                                  test_case: ExpandableVLMTestArgs,
-                                  hf_runner: type[HfRunner],
-                                  vllm_runner: type[VllmRunner],
-                                  image_assets: ImageTestAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+def test_multi_image_models_heavy(
+    tmp_path: PosixPath,
+    model_type: str,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    image_assets: ImageTestAssets,
+):
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_multi_image_test(
         tmp_path=tmp_path,
@@ -1030,16 +1244,16 @@ def test_multi_image_models_heavy(tmp_path: PosixPath, model_type: str,
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.EMBEDDING,
         create_new_process_for_each_test=True,
-    ))
+    ),
+)
 @create_new_process_for_each_test()
-def test_image_embedding_models_heavy(model_type: str,
-                                      test_case: ExpandableVLMTestArgs,
-                                      hf_runner: type[HfRunner],
-                                      vllm_runner: type[VllmRunner],
-                                      image_assets: ImageTestAssets,
-                                      monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+def test_image_embedding_models_heavy(
+    model_type: str,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    image_assets: ImageTestAssets,
+):
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_embedding_test(
         model_test_info=model_test_info,
@@ -1056,13 +1270,15 @@ def test_image_embedding_models_heavy(model_type: str,
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.VIDEO,
         create_new_process_for_each_test=True,
-    ))
-def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
-                            hf_runner: type[HfRunner],
-                            vllm_runner: type[VllmRunner],
-                            video_assets: VideoTestAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+    ),
+)
+def test_video_models_heavy(
+    model_type: str,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    video_assets: VideoTestAssets,
+):
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_video_test(
         model_test_info=model_test_info,
@@ -1079,13 +1295,15 @@ def test_video_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.AUDIO,
         create_new_process_for_each_test=True,
-    ))
-def test_audio_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
-                            hf_runner: type[HfRunner],
-                            vllm_runner: type[VllmRunner],
-                            audio_assets: AudioTestAssets, monkeypatch):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
+    ),
+)
+def test_audio_models_heavy(
+    model_type: str,
+    test_case: ExpandableVLMTestArgs,
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    audio_assets: AudioTestAssets,
+):
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_audio_test(
         model_test_info=model_test_info,
@@ -1102,17 +1320,15 @@ def test_audio_models_heavy(model_type: str, test_case: ExpandableVLMTestArgs,
         VLM_TEST_SETTINGS,
         test_type=VLMTestType.CUSTOM_INPUTS,
         create_new_process_for_each_test=True,
-    ))
+    ),
+)
 @create_new_process_for_each_test()
 def test_custom_inputs_models_heavy(
     model_type: str,
     test_case: ExpandableVLMTestArgs,
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    monkeypatch,
 ):
-    if model_type in REQUIRES_V0_MODELS:
-        monkeypatch.setenv("VLLM_USE_V1", "0")
     model_test_info = VLM_TEST_SETTINGS[model_type]
     runners.run_custom_inputs_test(
         model_test_info=model_test_info,

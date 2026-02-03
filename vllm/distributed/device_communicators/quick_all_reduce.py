@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
-from typing import Union
 
 import torch
 import torch.distributed as dist
@@ -10,11 +9,11 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
@@ -27,9 +26,10 @@ except Exception:
 
 
 def is_weak_contiguous(inp: torch.Tensor):
-    return inp.is_contiguous() or (inp.storage().nbytes() -
-                                   inp.storage_offset() * inp.element_size()
-                                   == inp.numel() * inp.element_size())
+    return inp.is_contiguous() or (
+        inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
+        == inp.numel() * inp.element_size()
+    )
 
 
 class QuickReduceRegime(Enum):
@@ -44,7 +44,6 @@ MB = 1024 * 1024
 
 
 class QuickAllReduce:
-
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
     # The following data is based on kernel tests.
@@ -58,27 +57,26 @@ class QuickAllReduce:
         (torch.bfloat16, 8): [16 * MB, 2048 * MB, 2048 * MB, 2048 * MB],
     }
 
-    def __init__(self, group: ProcessGroup,
-                 device: Union[int, str, torch.device]) -> None:
+    def __init__(self, group: ProcessGroup, device: int | str | torch.device) -> None:
         """
-        Custom allreduce provides non-destructive acceleration and is 
+        Custom allreduce provides non-destructive acceleration and is
         available for CUDA and ROCm MI300 series.
 
-        Custom quick allreduce leverages quantization for further 
-        acceleration on ROCm. It currently supports Q8, Q6, and Q4 
+        Custom quick allreduce leverages quantization for further
+        acceleration on ROCm. It currently supports Q8, Q6, and Q4
         quantization formats and FP(float16, bfloat16).
 
-        Quick allreduce is designed as a complement to custom allreduce. 
-        Its initialization requires even stricter conditions. 
+        Quick allreduce is designed as a complement to custom allreduce.
+        Its initialization requires even stricter conditions.
 
-        Only the ROCm MI300 series is supported for quick allreduce at 
+        Only the ROCm MI300 series is supported for quick allreduce at
         this time.
 
         Args:
             group: the process group to work on. If None, it will use the
                 default process group.
             device: the device to bind the CustomAllreduce to. If None,
-                it will be bind to f"cuda:{local_rank}".
+                it will be bound to f"cuda:{local_rank}".
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device, and all communicators in this group
         are in the same node.
@@ -93,18 +91,23 @@ class QuickAllReduce:
         if not quick_ar:
             # disable because of missing quick reduce library
             # e.g. in a cuda environment
-            logger.info("Custom quick allreduce is disabled because "
-                        "of missing custom quick allreduce library")
+            logger.info(
+                "Custom quick allreduce is disabled because "
+                "of missing custom quick allreduce library"
+            )
             return
 
         self.group = group
         assert dist.get_backend(group) != dist.Backend.NCCL, (
-            "Custom quick allreduce should be attached to a non-NCCL group.")
+            "Custom quick allreduce should be attached to a non-NCCL group."
+        )
         if not all(in_the_same_node_as(group, source_rank=0)):
             # No need to initialize custom quick allreduce for
             # multi-node case.
-            logger.warning("Custom quick allreduce is disabled because this "
-                           "process group spans across nodes.")
+            logger.warning(
+                "Custom quick allreduce is disabled because this "
+                "process group spans across nodes."
+            )
             return
         rank = dist.get_rank(group=self.group)
         world_size = dist.get_world_size(group=self.group)
@@ -118,7 +121,9 @@ class QuickAllReduce:
             logger.warning(
                 "Custom quick allreduce is disabled due to an "
                 "unsupported world size: %d. Supported world sizes: %s.",
-                world_size, str(QuickAllReduce._SUPPORTED_WORLD_SIZES))
+                world_size,
+                str(QuickAllReduce._SUPPORTED_WORLD_SIZES),
+            )
             return
 
         if isinstance(device, int):
@@ -134,9 +139,7 @@ class QuickAllReduce:
         else:
             device_ids = list(range(cuda_device_count_stateless()))
         physical_device_id = device_ids[device.index]
-        tensor = torch.tensor([physical_device_id],
-                              dtype=torch.int,
-                              device="cpu")
+        tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
         gather_list = [
             torch.tensor([0], dtype=torch.int, device="cpu")
             for _ in range(self.world_size)
@@ -148,12 +151,12 @@ class QuickAllReduce:
         # where custom quick allreduce is not supported
         # this checks hardware and driver support for NVLink
         assert current_platform.is_cuda_alike()
-        self.fully_connected = current_platform.is_fully_connected(
-            physical_device_ids)
+        self.fully_connected = current_platform.is_fully_connected(physical_device_ids)
         if self.world_size > 2 and not self.fully_connected:
             logger.debug(
                 "Custom quick allreduce is disabled because it's not supported "
-                "on more than two PCIe-only GPUs. ")
+                "on more than two PCIe-only GPUs. "
+            )
             return
 
         self.init_quick_all_reduce()
@@ -169,24 +172,31 @@ class QuickAllReduce:
                 "Custom quick allreduce:",
                 f"Invalid quantization level: {regime_str}. "
                 "Supported levels: "
-                f"{list(QuickReduceRegime.__members__.keys())}")
+                f"{list(QuickReduceRegime.__members__.keys())}",
+            )
             return
 
         if regime_str == "NONE":
-            logger.debug("Custom quick allreduce is disabled based "
-                         "on env variable "
-                         "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION='NONE'")
+            logger.debug(
+                "Custom quick allreduce is disabled based "
+                "on env variable "
+                "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION='NONE'"
+            )
             return
         self.qr_quant_level = QuickReduceRegime[regime_str]
-        vllm_config = get_current_vllm_config()
-        if vllm_config is not None and \
-            hasattr(vllm_config, "model_config") and \
-            hasattr(vllm_config.model_config, "dtype"):
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            vllm_config is not None
+            and hasattr(vllm_config, "model_config")
+            and hasattr(vllm_config.model_config, "dtype")
+        ):
             dtype = vllm_config.model_config.dtype
             if dtype not in [torch.float16, torch.bfloat16]:
                 logger.debug(
                     "Custom quick allreduce disabled: only supports "
-                    "float16 and float16, but get %s.", dtype)
+                    "float16 and float16, but get %s.",
+                    dtype,
+                )
                 return
 
             if dtype == torch.bfloat16 and self.use_fp16_kernels:
@@ -194,7 +204,8 @@ class QuickAllReduce:
                     "Custom quick allreduce: BF16 inputs will be converted "
                     "to FP16 to improve performance. set "
                     "envs.VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16=0 "
-                    "to turn off.")
+                    "to turn off."
+                )
 
         # VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB is specified in MB
         qr_max_size = envs.VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB
@@ -206,8 +217,7 @@ class QuickAllReduce:
                 )
             qr_max_size = qr_max_size * MB
         self._ptr = ops.init_custom_qr(self.rank, self.world_size, qr_max_size)
-        self.qr_max_size = qr_max_size if qr_max_size is not None \
-            else ops.qr_max_size()
+        self.qr_max_size = qr_max_size if qr_max_size is not None else ops.qr_max_size()
         self.create_shared_buffer()
         self.disabled = False
 
@@ -217,16 +227,15 @@ class QuickAllReduce:
         try:
             props = torch.cuda.get_device_properties(0)
             gcn_arch = getattr(props, "gcnArchName", "")
-            supported_archs = ['gfx94', 'gfx95']
+            supported_archs = ["gfx94", "gfx95"]
             return any(gfx in gcn_arch for gfx in supported_archs)
         except Exception as e:
-            logger.warning("Failed to determine ROCm for quick allreduce: %s",
-                           e)
+            logger.warning("Failed to determine ROCm for quick allreduce: %s", e)
             return False
 
     def create_shared_buffer(self):
         """
-        Creates a shared buffer for quickreduce. 
+        Creates a shared buffer for quickreduce.
         Has to be called after init_custom_qr
         """
         handle = ops.qr_get_handle(self._ptr)
@@ -253,9 +262,11 @@ class QuickAllReduce:
         dtype = inp.dtype
         if self.use_fp16_kernels:
             dtype = torch.float16
-        return inp_size <= self.qr_max_size and \
-            inp_size >= self._QR_MIN_SIZE[(dtype, self.world_size)]\
-                [self.qr_quant_level.value]
+        return (
+            inp_size <= self.qr_max_size
+            and inp_size
+            >= self._QR_MIN_SIZE[(dtype, self.world_size)][self.qr_quant_level.value]
+        )
 
     def quick_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
         """Performs an out-of-place custom quick all reduce."""
@@ -263,8 +274,9 @@ class QuickAllReduce:
         # as QR uses static IPC buffer.
         if out is None:
             out = torch.empty_like(inp)
-        ops.qr_all_reduce(self._ptr, inp, out, self.qr_quant_level.value,
-                          self.use_fp16_kernels)
+        ops.qr_all_reduce(
+            self._ptr, inp, out, self.qr_quant_level.value, self.use_fp16_kernels
+        )
         return out
 
     def close(self):

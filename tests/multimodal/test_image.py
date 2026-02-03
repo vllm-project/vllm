@@ -3,9 +3,12 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image, ImageChops
 
 from vllm.multimodal.image import convert_image_mode
+
+pytestmark = pytest.mark.cpu_test
 
 ASSETS_DIR = Path(__file__).parent / "assets"
 assert ASSETS_DIR.exists()

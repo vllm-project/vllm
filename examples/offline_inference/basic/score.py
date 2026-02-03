@@ -4,7 +4,7 @@
 from argparse import Namespace
 
 from vllm import LLM, EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def parse_args():
@@ -12,31 +12,33 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="BAAI/bge-reranker-v2-m3", task="score", enforce_eager=True
+        model="BAAI/bge-reranker-v2-m3",
+        runner="pooling",
+        enforce_eager=True,
     )
     return parser.parse_args()
 
 
 def main(args: Namespace):
     # Sample prompts.
-    text_1 = "What is the capital of France?"
-    texts_2 = [
+    query = "What is the capital of France?"
+    documents = [
         "The capital of Brazil is Brasilia.",
         "The capital of France is Paris.",
     ]
 
     # Create an LLM.
-    # You should pass task="score" for cross-encoder models
+    # You should pass runner="pooling" for cross-encoder models
     llm = LLM(**vars(args))
 
     # Generate scores. The output is a list of ScoringRequestOutputs.
-    outputs = llm.score(text_1, texts_2)
+    outputs = llm.score(query, documents)
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)
-    for text_2, output in zip(texts_2, outputs):
+    for document, output in zip(documents, outputs):
         score = output.outputs.score
-        print(f"Pair: {[text_1, text_2]!r} \nScore: {score}")
+        print(f"Pair: {[query, document]!r} \nScore: {score}")
         print("-" * 60)
 
 

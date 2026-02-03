@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from https://github.com/fixie-ai/ultravox/blob/ecd58c4041030bae2ad15aa6bcf04ab43199ea02/ultravox/model/ultravox_config.py
-from typing import Any, Optional
+from typing import Any
 
 import transformers
 
@@ -20,10 +20,13 @@ class UltravoxConfig(transformers.PretrainedConfig):
 
     Args:
         audio_config (`Union[AutoConfig, dict]`,  *optional*):
-            Custom audio config or dict
+            Custom audio config or dict.
         text_config (`Union[AutoConfig, dict]`, *optional*):
-            The config object of the text backbone. Can be any of `LlamaConfig`
-            or `MistralConfig`.
+            The config object of the text backbone.
+        audio_model_id (`str`, *optional*):
+            The model ID of the audio backbone.
+        text_model_id (`str`, *optional*):
+            The model ID of the text backbone.
         ignore_index (`int`, *optional*, defaults to -100):
             The ignore index for the loss function.
         audio_token_index (`int`, *optional*, defaults to 32000):
@@ -34,40 +37,34 @@ class UltravoxConfig(transformers.PretrainedConfig):
             The initialization value for the layer normalization.
         projector_act (`str`, *optional*, defaults to `"swiglu"`):
             The activation function used by the multimodal projector.
-        text_model_lora_config (`LoraConfigSimplified`, *optional*):
-            The LoRA configuration for finetuning the text model.
-        audio_model_lora_config (`LoraConfigSimplified`, *optional*):
-            The LoRA configuration for finetuning the audio model.
         projector_ln_mid (`bool`, *optional*, defaults to `False`):
             Whether to apply layer normalization at the middle of the
             projector or at the end. Versions v0.4.1 and below
             use `False`, but v0.5 and above use `True`.
     """
 
+    wrapped_model_config: transformers.PretrainedConfig
     model_type = "ultravox"
+    audio_token = "<|audio|>"
     is_composition = False
 
     def __init__(
         self,
-        audio_config: Optional[dict[str, Any]] = None,
-        text_config: Optional[dict[str, Any]] = None,
-        audio_model_id: Optional[str] = None,
-        text_model_id: Optional[str] = None,
+        audio_config: dict[str, Any] | None = None,
+        text_config: dict[str, Any] | None = None,
+        audio_model_id: str | None = None,
+        text_model_id: str | None = None,
         ignore_index: int = -100,
         audio_token_index: int = 32000,
         hidden_size: int = 4096,
         stack_factor: int = 8,
         norm_init: float = 0.4,
         projector_act: str = "swiglu",
-        text_model_lora_config: Optional[dict[str, Any]] = None,
-        audio_model_lora_config: Optional[dict[str, Any]] = None,
         projector_ln_mid: bool = False,
+        num_projector_layers: int = 0,
         **kwargs,
     ):
         self.ignore_index = ignore_index
-
-        self.audio_model_id = audio_model_id
-        self.text_model_id = text_model_id
         self.audio_token_index = audio_token_index
 
         self.hidden_size = hidden_size
@@ -75,34 +72,49 @@ class UltravoxConfig(transformers.PretrainedConfig):
         self.norm_init = norm_init
         self.projector_act = projector_act
         self.projector_ln_mid = projector_ln_mid
+        self.num_projector_layers = num_projector_layers
 
-        if text_model_id is not None:
-            # Avoid circular import
-            from vllm.transformers_utils.config import get_config
-
-            self.text_config = get_config(text_model_id,
-                                          trust_remote_code=False)
-        else:
+        # N.B. May set the wrapped_model_config below.
+        self.text_model_id = text_model_id
+        if text_model_id is None:
             text_config = text_config or {}
-            self.text_config = transformers.CONFIG_MAPPING[text_config.get(
-                "model_type", "llama")](**text_config)
+            self.wrapped_model_config = transformers.CONFIG_MAPPING[
+                text_config.get("model_type", "llama")
+            ](**text_config)
 
-        if audio_model_id is not None:
-            # Avoid circular import
-            from vllm.transformers_utils.config import get_config
-
-            self.audio_config = get_config(audio_model_id,
-                                           trust_remote_code=False)
-        else:
+        # N.B. May set the audio_config below.
+        self.audio_model_id = audio_model_id
+        if audio_model_id is None:
+            self.audio_model_id = None
             audio_config = audio_config or {}
-            self.audio_config = transformers.CONFIG_MAPPING[audio_config.get(
-                "model_type", "whisper")](**audio_config)
-
-        self.text_model_lora_config = text_model_lora_config or {}
-        self.audio_model_lora_config = audio_model_lora_config or {}
-
-        self.vocab_size = self.text_config.vocab_size
-
-        self.initializer_range = self.text_config.initializer_range
+            self.audio_config = transformers.CONFIG_MAPPING[
+                audio_config.get("model_type", "whisper")
+            ](**audio_config)
 
         super().__init__(**kwargs)
+
+    def __setattr__(self, key, value):
+        # Since --hf-overrides are applied _after_ the UltravoxConfig is
+        # instantiated, load the configs implicitly when assigning text_model_id
+        # or audio_model_id. This allows:
+        #
+        #   --hf-overrides.text_model_id=<quantized variant>
+        #
+        # to behave as intended.
+        if key == "text_model_id" and value is not None:
+            from vllm.transformers_utils.config import get_config
+
+            self.wrapped_model_config = get_config(value, trust_remote_code=False)
+        elif key == "audio_model_id" and value is not None:
+            from vllm.transformers_utils.config import get_config
+
+            self.audio_config = get_config(value, trust_remote_code=False)
+
+        return super().__setattr__(key, value)
+
+    @property
+    def text_config(self) -> transformers.PretrainedConfig:
+        # When Ultravox wraps a multi-modal model (e.g. Gemma), we instantiate
+        # the full model, but the text config is the text config of the inner
+        # model.
+        return self.wrapped_model_config.get_text_config()

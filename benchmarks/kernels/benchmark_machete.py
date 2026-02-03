@@ -8,10 +8,9 @@ import math
 import os
 import pickle as pkl
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import product
-from typing import Callable, Optional
 
 import pandas as pd
 import torch
@@ -34,7 +33,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     quantize_weights,
 )
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = ["meta-llama/Llama-3-8b", "meta-llama/Llama-2-70b-hf"]
 DEFAULT_BATCH_SIZES = [1, 16, 32, 64, 128, 256, 512, 1024]
@@ -63,23 +62,23 @@ class BenchmarkTensors:
     a: torch.Tensor
 
     w_q: torch.Tensor
-    group_size: Optional[int]
+    group_size: int | None
     wtype: ScalarType
     w_g_s: torch.Tensor
-    w_g_zp: Optional[torch.Tensor]
-    w_ch_s: Optional[torch.Tensor]
-    w_tok_s: Optional[torch.Tensor]
+    w_g_zp: torch.Tensor | None
+    w_ch_s: torch.Tensor | None
+    w_tok_s: torch.Tensor | None
 
 
 @dataclass
 class TypeConfig:
     act_type: torch.dtype
     weight_type: ScalarType
-    output_type: Optional[torch.dtype]
-    group_scale_type: Optional[torch.dtype]
-    group_zero_type: Optional[torch.dtype]
-    channel_scale_type: Optional[torch.dtype]
-    token_scale_type: Optional[torch.dtype]
+    output_type: torch.dtype | None
+    group_scale_type: torch.dtype | None
+    group_zero_type: torch.dtype | None
+    channel_scale_type: torch.dtype | None
+    token_scale_type: torch.dtype | None
 
 
 def rand_data(shape, dtype=torch.float16, scale=1):
@@ -93,8 +92,8 @@ def quantize_and_pack(
     atype: torch.dtype,
     w: torch.Tensor,
     wtype: ScalarType,
-    stype: Optional[torch.dtype],
-    group_size: Optional[int],
+    stype: torch.dtype | None,
+    group_size: int | None,
     zero_points: bool = False,
 ):
     assert wtype.is_integer(), "TODO: support floating point weights"
@@ -113,7 +112,7 @@ def quantize_and_pack(
 
 
 def create_bench_tensors(
-    shape: tuple[int, int, int], types: TypeConfig, group_size: Optional[int]
+    shape: tuple[int, int, int], types: TypeConfig, group_size: int | None
 ) -> list[BenchmarkTensors]:
     m, n, k = shape
 
@@ -232,11 +231,13 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
         assert bt.w_tok_s is None
         assert bt.group_size is not None
 
-        fn = lambda: ops.gptq_marlin_gemm(
+        fn = lambda: ops.marlin_gemm(
             a=bt.a,
             c=None,
             b_q_weight=w_q,
+            b_bias=None,
             b_scales=w_s,
+            a_scales=None,
             global_scale=None,
             b_zeros=w_zp,
             g_idx=g_idx,
@@ -252,28 +253,7 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
     else:
         assert bt.a.dtype == torch.int8
         assert bt.wtype == scalar_types.uint4b8
-
-        if bt.w_ch_s is not None:
-            s_ch = bt.w_ch_s.to(torch.float32)
-        else:
-            s_ch = torch.ones(bt.w_ref.shape[1], dtype=torch.float32, device=device)
-
-        if bt.w_tok_s is not None:
-            s_tok = bt.w_tok_s.to(torch.float32)
-        else:
-            s_tok = torch.ones(bt.a.shape[0], dtype=torch.float32, device=device)
-
-        fn = lambda: ops.marlin_qqq_gemm(
-            a=bt.a,
-            b_q_weight=w_q,
-            s_group=w_s,
-            s_tok=s_tok,
-            s_ch=s_ch,
-            workspace=workspace.scratch,
-            size_m=bt.a.shape[0],
-            size_n=bt.w_ref.shape[1],
-            size_k=bt.w_ref.shape[0],
-        )
+        raise NotImplementedError("QQQ is not supported anymore")
 
     return fn
 
@@ -301,6 +281,25 @@ def machete_create_bench_fn(
         a_token_scales=bt.w_tok_s,
         out_type=out_type,
         schedule=schedule,
+    )
+
+
+def cutlass_w4a8_create_bench_fn(
+    bt: BenchmarkTensors, out_type=torch.dtype, schedule=None
+) -> Callable:
+    w_q = bt.w_q.t().contiguous().t()  # make col major
+    w_q = ops.cutlass_encode_and_reorder_int4b(w_q)
+    # expects fp8 scales
+    w_s = ops.cutlass_pack_scale_fp8(bt.w_g_s.to(torch.float8_e4m3fn))
+
+    return lambda: ops.cutlass_w4a8_mm(
+        a=bt.a,
+        b_q=w_q,
+        b_group_scales=w_s,
+        b_group_size=bt.group_size,
+        b_channel_scales=bt.w_ch_s,
+        a_token_scales=bt.w_tok_s,
+        maybe_schedule=schedule,
     )
 
 
@@ -332,8 +331,8 @@ def bench_fns(label: str, sub_label: str, description: str, fns: list[Callable])
     return res
 
 
-_SWEEP_SCHEDULES_RESULTS: Optional[pd.DataFrame] = None
-_SWEEP_SCHEDULES_RESULTS_CSV: Optional[str] = None
+_SWEEP_SCHEDULES_RESULTS: pd.DataFrame | None = None
+_SWEEP_SCHEDULES_RESULTS_CSV: str | None = None
 
 
 def bench(
@@ -404,6 +403,20 @@ def bench(
             ],
         )
     )
+
+    # cutlass w4a8
+    if types.act_type == torch.float8_e4m3fn and group_size == 128:
+        timers.append(
+            bench_fns(
+                label,
+                sub_label,
+                f"cutlass w4a8 ({name_type_string})",
+                [
+                    cutlass_w4a8_create_bench_fn(bt, out_type=types.output_type)
+                    for bt in benchmark_tensors
+                ],
+            )
+        )
 
     if sweep_schedules:
         global _SWEEP_SCHEDULES_RESULTS

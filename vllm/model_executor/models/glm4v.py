@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
-# https://github.com/THUDM/CogAgent
+# https://github.com/zai-org/CogAgent
 """Inference-only CogAgent model compatible with THUDM weights."""
-from argparse import Namespace
-from collections.abc import Mapping, Sequence
-from typing import Literal, Optional, TypedDict, Union
 
+from argparse import Namespace
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Annotated, Literal
+
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import LayerNorm
@@ -17,51 +19,74 @@ from transformers import BatchFeature, PreTrainedTokenizer, TensorType
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               ReplicatedLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    ReplicatedLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFeatureSpec,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import MultiModalDataItems
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import ChatGLMConfig
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .chatglm import ChatGLMBaseModel, ChatGLMModel
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
-                         SupportsMultiModal, SupportsPP)
-from .utils import flatten_bn, merge_multimodal_embeddings
+from .chatglm import ChatGLMBaseModel, ChatGLMModel, GLMTransformer
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMRoPE,
+    SupportsMultiModal,
+    SupportsPP,
+)
 
 
-class GLMVImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: `(batch_size, num_channels, height, width)`"""
+class GLMVImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - b: Batch size
+        - c: Number of channels (3)
+        - h: Height of image
+        - w: Width of image
+    """
+
+    type: Literal["pixel_values"] = "pixel_values"
+    data: Annotated[torch.Tensor, TensorShape("b", 3, "h", "w")]
 
 
 class EVA2CLIPPatchEmbedding(nn.Module):
-
     def __init__(self, config):
         super().__init__()
-        self.proj = nn.Conv2d(config.in_channels,
-                              config.hidden_size,
-                              kernel_size=config.patch_size,
-                              stride=config.patch_size)
+        self.proj = Conv2dLayer(
+            config.in_channels,
+            config.hidden_size,
+            kernel_size=config.patch_size,
+            stride=config.patch_size,
+        )
         self.cls_embedding = nn.Parameter(torch.zeros(1, config.hidden_size))
-        self.position_embedding = nn.Embedding(config.num_positions,
-                                               config.hidden_size)
+        self.position_embedding = nn.Embedding(config.num_positions, config.hidden_size)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         """
@@ -73,8 +98,7 @@ class EVA2CLIPPatchEmbedding(nn.Module):
         torch.Tensor
             Transformed tensor with shape (B, L, D)
         """
-        images = images.to(device=self.proj.weight.device,
-                           dtype=self.proj.weight.dtype)
+        images = images.to(device=self.proj.weight.device, dtype=self.proj.weight.dtype)
         x = self.proj(images)
         x = x.flatten(2).transpose(1, 2)
         cls_token = self.cls_embedding.expand(x.shape[0], -1, -1)
@@ -84,12 +108,11 @@ class EVA2CLIPPatchEmbedding(nn.Module):
 
 
 class EVA2CLIPAttention(nn.Module):
-
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -112,8 +135,12 @@ class EVA2CLIPAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        self.attn = MultiHeadAttention(self.num_heads_per_rank, self.head_dim,
-                                       self.scale)
+        self.attn = MMEncoderAttention(
+            self.num_heads_per_rank,
+            self.head_dim,
+            self.scale,
+            prefix=prefix,
+        )
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -127,12 +154,11 @@ class EVA2CLIPAttention(nn.Module):
 
 
 class EVA2CLIPMLP(nn.Module):
-
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -158,29 +184,27 @@ class EVA2CLIPMLP(nn.Module):
 
 
 class EVA2CLIPTransformerLayer(nn.Module):
-
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
-        self.input_layernorm = LayerNorm(config.hidden_size,
-                                         eps=config.layer_norm_eps)
-        self.attention = EVA2CLIPAttention(config,
-                                           quant_config=quant_config,
-                                           prefix=f"{prefix}.attention")
-        self.mlp = EVA2CLIPMLP(config,
-                               quant_config=quant_config,
-                               prefix=f"{prefix}.mlp")
-        self.post_attention_layernorm = LayerNorm(config.hidden_size,
-                                                  eps=config.layer_norm_eps)
+        self.input_layernorm = LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.attention = EVA2CLIPAttention(
+            config, quant_config=quant_config, prefix=f"{prefix}.attention"
+        )
+        self.mlp = EVA2CLIPMLP(
+            config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+        )
+        self.post_attention_layernorm = LayerNorm(
+            config.hidden_size, eps=config.layer_norm_eps
+        )
 
     def forward(self, hidden_states):
         attention_input = hidden_states
-        attention_output = self.input_layernorm(
-            self.attention(attention_input))
+        attention_output = self.input_layernorm(self.attention(attention_input))
         hidden_states = attention_input + attention_output
         mlp_input = hidden_states
         mlp_output = self.post_attention_layernorm(self.mlp(mlp_input))
@@ -189,20 +213,23 @@ class EVA2CLIPTransformerLayer(nn.Module):
 
 
 class EVA2CLIPTransformer(nn.Module):
-
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
-        self.layers = nn.ModuleList([
-            EVA2CLIPTransformerLayer(config,
-                                     quant_config=quant_config,
-                                     prefix=f"{prefix}.layers.{layer_idx}")
-            for layer_idx in range(config.num_hidden_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [
+                EVA2CLIPTransformerLayer(
+                    config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                )
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+        )
 
     def forward(self, hidden_states):
         for layer_module in self.layers:
@@ -211,13 +238,12 @@ class EVA2CLIPTransformer(nn.Module):
 
 
 class EVA2CLIPGLU(nn.Module):
-
     def __init__(
         self,
         config,
         in_features,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         """
         The original implementation is the same as:
@@ -226,14 +252,14 @@ class EVA2CLIPGLU(nn.Module):
             config.hidden_size,
             config.ffn_hidden_size,
             bias=False,
-            quant_config=quant_config
+            quant_config=quant_config,
         )
 
         self.gate_proj = ColumnParallelLinear(
             config.hidden_size,
             config.ffn_hidden_size,
             bias=False,
-            quant_config=quant_config
+            quant_config=quant_config,
         )
         ```
         ```
@@ -248,7 +274,7 @@ class EVA2CLIPGLU(nn.Module):
             config.hidden_size,
             [config.ffn_hidden_size] * 2,
             bias=False,
-            quant_config=quant_config
+            quant_config=quant_config,
         )
         ```
         ```
@@ -256,27 +282,32 @@ class EVA2CLIPGLU(nn.Module):
         ```
         """
         super().__init__()
-        self.linear_proj = ReplicatedLinear(in_features,
-                                            config.hidden_size,
-                                            bias=False,
-                                            quant_config=quant_config,
-                                            prefix=f"{prefix}.linear_proj")
+        self.linear_proj = ReplicatedLinear(
+            in_features,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_proj",
+        )
         self.norm1 = nn.LayerNorm(config.hidden_size)
         self.act1 = nn.GELU()
         self.act2 = SiluAndMul()
 
         self.merged_proj = MergedColumnParallelLinear(
-            config.hidden_size, [config.ffn_hidden_size] * 2,
+            config.hidden_size,
+            [config.ffn_hidden_size] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.merged_proj")
+            prefix=f"{prefix}.merged_proj",
+        )
 
         self.dense_4h_to_h = RowParallelLinear(
             config.ffn_hidden_size,
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.dense_4h_to_h")
+            prefix=f"{prefix}.dense_4h_to_h",
+        )
 
     def forward(self, x):
         x, _ = self.linear_proj(x)
@@ -288,27 +319,30 @@ class EVA2CLIPGLU(nn.Module):
 
 
 class EVA2CLIPModel(nn.Module):
-
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = '',
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         vision_config = Namespace(**config.vision_config)
         self.patch_embedding = EVA2CLIPPatchEmbedding(vision_config)
-        self.transformer = EVA2CLIPTransformer(vision_config,
-                                               quant_config=quant_config,
-                                               prefix=f"{prefix}.transformer")
-        self.linear_proj = EVA2CLIPGLU(config,
-                                       in_features=config.hidden_size,
-                                       quant_config=quant_config,
-                                       prefix=f"{prefix}.linear_proj")
-        self.conv = nn.Conv2d(in_channels=vision_config.hidden_size,
-                              out_channels=config.hidden_size,
-                              kernel_size=2,
-                              stride=2)
+        self.transformer = EVA2CLIPTransformer(
+            vision_config, quant_config=quant_config, prefix=f"{prefix}.transformer"
+        )
+        self.linear_proj = EVA2CLIPGLU(
+            config,
+            in_features=config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_proj",
+        )
+        self.conv = Conv2dLayer(
+            in_channels=vision_config.hidden_size,
+            out_channels=config.hidden_size,
+            kernel_size=2,
+            stride=2,
+        )
         self.boi = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         self.eoi = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         self.scaling_factor = vision_config.scaling_factor
@@ -342,15 +376,14 @@ class EVA2CLIPModel(nn.Module):
 
 
 class GLM4VModel(ChatGLMModel):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         quant_config = vllm_config.quant_config
 
-        self.vision = EVA2CLIPModel(self.config,
-                                    quant_config,
-                                    prefix=f"{prefix}.vision")
+        self.vision = EVA2CLIPModel(
+            self.config, quant_config, prefix=f"{prefix}.vision"
+        )
 
 
 class GLM4VProcessor:
@@ -372,23 +405,25 @@ class GLM4VProcessor:
         vision_config = config.vision_config
         image_size = vision_config["image_size"]
 
-        self.image_transform = transforms.Compose([
-            transforms.Resize(
-                (image_size, image_size),
-                interpolation=InterpolationMode.BICUBIC,
-            ),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=(0.48145466, 0.4578275, 0.40821073),
-                std=(0.26862954, 0.26130258, 0.27577711),
-            ),
-        ])
+        self.image_transform = transforms.Compose(
+            [
+                transforms.Resize(
+                    (image_size, image_size),
+                    interpolation=InterpolationMode.BICUBIC,
+                ),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=(0.48145466, 0.4578275, 0.40821073),
+                    std=(0.26862954, 0.26130258, 0.27577711),
+                ),
+            ]
+        )
 
     def __call__(
         self,
-        text: Optional[Union[TextInput, list[TextInput]]] = None,
-        images: Optional[Union[ImageInput, list[ImageInput]]] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
+        text: TextInput | list[TextInput] | None = None,
+        images: ImageInput | list[ImageInput] | None = None,
+        return_tensors: str | TensorType | None = None,
     ) -> BatchFeature:
         if text is None:
             text = []
@@ -417,7 +452,6 @@ class GLM4VProcessor:
 
 
 class GLM4VProcessingInfo(BaseProcessingInfo):
-
     def get_hf_config(self):
         return self.ctx.get_hf_config(ChatGLMConfig)
 
@@ -429,7 +463,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
             **kwargs,
         )
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
     def get_num_image_tokens(self) -> int:
@@ -447,7 +481,6 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
 
 
 class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
-
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
@@ -459,6 +492,7 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -466,16 +500,19 @@ class GLM4VDummyInputsBuilder(BaseDummyInputsBuilder[GLM4VProcessingInfo]):
         target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
+        image_overrides = mm_options.get("image") if mm_options else None
+
         return {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images)
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images,
+                overrides=image_overrides,
+            )
         }
 
 
 class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
-
     def _hf_processor_applies_updates(
         self,
         prompt_text: str,
@@ -496,7 +533,7 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
 
@@ -519,16 +556,18 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(GLM4VMultiModalProcessor,
-                                        info=GLM4VProcessingInfo,
-                                        dummy_inputs=GLM4VDummyInputsBuilder)
-class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
-                       SupportsMultiModal):
-
+@MULTIMODAL_REGISTRY.register_processor(
+    GLM4VMultiModalProcessor,
+    info=GLM4VProcessingInfo,
+    dummy_inputs=GLM4VDummyInputsBuilder,
+)
+class GLM4VForCausalLM(
+    ChatGLMBaseModel, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
+):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
-        "merged_proj": ["gate_proj", "dense_h_to_4h"]
+        "merged_proj": ["gate_proj", "dense_h_to_4h"],
     }
 
     def get_mm_mapping(self) -> MultiModelKeys:
@@ -538,10 +577,11 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         return MultiModelKeys.from_string_field(
             language_model="transformer.encoder",
             connector="transformer.vision.linear_proj",
-            tower_model="transformer.vision.transformer")
+            tower_model="transformer.vision.transformer",
+        )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|begin_of_image|><|endoftext|><|end_of_image|>"
 
@@ -554,55 +594,93 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         prefix: str = "",
         transformer_type: type[GLM4VModel] = GLM4VModel,
     ) -> None:
-        super().__init__(
-            vllm_config=vllm_config,
-            prefix=prefix,
-            transformer_type=transformer_type,
-        )
+        with self._mark_composite_model(
+            vllm_config,
+            language_targets=GLMTransformer,
+            tower_targets={"image": EVA2CLIPModel},
+        ):
+            super().__init__(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                transformer_type=transformer_type,
+            )
 
         self.transformer: GLM4VModel
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config["image_size"]
-        expected_dims = (3, h, w)
-        actual_dims = tuple(data.shape[1:])
-
-        if actual_dims != expected_dims:
-            expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
-
-        return data
-
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[GLMVImagePixelInputs]:
+        self, **kwargs: object
+    ) -> GLMVImagePixelInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
+            expected_h = expected_w = self.config.vision_config["image_size"]
             return GLMVImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(
-                    flatten_bn(pixel_values, concat=True)),
+                data=pixel_values,
+                resolve_bindings={"h": expected_h, "w": expected_w},
             )
 
         return None
 
-    def _process_image_input(
-            self, image_input: GLMVImagePixelInputs) -> torch.Tensor:
-        pixel_values = image_input["data"].to(dtype=self.config.torch_dtype)
+    def _process_image_input(self, image_input: GLMVImagePixelInputs) -> torch.Tensor:
+        pixel_values = image_input["data"].to(dtype=self.config.dtype)
 
         return self.transformer.vision(pixel_values)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.transformer
+    def iter_mm_grid_thw(
+        self, mm_features: list[MultiModalFeatureSpec]
+    ) -> Iterator[tuple[int, int, int, int]]:
+        hf_config = self.config
+        spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
+            offset = mm_feature.mm_position.offset
+            if mm_feature.modality == "image":
+                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                assert t == 1, f"Image must have 1 frame, got {t}"
+                yield offset, t, h // spatial_merge_size, w // spatial_merge_size
+            else:
+                # glm4v only supports image modality
+                raise ValueError(f"Unsupported modality: {mm_feature.modality}")
 
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> MultiModalEmbeddings:
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> tuple[torch.Tensor, int]:
+        llm_pos_ids_list: list = []
+        st = 0
+        for (
+            offset,
+            llm_grid_t,
+            llm_grid_h,
+            llm_grid_w,
+        ) in self.iter_mm_grid_thw(mm_features):
+            text_len = offset - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
+            grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w)).reshape(
+                3, -1
+            )
+            llm_pos_ids_list.append(grid_indices + text_len + st_idx)
+            # EVA2CLIPModel has embeddings for boi and eoi tokens as well
+            st = offset + 1 + llm_grid_t * llm_grid_h * llm_grid_w + 1
+
+        if st < len(input_tokens):
+            text_len = len(input_tokens) - st
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
+            )
+
+        llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
+        return torch.from_numpy(llm_positions), mrope_position_delta
+
+    embed_input_ids = SupportsMultiModal.embed_input_ids
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -610,48 +688,19 @@ class GLM4VForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.transformer.get_input_embeddings(input_ids)
-
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids=input_ids,
-                inputs_embeds=inputs_embeds,
-                multimodal_embeddings=multimodal_embeddings,
-                placeholder_token_id=[
-                    self.config.boi_token_id,
-                    self.config.pad_token_id,
-                    self.config.eoi_token_id,
-                ],
-            )
-
-        return inputs_embeds
-
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
-
-        hidden_states = self.transformer(input_ids, positions,
-                                         intermediate_tensors, inputs_embeds)
+        hidden_states = self.transformer(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
 
         return hidden_states

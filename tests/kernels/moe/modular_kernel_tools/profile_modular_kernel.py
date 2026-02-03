@@ -2,40 +2,44 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from collections.abc import Callable
 from itertools import product
-from typing import Any, Callable
+from typing import Any
 
 import torch
 
 from vllm.config import VllmConfig
-from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 from .common import Config, RankTensors, WeightTensors, make_modular_kernel
 from .parallel_utils import ProcessGroupInfo, parallel_launch_with_config
 
 
-def do_profile(fn: Callable,
-               fn_kwargs: dict[Any, Any],
-               pgi: ProcessGroupInfo,
-               config: Config,
-               num_warmups: int = 5):
+def do_profile(
+    fn: Callable,
+    fn_kwargs: dict[Any, Any],
+    pgi: ProcessGroupInfo,
+    config: Config,
+    num_warmups: int = 5,
+):
     for _ in range(num_warmups):
         fn(**fn_kwargs)
 
     with torch.profiler.profile(
-            activities=[
-                torch.profiler.ProfilerActivity.CPU,
-                torch.profiler.ProfilerActivity.CUDA,
-            ],
-            with_stack=True,
-            record_shapes=True,
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        with_stack=True,
+        record_shapes=True,
     ) as tprof:
         fn(**fn_kwargs)
         torch.cuda.synchronize(torch.cuda.current_device())
 
     # TODO (varun): Add a descriptive trace file name
     tprof.export_chrome_trace(
-        f"{config.torch_trace_dir_path}/m{config.M}_{pgi.rank}_trace.json")
+        f"{config.torch_trace_dir_path}/m{config.M}_{pgi.rank}_trace.json"
+    )
 
 
 def profile_modular_kernel(
@@ -52,7 +56,7 @@ def profile_modular_kernel(
     rank_weights = weights.slice_weights(pgi.rank, config.num_local_experts)
 
     # make modular kernel
-    mk = make_modular_kernel(config, vllm_config)
+    mk = make_modular_kernel(config, vllm_config, weights)
 
     mk_kwargs = {
         "hidden_states": rank_tensors.hidden_states,
@@ -78,12 +82,13 @@ def rank_worker(
     config: Config,
     weights: WeightTensors,
 ):
-    current_platform.seed_everything(pgi.rank)
+    set_random_seed(pgi.rank)
 
     # sanity check
     from vllm import envs
+
     if config.fused_moe_chunk_size is not None:
-        assert (config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+        assert config.fused_moe_chunk_size == envs.VLLM_FUSED_MOE_CHUNK_SIZE
 
     # get weights to this device
     weights.to_current_device()
@@ -108,20 +113,25 @@ def rank_worker(
 def run(config: Config):
     weights: WeightTensors = WeightTensors.make(config)
     vllm_config, env_dict = config.make_env_data()
-    parallel_launch_with_config(config.world_size, rank_worker, vllm_config,
-                                env_dict, config, weights)
+    parallel_launch_with_config(
+        config.world_size, rank_worker, vllm_config, env_dict, config, weights
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     from .cli_args import make_config, make_config_arg_parser
-    parser = make_config_arg_parser(description=(
-        "Run single prepare-finalize & fused-experts combination test"
-        "Example : python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel "  #noqa: E501
-        "--pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts"
-    ))
+
+    parser = make_config_arg_parser(
+        description=(
+            "Run single prepare-finalize & fused-experts combination test"
+            "Example : python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel "  # noqa: E501
+            "--pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts"
+        )
+    )
     args = parser.parse_args()
     assert args.torch_trace_dir_path is not None, (
-        "Please pass in a directory to store torch traces")
+        "Please pass in a directory to store torch traces"
+    )
     config = make_config(args)
 
     run(config)

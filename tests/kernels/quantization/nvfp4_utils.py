@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm._custom_ops import scaled_fp4_quant
 from vllm.scalar_type import scalar_types
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
-kE2M1ToFloat = torch.tensor([0., 0.5, 1., 1.5, 2., 3., 4., 6.],
-                            dtype=torch.float32)
+kE2M1ToFloat = torch.tensor(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32
+)
 
 
 def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
@@ -21,12 +23,27 @@ def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
     return out[0:m, 0:k]
 
 
-def dequantize_nvfp4_to_dtype(tensor_fp4,
-                              tensor_sf,
-                              global_scale,
-                              dtype,
-                              device,
-                              block_size=16):
+def convert_swizzled_8x4_layout_to_linear(
+    a_sf_swizzled: torch.Tensor, m, k, block_size
+):
+    m_tiles = (m + 8 - 1) // 8
+    f = block_size * 4
+    k_tiles = (k + f - 1) // f
+    tmp = torch.reshape(a_sf_swizzled, (1, m_tiles, k_tiles, 8, 4))
+    tmp = torch.permute(tmp, (0, 1, 3, 2, 4))
+    out = tmp.reshape(m_tiles * 8, k_tiles * f // block_size)
+    return out[0:m, 0:k]
+
+
+def dequantize_nvfp4_to_dtype(
+    tensor_fp4,
+    tensor_sf,
+    global_scale,
+    dtype,
+    device,
+    block_size=16,
+    is_sf_128x4_layout=True,
+):
     """Dequantize the fp4 tensor back to high precision."""
     # Two fp4 values are packed into one uint8.
     assert tensor_fp4.dtype == torch.uint8
@@ -35,7 +52,11 @@ def dequantize_nvfp4_to_dtype(tensor_fp4,
     tensor_f32 = break_fp4_bytes(tensor_fp4, dtype)
     tensor_f32 = tensor_f32.reshape(m, k // block_size, block_size)
     tensor_sf = tensor_sf.view(torch.float8_e4m3fn)
-    tensor_sf = convert_swizzled_to_linear(tensor_sf, m, k, block_size)
+    if is_sf_128x4_layout:
+        tensor_sf = convert_swizzled_to_linear(tensor_sf, m, k, block_size)
+    else:
+        tensor_sf = convert_swizzled_8x4_layout_to_linear(tensor_sf, m, k, block_size)
+
     tensor_sf_dtype = tensor_sf.to(torch.float32) / global_scale
 
     # scale the tensor
@@ -65,3 +86,13 @@ def break_fp4_bytes(a, dtype):
 
     # Reshape to final form
     return values.reshape(m, n * 2).to(dtype=dtype)
+
+
+def get_nvfp4_global_scale(a: torch.Tensor):
+    return (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.abs(a).max().to(torch.float32)
+
+
+def quant_nvfp4_tensor(a: torch.Tensor):
+    a_global_scale = get_nvfp4_global_scale(a)
+    a_quant, a_block_scale = scaled_fp4_quant(a, a_global_scale)
+    return a_quant, a_block_scale, a_global_scale

@@ -2,36 +2,36 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional, Union
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage)
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("hunyuan_a13b")
 class HunyuanA13BReasoningParser(ReasoningParser):
     """
     Reasoning parser for Hunyuan A13B Model
 
     HunyuanReasoningParser
 
-    This class implements a reasoning parser specifically designed 
-    for the Hunyuan A13B Model. It is responsible for parsing and 
-    extracting structured reasoning and answer segments from model 
+    This class implements a reasoning parser specifically designed
+    for the Hunyuan A13B Model. It is responsible for parsing and
+    extracting structured reasoning and answer segments from model
     outputs that follow a specific pattern.
 
     Key Features:
         - For non-stream output , Recognizes and extracts reasoning ("think")
          and answer ("answer") sections from text using regular expressions.
-        - For stream process, it require a token id sequences to change the 
-          reasoning state and other state so it maintains internal state to 
+        - For stream process, it requires a token id sequences to change the
+          reasoning state and other state so it maintains internal state to
           manage parsing across multiple token.
 
 
@@ -40,8 +40,8 @@ class HunyuanA13BReasoningParser(ReasoningParser):
     response ends: "\n</answer>": [524, 9399, 29]
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizerBase):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
+        super().__init__(tokenizer, *args, **kwargs)
         self.think_start_expr = r"<think>\n"
         self.think_end_expr = r"\n</think>\n"
 
@@ -50,20 +50,19 @@ class HunyuanA13BReasoningParser(ReasoningParser):
 
         self.full_match_reasoning_regex = re.compile(
             rf"(?:{self.think_start_expr}(.*?){self.response_start_expr})?(.*?){self.response_end_expr}",
-            re.DOTALL)
+            re.DOTALL,
+        )
 
         self.half_match_reasoning_regex = re.compile(
-            rf"{self.think_start_expr}(.*?){self.response_start_expr}(.*)",
-            re.DOTALL)
+            rf"{self.think_start_expr}(.*?){self.response_start_expr}(.*)", re.DOTALL
+        )
 
         self.think_start_ids = [14023, 771, 397]
         self.think_start_ids_fast = [14023, 771, 1363]
         self.response_start_ids = [198, 524, 27963, 397, 27, 9399, 397]
         self.response_start_ids_fast = [524, 27963, 397, 27, 9399, 397]
         self.response_end_ids = [198, 524, 9399, 29]
-        self.fast_think_ids = [
-            14023, 771, 1363, 524, 27963, 397, 27, 9399, 397
-        ]
+        self.fast_think_ids = [14023, 771, 1363, 524, 27963, 397, 27, 9399, 397]
 
         # when state change, send out all the buffered text in last state
         self.buffered_text = []
@@ -80,7 +79,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         self.token_buffer = []
         self.text_buffer = ""
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self.current_state == "response"
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
@@ -90,9 +89,9 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         # this id is not part of content, so just return [] here.
         return []
 
-    def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+    def extract_reasoning(
+        self, model_output: str, request: ChatCompletionRequest
+    ) -> tuple[str | None, str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
@@ -108,33 +107,33 @@ class HunyuanA13BReasoningParser(ReasoningParser):
 
         re_match = self.full_match_reasoning_regex.findall(model_output)
         if re_match:
-            reasoning_content, response_content = re_match[0]
-            if len(reasoning_content) == 0:
-                reasoning_content = None
+            reasoning, response_content = re_match[0]
+            if len(reasoning) == 0:
+                reasoning = None
             if len(response_content) == 0:
                 response_content = None
-            return reasoning_content, response_content
+            return reasoning, response_content
 
         fallback_regex = self.half_match_reasoning_regex
         fallback_match = fallback_regex.findall(model_output)
         if fallback_match:
-            reasoning_content, response_content = fallback_match[0]
+            reasoning, response_content = fallback_match[0]
 
             if response_content.endswith(self.response_end_expr):
-                response_content = response_content[:-len(self.
-                                                          response_end_expr)]
+                response_content = response_content[: -len(self.response_end_expr)]
 
-            if len(reasoning_content) == 0:
-                reasoning_content = None
+            if len(reasoning) == 0:
+                reasoning = None
             if len(response_content) == 0:
                 response_content = None
 
-            return reasoning_content, response_content
+            return reasoning, response_content
 
         return None, model_output
 
-    def _is_strict_increasing_subsequence(self, subsequence: Sequence[int],
-                                          sequence: Sequence[int]) -> bool:
+    def _is_strict_increasing_subsequence(
+        self, subsequence: Sequence[int], sequence: Sequence[int]
+    ) -> bool:
         if not subsequence:
             return False
 
@@ -144,7 +143,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
                 sub_idx += 1
         return sub_idx == len(subsequence)
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,
@@ -152,34 +151,34 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """Extract content using token ID sequence state machine"""
         # Define sequences
         think_start_sequence = self.think_start_ids
         response_start_sequence = self.response_start_ids
         response_end_sequence = self.response_end_ids
 
-        assert (len(delta_token_ids) == 1)
+        assert len(delta_token_ids) == 1
         # Process each token in the delta
         token = delta_token_ids[0]
 
         def check_token_with_sequence(token):
             if self.current_state == "idle" or self.current_state == "think":
-                return (token == self.expected_sequence[self.sequence_index]
-                         or token ==  \
-                         self.expected_sequence_side[self.sequence_index])
+                return (
+                    token == self.expected_sequence[self.sequence_index]
+                    or token == self.expected_sequence_side[self.sequence_index]
+                )
             else:
                 return token == self.expected_sequence[self.sequence_index]
 
         def check_last_token(token):
             if self.current_state == "idle" or self.current_state == "think":
                 # only return true if it's judge using a side sequence.
-                if (self.sequence_index - 1 < len(self.expected_sequence_side)
-                        and token
-                        == self.expected_sequence_side[self.sequence_index -
-                                                       1]):
-                    return self.sequence_index == len(
-                        self.expected_sequence_side)
+                if (
+                    self.sequence_index - 1 < len(self.expected_sequence_side)
+                    and token == self.expected_sequence_side[self.sequence_index - 1]
+                ):
+                    return self.sequence_index == len(self.expected_sequence_side)
                 else:
                     return self.sequence_index == len(self.expected_sequence)
             else:
@@ -227,19 +226,15 @@ class HunyuanA13BReasoningParser(ReasoningParser):
 
                 # Return content based on current state
                 if self.current_state == "think":
-                    return DeltaMessage(reasoning_content=buffered_content,
-                                        content=None)
+                    return DeltaMessage(reasoning=buffered_content, content=None)
                 else:
-                    return DeltaMessage(reasoning_content=None,
-                                        content=buffered_content)
+                    return DeltaMessage(reasoning=None, content=buffered_content)
             else:
                 # No buffered content, send normally
                 if self.current_state == "think":
-                    return DeltaMessage(reasoning_content=delta_text,
-                                        content=None)
+                    return DeltaMessage(reasoning=delta_text, content=None)
                 else:
-                    return DeltaMessage(reasoning_content=None,
-                                        content=delta_text)
+                    return DeltaMessage(reasoning=None, content=delta_text)
 
         # If no content to send in this delta
         return None

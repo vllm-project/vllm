@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -22,32 +23,45 @@ class ModelPair:
 MODEL_ARG_EXPTYPES = [
     # AUTOGPTQ
     # compat: autogptq <=0.7.1 is_marlin_format: bool
-    # Model Serialized in Marlin Format should always use Marlin kernel.
-    ("neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin", None, "marlin"),
-    ("neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin", "marlin", "marlin"),
-    ("neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin", "gptq", "marlin"),
-    ("neuralmagic/TinyLlama-1.1B-Chat-v1.0-marlin", "awq", "ERROR"),
     # Model Serialized in Exllama Format.
-    ("TheBloke/Llama-2-7B-Chat-GPTQ", None, "gptq_marlin"),
-    ("TheBloke/Llama-2-7B-Chat-GPTQ", "marlin", "gptq_marlin"),
+    (
+        "TheBloke/Llama-2-7B-Chat-GPTQ",
+        None,
+        "gptq_marlin" if current_platform.is_cuda() else "gptq",
+    ),
+    (
+        "TheBloke/Llama-2-7B-Chat-GPTQ",
+        "marlin",
+        "gptq_marlin" if current_platform.is_cuda() else "ERROR",
+    ),
     ("TheBloke/Llama-2-7B-Chat-GPTQ", "gptq", "gptq"),
     ("TheBloke/Llama-2-7B-Chat-GPTQ", "awq", "ERROR"),
     # compat: autogptq >=0.8.0 use checkpoint_format: str
-    # Model Serialized in Marlin Format should always use Marlin kernel.
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-Marlin-4bit", None, "marlin"),
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-Marlin-4bit", "marlin", "marlin"),
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-Marlin-4bit", "gptq", "marlin"),
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-Marlin-4bit", "awq", "ERROR"),
     # Model Serialized in Exllama Format.
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", None, "gptq_marlin"),
-    ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "marlin", "gptq_marlin"),
+    (
+        "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+        None,
+        "gptq_marlin" if current_platform.is_cuda() else "gptq",
+    ),
+    (
+        "LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit",
+        "marlin",
+        "gptq_marlin" if current_platform.is_cuda() else "ERROR",
+    ),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "gptq", "gptq"),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "awq", "ERROR"),
-
     # AUTOAWQ
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", None, "awq_marlin"),
+    (
+        "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
+        None,
+        "awq_marlin" if current_platform.is_cuda() else "awq",
+    ),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "awq"),
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "marlin", "awq_marlin"),
+    (
+        "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
+        "marlin",
+        "awq_marlin" if current_platform.is_cuda() else "ERROR",
+    ),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
 ]
 
@@ -57,15 +71,7 @@ def test_auto_gptq(model_arg_exptype: tuple[str, None, str]) -> None:
     model_path, quantization_arg, expected_type = model_arg_exptype
 
     try:
-        model_config = ModelConfig(model_path,
-                                   task="auto",
-                                   tokenizer=model_path,
-                                   tokenizer_mode="auto",
-                                   trust_remote_code=False,
-                                   seed=0,
-                                   dtype="float16",
-                                   revision=None,
-                                   quantization=quantization_arg)
+        model_config = ModelConfig(model_path, quantization=quantization_arg)
         found_quantization_type = model_config.quantization
     except ValueError:
         found_quantization_type = "ERROR"
@@ -73,4 +79,5 @@ def test_auto_gptq(model_arg_exptype: tuple[str, None, str]) -> None:
     assert found_quantization_type == expected_type, (
         f"Expected quant_type == {expected_type} for {model_path}, "
         f"but found {found_quantization_type} "
-        f"for no --quantization {quantization_arg} case")
+        f"for no --quantization {quantization_arg} case"
+    )

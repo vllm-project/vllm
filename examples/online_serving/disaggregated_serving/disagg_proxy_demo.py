@@ -23,7 +23,7 @@ import logging
 import os
 import sys
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import aiohttp
 import requests
@@ -49,12 +49,9 @@ class Proxy:
         decode_instances: list[str],
         model: str,
         scheduling_policy: SchedulingPolicy,
-        custom_create_completion: Optional[
-            Callable[[Request], StreamingResponse]
-        ] = None,
-        custom_create_chat_completion: Optional[
-            Callable[[Request], StreamingResponse]
-        ] = None,
+        custom_create_completion: Callable[[Request], StreamingResponse] | None = None,
+        custom_create_chat_completion: Callable[[Request], StreamingResponse]
+        | None = None,
     ):
         self.prefill_instances = prefill_instances
         self.decode_instances = decode_instances
@@ -203,9 +200,9 @@ class Proxy:
                 async with session.post(
                     url=url, json=data, headers=headers
                 ) as response:
-                    if 200 <= response.status < 300 or 400 <= response.status < 500:  # noqa: E501
+                    if 200 <= response.status < 300 or 400 <= response.status < 500:
                         if use_chunked:
-                            async for chunk_bytes in response.content.iter_chunked(  # noqa: E501
+                            async for chunk_bytes in response.content.iter_chunked(
                                 1024
                             ):
                                 yield chunk_bytes
@@ -293,6 +290,8 @@ class Proxy:
             # add params to request
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
+            if "max_completion_tokens" in kv_prepare_request:
+                kv_prepare_request["max_completion_tokens"] = 1
 
             # prefill stage
             prefill_instance = self.schedule(self.prefill_cycler)
@@ -346,9 +345,9 @@ class ProxyServer:
     def __init__(
         self,
         args: argparse.Namespace,
-        scheduling_policy: Optional[SchedulingPolicy] = None,
-        create_completion: Optional[Callable[[Request], StreamingResponse]] = None,
-        create_chat_completion: Optional[Callable[[Request], StreamingResponse]] = None,
+        scheduling_policy: SchedulingPolicy | None = None,
+        create_completion: Callable[[Request], StreamingResponse] | None = None,
+        create_chat_completion: Callable[[Request], StreamingResponse] | None = None,
     ):
         self.validate_parsed_serve_args(args)
         self.port = args.port

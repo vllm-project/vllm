@@ -3,20 +3,27 @@
 # ruff: noqa: SIM117
 import copy
 from collections.abc import Generator
-from typing import Union
 
 import torch
 from torch import nn
 
-from vllm.config import LoadConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import ModelConfig, ParallelConfig, VllmConfig
+from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.tensorizer import (
-    TensorizerConfig, deserialize_tensorizer_model, init_tensorizer_model,
-    is_vllm_tensorized, serialize_vllm_model, tensorizer_weights_iterator)
-from vllm.model_executor.model_loader.utils import (get_model_architecture,
-                                                    initialize_model,
-                                                    set_default_torch_dtype)
+    TensorizerConfig,
+    deserialize_tensorizer_model,
+    init_tensorizer_model,
+    is_vllm_tensorized,
+    serialize_vllm_model,
+    tensorizer_weights_iterator,
+)
+from vllm.model_executor.model_loader.utils import (
+    get_model_architecture,
+    initialize_model,
+)
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
@@ -43,21 +50,25 @@ class TensorizerLoader(BaseModelLoader):
         else:
             validate_config(load_config.model_loader_extra_config)
             self.tensorizer_config = TensorizerConfig(
-                **load_config.model_loader_extra_config["tensorizer_config"])
+                **load_config.model_loader_extra_config["tensorizer_config"]
+            )
 
-    def _verify_config(self, model_config: ModelConfig,
-                       parallel_config: ParallelConfig):
+    def _verify_config(
+        self, model_config: ModelConfig, parallel_config: ParallelConfig
+    ):
         self.tensorizer_config.verify_with_model_config(model_config)
         self.tensorizer_config.verify_with_parallel_config(parallel_config)
 
     def _get_weights_iterator(
-        self, ) -> Generator[tuple[str, torch.Tensor], None, None]:
+        self,
+    ) -> Generator[tuple[str, torch.Tensor], None, None]:
         tensorizer_args = self.tensorizer_config._construct_tensorizer_args()
         return tensorizer_weights_iterator(tensorizer_args)
 
     def _load_model_serialized_cpu(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> nn.Module:
         """Load a serialized model with tensorizer to the CPU.
 
@@ -70,7 +81,7 @@ class TensorizerLoader(BaseModelLoader):
         model_config = vllm_config.model_config
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                model = initialize_model(vllm_config=vllm_config)
+                model = initialize_model(vllm_config=vllm_config, prefix=prefix)
 
             model.load_weights(self._get_weights_iterator())
         return model.eval()
@@ -81,8 +92,7 @@ class TensorizerLoader(BaseModelLoader):
         with self.tensorizer_config.open_stream():
             pass
 
-    def _patch_tensorizer_config(
-            self, model_config: ModelConfig) -> TensorizerConfig:
+    def _patch_tensorizer_config(self, model_config: ModelConfig) -> TensorizerConfig:
         model_class = get_model_architecture(model_config)[0]
         tensorizer_config = copy.copy(self.tensorizer_config)
         tensorizer_config.model_class = model_class
@@ -90,8 +100,7 @@ class TensorizerLoader(BaseModelLoader):
         tensorizer_config.dtype = model_config.dtype
         return tensorizer_config
 
-    def load_weights(self, model: nn.Module,
-                     model_config: ModelConfig) -> None:
+    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         """Load serialized model weights with tensorizer.
 
         Expects a vLLM-tensorized model. See the
@@ -103,8 +112,9 @@ class TensorizerLoader(BaseModelLoader):
         else:
             model.load_weights(self._get_weights_iterator())
 
-    def load_model(self, vllm_config: VllmConfig,
-                   model_config: ModelConfig) -> nn.Module:
+    def load_model(
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
+    ) -> nn.Module:
         parallel_config = vllm_config.parallel_config
         self._verify_config(model_config, parallel_config)
 
@@ -112,8 +122,8 @@ class TensorizerLoader(BaseModelLoader):
             from vllm.distributed import get_tensor_model_parallel_rank
 
             self.tensorizer_config.tensorizer_uri = (
-                self.tensorizer_config.tensorizer_uri %
-                get_tensor_model_parallel_rank())
+                self.tensorizer_config.tensorizer_uri % get_tensor_model_parallel_rank()
+            )
 
         if is_vllm_tensorized(self.tensorizer_config):
             tensorizer_config = self._patch_tensorizer_config(model_config)
@@ -121,16 +131,16 @@ class TensorizerLoader(BaseModelLoader):
             with set_default_torch_dtype(model_config.dtype):
                 with torch.device(device_config.device):
                     model = init_tensorizer_model(
-                        tensorizer_config=tensorizer_config,
-                        vllm_config=vllm_config)
+                        tensorizer_config=tensorizer_config, vllm_config=vllm_config
+                    )
             self.load_weights(model, model_config)
             return model
-        return self._load_model_serialized_cpu(vllm_config=vllm_config)
+        return self._load_model_serialized_cpu(vllm_config=vllm_config, prefix=prefix)
 
     @staticmethod
     def save_model(
         model: torch.nn.Module,
-        tensorizer_config: Union[TensorizerConfig, dict],
+        tensorizer_config: TensorizerConfig | dict,
         model_config: ModelConfig,
     ) -> None:
         if isinstance(tensorizer_config, dict):

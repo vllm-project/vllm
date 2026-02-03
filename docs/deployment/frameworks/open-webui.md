@@ -20,7 +20,7 @@ To get started with Open WebUI using vLLM, follow these steps:
         For example:
 
         ```console
-        python -m vllm.entrypoints.openai.api_server --host 0.0.0.0 --port 8000
+        vllm serve <model> --host 0.0.0.0 --port 8000
         ```
 
 3. Start the Open WebUI Docker container:

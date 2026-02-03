@@ -38,7 +38,7 @@ from rlhf_utils import stateless_init_process_group
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
-from vllm.utils import get_ip, get_open_port
+from vllm.utils.network_utils import get_ip, get_open_port
 
 
 class MyLLM(LLM):
@@ -62,7 +62,7 @@ ray.init()
 
 # Create a placement group that reserves GPU 1–2 for the vLLM inference engine.
 # Learn more about Ray placement groups:
-# https://docs.ray.io/en/latest/placement-groups.html
+# https://docs.ray.io/en/latest/ray-core/scheduling/placement-group.html
 pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
 ray.get(pg_inference.ready())
 scheduling_inference = PlacementGroupSchedulingStrategy(
@@ -126,7 +126,10 @@ for name, p in train_model.named_parameters():
 
 # Synchronize the updated weights to the inference engine.
 for name, p in train_model.named_parameters():
-    handle = llm.collective_rpc.remote("update_weight", args=(name, p.dtype, p.shape))
+    dtype_name = str(p.dtype).split(".")[-1]
+    handle = llm.collective_rpc.remote(
+        "update_weight", args=(name, dtype_name, p.shape)
+    )
     model_update_group.broadcast(p, src=0, stream=torch.cuda.current_stream())
     ray.get(handle)
 

@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Callable, Optional
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any
 
 import gguf
 import torch
@@ -10,16 +12,32 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
-                                                        FusedMoEMethodBase)
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE,
+    FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+    QuantizationConfig,
+    QuantizeMethodBase,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+    UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
+)
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import direct_register_custom_op
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -27,16 +45,22 @@ logger = init_logger(__name__)
 class GGUFConfig(QuantizationConfig):
     """Config class for GGUF."""
 
-    def __init__(self, ) -> None:
+    def __init__(self, unquantized_modules: list[str] | None = None) -> None:
         super().__init__()
+        self.unquantized_modules = unquantized_modules or []
 
     def __repr__(self) -> str:
-        return ("GGUFConfig()")
+        return "GGUFConfig()"
 
     def get_name(self) -> QuantizationMethods:
         return "gguf"
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        # GGUF dequantization kernels use half precision (fp16) internally.
+        # bfloat16 has precision issues on Blackwell devices.
+        if current_platform.has_device_capability(100):
+            logger.warning_once("GGUF has precision issues with bfloat16 on Blackwell.")
+            return [torch.half, torch.float32]
         return [torch.half, torch.bfloat16, torch.float32]
 
     @classmethod
@@ -51,15 +75,75 @@ class GGUFConfig(QuantizationConfig):
     def from_config(cls, config: dict[str, Any]) -> "GGUFConfig":
         return cls()
 
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["QuantizeMethodBase"]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
         if isinstance(layer, LinearBase):
+            if is_layer_skipped_gguf(
+                prefix, self.unquantized_modules, self.packed_modules_mapping
+            ):
+                return UnquantizedLinearMethod()
             return GGUFLinearMethod(self)
         elif isinstance(layer, VocabParallelEmbedding):
+            if is_layer_skipped_gguf(
+                prefix, self.unquantized_modules, self.packed_modules_mapping
+            ):
+                return UnquantizedEmbeddingMethod()
             return GGUFEmbeddingMethod(self)
         elif isinstance(layer, FusedMoE):
-            return GGUFMoEMethod(self)
+            # TODO: Select UnquantizedFusedMoEMethod on unquantized layers.
+            return GGUFMoEMethod(self, layer.moe_config)
         return None
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        """
+        Interface for models to update module names referenced in
+        quantization configs in order to reflect the vllm model structure
+
+        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
+            structure of the qconfig) to vllm model structure
+        """
+        if self.unquantized_modules is not None:
+            self.unquantized_modules = hf_to_vllm_mapper.apply_list(
+                self.unquantized_modules
+            )
+
+
+def is_layer_skipped_gguf(
+    prefix: str,
+    unquantized_modules: list[str],
+    fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+):
+    # Fused layers like gate_up_proj or qkv_proj will not be fused
+    # in the safetensors checkpoint. So, we convert the name
+    # from the fused version to unfused + check to make sure that
+    # each shard of the fused layer has the same scheme.
+    proj_name = prefix.split(".")[-1]
+    if proj_name in fused_mapping:
+        shard_prefixes = [
+            prefix.replace(proj_name, shard_proj_name)
+            for shard_proj_name in fused_mapping[proj_name]
+        ]
+
+        is_skipped = None
+        for shard_prefix in shard_prefixes:
+            is_shard_skipped = any(
+                shard_prefix in module_name for module_name in unquantized_modules
+            )
+
+            if is_skipped is None:
+                is_skipped = is_shard_skipped
+            elif is_shard_skipped != is_skipped:
+                raise ValueError(
+                    f"Detected some but not all shards of {prefix} "
+                    "are quantized. All shards of fused layers "
+                    "to have the same precision."
+                )
+    else:
+        is_skipped = any(module_name in prefix for module_name in unquantized_modules)
+
+    assert is_skipped is not None
+    return is_skipped
 
 
 UNQUANTIZED_TYPES = {WeightType.F32, WeightType.F16, WeightType.BF16}
@@ -97,8 +181,9 @@ MMVQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
 MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 
 
-def _fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor,
-                        qweight_type: int) -> torch.Tensor:
+def _fused_mul_mat_gguf(
+    x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
+) -> torch.Tensor:
     if qweight_type in IMATRIX_QUANT_TYPES:
         mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
     else:
@@ -106,10 +191,7 @@ def _fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor,
     # HACK: when doing chunked prefill we don't generate output tokens
     # so input to logits generator is empty which causes invalid parameter
     if x.shape[0] == 0:
-        return torch.empty(x.shape[0],
-                           qweight.shape[0],
-                           dtype=x.dtype,
-                           device=x.device)
+        return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
@@ -130,8 +212,7 @@ def _fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor,
         # Might be useful if llama.cpp adds a new quantization type.
         # Wrap to GGMLQuantizationType IntEnum to make sure it's a valid type.
         qweight_type = WeightType(qweight_type)
-        raise NotImplementedError(
-            f"Unsupported GGUF quantization type: {qweight_type}")
+        raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
     return y
 
 
@@ -140,17 +221,13 @@ def _fused_mul_mat_gguf_fake(
     qweight: torch.Tensor,
     qweight_type: int,
 ) -> torch.Tensor:
-    return torch.empty(x.shape[0],
-                       qweight.shape[0],
-                       dtype=x.dtype,
-                       device=x.device)
+    return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
 
 
 try:
     direct_register_custom_op(
         op_name="_fused_mul_mat_gguf",
         op_func=_fused_mul_mat_gguf,
-        mutates_args=[],
         fake_impl=_fused_mul_mat_gguf_fake,
     )
     fused_mul_mat_gguf = torch.ops.vllm._fused_mul_mat_gguf
@@ -169,10 +246,9 @@ def _fused_moe_gguf(
     qweight_type2: int,
     activation: str,
 ) -> torch.Tensor:
-
     def act(x: torch.Tensor):
         d = x.shape[-1] // 2
-        output_shape = (x.shape[:-1] + (d, ))
+        output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         if activation == "silu":
             torch.ops._C.silu_and_mul(out, x)
@@ -183,50 +259,73 @@ def _fused_moe_gguf(
         return out
 
     # lazy import to avoid triggering triton import in CPU backend
-    from vllm.model_executor.layers.fused_moe.fused_moe import (
-        moe_align_block_size)
+    from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
     out_hidden_states = torch.empty_like(x)
     # unless we decent expert reuse we are better off running moe_vec kernel
-    if (qweight_type2 in MMQ_QUANT_TYPES and qweight_type in MMQ_QUANT_TYPES
-            and x.shape[0] > 64):
+    if (
+        qweight_type2 in MMQ_QUANT_TYPES
+        and qweight_type in MMQ_QUANT_TYPES
+        and x.shape[0] > 64
+    ):
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
         top_k = topk_ids.shape[1]
         BLOCK_SIZE = ops.ggml_moe_get_block_size(qweight_type)
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = \
-                moe_align_block_size(topk_ids, BLOCK_SIZE, E)
-        out = ops.ggml_moe_a8(x, w1, sorted_token_ids, expert_ids,
-                              num_tokens_post_padded, qweight_type, N, top_k,
-                              num_tokens)
+        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+            topk_ids, BLOCK_SIZE, E
+        )
+        out = ops.ggml_moe_a8(
+            x,
+            w1,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            qweight_type,
+            N,
+            top_k,
+            num_tokens,
+        )
         out = act(out)
-        out = ops.ggml_moe_a8(out, w2, sorted_token_ids, expert_ids,
-                              num_tokens_post_padded, qweight_type2,
-                              w2.shape[1], 1, num_tokens * top_k)
+        out = ops.ggml_moe_a8(
+            out,
+            w2,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            qweight_type2,
+            w2.shape[1],
+            1,
+            num_tokens * top_k,
+        )
         out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
-            topk_weights.view(num_tokens, top_k, 1))
+            topk_weights.view(num_tokens, top_k, 1)
+        )
         ops.moe_sum(out, out_hidden_states)
     elif qweight_type2 in MMVQ_QUANT_TYPES and qweight_type in MMVQ_QUANT_TYPES:
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
         top_k = topk_ids.shape[1]
 
-        out = ops.ggml_moe_a8_vec(x, w1, topk_ids, top_k, qweight_type, N,
-                                  num_tokens)
+        out = ops.ggml_moe_a8_vec(x, w1, topk_ids, top_k, qweight_type, N, num_tokens)
         out = act(out)
 
-        out = ops.ggml_moe_a8_vec(out, w2, topk_ids, 1, qweight_type2,
-                                  w2.shape[1], num_tokens * top_k)
+        out = ops.ggml_moe_a8_vec(
+            out, w2, topk_ids, 1, qweight_type2, w2.shape[1], num_tokens * top_k
+        )
         out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
-            topk_weights.view(num_tokens, top_k, 1))
+            topk_weights.view(num_tokens, top_k, 1)
+        )
         ops.moe_sum(out, out_hidden_states)
     else:
-        logger.warning_once("There is no support for fast MoE kernel "
-                            "for current quantization method. "
-                            "Falling back to slow implementation. ")
+        logger.warning_once(
+            "There is no support for fast MoE kernel "
+            "for current quantization method. "
+            "Falling back to slow implementation. "
+        )
         for tok, (w, idx) in enumerate(zip(topk_weights, topk_ids)):
-            inp = x[tok].reshape((1, ) + x.shape[1:])
+            inp = x[tok].reshape((1,) + x.shape[1:])
             current_hidden_state = None
             for ww, ii in zip(w, idx):
                 expert_up = w1[ii]
@@ -235,8 +334,9 @@ def _fused_moe_gguf(
                 out = act(out)
 
                 expert_down = w2[ii]
-                current_state = fused_mul_mat_gguf(out, expert_down,
-                                                   qweight_type2).mul_(ww)
+                current_state = fused_mul_mat_gguf(
+                    out, expert_down, qweight_type2
+                ).mul_(ww)
                 if current_hidden_state is None:
                     current_hidden_state = current_state
                 else:
@@ -262,7 +362,6 @@ try:
     direct_register_custom_op(
         op_name="_fused_moe_gguf",
         op_func=_fused_moe_gguf,
-        mutates_args=[],
         fake_impl=_fused_moe_gguf_fake,
     )
     fused_moe_gguf = torch.ops.vllm._fused_moe_gguf
@@ -276,22 +375,22 @@ def _apply_gguf_embedding(
     qweight: torch.Tensor,
     qweight_type: int,
     hidden_size: int,
-    dtype: Optional[torch.dtype] = None,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if qweight_type in UNQUANTIZED_TYPES:
         return torch.embedding(qweight, x)
     elif qweight_type in DEQUANT_TYPES:
         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
         x_flat = x.flatten()
-        assert (hidden_size == qweight.shape[1] // type_size * block_size)
+        assert hidden_size == qweight.shape[1] // type_size * block_size
         quant = torch.index_select(qweight, dim=0, index=x_flat)
-        dequant = ops.ggml_dequantize(quant, qweight_type, hidden_size,
-                                      x_flat.shape[0], dtype)
+        dequant = ops.ggml_dequantize(
+            quant, qweight_type, hidden_size, x_flat.shape[0], dtype
+        )
         return dequant.view(*x.shape, hidden_size)
     else:
         qweight_type = WeightType(qweight_type)
-        raise NotImplementedError(
-            f"Unsupported GGUF quantization type: {qweight_type}")
+        raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
 
 
 def _apply_gguf_embedding_fake(
@@ -299,7 +398,7 @@ def _apply_gguf_embedding_fake(
     qweight: torch.Tensor,
     qweight_type: int,
     hidden_size: int,
-    dtype: Optional[torch.dtype] = None,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     return torch.empty(x.shape[0], hidden_size, dtype=dtype, device=x.device)
 
@@ -308,7 +407,6 @@ try:
     direct_register_custom_op(
         op_name="_apply_gguf_embedding",
         op_func=_apply_gguf_embedding,
-        mutates_args=[],
         fake_impl=_apply_gguf_embedding_fake,
     )
     apply_gguf_embedding = torch.ops.vllm._apply_gguf_embedding
@@ -327,18 +425,24 @@ class GGUFLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: GGUFConfig):
         self.quant_config = quant_config
 
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
-                       output_partition_sizes: list[int], input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
-                       **extra_weight_attrs):
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
         self.params_dtype = params_dtype
         output_size_per_partition = sum(output_partition_sizes)
 
         tensor_shape = (output_size_per_partition, input_size_per_partition)
         qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
-            qweight, {
+            qweight,
+            {
                 "input_dim": 1,
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,
@@ -346,31 +450,34 @@ class GGUFLinearMethod(LinearMethodBase):
                 "data_container": [],
                 "shard_id": [],
                 "shard_id_map": {},
-            })
+            },
+        )
         set_weight_attrs(qweight, extra_weight_attrs)
         layer.register_parameter("qweight", qweight)
 
-        qweight_type = Parameter(torch.empty(len(output_partition_sizes),
-                                             dtype=torch.uint8),
-                                 requires_grad=False)
+        qweight_type = Parameter(
+            torch.empty(len(output_partition_sizes), dtype=torch.uint8),
+            requires_grad=False,
+        )
         set_weight_attrs(
-            qweight_type, {
+            qweight_type,
+            {
                 "is_gguf_weight_type": True,
                 "weight_type": 0,
                 "shard_weight_type": {},
-                "ignore_warning": True
-            })
+                "ignore_warning": True,
+            },
+        )
         set_weight_attrs(qweight_type, extra_weight_attrs)
         layer.register_parameter("qweight_type", qweight_type)
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         qweight_type = layer.qweight_type.weight_type
-        if not (qweight_type in UNQUANTIZED_TYPES
-                or qweight_type in DEQUANT_TYPES):
+        if not (qweight_type in UNQUANTIZED_TYPES or qweight_type in DEQUANT_TYPES):
             qweight_type = WeightType(qweight_type)
             raise ValueError(
-                f"Unsupported GGUF quantization type {qweight_type} in "
-                f"layer {layer}.")
+                f"Unsupported GGUF quantization type {qweight_type} in layer {layer}."
+            )
         # For MergedColumnParallelLinear and QKVParallelLinear, we need to
         # materialize the padded weight parameter for CUDA Graph compatibility.
         self._create_padded_weight_param(layer)
@@ -383,22 +490,22 @@ class GGUFLinearMethod(LinearMethodBase):
         if len(data_container := qweight.data_container) > 1:
             dtype = {data.dtype for data in data_container}
             assert len(dtype) == 1, ValueError(
-                f"Data container has mixed dtypes: {dtype}")
+                f"Data container has mixed dtypes: {dtype}"
+            )
             dtype = next(iter(dtype))
             # concat dim0 and pad dim1
             padded_side = max(x.size(1) for x in data_container)
             concat_side = sum(x.size(0) for x in data_container)
             # Pad the quantized weights to dense tensor, and create a map
             # with the location of each shard in the padded tensor.
-            padded_data = torch.zeros((concat_side, padded_side),
-                                      dtype=dtype,
-                                      device=qweight.device)
+            padded_data = torch.zeros(
+                (concat_side, padded_side), dtype=dtype, device=qweight.device
+            )
             # (dim0_start, dim0_end, dim1_size)
             shard_offset_map = dict[str, tuple[int, int, int]]()
             for idx in shard_id:
                 id_in_container = shard_id_map[idx]
-                start = sum(
-                    x.size(0) for x in data_container[:id_in_container])
+                start = sum(x.size(0) for x in data_container[:id_in_container])
                 end = start + data_container[id_in_container].size(0)
                 size = data_container[id_in_container].size(1)
                 padded_data[start:end, :size] = data_container[id_in_container]
@@ -406,14 +513,15 @@ class GGUFLinearMethod(LinearMethodBase):
             qweight.data_container.clear()
             padded_param = Parameter(padded_data, requires_grad=False)
             set_weight_attrs(padded_param, vars(qweight))
-            set_weight_attrs(padded_param,
-                             {"shard_offset_map": shard_offset_map})
+            set_weight_attrs(padded_param, {"shard_offset_map": shard_offset_map})
             layer.register_parameter("qweight", padded_param)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         shard_id = layer.qweight.shard_id
 
         if shard_id:
@@ -426,8 +534,9 @@ class GGUFLinearMethod(LinearMethodBase):
                 qweight_type = layer.qweight_type.shard_weight_type[idx]
                 result.append(
                     fused_mul_mat_gguf(
-                        x, qweight[start:end, :offset].contiguous(),
-                        qweight_type))
+                        x, qweight[start:end, :offset].contiguous(), qweight_type
+                    )
+                )
             out = torch.cat(result, axis=1)
         else:
             qweight = layer.qweight
@@ -445,111 +554,105 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         quant_config: The GGUF quantization config.
     """
 
-    def __init__(self, quant_config: GGUFConfig):
+    def __init__(
+        self,
+        quant_config: GGUFConfig,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.quant_config = quant_config
 
-    def create_weights(self, layer: torch.nn.Module, num_experts: int,
-                       hidden_size: int, intermediate_size_per_partition: int,
-                       params_dtype: torch.dtype, **extra_weight_attrs):
-
-        tensor_shape = (num_experts, 2 * intermediate_size_per_partition,
-                        hidden_size)
-        #gate up proj
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        tensor_shape = (num_experts, 2 * intermediate_size_per_partition, hidden_size)
+        # gate up proj
         w13_qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
-            w13_qweight, {
+            w13_qweight,
+            {
                 "input_dim": 1,
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,
                 "is_gguf_weight": True,
                 "data_container": [],
-            })
+            },
+        )
         set_weight_attrs(w13_qweight, extra_weight_attrs)
         layer.register_parameter("w13_qweight", w13_qweight)
 
-        w13_qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
-                                     requires_grad=False)
-        set_weight_attrs(w13_qweight_type, {
-            "is_gguf_weight_type": True,
-            "weight_type": 0,
-            "ignore_warning": True
-        })
+        w13_qweight_type = Parameter(
+            torch.empty(1, dtype=torch.uint8), requires_grad=False
+        )
+        set_weight_attrs(
+            w13_qweight_type,
+            {"is_gguf_weight_type": True, "weight_type": 0, "ignore_warning": True},
+        )
         set_weight_attrs(w13_qweight_type, extra_weight_attrs)
         layer.register_parameter("w13_qweight_type", w13_qweight_type)
 
-        tensor_shape = (num_experts, intermediate_size_per_partition,
-                        hidden_size)
-        #gate down proj
+        tensor_shape = (num_experts, intermediate_size_per_partition, hidden_size)
+        # gate down proj
         w2_qweight = GGUFUninitializedParameter(requires_grad=False)
         set_weight_attrs(
-            w2_qweight, {
+            w2_qweight,
+            {
                 "input_dim": 1,
                 "output_dim": 0,
                 "tensor_shape": tensor_shape,
                 "is_gguf_weight": True,
                 "data_container": [],
-            })
+            },
+        )
         set_weight_attrs(w2_qweight, extra_weight_attrs)
         layer.register_parameter("w2_qweight", w2_qweight)
 
-        w2_qweight_type = Parameter(torch.empty(1, dtype=torch.uint8),
-                                    requires_grad=False)
-        set_weight_attrs(w2_qweight_type, {
-            "is_gguf_weight_type": True,
-            "weight_type": 0,
-            "ignore_warning": True
-        })
+        w2_qweight_type = Parameter(
+            torch.empty(1, dtype=torch.uint8), requires_grad=False
+        )
+        set_weight_attrs(
+            w2_qweight_type,
+            {"is_gguf_weight_type": True, "weight_type": 0, "ignore_warning": True},
+        )
 
         set_weight_attrs(w2_qweight_type, extra_weight_attrs)
         layer.register_parameter("w2_qweight_type", w2_qweight_type)
 
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        return None
+
     def apply(
         self,
-        layer: torch.nn.Module,
+        layer: FusedMoE,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool = False,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None,
-    ):
-        if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `GGUFMoEMethod` yet.")
-
-        assert activation == "silu", "Only SiLU activation is supported."
-        if apply_router_weight_on_input:
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        assert layer.activation == "silu", "Only SiLU activation is supported."
+        if layer.apply_router_weight_on_input:
             raise NotImplementedError(
                 "Apply router weight on input is not supported for"
-                "fused GGUF MoE method.")
+                "fused GGUF MoE method."
+            )
 
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
-        return fused_moe_gguf(x, layer.w13_qweight, layer.w2_qweight,
-                              topk_weights, topk_ids,
-                              layer.w13_qweight_type.weight_type,
-                              layer.w2_qweight_type.weight_type, activation)
+        return fused_moe_gguf(
+            x,
+            layer.w13_qweight,
+            layer.w2_qweight,
+            topk_weights,
+            topk_ids,
+            layer.w13_qweight_type.weight_type,
+            layer.w2_qweight_type.weight_type,
+            layer.activation,
+        )
 
 
 class GGUFEmbeddingMethod(GGUFLinearMethod):
@@ -559,17 +662,14 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
         quant_config: The GGUF quantization config.
     """
 
-    def embedding(self, layer: torch.nn.Module,
-                  x: torch.Tensor) -> torch.Tensor:
+    def embedding(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
         qweight = layer.qweight
         qweight_type = layer.qweight_type.weight_type
         hidden_size = qweight.tensor_shape[1]
 
-        return apply_gguf_embedding(x,
-                                    qweight,
-                                    qweight_type,
-                                    hidden_size,
-                                    dtype=self.params_dtype)
+        return apply_gguf_embedding(
+            x, qweight, qweight_type, hidden_size, dtype=self.params_dtype
+        )
 
 
 class GGUFUninitializedParameter(UninitializedParameter):
