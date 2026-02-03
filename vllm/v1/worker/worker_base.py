@@ -214,7 +214,7 @@ class WorkerWrapperBase:
         to adjust the rpc_rank of workers after we create all workers.
         """
         if self.rpc_rank in rank_mapping:
-            self.rpc_rank = rank_mapping[self.rpc_rank]
+            self.global_rank = self.rpc_rank = rank_mapping[self.rpc_rank]
 
     def update_environment_variables(
         self,
