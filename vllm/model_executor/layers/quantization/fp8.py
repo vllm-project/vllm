@@ -19,14 +19,13 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    FusedMoEExpertsModular,
     FusedMoEMethodBase,
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize,
+    FusedMoEPrepareAndFinalizeModular,
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
-    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
@@ -50,9 +49,6 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_fi_trtllm_fp8_per_tensor_moe,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
     create_fp8_input_scale,
@@ -874,21 +870,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
-        # Setup modular kernel for TP case and naive DP/EP case.
-        # In non-naive DP/EP case, we will create a ModularKernelMethod.
-        # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
-        # in both cases.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
-            assert self.experts_cls is not None
-            self.moe_mk, self.use_inplace = make_fp8_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                fp8_backend=self.fp8_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-                shared_experts=layer.shared_experts,
-            )
+        assert self.experts_cls is not None
+        self.moe_kernel, self.use_inplace = make_fp8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._maybe_init_expert_routing_tables(),
+            shared_experts=layer.shared_experts,
+        )
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -941,7 +932,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalize | None:
+    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."
@@ -949,21 +940,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def select_gemm_impl(
         self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
-    ) -> FusedMoEPermuteExpertsUnpermute:
+    ) -> FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."
         )
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
-        # TRTLLM does not use Modular Kernel.
-        if self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            return None
-
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
         w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
         a1_scale = layer.w13_input_scale
@@ -996,58 +981,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.is_monolithic
         assert self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
-
-        # TODO(rob): convert this to MK.
         if layer.enable_eplb:
             raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
-        assert layer.activation == "silu", (
-            f"Expected 'silu' activation but got {layer.activation}"
+
+        assert isinstance(self.moe_kernel, mk.FusedMoEKMonolithicKernel)
+        return self.moe_kernel(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
         )
-
-        if self.block_quant:
-            import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
-
-            e_score_correction_bias = (
-                layer.e_score_correction_bias.to(x.dtype)
-                if layer.e_score_correction_bias is not None
-                else None
-            )
-            routing_method_type = layer.routing_method_type
-            return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                routing_logits=router_logits.to(torch.float32)
-                if routing_method_type == RoutingMethodType.DeepSeekV3
-                else router_logits,
-                routing_bias=e_score_correction_bias,
-                x=x,
-                w13_weight=layer.w13_weight,
-                w13_weight_scale_inv=layer.w13_weight_scale_inv,
-                w2_weight=layer.w2_weight,
-                w2_weight_scale_inv=layer.w2_weight_scale_inv,
-                global_num_experts=layer.global_num_experts,
-                top_k=layer.top_k,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                intermediate_size=layer.intermediate_size_per_partition,
-                expert_offset=layer.ep_rank * layer.local_num_experts,
-                local_num_experts=layer.local_num_experts,
-                block_shape=self.weight_block_size,
-                routing_method_type=routing_method_type,
-                routed_scaling=layer.routed_scaling_factor,
-            )
-        else:
-            return apply_fi_trtllm_fp8_per_tensor_moe(
-                layer=layer,
-                hidden_states=x,
-                router_logits=router_logits,
-                routing_bias=layer.e_score_correction_bias,
-                global_num_experts=layer.global_num_experts,
-                top_k=layer.top_k,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
 
     def apply(
         self,
@@ -1056,9 +1004,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_mk is not None
+        assert self.moe_kernel is not None
         assert not self.is_monolithic
-        return self.moe_mk(
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,

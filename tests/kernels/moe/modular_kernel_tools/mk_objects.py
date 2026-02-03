@@ -72,12 +72,14 @@ class ExpertInfo:
     needs_aiter: bool = False
 
 
-PREPARE_FINALIZE_INFO: dict[mk.FusedMoEPrepareAndFinalize, PrepareFinalizeInfo] = {}
-EXPERT_INFO: dict[mk.FusedMoEPermuteExpertsUnpermute, ExpertInfo] = {}
-MK_ALL_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
-MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
-MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalize] = []
-MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEPermuteExpertsUnpermute] = []
+PREPARE_FINALIZE_INFO: dict[
+    mk.FusedMoEPrepareAndFinalizeModular, PrepareFinalizeInfo
+] = {}
+EXPERT_INFO: dict[mk.FusedMoEExpertsModular, ExpertInfo] = {}
+MK_ALL_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
+MK_MULTI_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
+MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES: list[mk.FusedMoEPrepareAndFinalizeModular] = []
+MK_FUSED_EXPERT_TYPES: list[mk.FusedMoEExpertsModular] = []
 
 standard_format = mk.FusedMoEActivationFormat.Standard
 batched_format = mk.FusedMoEActivationFormat.BatchedExperts
@@ -444,12 +446,12 @@ def make_cutlass_strides(
 
 
 def make_fused_experts(
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
+    fused_experts_type: mk.FusedMoEExpertsModular,
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
     num_dispatchers: int,
     N: int,
-) -> mk.FusedMoEPermuteExpertsUnpermute:
+) -> mk.FusedMoEExpertsModular:
     if (
         fused_experts_type.activation_format()
         == mk.FusedMoEActivationFormat.BatchedExperts

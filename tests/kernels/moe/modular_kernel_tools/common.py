@@ -66,7 +66,7 @@ class Config:
     quant_config: TestMoEQuantConfig | None
 
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute
+    fused_experts_type: mk.FusedMoEExperts
 
     fused_moe_chunk_size: int | None
     world_size: int
@@ -620,7 +620,7 @@ def make_modular_kernel(
         config.N,
     )
 
-    modular_kernel = mk.FusedMoEModularKernel(
+    modular_kernel = mk.FusedMoEKernel.make_mk(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
     )

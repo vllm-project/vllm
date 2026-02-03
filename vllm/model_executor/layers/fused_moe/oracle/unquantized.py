@@ -166,7 +166,7 @@ def make_unquantized_moe_kernel(
             FlashInferExperts,
         )
 
-        kernel = mk.FusedMoEModularKernel(
+        kernel = mk.FusedMoEKernel.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
                 moe_config=moe_config,
@@ -179,7 +179,7 @@ def make_unquantized_moe_kernel(
             AiterExperts,
         )
 
-        kernel = mk.FusedMoEModularKernel(
+        kernel = mk.FusedMoEKernel.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             AiterExperts(
                 moe_config=moe_config,
@@ -189,7 +189,7 @@ def make_unquantized_moe_kernel(
     elif backend == UnquantizedMoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe import TritonExperts
 
-        kernel = mk.FusedMoEModularKernel(
+        kernel = mk.FusedMoEKernel.make_mk(
             MoEPrepareAndFinalizeNoEP(),
             TritonExperts(
                 moe_config=moe_config,
