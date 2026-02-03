@@ -1219,7 +1219,7 @@ tqdm==4.66.6
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@b6a202f868d261c7404d331cf9d8ce03aec12fe2
+transformers @ git+https://github.com/huggingface/transformers.git@01e860ebc6b827c88e2d75e70864d1b618364653
     # via
     #   -r requirements/test.in
     #   genai-perf
