@@ -103,18 +103,21 @@ def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
 
 def _re_import_modules():
     hf_hub_module_names = [k for k in sys.modules if k.startswith("huggingface_hub")]
-    is_transformers = lambda name: name.startswith("transformers")
-    is_remote_code = lambda name: name.startswith("transformers_modules")
-    aliased_modules = ["tokenization_utils", "tokenization_utils_fast"]
-    is_alias = lambda name: any(f".{name}".endswith(alias) for alias in aliased_modules)
     transformers_module_names = [
         k
         for k in sys.modules
-        if is_transformers(k) and not is_remote_code(k) and not is_alias(k)
+        if k.startswith("transformers") and not k.startswith("transformers_modules")
     ]
+
+    # These modules are aliased in Transformers v5 and so cannot be reloaded directly
+    aliased_modules = ["tokenization_utils", "tokenization_utils_fast"]
 
     reload_exception = None
     for module_name in hf_hub_module_names + transformers_module_names:
+        if any(module_name.endswith(alias) for alias in aliased_modules):
+            # Remove from sys.modules so they are re-aliased on next import
+            del sys.modules[module_name]
+            continue
         try:
             importlib.reload(sys.modules[module_name])
         except Exception as e:
