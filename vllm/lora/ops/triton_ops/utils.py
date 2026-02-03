@@ -170,7 +170,7 @@ def load_lora_op_config(op_type: str, add_inputs: bool | None) -> dict | None:
 
         config_path = Path(f"{user_defined_config_folder}/{config_fname}")
         if not config_path.exists():
-            logger.warning_once(f"No LoRA kernel configs founded in {config_path}")
+            logger.warning_once(f"No LoRA kernel configs found in {config_path}")
             return None
 
         # Load json
@@ -251,7 +251,7 @@ def get_lora_op_configs(
     else:
         default = {
             "block_m": 64,
-            "block_n": 128,
+            "block_n": max(64, next_power_of_2(128 // num_slices)),
             "block_k": 16,
             "num_warps": 4,
             "num_ctas": 1,
@@ -310,4 +310,9 @@ def supports_pdl(device: torch.device | None = None) -> bool:
     Refer to: https://github.com/triton-lang/triton/blob/v3.5.0/python/tutorials/11-programmatic-dependent-launch.py
     """
     # PDL requires compute capability SM90 or above
-    return current_platform.is_cuda() and current_platform.has_device_capability(90)
+
+    return (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(90)
+        and not envs.VLLM_LORA_DISABLE_PDL
+    )

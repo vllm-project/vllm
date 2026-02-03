@@ -30,6 +30,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import RCP_LN2
 
 
 @triton.jit
@@ -110,15 +111,7 @@ def _fwd_kernel(
     end_n_limit = block_mask * end_n
 
     for start_n in range(start_n_limit, end_n_limit, BLOCK_N):
-        start_n = tl.multiple_of(start_n, BLOCK_N)
-        # -- compute qk ----
-        k = tl.load(
-            k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
-            mask=((start_n + offs_n[None, :]) < cur_batch_seq_len) & (mask_d[:, None]),
-            other=0.0,
-        )
-
-        # Apply attention mask (causal + bidirectional sliding window)
+        # -- prepare attention mask ----
         # Position indices in the sequence
         pos_q = offs_m[:, None]  # Query positions [BLOCK_M, 1]
         pos_k = start_n + offs_n[None, :]  # Key positions [1, BLOCK_N]
@@ -141,53 +134,38 @@ def _fwd_kernel(
         if sliding_mask_k is not None:
             mask &= sliding_mask_k
 
-        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-        qk += tl.where(mask, 0, float("-inf"))
-        qk += tl.dot(q, k)
-        qk *= sm_scale
+        start_n = tl.multiple_of(start_n, BLOCK_N)
+        # -- compute qk ----
+        k = tl.load(
+            k_ptrs + (cur_batch_in_all_start_index + start_n) * stride_kbs,
+            mask=(pos_k < cur_batch_seq_len) & (mask_d[:, None]),
+            other=0.0,
+        )
 
-        # -- compute m_ij, p, l_ij
-        m_ij = tl.max(qk, 1)
-        # For sliding window there's a chance the max is -inf due to masking of
-        # the entire row. In this case we need to set m_j 0 to avoid NaN
-        m_ij_valid_mask = m_ij > float("-inf")
-        m_ij_masked = tl.where(m_ij_valid_mask, m_ij, 0.0)
-        # -- compute p and l_ij --
-        p = tl.exp(qk - m_ij_masked[:, None])
+        qk = tl.dot(q, k)
+        qk = tl.where(mask, qk * sm_scale, -1.0e8)
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        qk -= m_ij[:, None]
+        p = tl.math.exp2(qk)
         l_ij = tl.sum(p, 1)
+
         # -- update m_i and l_i
-        m_i_new = tl.maximum(m_i, m_ij)
-        m_i_new_mask = m_i_new > float("-inf")
-        alpha = tl.exp(m_i - m_i_new)
-        beta = tl.exp(m_ij - m_i_new)
-        # mask alpha and beta for sliding window
-        alpha = tl.where(m_i_new_mask, alpha, 1.0)
-        beta = tl.where(m_i_new_mask, beta, 0.0)
-        l_i_new = alpha * l_i + beta * l_ij
+        alpha = tl.math.exp2(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
         # -- update output accumulator --
-        # scale p
-        # For sliding window there's a chance the l_i_new is 0 due to masking
-        # the entire row. We need to set l_i_new 1 to avoid zero division
-        l_i_new_mask = (l_i_new != 0.0) & (m_i_new_mask > float("-inf"))
-        l_i_new_safe = tl.where(l_i_new_mask, l_i_new, 1.0)
-        p_scale = beta / l_i_new_safe
-        p = p * p_scale[:, None]
-        # scale acc
-        acc_scale = l_i / l_i_new_safe * alpha
-        acc = acc * acc_scale[:, None]
+        acc = acc * alpha[:, None]
         # update acc
         v = tl.load(
             v_ptrs + (cur_batch_in_all_start_index + start_n) * stride_vbs,
             mask=((start_n + offs_n[:, None]) < cur_batch_seq_len) & (mask_d[None, :]),
             other=0.0,
         )
-
         p = p.to(v.dtype)
-        acc += tl.dot(p, v)
-        # update m_i and l_i
-        l_i = l_i_new
-        m_i = m_i_new
-    # initialize pointers to output
+        acc = tl.dot(p, v, acc)
+        # update m_i
+        m_i = m_ij
+
+    acc = acc / l_i[:, None]
     off_o = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
         + cur_head * stride_oh
@@ -211,16 +189,17 @@ def get_block_size(dtype: torch.dtype) -> int:
 
 
 def context_attention_fwd(
-    q,
-    k,
-    v,
-    o,
-    b_start_loc,
-    b_seq_len,
-    max_input_len,
-    is_causal=True,
-    sliding_window_q=None,
-    sliding_window_k=None,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    o: torch.Tensor,
+    b_start_loc: torch.Tensor,
+    b_seq_len: torch.Tensor,
+    max_input_len: int,
+    is_causal: bool = True,
+    softmax_scale: float | None = None,
+    sliding_window_q: int | None = None,
+    sliding_window_k: int | None = None,
 ):
     """
     q, k, v: [b * s, head, head_dim]
@@ -232,7 +211,10 @@ def context_attention_fwd(
 
     Lq, Lk, _ = q.shape[-1], k.shape[-1], v.shape[-1]
 
-    sm_scale = 1.0 / (Lq**0.5)
+    sm_scale = 1.0 / (Lq**0.5) if softmax_scale is None else softmax_scale
+    # rescale with 1/ln(2) for triton exp2
+    sm_scale *= RCP_LN2
+
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 
