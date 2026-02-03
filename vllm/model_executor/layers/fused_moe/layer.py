@@ -1561,6 +1561,7 @@ class FusedMoE(CustomOp):
             if (
                 is_forward_context_available()
                 and get_forward_context().all_moe_layers is not None
+                and "mtp" not in self.layer_name
             ):
                 return "from_forward_context"
             return self.layer_name

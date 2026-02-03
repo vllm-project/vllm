@@ -4,7 +4,7 @@
 import abc
 import copy
 from dataclasses import dataclass
-from typing import ClassVar, TypeVar
+from typing import Any, ClassVar, TypeVar
 
 import torch
 
@@ -35,12 +35,23 @@ class BaseMambaAttentionMetadata:
     num_reqs: int
 
     # The following tensors only contain prefill requests and will be None if
-    # the batch has no prefill request.
+    # the batch has no prefill requests.
     has_initial_states_p: torch.Tensor | None
     query_start_loc_p: torch.Tensor | None
     num_computed_tokens_p: torch.Tensor | None
+    prefill_state_indices_tensor: torch.Tensor | None  # shape: [num_prefills,]
 
-    state_indices_tensor: torch.Tensor
+    # The following tensors are used for decode requests and
+    # speculative decoding compatibility, and will be None if the batch
+    # has no decode requests.
+    decode_state_indices_tensor: (
+        torch.Tensor | None
+    )  # shape: [num_decodes, 1 + num_spec]
+    query_start_loc_d: torch.Tensor | None  # shape: [num_decodes + 1,]
+
+    # Number of accepted tokens for each spec sequence (for loading correct checkpoint)
+    # Includes the bonus token (so minimum is 1)
+    num_accepted_tokens: torch.Tensor | None  # shape: [batch,]
 
     # The following tensors are only used for prefix caching in all mode and
     # are None if disabled
@@ -60,10 +71,10 @@ class BaseMambaAttentionMetadata:
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     metadata_cls: type[M]
     reorder_batch_threshold: int = 1
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
-    supports_update_block_table: bool = True
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    # TODO(ben): reimplement this, at least for when speculative decoding is disabled.
+    supports_update_block_table: bool = False
 
     def __init__(
         self,
@@ -73,6 +84,18 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+        # Enable speculative decoding support
+        self.speculative_config = vllm_config.speculative_config
+        self.compilation_config = vllm_config.compilation_config
+        self.num_spec_tokens: int = (
+            self.speculative_config.num_speculative_tokens
+            if self.speculative_config is not None
+            else 0
+        )
+        if self.num_spec_tokens is None:
+            self.num_spec_tokens = 0
+        self.use_spec_decode = self.num_spec_tokens > 0
 
         assert isinstance(kv_cache_spec, MambaSpec)
         self.compilation_config = vllm_config.compilation_config
@@ -84,13 +107,24 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
 
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
-            self.state_indices_tensor = torch.empty(
+            max_num_blocks = cdiv(
+                self.vllm_config.model_config.max_model_len,
+                self.kv_cache_spec.block_size,
+            )
+            self.prefill_state_indices_tensor = torch.empty(
                 (
                     self.decode_cudagraph_max_bs,
-                    cdiv(
-                        self.vllm_config.model_config.max_model_len,
-                        self.kv_cache_spec.block_size,
-                    ),
+                    max_num_blocks,
+                ),
+                dtype=torch.int32,
+                device=device,
+            )
+            # Speculative decoding not supported with prefix caching,
+            # so keep shape consistent with prefill buffer
+            self.decode_state_indices_tensor = torch.empty(
+                (
+                    self.decode_cudagraph_max_bs,
+                    max_num_blocks,  # TODO(ben): why is this needed at all?
                 ),
                 dtype=torch.int32,
                 device=device,
@@ -106,11 +140,32 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=device,
             )
         else:
-            self.state_indices_tensor = torch.empty(
+            self.prefill_state_indices_tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
                 device=device,
             )
+            self.decode_state_indices_tensor = torch.empty(
+                (self.decode_cudagraph_max_bs, 1 + self.num_spec_tokens),
+                dtype=torch.int32,
+                device=device,
+            )
+
+        # For speculative decoding, we need to store the following buffers
+        # for CUDA graph capture during decode
+        if self.num_spec_tokens > 0:
+            self.decode_query_start_loc = torch.empty(
+                (self.decode_cudagraph_max_bs + 1,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.decode_num_accepted_tokens = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+
+        self._init_reorder_batch_threshold(1, True)
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -121,26 +176,38 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """
         m = common_attn_metadata
 
-        assert m.num_reqs == m.num_actual_tokens, (
+        assert (
+            m.max_query_len <= 1 + self.num_spec_tokens
+            and m.num_actual_tokens <= self.decode_cudagraph_max_bs
+        ), (
             "Mamba only supports decode-only full CUDAGraph capture. "
             "Make sure all cudagraph capture sizes <= max_num_seq."
         )
 
-        m.max_query_len = 1  # decode-only
+        m.max_query_len = 1 + self.num_spec_tokens  # decode-only
 
-        return self.build(0, m)
+        num_accepted_tokens = None
+        if self.num_spec_tokens > 0:
+            num_accepted_tokens = torch.diff(m.query_start_loc)
+
+        return self.build(0, m, num_accepted_tokens=num_accepted_tokens)
 
     def build(
         self,
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        num_accepted_tokens: torch.Tensor | None = None,
+        **kwargs: Any,
     ) -> M:
         """
         Default build implementation for Mamba-like attention backends.
         Subclasses (e.g., Mamba2) can override to add additional metadata.
         """
-        return self._compute_common_metadata(common_attn_metadata)
+        return self._compute_common_metadata(
+            common_attn_metadata, num_accepted_tokens=num_accepted_tokens
+        )
 
     def _compute_prefix_caching_block_indices(
         self,
@@ -176,6 +243,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     def _compute_common_metadata(
         self,
         common_attn_metadata: CommonAttentionMetadata,
+        *,
+        num_accepted_tokens: torch.Tensor | None = None,
     ) -> M:
         """
         Compute metadata common to both Mamba1 and Mamba2.
@@ -191,6 +260,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         # Need flags to indicate if there are initial states
         has_initial_states_p = None
         query_start_loc_p = None
+        query_start_loc_d = None
         num_computed_tokens = None
         num_computed_tokens_p = None
 
@@ -207,7 +277,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
 
             # Return a tensor of shape (#requests, #max blocks)
-            state_indices_tensor = common_attn_metadata.block_table_tensor
+            _state_indices_tensor = common_attn_metadata.block_table_tensor
             # Additional cache-related varaiables:
             mamba_block_size = self.kv_cache_spec.block_size
             (
@@ -218,13 +288,32 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 common_attn_metadata, mamba_block_size
             )
         else:
-            # Always return just a single block per each request:
-            state_indices_tensor = mamba_get_block_table_tensor(
+            _state_indices_tensor = mamba_get_block_table_tensor(
                 common_attn_metadata.block_table_tensor,
                 common_attn_metadata.seq_lens,
                 self.kv_cache_spec,
                 self.vllm_config.cache_config.mamba_cache_mode,
-            )[:, 0]
+            )
+
+        if _state_indices_tensor.dim() == 1:
+            _state_indices_tensor = _state_indices_tensor.unsqueeze(-1)
+
+        decode_state_indices_tensor, prefill_state_indices_tensor = torch.split(
+            _state_indices_tensor.contiguous(),
+            [num_decodes, num_prefills],
+            dim=0,
+        )
+        decode_state_indices_tensor = decode_state_indices_tensor[
+            :, : 1 + self.num_spec_tokens
+        ]  # shape: [num_decodes, 1 + num_spec]
+        prefill_state_indices_tensor = prefill_state_indices_tensor[
+            :, 0
+        ]  # shape: [num_prefills,]
+
+        if num_decodes > 0 and self.use_spec_decode:
+            assert num_accepted_tokens is not None
+            query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
+            num_accepted_tokens = num_accepted_tokens[:num_decodes]
 
         if num_prefills > 0:
             if num_computed_tokens is None:
@@ -262,11 +351,35 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
-            self.state_indices_tensor[:num_decodes].copy_(
-                state_indices_tensor, non_blocking=True
+            # Note: num_actual_tokens is already padded by the model runner for graphs
+            assert num_decode_tokens == common_attn_metadata.num_actual_tokens
+            self.decode_state_indices_tensor[:num_decodes].copy_(
+                decode_state_indices_tensor, non_blocking=True
             )
-            state_indices_tensor = self.state_indices_tensor[:num_decode_tokens]
-            state_indices_tensor[num_decodes:] = PAD_SLOT_ID
+            decode_state_indices_tensor = self.decode_state_indices_tensor[
+                :num_decode_tokens
+            ]
+            decode_state_indices_tensor[num_decodes:] = PAD_SLOT_ID
+
+            if self.use_spec_decode:
+                assert query_start_loc_d is not None
+                assert num_accepted_tokens is not None
+                self.decode_query_start_loc[: num_decodes + 1].copy_(
+                    query_start_loc_d, non_blocking=True
+                )
+                query_start_loc_d = self.decode_query_start_loc[
+                    : num_decode_tokens + 1
+                ]  # TODO(ben): is this too large?
+                query_start_loc_d[num_decodes + 1 :] = query_start_loc_d[
+                    num_decodes
+                ]  # pad with last value
+                self.decode_num_accepted_tokens[:num_decodes].copy_(
+                    num_accepted_tokens, non_blocking=True
+                )
+                num_accepted_tokens = self.decode_num_accepted_tokens[
+                    :num_decode_tokens
+                ]
+                num_accepted_tokens[num_decodes:] = 1  # pad with 1st slot index
 
             if self.vllm_config.cache_config.mamba_cache_mode == "all":
                 self.block_idx_last_scheduled_token[:num_decodes].copy_(
@@ -290,7 +403,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_decode_tokens=num_decode_tokens,
             query_start_loc_p=query_start_loc_p,
             has_initial_states_p=has_initial_states_p,
-            state_indices_tensor=state_indices_tensor,
+            prefill_state_indices_tensor=prefill_state_indices_tensor,
+            decode_state_indices_tensor=decode_state_indices_tensor,
+            num_accepted_tokens=num_accepted_tokens,
+            query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
             block_idx_last_computed_token=block_idx_last_computed_token,
@@ -308,6 +424,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> M:
+        raise NotImplementedError("Temporarily disabled for debugging.")
         new_metadata = copy.copy(metadata)
         state_indices_t = mamba_get_block_table_tensor(
             blk_table,

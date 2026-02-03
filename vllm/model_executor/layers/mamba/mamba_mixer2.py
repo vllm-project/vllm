@@ -707,7 +707,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
-                validate_data=False,
+                validate_data=True,
             ).transpose(0, 1)[:num_prefill_tokens]
 
             hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(
@@ -854,7 +854,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=decode_query_start_loc,
                 max_query_len=decode_state_indices_tensor.size(-1),
-                validate_data=False,
+                validate_data=True,
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(

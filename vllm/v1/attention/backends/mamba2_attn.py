@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 from dataclasses import dataclass, replace
+from typing import Any
 
 import torch
 
@@ -200,8 +201,11 @@ class Mamba2AttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        **kwargs: Any,
     ) -> Mamba2AttentionMetadata:
-        common = self._compute_common_metadata(common_attn_metadata)
+        common = self._compute_common_metadata(
+            common_attn_metadata, num_accepted_tokens=kwargs.get("num_accepted_tokens")
+        )
 
         seq_idx_p = None
         cu_chunk_seqlen_p = None
