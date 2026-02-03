@@ -43,7 +43,6 @@ trap cleanup EXIT
 
 for BACK in "${BACKENDS[@]}"; do
   VLLM_DEEP_GEMM_WARMUP=skip \
-  VLLM_ALL2ALL_BACKEND=$BACK \
   vllm serve "$MODEL" \
     --enforce-eager \
     --tensor-parallel-size 2 \
@@ -52,6 +51,7 @@ for BACK in "${BACKENDS[@]}"; do
     --enable-eplb \
     --trust-remote-code \
     --max-model-len 2048 \
+    --all2all-backend $BACK \
     --port $PORT &
   SERVER_PID=$!
   wait_for_server $PORT
