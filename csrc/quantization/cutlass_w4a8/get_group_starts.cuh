@@ -10,7 +10,9 @@
 #include "cutlass/float8.h"
 
 // ElementB is int32 (packed int4)
-// ElementGroupScale is cutlass::Array<cutlass::float_e4m3_t, 8> (packed fp8)
+// ElementGroupScale is cutlass::Array<cutlass::float_e4m3_t, 8> (packed fp8) or
+// cutlass::bfloat16_t
+// a_scales_offsets and b_scales_offsets are optional for W4A16
 template <typename ElementA, typename ElementB, typename ElementC,
           typename ElementAccumulator, typename ElementGroupScale>
 __global__ void get_group_gemm_starts(

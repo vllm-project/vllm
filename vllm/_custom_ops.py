@@ -1564,12 +1564,26 @@ def cutlass_w4a16_moe_mm(
 def cutlass_encode_and_reorder_int4b_grouped(
     b_tensors: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Encode the int4b weights for lookup table conversion.
+    Args:
+        b_tensors: The int4b weights to encode and reorder. Dtype must be packed into int32.
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: The encoded and reordered int4b weights and the strides.
+    """
     return torch.ops._C.cutlass_encode_and_reorder_int4b_grouped(b_tensors)
 
 
 def cutlass_reorder_int4b_grouped(
     b_tensors: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Reorder the int4b weights for faster conversion, but not for lookup table conversion.
+    Args:
+        b_tensors: The int4b weights to reorder. Dtype must be packed into int32.
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: The reordered int4b weights and the strides.
+    """
     return torch.ops._C.cutlass_reorder_int4b_grouped(b_tensors)
 
 

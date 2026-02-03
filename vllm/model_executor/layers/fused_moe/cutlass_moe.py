@@ -821,7 +821,9 @@ def run_cutlass_moe_w4a8_fp8(
     if expert_map is not None:
         assert expert_num_tokens is None
     assert not use_batched_format, "batched format not supported yet"
-    assert group_size == 128, f"Only group size 128 supported but got {group_size=}"
+    assert group_size % 128 == 0, (
+        f"Group size must be divisible by 128 but got {group_size=}"
+    )
 
     assert global_num_experts != -1
     assert w1.size(2) * 8 == K, (
@@ -1103,9 +1105,11 @@ def cutlass_moe_w4a8_fp8(
     Parameters:
     - a (torch.Tensor): The input tensor to the MoE layer.
         Shape: [M, K]
-    - w1_q (torch.Tensor): The first set of fp8-quantized expert weights.
+    - w1_q (torch.Tensor): The first set of int4 expert weights.
+        Dtype must be packed into int32.
         Shape: [num_experts, 2*N, K // packed_factor]
-    - w2_q (torch.Tensor): The second set of fp8-quantized expert weights.
+    - w2_q (torch.Tensor): The second set of int4 expert weights.
+        Dtype must be packed into int32.
         Shape: [num_experts, K, N // packed_factor]
     - topk_weights (torch.Tensor): The weights of each token->expert mapping.
     - topk_ids (torch.Tensor): The token->expert mappings.
@@ -1129,6 +1133,8 @@ def cutlass_moe_w4a8_fp8(
     - s_strides2 (torch.Tensor): strides for the group-wise scales for the second gemm.
         Shape: [num_experts, 2]
         dtype: torch.int64
+    - quant_config (FusedMoEQuantConfig): The quantization configuration.
+        Must be int4_w4afp8_moe_quant_config and contains the packed fp8 scale tensors.
     - per_act_token (Optional[bool]): Whether the scale is per-token or
                                       per-tensor.
     - activation (str): The activation function to use.
@@ -1339,14 +1345,14 @@ class CutlassExpertsW4A16Bf16(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def _supports_current_device() -> bool:
         raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "CutlassExpertsW4A16Bf16 is not yet used by an Oracle. "
             "This method should not be called."
         )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
         raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "CutlassExpertsW4A16Bf16 is not yet used by an Oracle. "
             "This method should not be called."
         )
 
@@ -1356,21 +1362,21 @@ class CutlassExpertsW4A16Bf16(mk.FusedMoEPermuteExpertsUnpermute):
         activation_key: QuantKey | None,
     ) -> bool:
         raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "CutlassExpertsW4A16Bf16 is not yet used by an Oracle. "
             "This method should not be called."
         )
 
     @staticmethod
     def _supports_activation(activation: str) -> bool:
         raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "CutlassExpertsW4A16Bf16 is not yet used by an Oracle. "
             "This method should not be called."
         )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         raise NotImplementedError(
-            "CutlassExpertsW4A8Fp8 is not yet used by an Oracle. "
+            "CutlassExpertsW4A16Bf16 is not yet used by an Oracle. "
             "This method should not be called."
         )
 
@@ -1497,12 +1503,14 @@ def cutlass_moe_w4a16_bf16(
     mixed-dtype grouped gemm.
 
     Parameters:
-    - a (torch.Tensor): The input tensor to the MoE layer.
+    - a (torch.Tensor): The input tensor to the MoE layer. Dtype must be bfloat16.
         Shape: [M, K]
-    - w1_q (torch.Tensor): The first set of bfloat16 expert weights.
-        Shape: [num_experts, 2*N, K]
-    - w2_q (torch.Tensor): The second set of bfloat16 expert weights.
-        Shape: [num_experts, K, N]
+    - w1_q (torch.Tensor): The first set of int4 expert weights.
+        Dtype must be packed into int32.
+        Shape: [num_experts, 2*N, K // group_size]
+    - w2_q (torch.Tensor): The second set of int4 expert weights.
+        Dtype must be packed into int32.
+        Shape: [num_experts, K, N // group_size]
     - topk_weights (torch.Tensor): The weights of each token->expert mapping.
     - topk_ids (torch.Tensor): The token->expert mappings.
     - a_strides1 (torch.Tensor): The input strides for the first gemm.
@@ -1525,6 +1533,8 @@ def cutlass_moe_w4a16_bf16(
     - s_strides2 (torch.Tensor): strides for the group-wise scales for the second gemm.
         Shape: [num_experts, 2]
         dtype: torch.int64
+    - quant_config (FusedMoEQuantConfig): The quantization configuration.
+        Must be int4_w4a16_moe_quant_config and contains the bfloat16 scale tensors.
     - activation (str): The activation function to use.
     - expert_map (Optional[torch.Tensor]): In the case of Expert parallel,
         every Rank is responsible for a subset of experts. expert_map is a
