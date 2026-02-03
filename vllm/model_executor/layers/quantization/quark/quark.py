@@ -387,7 +387,7 @@ class QuarkConfig(QuantizationConfig):
 
         return (
             self._is_w_ocp_mx_a_x(weight_config, input_config)
-            and weight_config
+            and weight_config is not None
             and weight_config.get("dtype") == "fp4"
             and getattr(torch, "float4_e2m1fn_x2", None) is not None
         )
