@@ -4,9 +4,7 @@
 
 ## Prerequisites
 
-- Setup vLLM environment
-
-- Setup [AutoGen](https://microsoft.github.io/autogen/0.2/docs/installation/) environment
+Set up the vLLM and [AutoGen](https://microsoft.github.io/autogen/0.2/docs/installation/) environment:
 
 ```bash
 pip install vllm
@@ -18,14 +16,13 @@ pip install -U "autogen-agentchat" "autogen-ext[openai]"
 
 ## Deploy
 
-- Start the vLLM server with the supported chat completion model, e.g.
+1. Start the vLLM server with the supported chat completion model, e.g.
 
-```bash
-python -m vllm.entrypoints.openai.api_server \
-    --model mistralai/Mistral-7B-Instruct-v0.2
-```
+    ```bash
+    vllm serve mistralai/Mistral-7B-Instruct-v0.2
+    ```
 
-- Call it with AutoGen:
+1. Call it with AutoGen:
 
 ??? code
 

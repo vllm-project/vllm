@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
-# https://github.com/THUDM/ChatGLM2-6B
+# https://github.com/zai-org/ChatGLM2-6B
 from transformers import PretrainedConfig
 
 
@@ -13,33 +13,35 @@ class ChatGLMConfig(PretrainedConfig):
         "n_head_kv": "multi_query_group_num",
     }
 
-    def __init__(self,
-                 num_layers=28,
-                 padded_vocab_size=65024,
-                 hidden_size=4096,
-                 ffn_hidden_size=13696,
-                 kv_channels=128,
-                 num_attention_heads=32,
-                 seq_length=2048,
-                 hidden_dropout=0.0,
-                 attention_dropout=0.0,
-                 layernorm_epsilon=1e-5,
-                 rmsnorm=True,
-                 apply_residual_connection_post_layernorm=False,
-                 post_layer_norm=True,
-                 add_bias_linear=False,
-                 add_qkv_bias=False,
-                 interleaved_qkv=False,
-                 bias_dropout_fusion=True,
-                 multi_query_attention=False,
-                 multi_query_group_num=1,
-                 apply_query_key_layer_scaling=True,
-                 attention_softmax_in_fp32=True,
-                 fp32_residual_connection=False,
-                 quantization_bit=0,
-                 pre_seq_len=None,
-                 prefix_projection=False,
-                 **kwargs):
+    def __init__(
+        self,
+        num_layers=28,
+        padded_vocab_size=65024,
+        hidden_size=4096,
+        ffn_hidden_size=13696,
+        kv_channels=128,
+        num_attention_heads=32,
+        seq_length=2048,
+        hidden_dropout=0.0,
+        attention_dropout=0.0,
+        layernorm_epsilon=1e-5,
+        rmsnorm=True,
+        apply_residual_connection_post_layernorm=False,
+        post_layer_norm=True,
+        add_bias_linear=False,
+        add_qkv_bias=False,
+        interleaved_qkv=False,
+        bias_dropout_fusion=True,
+        multi_query_attention=False,
+        multi_query_group_num=1,
+        apply_query_key_layer_scaling=True,
+        attention_softmax_in_fp32=True,
+        fp32_residual_connection=False,
+        quantization_bit=0,
+        pre_seq_len=None,
+        prefix_projection=False,
+        **kwargs,
+    ):
         self.num_layers = num_layers
         self.vocab_size = padded_vocab_size
         self.padded_vocab_size = padded_vocab_size
@@ -55,7 +57,8 @@ class ChatGLMConfig(PretrainedConfig):
         self.layernorm_epsilon = layernorm_epsilon
         self.rmsnorm = rmsnorm
         self.apply_residual_connection_post_layernorm = (
-            apply_residual_connection_post_layernorm)
+            apply_residual_connection_post_layernorm
+        )
         self.post_layer_norm = post_layer_norm
         self.add_bias_linear = add_bias_linear
         self.add_qkv_bias = add_qkv_bias

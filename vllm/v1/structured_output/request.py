@@ -1,27 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import dataclasses
 import functools
 import json
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
-from typing import Optional, Union, cast
+from typing import cast
 
-from vllm.sampling_params import SamplingParams
-from vllm.v1.structured_output.backend_types import (StructuredOutputGrammar,
-                                                     StructuredOutputKey,
-                                                     StructuredOutputOptions)
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputGrammar,
+    StructuredOutputKey,
+    StructuredOutputOptions,
+)
 
 
 @dataclasses.dataclass
 class StructuredOutputRequest:
+    params: StructuredOutputsParams
+    _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
+    reasoning_ended: bool | None = None
 
-    sampling_params: SamplingParams
-    _grammar: Optional[Union[Future[StructuredOutputGrammar],
-                             StructuredOutputGrammar]] = None
-    reasoning_ended: Optional[bool] = None
+    @staticmethod
+    def from_sampling_params(
+        sampling_params: SamplingParams | None,
+    ) -> "StructuredOutputRequest | None":
+        if sampling_params is None:
+            return None
+        params = sampling_params.structured_outputs
+        if not params or params.all_constraints_none():
+            return None
+        return StructuredOutputRequest(params=params)
 
     def _check_grammar_completion(self) -> bool:
         # NOTE: We have to lazy import to gate circular imports
@@ -41,46 +50,42 @@ class StructuredOutputRequest:
         return self._check_grammar_completion()
 
     @property
-    def grammar(self) -> Optional[StructuredOutputGrammar]:
+    def grammar(self) -> StructuredOutputGrammar | None:
         completed = self._check_grammar_completion()
-        return cast(Optional[StructuredOutputGrammar],
-                    self._grammar) if completed else None
+        return (
+            cast(StructuredOutputGrammar | None, self._grammar) if completed else None
+        )
 
     @grammar.setter
     def grammar(
-        self, grammar: Union[StructuredOutputGrammar,
-                             Future[StructuredOutputGrammar]]
+        self, grammar: StructuredOutputGrammar | Future[StructuredOutputGrammar]
     ) -> None:
         self._grammar = grammar
 
     @functools.cached_property
     def structured_output_key(self) -> StructuredOutputKey:
-        return get_structured_output_key(self.sampling_params)
+        return get_structured_output_key(self.params)
 
 
-def get_structured_output_key(
-        sampling_params: SamplingParams) -> StructuredOutputKey:
-    params = sampling_params.guided_decoding
-    assert params is not None, "params can't be None."
+def get_structured_output_key(params: StructuredOutputsParams) -> StructuredOutputKey:
     if params.json is not None:
         if not isinstance(params.json, str):
             json_str = json.dumps(params.json)
         else:
             json_str = params.json
-        return (StructuredOutputOptions.JSON, json_str)
-    elif params.json_object:
-        return (StructuredOutputOptions.JSON_OBJECT, "")
-    elif params.regex is not None:
-        return (StructuredOutputOptions.REGEX, params.regex)
-    elif params.choice is not None:
+        return StructuredOutputOptions.JSON, json_str
+    if params.json_object:
+        return StructuredOutputOptions.JSON_OBJECT, ""
+    if params.regex is not None:
+        return StructuredOutputOptions.REGEX, params.regex
+    if params.choice is not None:
         if not isinstance(params.choice, str):
             json_str = json.dumps(params.choice)
         else:
             json_str = params.choice
-        return (StructuredOutputOptions.CHOICE, json_str)
-    elif params.grammar is not None:
-        return (StructuredOutputOptions.GRAMMAR, params.grammar)
-    elif params.structural_tag is not None:
-        return (StructuredOutputOptions.STRUCTURAL_TAG, params.structural_tag)
-    else:
-        raise ValueError("No valid structured output parameter found")
+        return StructuredOutputOptions.CHOICE, json_str
+    if params.grammar is not None:
+        return StructuredOutputOptions.GRAMMAR, params.grammar
+    if params.structural_tag is not None:
+        return StructuredOutputOptions.STRUCTURAL_TAG, params.structural_tag
+    raise ValueError("No valid structured output parameter found")

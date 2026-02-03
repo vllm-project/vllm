@@ -16,33 +16,20 @@ from ...utils import RemoteOpenAIServer
 # need a multimodal model for these tests.
 
 # Contains a modality specific lora alongside the base model
-MULTIMODAL_MODEL_NAME = snapshot_download(
-    "microsoft/Phi-4-multimodal-instruct")
+MULTIMODAL_MODEL_NAME = snapshot_download("microsoft/Phi-4-multimodal-instruct")
 AUDIO_LORA_PATH = os.path.join(MULTIMODAL_MODEL_NAME, "speech-lora")
 
 ACTIVE_MM_LORA_RESPONSE = "Spoken text: The first words I spoke in the original chronograph, a little piece of practical poetry. Mary had a little lamb, it slept with quite a snow, and everywhere that Mary went, the lamb was sure to go."  # noqa: E501
 
 
 @pytest.fixture(scope="module")
-def monkeypatch_module():
-    from _pytest.monkeypatch import MonkeyPatch
-    mpatch = MonkeyPatch()
-    yield mpatch
-    mpatch.undo()
-
-
-@pytest.fixture(scope="module", params=[False, True])
-def multimodal_server(request, monkeypatch_module):  # noqa: F811
-
-    use_v1 = request.param
-    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
-
+def multimodal_server():
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "half",
         "--max-model-len",
-        "12800",
+        "4096",
         "--enforce-eager",
         # lora config below
         "--enable-lora",
@@ -56,10 +43,12 @@ def multimodal_server(request, monkeypatch_module):  # noqa: F811
         "--gpu-memory-utilization",
         "0.8",
         "--default-mm-loras",
-        f"{{\"audio\": \"{AUDIO_LORA_PATH}\"}}",
+        f'{{"audio": "{AUDIO_LORA_PATH}"}}',
     ]
 
-    with RemoteOpenAIServer(MULTIMODAL_MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(
+        MULTIMODAL_MODEL_NAME, args, max_wait_seconds=480
+    ) as remote_server:
         yield remote_server
 
 
@@ -80,25 +69,25 @@ async def test_default_mm_lora_chat_completions(
     multi_modal_client: openai.AsyncOpenAI,
     audio_assets: AudioTestAssets,
 ):
-    messages = [{
-        "role":
-        "user",
-        "content": [{
-            "type": "text",
-            "text": "Can you transcribe this audio?",
-        }, {
-            "type": "audio_url",
-            "audio_url": {
-                "url": audio_assets[0].url
-            },
-        }]
-    }]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Can you transcribe this audio?",
+                },
+                {
+                    "type": "audio_url",
+                    "audio_url": {"url": audio_assets[0].url},
+                },
+            ],
+        }
+    ]
 
     chat_completion = await multi_modal_client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_completion_tokens=128,
-        temperature=0.0)
+        model=model_name, messages=messages, max_completion_tokens=128, temperature=0.0
+    )
 
     assert len(chat_completion.choices) > 0
 

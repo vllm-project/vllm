@@ -48,64 +48,47 @@ def run_test(model_name, more_args=None):
 
     measured_value = results["results"][TASK][FILTER]
     assert model_name in EXPECTED_VALUES, (
-        f"Cannot find the expected value for the model {model_name=}")
+        f"Cannot find the expected value for the model {model_name=}"
+    )
     expected_value = EXPECTED_VALUES[model_name]
-    assert (measured_value - RTOL < expected_value
-            and measured_value + RTOL > expected_value
-            ), f"Expected: {expected_value} |  Measured: {measured_value}"
+    assert (
+        measured_value - RTOL < expected_value
+        and measured_value + RTOL > expected_value
+    ), f"Expected: {expected_value} |  Measured: {measured_value}"
 
 
 # TODO: [AlexM] Fix it with new CI/CD tests
-TPU_TP_TEST_STR = ""  #"tensor_parallel_size=4"
+TPU_TP_TEST_STR = ""  # "tensor_parallel_size=4"
 
 
-@pytest.mark.skipif(not current_platform.is_cuda()
-                    and not current_platform.is_tpu(),
-                    reason="V1 is currently only supported on CUDA and TPU")
 @pytest.mark.parametrize("model", MODEL_NAMES)
-def test_lm_eval_accuracy_v1_engine(model, monkeypatch: pytest.MonkeyPatch):
+def test_lm_eval_accuracy_v1_engine(model):
     """Run with the V1 Engine."""
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
+    more_args = None
+    if current_platform.is_tpu():
+        # Limit compilation time for TPU V1
 
-        more_args = None
-        if current_platform.is_tpu():
-            # Limit compilation time for TPU V1
+        more_args = "max_model_len=2048,max_num_seqs=64"
 
-            # xet doesn't work well for both Qwen/Qwen3-1.7B and
-            # google/gemma-3-1b-it
-            m.setenv("HF_HUB_DISABLE_XET", "1")
-            more_args = "max_model_len=2048,max_num_seqs=64"
+        # Add TP test (if provided)
+        if TPU_TP_TEST_STR:
+            more_args += ",{}".format(TPU_TP_TEST_STR)
 
-            # Add TP test (if provided)
-            if TPU_TP_TEST_STR:
-                more_args += ",{}".format(TPU_TP_TEST_STR)
-
-        run_test(model, more_args)
+    run_test(model, more_args)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda()
-                    and not current_platform.is_tpu(),
-                    reason="V1 is currently only supported on CUDA and TPU")
 @pytest.mark.parametrize("model", FP8_KV_MODEL_NAMES)
-def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(
-        model, monkeypatch: pytest.MonkeyPatch):
+def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(model):
     """Run with the V1 Engine."""
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
+    more_args = None
+    if current_platform.is_tpu():
+        # Limit compilation time for TPU V1
+        more_args = "max_model_len=2048,max_num_seqs=128,kv_cache_dtype=fp8"
 
-        more_args = None
-        if current_platform.is_tpu():
-            # Limit compilation time for TPU V1
+        # Add TP test (if provided)
+        if TPU_TP_TEST_STR:
+            more_args += ",{}".format(TPU_TP_TEST_STR)
 
-            # xet doesn't work well for Qwen/Qwen3-1.7B
-            m.setenv("HF_HUB_DISABLE_XET", "1")
-            more_args = "max_model_len=2048,max_num_seqs=128,kv_cache_dtype=fp8"
-
-            # Add TP test (if provided)
-            if TPU_TP_TEST_STR:
-                more_args += ",{}".format(TPU_TP_TEST_STR)
-
-        run_test(model, more_args)
+    run_test(model, more_args)

@@ -38,7 +38,7 @@ class NemotronHConfig(PretrainedConfig):
             passed when calling [`NemotronHModel`]
         tie_word_embeddings (`bool`, *optional*, defaults to `False`):
             Whether the model's input and output word embeddings should be
-            tied. Note that this is only relevant if the model has a output
+            tied. Note that this is only relevant if the model has an output
             word embedding layer.
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.
@@ -151,7 +151,7 @@ class NemotronHConfig(PretrainedConfig):
         num_hidden_layers=52,
         hybrid_override_pattern="M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-",
         num_attention_heads=32,
-        attention_head_dim=128,
+        head_dim=128,
         num_key_value_heads=8,  # nemo: num_query_groups
         mlp_hidden_act="relu2",
         attention_bias=False,
@@ -185,6 +185,16 @@ class NemotronHConfig(PretrainedConfig):
         mamba_proj_bias=False,
         mamba_chunk_size=256,
         rescale_prenorm_residual=True,
+        n_routed_experts=8,
+        n_shared_experts=1,
+        moe_intermediate_size=7688,
+        moe_shared_expert_intermediate_size=7688,
+        moe_latent_size=None,
+        num_experts_per_tok=2,
+        routed_scaling_factor=1.0,
+        n_group=1,
+        topk_group=1,
+        norm_topk_prob=True,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -194,7 +204,7 @@ class NemotronHConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.hybrid_override_pattern = hybrid_override_pattern
         self.num_attention_heads = num_attention_heads
-        self.attention_head_dim = attention_head_dim
+        self.head_dim = head_dim
         self.sliding_window = sliding_window
         self.max_position_embeddings = max_position_embeddings
         self.attention_dropout = attention_dropout
@@ -203,11 +213,11 @@ class NemotronHConfig(PretrainedConfig):
         # Validate hybrid_override_pattern
         # M: Mamba2, *: Attention, -: MLP
         assert len(self.hybrid_override_pattern) == self.num_hidden_layers, (
-            "hybrid_override_pattern must have same length as "
-            "num_hidden_layers")
+            "hybrid_override_pattern must have same length as num_hidden_layers"
+        )
         assert re.match(r"^[*-M]+$", self.hybrid_override_pattern), (
-            "hybrid_override_pattern must only contain characters "
-            "'M', '*', or '-'")
+            "hybrid_override_pattern must only contain characters 'M', '*', or '-'"
+        )
 
         # for backward compatibility
         if num_key_value_heads is None:
@@ -241,6 +251,16 @@ class NemotronHConfig(PretrainedConfig):
         self.mamba_proj_bias = mamba_proj_bias
         self.chunk_size = mamba_chunk_size
         self.rescale_prenorm_residual = rescale_prenorm_residual
+        self.n_routed_experts = n_routed_experts
+        self.n_shared_experts = n_shared_experts
+        self.moe_intermediate_size = moe_intermediate_size
+        self.moe_shared_expert_intermediate_size = moe_shared_expert_intermediate_size  # noqa: E501
+        self.moe_latent_size = moe_latent_size
+        self.num_experts_per_tok = num_experts_per_tok
+        self.routed_scaling_factor = routed_scaling_factor
+        self.n_group = n_group
+        self.topk_group = topk_group
+        self.norm_topk_prob = norm_topk_prob
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -253,7 +273,12 @@ class NemotronHConfig(PretrainedConfig):
     @property
     def layers_block_type(self):
         return [
-            "mamba" if self.hybrid_override_pattern[i] == "M" else
-            "attention" if self.hybrid_override_pattern[i] == "*" else "mlp"
+            "mamba"
+            if self.hybrid_override_pattern[i] == "M"
+            else "attention"
+            if self.hybrid_override_pattern[i] == "*"
+            else "mlp"
+            if self.hybrid_override_pattern[i] == "-"
+            else "moe"
             for i in range(self.num_hidden_layers)
         ]

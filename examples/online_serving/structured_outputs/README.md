@@ -21,7 +21,7 @@ If you want to run this script standalone with `uv`, you can use the following:
 
 ```bash
 uvx --from git+https://github.com/vllm-project/vllm#subdirectory=examples/online_serving/structured_outputs \
-    structured-output
+    structured-outputs
 ```
 
 See [feature docs](https://docs.vllm.ai/en/latest/features/structured_outputs.html) for more information.

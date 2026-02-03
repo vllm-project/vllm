@@ -3,6 +3,7 @@
 This script automates the process of finding the optimal server parameter combination (`max-num-seqs` and `max-num-batched-tokens`) to maximize throughput for a vLLM server. It also supports additional constraints such as E2E latency and prefix cache hit rate.
 
 ## Table of Contents
+
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
 - [How to Run](#how-to-run)
@@ -30,6 +31,12 @@ cd vllm
 
 You must set the following variables at the top of the script before execution.
 
+   Note: You can also override the default values below via environment variables when running the script.
+
+```bash
+MODEL=meta-llama/Llama-3.3-70B-Instruct SYSTEM=TPU TP=8 DOWNLOAD_DIR='' INPUT_LEN=128 OUTPUT_LEN=2048 MAX_MODEL_LEN=2300 MIN_CACHE_HIT_PCT=0 MAX_LATENCY_ALLOWED_MS=100000000000 NUM_SEQS_LIST="128 256" NUM_BATCHED_TOKENS_LIST="1024 2048 4096" VLLM_LOGGING_LEVEL=DEBUG bash auto_tune.sh
+```
+
 | Variable | Description | Example Value |
 | --- | --- | --- |
 | `BASE` | **Required.** The absolute path to the parent directory of your vLLM repository directory. | `"$HOME"` |
@@ -39,6 +46,7 @@ You must set the following variables at the top of the script before execution.
 | `DOWNLOAD_DIR` | **Required.** Directory to download and load model weights from. | `""` (default download path) |
 | `INPUT_LEN` | **Required.** Request input length. | `4000` |
 | `OUTPUT_LEN` | **Required.** Request output length. | `16` |
+| `MAX_MODEL_LEN` | **Required.** Max model length. | `4096` |
 | `MIN_CACHE_HIT_PCT` | Prefix cache hit rate in percentage (0-100). Set to `0` to disable. | `60` |
 | `MAX_LATENCY_ALLOWED_MS` | The maximum allowed P99 end-to-end latency in milliseconds. Set to a very large number (e.g., `100000000000`) to effectively ignore the latency constraint. | `500` |
 | `NUM_SEQS_LIST` | A space-separated string of `max-num-seqs` values to test. | `"128 256"` |
@@ -51,7 +59,7 @@ You must set the following variables at the top of the script before execution.
 1. **Configure**: Edit the script and set the variables in the [Configuration](#configuration) section.
 2. **Execute**: Run the script. Since the process can take a long time, it is highly recommended to use a terminal multiplexer like `tmux` or `screen` to prevent the script from stopping if your connection is lost.
 
-```
+```bash
 cd <FOLDER_OF_THIS_SCRIPT>
 bash auto_tune.sh
 ```
@@ -63,34 +71,40 @@ bash auto_tune.sh
 Here are a few examples of how to configure the script for different goals:
 
 ### 1. Maximize Throughput (No Latency Constraint)
+
 - **Goal**: Find the best `max-num-seqs` and `max-num-batched-tokens` to get the highest possible throughput for 1800 input tokens and 20 output tokens.
 - **Configuration**:
 
 ```bash
 INPUT_LEN=1800
 OUTPUT_LEN=20
+MAX_MODEL_LEN=2048
 MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=100000000000 # A very large number
 ```
 
-#### 2. Maximize Throughput with a Latency Requirement
+### 2. Maximize Throughput with a Latency Requirement
+
 - **Goal**: Find the best server parameters when P99 end-to-end latency must be below 500ms.
 - **Configuration**:
 
 ```bash
 INPUT_LEN=1800
 OUTPUT_LEN=20
+MAX_MODEL_LEN=2048
 MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=500
 ```
 
-#### 3. Maximize Throughput with Prefix Caching and Latency Requirements
+### 3. Maximize Throughput with Prefix Caching and Latency Requirements
+
 - **Goal**: Find the best server parameters assuming a 60% prefix cache hit rate and a latency requirement of 500ms.
 - **Configuration**:
 
 ```bash
 INPUT_LEN=1800
 OUTPUT_LEN=20
+MAX_MODEL_LEN=2048
 MIN_CACHE_HIT_PCT=60
 MAX_LATENCY_ALLOWED_MS=500
 ```
@@ -101,11 +115,11 @@ After the script finishes, you will find the results in a new, timestamped direc
 
 - **Log Files**: The directory (`$BASE/auto-benchmark/YYYY_MM_DD_HH_MM/`) contains detailed logs for each run:
     - `vllm_log_...txt`: The log output from the vLLM server for each parameter combination.
-    - `bm_log_...txt`: The log output from the `benchmark_serving.py` script for each benchmark run.
+    - `bm_log_...txt`: The log output from the `vllm bench serve` command for each benchmark run.
 
 - **Final Result Summary**: A file named `result.txt` is created in the log directory. It contains a summary of each tested combination and concludes with the overall best parameters found.
 
-```
+```text
 # Example result.txt content
 hash:a1b2c3d4...
 max_num_seqs: 128, max_num_batched_tokens: 2048, request_rate: 10.0, e2el: 450.5, throughput: 9.8, goodput: 9.8
@@ -135,3 +149,70 @@ The script follows a systematic process to find the optimal parameters:
 4. **Track Best Result**: Throughout the process, the script tracks the parameter combination that has yielded the highest valid throughput so far.
 
 5. **Profile Collection**: For the best-performing run, the script saves the vLLM profiler output, which can be used for deep-dive performance analysis with tools like TensorBoard.
+
+## Batched `auto_tune`
+
+The `batch_auto_tune.sh` script allows you to run multiple `auto_tune.sh` experiments sequentially from a single configuration file. It iterates through a list of parameter sets, executes `auto_tune.sh` for each, and records the results back into the input file.
+
+### Prerequisites
+
+- **jq**: This script requires `jq` to parse the JSON configuration file.
+- **gcloud**: If you plan to upload results to Google Cloud Storage, the `gcloud` CLI must be installed and authenticated.
+
+### How to Run
+
+1. **Create a JSON configuration file**: Create a file (e.g., `runs_config.json`) containing an array of JSON objects. Each object defines the parameters for a single `auto_tune.sh` run.
+
+2. **Execute the script**:
+
+    ```bash
+    bash batch_auto_tune.sh <path_to_json_file> [gcs_upload_path]
+    ```
+
+    - `<path_to_json_file>`: **Required.** Path to your JSON configuration file.
+    - `[gcs_upload_path]`: **Optional.** A GCS path (e.g., `gs://my-bucket/benchmark-results`) where the detailed results and profiles for each run will be uploaded. If this is empty, the results will be available on the local filesystem (see the log for `RESULT_FILE=/path/to/results/file.txt`).
+
+### Configuration File
+
+The JSON configuration file should contain an array of objects. Each object's keys correspond to the configuration variables for `auto_tune.sh` (see the [Configuration table above](#configuration)). These keys will be converted to uppercase environment variables for each run.
+
+Here is an example `runs_config.json` with two benchmark configurations:
+
+```json
+[
+  {
+    "base": "/home/user",
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "system": "TPU", # OR GPU
+    "tp": 8,
+    "input_len": 128,
+    "output_len": 2048,
+    "max_model_len": 2300,
+    "num_seqs_list": "128 256",
+    "num_batched_tokens_list": "8192 16384"
+  },
+  {
+    "base": "/home/user",
+    "model": "meta-llama/Llama-3.1-70B-Instruct",
+    "system": "TPU", # OR GPU
+    "tp": 8,
+    "input_len": 4000,
+    "output_len": 16,
+    "max_model_len": 4096,
+    "num_seqs_list": "64 128",
+    "num_batched_tokens_list": "4096 8192",
+    "max_latency_allowed_ms": 500
+  }
+]
+```
+
+### Output
+
+The script modifies the input JSON file in place, adding the results of each run to the corresponding object. The following fields are added:
+
+- `run_id`: A unique identifier for the run, derived from the timestamp.
+- `status`: The outcome of the run (`SUCCESS`, `FAILURE`, or `WARNING_NO_RESULT_FILE`).
+- `results`: The content of the `result.txt` file from the `auto_tune.sh` run.
+- `gcs_results`: The GCS URL where the run's artifacts are stored (if a GCS path was provided).
+
+A summary of successful and failed runs is also printed to the console upon completion.

@@ -5,7 +5,7 @@ release in CI/CD. It is standard practice to submit a PR to update the
 PyTorch version as early as possible when a new [PyTorch stable
 release](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-cadence) becomes available.
 This process is non-trivial due to the gap between PyTorch
-releases. Using <gh-pr:16859> as an example, this document outlines common steps to achieve this
+releases. Using <https://github.com/vllm-project/vllm/pull/16859> as an example, this document outlines common steps to achieve this
 update along with a list of potential issues and how to address them.
 
 ## Test PyTorch release candidates (RCs)
@@ -57,8 +57,7 @@ cc the PyTorch release team to initiate discussion on how to address them.
 
 ## Update CUDA version
 
-The PyTorch release matrix includes both stable and experimental [CUDA versions](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix). Due to limitations, only the latest stable CUDA version (for example,
-`torch2.7.0+cu12.6`) is uploaded to PyPI. However, vLLM may require a different CUDA version,
+The PyTorch release matrix includes both stable and experimental [CUDA versions](https://github.com/pytorch/pytorch/blob/main/RELEASE.md#release-compatibility-matrix). Due to limitations, only the latest stable CUDA version (for example, torch `2.7.1+cu126`) is uploaded to PyPI. However, vLLM may require a different CUDA version,
 such as 12.8 for Blackwell support.
 This complicates the process as we cannot use the out-of-the-box
 `pip install torch torchvision torchaudio` command. The solution is to use
@@ -78,70 +77,21 @@ This complicates the process as we cannot use the out-of-the-box
     - `.buildkite/release-pipeline.yaml`
     - `.buildkite/scripts/upload-wheels.sh`
 
-## Address long vLLM build time
+## Manually running vLLM builds on BuildKiteCI
 
-When building vLLM with a new PyTorch/CUDA version, no cache will exist
-in the vLLM sccache S3 bucket, causing the build job on CI to potentially take more than 5 hours
-and timeout. Additionally, since vLLM's fastcheck pipeline runs in read-only mode,
-it doesn't populate the cache, so re-running it to warm up the cache
-is ineffective.
+When building vLLM with a new PyTorch/CUDA version, the vLLM sccache S3 bucket
+will not have any cached artifacts, which can cause CI build jobs to exceed 5 hours.
+Furthermore, vLLM's fastcheck pipeline operates in read-only mode and does not
+populate the cache, making it ineffective for cache warm-up purposes.
 
-While ongoing efforts like [#17419](gh-issue:17419)
-address the long build time at its source, the current workaround is to set `VLLM_CI_BRANCH`
-to a custom branch provided by @khluu (`VLLM_CI_BRANCH=khluu/use_postmerge_q`)
-when manually triggering a build on Buildkite. This branch accomplishes two things:
+To address this, manually trigger a build on Buildkite to accomplish two objectives:
 
-1. Increase the timeout limit to 10 hours so that the build doesn't timeout.
-2. Allow the compiled artifacts to be written to the vLLM sccache S3 bucket
-to warm it up so that future builds are faster.
+1. Run the complete test suite against the PyTorch RC build by setting the environment variables: `RUN_ALL=1` and `NIGHTLY=1`
+2. Populate the vLLM sccache S3 bucket with compiled artifacts, enabling faster subsequent builds
 
 <p align="center" width="100%">
-    <img width="60%" src="https://github.com/user-attachments/assets/a8ff0fcd-76e0-4e91-b72f-014e3fdb6b94">
+<img width="60%" alt="Buildkite new build popup" src="https://github.com/user-attachments/assets/3b07f71b-bb18-4ca3-aeaf-da0fe79d315f" />
 </p>
-
-## Update dependencies
-
-Several vLLM dependencies, such as FlashInfer, also depend on PyTorch and need
-to be updated accordingly. Rather than waiting for all of them to publish new
-releases (which would take too much time), they can be built from
-source to unblock the update process.
-
-### FlashInfer
-Here is how to build and install it from source with `torch2.7.0+cu128` in vLLM [Dockerfile](https://github.com/vllm-project/vllm/blob/27bebcd89792d5c4b08af7a65095759526f2f9e1/docker/Dockerfile#L259-L271):
-
-```bash
-export TORCH_CUDA_ARCH_LIST='7.5 8.0 8.9 9.0 10.0+PTX'
-export FLASHINFER_ENABLE_SM90=1
-uv pip install --system \
-    --no-build-isolation "git+https://github.com/flashinfer-ai/flashinfer@v0.2.6.post1"
-```
-
-One caveat is that building FlashInfer from source adds approximately 30
-minutes to the vLLM build time. Therefore, it's preferable to cache the wheel in a
-public location for immediate installation, such as [this FlashInfer wheel link](https://download.pytorch.org/whl/cu128/flashinfer/flashinfer_python-0.2.6.post1%2Bcu128torch2.7-cp39-abi3-linux_x86_64.whl). For future releases, contact the PyTorch release
-team if you want to get the package published there.
-
-### xFormers
-Similar to FlashInfer, here is how to build and install xFormers from source:
-
-```bash
-export TORCH_CUDA_ARCH_LIST='7.0 7.5 8.0 8.9 9.0 10.0+PTX'
-MAX_JOBS=16 uv pip install --system \
-    --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.30"
-```
-
-### Mamba
-
-```bash
-uv pip install --system \
-    --no-build-isolation "git+https://github.com/state-spaces/mamba@v2.2.4"
-```
-
-### causal-conv1d
-
-```
-uv pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
-```
 
 ## Update all the different vLLM platforms
 
@@ -150,5 +100,5 @@ to handle some platforms separately. The separation of requirements and Dockerfi
 for different platforms in vLLM CI/CD allows us to selectively choose
 which platforms to update. For instance, updating XPU requires the corresponding
 release from [Intel Extension for PyTorch](https://github.com/intel/intel-extension-for-pytorch) by Intel.
-While <gh-pr:16859> updated vLLM to PyTorch 2.7.0 on CPU, CUDA, and ROCm,
-<gh-pr:17444> completed the update for XPU.
+While <https://github.com/vllm-project/vllm/pull/16859> updated vLLM to PyTorch 2.7.0 on CPU, CUDA, and ROCm,
+<https://github.com/vllm-project/vllm/pull/17444> completed the update for XPU.

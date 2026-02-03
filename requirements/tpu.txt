@@ -10,16 +10,5 @@ jinja2>=3.1.6
 ray[default]
 ray[data]
 setuptools==78.1.0
-
-# Install torch_xla
---pre
---extra-index-url https://download.pytorch.org/whl/nightly/cpu
---find-links https://storage.googleapis.com/libtpu-wheels/index.html
---find-links https://storage.googleapis.com/libtpu-releases/index.html
---find-links https://storage.googleapis.com/jax-releases/jax_nightly_releases.html
---find-links https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-torch==2.9.0.dev20250716
-torchvision==0.24.0.dev20250716
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.9.0.dev20250716-cp311-cp311-linux_x86_64.whl ; python_version == "3.11"
-torch_xla[tpu, pallas] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.9.0.dev20250716-cp312-cp312-linux_x86_64.whl ; python_version == "3.12"
-
+nixl==0.3.0
+tpu-inference==0.12.0

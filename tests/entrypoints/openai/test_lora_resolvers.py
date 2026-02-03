@@ -4,20 +4,21 @@
 from contextlib import suppress
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Optional
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vllm.config import MultiModalConfig
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
-from vllm.entrypoints.openai.protocol import CompletionRequest, ErrorResponse
-from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
-from vllm.entrypoints.openai.serving_models import (BaseModelPath,
-                                                    OpenAIServingModels)
+from vllm.config.multimodal import MultiModalConfig
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.renderers.hf import HfRenderer
+from vllm.tokenizers.registry import tokenizer_args_from_config
+from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
@@ -33,37 +34,45 @@ class MockHFConfig:
 @dataclass
 class MockModelConfig:
     """Minimal mock ModelConfig for testing."""
+
     model: str = MODEL_NAME
+    runner_type = "generate"
     tokenizer: str = MODEL_NAME
     trust_remote_code: bool = False
     tokenizer_mode: str = "auto"
     max_model_len: int = 100
-    tokenizer_revision: Optional[str] = None
-    multimodal_config: MultiModalConfig = field(
-        default_factory=MultiModalConfig)
+    tokenizer_revision: str | None = None
+    multimodal_config: MultiModalConfig = field(default_factory=MultiModalConfig)
     hf_config: MockHFConfig = field(default_factory=MockHFConfig)
-    logits_processor_pattern: Optional[str] = None
-    diff_sampling_param: Optional[dict] = None
+    logits_processors: list[str] | None = None
+    logits_processor_pattern: str | None = None
+    diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
+    allowed_media_domains: list[str] | None = None
     encoder_config = None
     generation_config: str = "auto"
+    skip_tokenizer_init: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
 
 
 class MockLoRAResolver(LoRAResolver):
-
-    async def resolve_lora(self, base_model_name: str,
-                           lora_name: str) -> Optional[LoRARequest]:
+    async def resolve_lora(
+        self, base_model_name: str, lora_name: str
+    ) -> LoRARequest | None:
         if lora_name == "test-lora":
-            return LoRARequest(lora_name="test-lora",
-                               lora_int_id=1,
-                               lora_local_path="/fake/path/test-lora")
+            return LoRARequest(
+                lora_name="test-lora",
+                lora_int_id=1,
+                lora_path="/fake/path/test-lora",
+            )
         elif lora_name == "invalid-lora":
-            return LoRARequest(lora_name="invalid-lora",
-                               lora_int_id=2,
-                               lora_local_path="/fake/path/invalid-lora")
+            return LoRARequest(
+                lora_name="invalid-lora",
+                lora_int_id=2,
+                lora_path="/fake/path/invalid-lora",
+            )
         return None
 
 
@@ -78,43 +87,61 @@ def register_mock_resolver():
         del LoRAResolverRegistry.resolvers[MOCK_RESOLVER_NAME]
 
 
+def _build_renderer(model_config: MockModelConfig):
+    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
+
+    return HfRenderer(
+        model_config,
+        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+    )
+
+
 @pytest.fixture
 def mock_serving_setup():
     """Provides a mocked engine and serving completion instance."""
-    mock_engine = MagicMock(spec=MQLLMEngineClient)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine = MagicMock(spec=AsyncLLM)
     mock_engine.errored = False
 
-    def mock_add_lora_side_effect(lora_request: LoRARequest):
+    async def mock_add_lora_side_effect(lora_request: LoRARequest):
         """Simulate engine behavior when adding LoRAs."""
         if lora_request.lora_name == "test-lora":
             # Simulate successful addition
-            return
-        elif lora_request.lora_name == "invalid-lora":
+            return True
+        if lora_request.lora_name == "invalid-lora":
             # Simulate failure during addition (e.g. invalid format)
-            raise ValueError(f"Simulated failure adding LoRA: "
-                             f"{lora_request.lora_name}")
+            raise ValueError(f"Simulated failure adding LoRA: {lora_request.lora_name}")
+        return True
 
-    mock_engine.add_lora.side_effect = mock_add_lora_side_effect
+    mock_engine.add_lora = AsyncMock(side_effect=mock_add_lora_side_effect)
+
+    async def mock_generate(*args, **kwargs):
+        for _ in []:
+            yield _
+
+    mock_engine.generate = MagicMock(spec=AsyncLLM.generate, side_effect=mock_generate)
+
     mock_engine.generate.reset_mock()
     mock_engine.add_lora.reset_mock()
 
-    mock_model_config = MockModelConfig()
-    models = OpenAIServingModels(engine_client=mock_engine,
-                                 base_model_paths=BASE_MODEL_PATHS,
-                                 model_config=mock_model_config)
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
-    serving_completion = OpenAIServingCompletion(mock_engine,
-                                                 mock_model_config,
-                                                 models,
-                                                 request_logger=None)
+    models = OpenAIServingModels(
+        engine_client=mock_engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+
+    serving_completion = OpenAIServingCompletion(
+        mock_engine, models, request_logger=None
+    )
 
     return mock_engine, serving_completion
 
 
 @pytest.mark.asyncio
-async def test_serving_completion_with_lora_resolver(mock_serving_setup,
-                                                     monkeypatch):
+async def test_serving_completion_with_lora_resolver(mock_serving_setup, monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true")
 
     mock_engine, serving_completion = mock_serving_setup
@@ -130,20 +157,19 @@ async def test_serving_completion_with_lora_resolver(mock_serving_setup,
     with suppress(Exception):
         await serving_completion.create_completion(req_found)
 
-    mock_engine.add_lora.assert_called_once()
+    mock_engine.add_lora.assert_awaited_once()
     called_lora_request = mock_engine.add_lora.call_args[0][0]
     assert isinstance(called_lora_request, LoRARequest)
     assert called_lora_request.lora_name == lora_model_name
 
     mock_engine.generate.assert_called_once()
-    called_lora_request = mock_engine.generate.call_args[1]['lora_request']
+    called_lora_request = mock_engine.generate.call_args[1]["lora_request"]
     assert isinstance(called_lora_request, LoRARequest)
     assert called_lora_request.lora_name == lora_model_name
 
 
 @pytest.mark.asyncio
-async def test_serving_completion_resolver_not_found(mock_serving_setup,
-                                                     monkeypatch):
+async def test_serving_completion_resolver_not_found(mock_serving_setup, monkeypatch):
     monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true")
 
     mock_engine, serving_completion = mock_serving_setup
@@ -156,17 +182,18 @@ async def test_serving_completion_resolver_not_found(mock_serving_setup,
 
     response = await serving_completion.create_completion(req)
 
-    mock_engine.add_lora.assert_not_called()
+    mock_engine.add_lora.assert_not_awaited()
     mock_engine.generate.assert_not_called()
 
     assert isinstance(response, ErrorResponse)
-    assert response.code == HTTPStatus.NOT_FOUND.value
-    assert non_existent_model in response.message
+    assert response.error.code == HTTPStatus.NOT_FOUND.value
+    assert non_existent_model in response.error.message
 
 
 @pytest.mark.asyncio
 async def test_serving_completion_resolver_add_lora_fails(
-        mock_serving_setup, monkeypatch):
+    mock_serving_setup, monkeypatch
+):
     monkeypatch.setenv("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "true")
 
     mock_engine, serving_completion = mock_serving_setup
@@ -180,7 +207,7 @@ async def test_serving_completion_resolver_add_lora_fails(
     response = await serving_completion.create_completion(req)
 
     # Assert add_lora was called before the failure
-    mock_engine.add_lora.assert_called_once()
+    mock_engine.add_lora.assert_awaited_once()
     called_lora_request = mock_engine.add_lora.call_args[0][0]
     assert isinstance(called_lora_request, LoRARequest)
     assert called_lora_request.lora_name == invalid_model
@@ -190,8 +217,8 @@ async def test_serving_completion_resolver_add_lora_fails(
 
     # Assert the correct error response
     assert isinstance(response, ErrorResponse)
-    assert response.code == HTTPStatus.BAD_REQUEST.value
-    assert invalid_model in response.message
+    assert response.error.code == HTTPStatus.BAD_REQUEST.value
+    assert invalid_model in response.error.message
 
 
 @pytest.mark.asyncio

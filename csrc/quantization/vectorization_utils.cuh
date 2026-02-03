@@ -41,8 +41,10 @@ __device__ inline void vectorize_with_alignment(
 
     for (int i = tid; i < num_vec; i += stride) {
       vout_t tmp;
-      vec_op(tmp, v_in[i]);
-      v_out[i] = tmp;
+      // Make a local copy of the entire pack
+      vin_t src = v_in[i];  // <- encourages a single vector ld
+      vec_op(tmp, src);
+      v_out[i] = tmp;  // <- encourages a single vector st
     }
     return;
   }
@@ -71,8 +73,10 @@ __device__ inline void vectorize_with_alignment(
   // 2. vectorize the main part
   for (int i = tid; i < num_vec; i += stride) {
     vout_t tmp;
-    vec_op(tmp, v_in[i]);
-    v_out[i] = tmp;
+    // Make a local copy of the entire pack
+    vin_t src = v_in[i];  // <- encourages a single vector ld
+    vec_op(tmp, src);
+    v_out[i] = tmp;  // <- encourages a single vector st
   }
 
   // 3. handle the tail
@@ -125,7 +129,8 @@ __device__ inline void vectorize_read_with_alignment(const InT* in, int len,
     auto* v_in = reinterpret_cast<const vin_t*>(in);
 
     for (int i = tid; i < num_vec; i += stride) {
-      vec_op(v_in[i]);
+      vin_t tmp = v_in[i];
+      vec_op(tmp);
     }
     return;
   }

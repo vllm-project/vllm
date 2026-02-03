@@ -5,11 +5,11 @@ import os
 import sys
 import zipfile
 
-# Read the VLLM_MAX_SIZE_MB environment variable, defaulting to 400 MiB
-# Note that we have 400 MiB quota, please use it wisely.
-# See https://github.com/pypi/support/issues/3792 .
+# Read the VLLM_MAX_SIZE_MB environment variable, defaulting to 500 MiB
+# Note that we have 800 MiB quota, please use it wisely.
+# See https://github.com/pypi/support/issues/6326 .
 # Please also sync the value with the one in Dockerfile.
-VLLM_MAX_SIZE_MB = int(os.environ.get("VLLM_MAX_SIZE_MB", 400))
+VLLM_MAX_SIZE_MB = int(os.environ.get("VLLM_MAX_SIZE_MB", 500))
 
 
 def print_top_10_largest_files(zip_file):

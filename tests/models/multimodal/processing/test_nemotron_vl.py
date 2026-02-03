@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for Nemotron-Nano-VL's multimodal preprocessing kwargs."""
+
 from collections.abc import Mapping
-from typing import Optional
 
 import pytest
 from PIL import Image
@@ -23,15 +23,17 @@ def _get_expected_num_patches(
     min_num: int,
     max_num: int,
 ):
-    from vllm.model_executor.models.internvl import (
-        calculate_internvl_targets, get_internvl_target_ratios)
+    from vllm.model_executor.models.nemotron_vl import (
+        calculate_nemotron_vl_targets,
+        get_nemotron_vl_target_ratios,
+    )
 
     width, height = image.size
 
-    blocks, _, _ = calculate_internvl_targets(
+    blocks, _, _ = calculate_nemotron_vl_targets(
         orig_width=width,
         orig_height=height,
-        target_ratios=get_internvl_target_ratios(
+        target_ratios=get_nemotron_vl_target_ratios(
             min_num,
             max_num,
         ),
@@ -63,21 +65,25 @@ def _run_check(
 
     total_expected_num_patches = sum(
         _get_expected_num_patches(config, image, len(images), min_num, max_num)
-        for image in images)
+        for image in images
+    )
     print(total_expected_num_patches)
-    processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=mm_processor_kwargs,
+    )
 
     # Ensure we have the right number of placeholders per num_crops size
     image_token_id = tokenizer.convert_tokens_to_ids("<image>")
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = processed_inputs["mm_kwargs"]["pixel_values_flat"].shape
+    pixel_shape = processed_inputs["mm_kwargs"].get_data()["pixel_values_flat"].shape
     print("Image token count:", img_tok_count, "Pixel shape:", pixel_shape)
     assert img_tok_count == 256 * total_expected_num_patches
     assert pixel_shape[0] == total_expected_num_patches
 
 
-@pytest.mark.parametrize("model_id",
-                         ["nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"])
+@pytest.mark.parametrize("model_id", ["nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1"])
 @pytest.mark.parametrize(
     "size_factors",
     [
@@ -102,7 +108,7 @@ def test_processor_override(
     size_factors: list[int],
     min_dynamic_patch: int,
     max_dynamic_patch: int,
-    dynamic_image_size: Optional[bool],
+    dynamic_image_size: bool | None,
     kwargs_on_init: bool,
 ):
     mm_processor_kwargs = {
@@ -124,10 +130,7 @@ def test_processor_override(
 
     _run_check(
         processor,
-        [
-            rescale_image_size(image_assets[0].pil_image, f)
-            for f in size_factors
-        ],
+        [rescale_image_size(image_assets[0].pil_image, f) for f in size_factors],
         min_num,
         max_num,
         hf_processor_mm_kwargs,

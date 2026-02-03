@@ -52,35 +52,14 @@ Try it yourself with the following argument:
 
 ### Quantization
 
-#### AQLM
-
-vLLM supports models that are quantized using AQLM.
-
-Try one yourself by passing one of the following models to the `--model` argument:
-
-- `ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf`
-- `ISTA-DASLab/Llama-2-7b-AQLM-2Bit-2x8-hf`
-- `ISTA-DASLab/Llama-2-13b-AQLM-2Bit-1x16-hf`
-- `ISTA-DASLab/Mixtral-8x7b-AQLM-2Bit-1x16-hf`
-- `BlackSamorez/TinyLlama-1_1B-Chat-v1_0-AQLM-2Bit-1x16-hf`
-
-> Some of these models are likely to be too large for a single GPU. You can split them across multiple GPUs by setting `--tensor-parallel-size` to the number of required GPUs.
-
 #### GGUF
 
 vLLM supports models that are quantized using GGUF.
 
-Try one yourself by downloading a quantized GGUF model and using the following arguments:
-
-```python
-from huggingface_hub import hf_hub_download
-repo_id = "bartowski/Phi-3-medium-4k-instruct-GGUF"
-filename = "Phi-3-medium-4k-instruct-IQ2_M.gguf"
-print(hf_hub_download(repo_id, filename=filename))
-```
+Try one yourself using the `repo_id:quant_type` format to load directly from HuggingFace:
 
 ```bash
---model {local-path-printed-above} --tokenizer microsoft/Phi-3-medium-4k-instruct
+--model unsloth/Qwen3-0.6B-GGUF:Q4_K_M --tokenizer Qwen/Qwen3-0.6B
 ```
 
 ### CPU offload

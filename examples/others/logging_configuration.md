@@ -8,11 +8,11 @@ of logging configurations that range from simple-and-inflexible to
 more-complex-and-more-flexible.
 
 - No vLLM logging (simple and inflexible)
-  - Set `VLLM_CONFIGURE_LOGGING=0` (leaving `VLLM_LOGGING_CONFIG_PATH` unset)
+    - Set `VLLM_CONFIGURE_LOGGING=0` (leaving `VLLM_LOGGING_CONFIG_PATH` unset)
 - vLLM's default logging configuration (simple and inflexible)
-  - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1`
+    - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1`
 - Fine-grained custom logging configuration (more complex, more flexible)
-  - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
+    - Leave `VLLM_CONFIGURE_LOGGING` unset or set `VLLM_CONFIGURE_LOGGING=1` and
     set `VLLM_LOGGING_CONFIG_PATH=<path-to-logging-config.json>`
 
 ## Logging Configuration Environment Variables
@@ -156,6 +156,37 @@ loggers.
 VLLM_CONFIGURE_LOGGING=0 \
     vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
 ```
+
+### Example 4: Disable access logs for health check endpoints
+
+In production environments, health check endpoints like `/health`, `/metrics`,
+and `/ping` are frequently called by load balancers and monitoring systems,
+generating a large volume of repetitive access logs. To reduce log noise while
+keeping logs for other endpoints, use the `--disable-access-log-for-endpoints`
+option.
+
+**Disable access logs for health and metrics endpoints:**
+
+```bash
+vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
+    --disable-access-log-for-endpoints /health,/metrics,/ping
+```
+
+**Common endpoints to consider filtering:**
+
+| Endpoint   | Description            | Typical Caller                                       |
+| ---------- | ---------------------- | ---------------------------------------------------- |
+| `/health`  | Health check           | Kubernetes liveness/readiness probes, load balancers |
+| `/metrics` | Prometheus metrics     | Prometheus scraper (every 15-60s)                    |
+| `/ping`    | SageMaker health check | SageMaker infrastructure                             |
+| `/load`    | Server load metrics    | Custom monitoring                                    |
+
+**Notes:**
+
+- This option only affects uvicorn access logs, not vLLM application logs
+- Specify multiple endpoints by separating them with commas (no spaces)
+- The filter uses exact path matching, query parameters are ignored (e.g., `/health?verbose=true` matches `/health`)
+- If you need to completely disable all access logs, use `--disable-uvicorn-access-log` instead
 
 ## Additional resources
 

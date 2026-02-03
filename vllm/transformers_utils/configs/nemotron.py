@@ -26,7 +26,7 @@ logger = logging.get_logger(__name__)
 class NemotronConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a
-    [`NemotronModel`]. It is used to instantiate an Nemotron model
+    [`NemotronModel`]. It is used to instantiate a Nemotron model
     according to the specified arguments, defining the model architecture.
     Instantiating a configuration with the defaults will yield a similar
     configuration to that of the Nemotron-8B.
@@ -62,7 +62,7 @@ class NemotronConfig(PretrainedConfig):
             (MQA) otherwise GQA is used. When converting a multi-head
             checkpoint to a GQA checkpoint, each group key and value
             head should be constructed by meanpooling all the original
-            heads within that group. For more details checkout 
+            heads within that group. For more details checkout
             [this paper](https://arxiv.org/pdf/2305.13245.pdf). If it
             is not specified, will default to `num_attention_heads`.
         hidden_act (`str` or `function`, *optional*, defaults to `"relu2"`):
@@ -88,10 +88,15 @@ class NemotronConfig(PretrainedConfig):
             End of stream token id.
         tie_word_embeddings (`bool`, *optional*, defaults to `False`):
             Whether to tie weight embeddings
-        rope_theta (`float`, *optional*, defaults to 10000.0):
-            The base period of the RoPE embeddings.
-        partial_rotary_factor (`float`, *optional*, defaults to 0.5):
-            Percentage of the query and keys which will have rotary embedding.
+        rope_parameters (`dict`, *optional*):
+            The parameters of the RoPE embeddings. Expected contents:
+                `rope_theta` (`float`): The base period of the RoPE embeddings.
+                `rope_type` (`str`):
+                    The sub-variant of RoPE to use. Can be one of ['default', 'linear',
+                    'dynamic', 'yarn', 'longrope', 'llama3'], with 'default' being the
+                    original RoPE implementation.
+                `partial_rotary_factor` (`float`, *optional*, defaults to 0.5):
+                    Percentage of the query and keys which will have rotary embedding.
         attention_bias (`bool`, *optional*, defaults to `False`):
             Whether to use a bias in the query, key, value and output
             projection layers during self-attention.
@@ -132,9 +137,7 @@ class NemotronConfig(PretrainedConfig):
         bos_token_id=2,
         eos_token_id=3,
         tie_word_embeddings=False,
-        rope_theta=10000.0,
-        rope_scaling=None,
-        partial_rotary_factor=0.5,
+        rope_parameters=None,
         attention_bias=False,
         attention_dropout=0.0,
         mlp_bias=False,
@@ -147,8 +150,9 @@ class NemotronConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
         head_dim = head_dim or kwargs.get("kv_channels")
-        self.head_dim = head_dim if head_dim is not None else (
-            hidden_size // num_attention_heads)
+        self.head_dim = (
+            head_dim if head_dim is not None else (hidden_size // num_attention_heads)
+        )
 
         # for backward compatibility
         if num_key_value_heads is None:
@@ -159,13 +163,23 @@ class NemotronConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.norm_eps = norm_eps
         self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
+        rope_scaling = kwargs.pop("rope_scaling", None)
+        rope_parameters = rope_scaling or rope_parameters or {"rope_type": "default"}
+        rope_theta = kwargs.pop("rope_theta", 10000.0)
+        if "rope_theta" not in rope_parameters:
+            rope_parameters["rope_theta"] = rope_theta
         # for backward compatibility
-        partial_rotary_factor = kwargs.get("rope_percent") or kwargs.get(
-            "rope_percentage") or partial_rotary_factor
-        self.partial_rotary_factor = partial_rotary_factor
-        self._rope_scaling_validation()
+        partial_rotary_factor = (
+            kwargs.get("rope_percent")
+            or kwargs.get("rope_percentage")
+            or kwargs.get("partial_rotary_factor")
+            or 0.5
+        )
+        if "partial_rotary_factor" not in rope_parameters:
+            rope_parameters["partial_rotary_factor"] = partial_rotary_factor
+        self.rope_parameters = rope_parameters
+        self._rope_parameters_validation()
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mlp_bias = mlp_bias
@@ -178,28 +192,29 @@ class NemotronConfig(PretrainedConfig):
             **kwargs,
         )
 
-    def _rope_scaling_validation(self):
+    def _rope_parameters_validation(self):
         """
-        Validate the `rope_scaling` configuration.
+        Validate the `rope_parameters` configuration.
         """
-        if self.rope_scaling is None:
+        if self.rope_parameters is None:
             return
 
-        if not isinstance(self.rope_scaling, dict) or len(
-                self.rope_scaling) != 2:
+        rope_type: str | None = self.rope_parameters.get("rope_type", None)
+        factor: float | None = self.rope_parameters.get("factor", None)
+
+        if rope_type not in {"default", "linear", "dynamic"}:
             raise ValueError(
-                "`rope_scaling` must be a dictionary with two fields, "
-                f"`type` and `factor`, got {self.rope_scaling}")
-        rope_scaling_type = self.rope_scaling.get("type", None)
-        rope_scaling_factor = self.rope_scaling.get("factor", None)
-        if rope_scaling_type is None or rope_scaling_type not in [
-                "linear", "dynamic"
-        ]:
-            raise ValueError(
-                "`rope_scaling`'s type field must be one of ['linear', "
-                f"'dynamic'], got {rope_scaling_type}")
-        if rope_scaling_factor is None or not isinstance(
-                rope_scaling_factor, float) or rope_scaling_factor <= 1.0:
-            raise ValueError(
-                "`rope_scaling`'s factor field must be a float > 1, got "
-                f"{rope_scaling_factor}")
+                "`rope_type` must be one of ['default', 'linear', 'dynamic'], "
+                f"got {rope_type}"
+            )
+        if rope_type != "default":
+            if factor is None:
+                raise ValueError(
+                    "If `rope_type` is not 'default', `rope_parameters` "
+                    "must include a `factor` field. Got `None`."
+                )
+            if not isinstance(factor, float) or factor <= 1.0:
+                raise ValueError(
+                    "`rope_parameters`'s factor field must be a float > 1, got "
+                    f"{factor}"
+                )

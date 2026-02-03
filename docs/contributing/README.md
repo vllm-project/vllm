@@ -16,116 +16,139 @@ Finally, one of the most impactful ways to support us is by raising awareness ab
 Unsure on where to start? Check out the following links for tasks to work on:
 
 - [Good first issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
-    - [Selected onboarding tasks](gh-project:6)
+    - [Selected onboarding tasks](https://github.com/orgs/vllm-project/projects/6)
 - [New model requests](https://github.com/vllm-project/vllm/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22new-model%22)
-    - [Models with multi-modal capabilities](gh-project:10)
+    - [Models with multi-modal capabilities](https://github.com/orgs/vllm-project/projects/10)
 
 ## License
 
-See <gh-file:LICENSE>.
+See [LICENSE](../../LICENSE).
 
 ## Developing
 
-Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation.
-Check out the [building from source][build-from-source] documentation for details.
-
-For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
-
-### Building the docs with MkDocs
-
-#### Introduction to MkDocs
-
-[MkDocs](https://github.com/mkdocs/mkdocs) is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file.
-
-#### Install MkDocs and Plugins
-
-Install MkDocs along with the [plugins](https://github.com/vllm-project/vllm/blob/main/mkdocs.yaml) used in the vLLM documentation, as well as required dependencies:
-
-```bash
-pip install -r requirements/docs.txt
-```
-
-!!! note
-    Ensure that your Python version is compatible with the plugins (e.g., `mkdocs-awesome-nav` requires Python 3.10+)
-
-#### Verify Installation
-
-Confirm that MkDocs is correctly installed:
-
-```bash
-mkdocs --version
-```
-
-Example output:
-
-```console
-mkdocs, version 1.6.1 from /opt/miniconda3/envs/mkdoc/lib/python3.10/site-packages/mkdocs (Python 3.10)
-```
-
-#### Clone the `vLLM` repository
+The first step of contributing to vLLM is to clone the GitHub repository:
 
 ```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 ```
 
-#### Start the Development Server
+Then, configure your Python virtual environment.
 
-MkDocs comes with a built-in dev-server that lets you preview your documentation as you work on it. Make sure you're in the same directory as the `mkdocs.yml` configuration file, and then start the server by running the `mkdocs serve` command:
+--8<-- "docs/getting_started/installation/python_env_setup.inc.md"
+
+If you are only developing vLLM's Python code, install vLLM using:
 
 ```bash
-mkdocs serve
+VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
-Example output:
+If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
-```console
-INFO    -  Documentation built in 106.83 seconds
-INFO    -  [22:02:02] Watching paths for changes: 'docs', 'mkdocs.yaml'
-INFO    -  [22:02:02] Serving on http://127.0.0.1:8000/
+```bash
+uv pip install torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu129
 ```
 
-#### View in Your Browser
+then install vLLM using:
 
-Open up [http://127.0.0.1:8000/](http://127.0.0.1:8000/) in your browser to see a live preview:.
+```bash
+uv pip install -e . --no-build-isolation
+```
 
-#### Learn More
+For more details about installing from source and installing for other hardware, check out the [installation instructions](../getting_started/installation/README.md) for your hardware and head to the "Build wheel from source" section.
 
-For additional features and advanced configurations, refer to the official [MkDocs Documentation](https://www.mkdocs.org/).
-
-## Testing
-
-??? console "Commands"
-
-    ```bash
-    pip install -r requirements/dev.txt
-
-    # Linting, formatting and static type checking
-    pre-commit install --hook-type pre-commit --hook-type commit-msg
-
-    # You can manually run pre-commit with
-    pre-commit run --all-files
-
-    # To manually run something from CI that does not run
-    # locally by default, you can run:
-    pre-commit run mypy-3.9 --hook-stage manual --all-files
-
-    # Unit tests
-    pytest tests/
-
-    # Run tests for a single test file with detailed output
-    pytest -s -v tests/test_logger.py
-    ```
+For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
 
 !!! tip
-    Since the <gh-file:docker/Dockerfile> ships with Python 3.12, all tests in CI (except `mypy`) are run with Python 3.12.
+    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
 
     Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 
-!!! note
+### Linting
+
+vLLM uses `pre-commit` to lint and format the codebase. See <https://pre-commit.com/#usage> if `pre-commit` is new to you. Setting up `pre-commit` is as easy as:
+
+```bash
+uv pip install pre-commit
+pre-commit install
+```
+
+vLLM's `pre-commit` hooks will now run automatically every time you commit.
+
+!!! tip "Tips"
+    You can manually run the `pre-commit` hooks using:
+
+    ```bash
+    pre-commit run     # runs on staged files
+    pre-commit run -a  # runs on all files (short for --all-files)
+    ```
+
+    ---
+
+    Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
+
+    ```bash
+    pre-commit run --hook-stage manual markdownlint
+    pre-commit run --hook-stage manual mypy-3.10
+    ```
+
+### Documentation
+
+MkDocs is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file, [mkdocs.yaml](../../mkdocs.yaml).
+
+Get started with:
+
+```bash
+uv pip install -r requirements/docs.txt
+```
+
+!!! tip
+    Ensure that your Python version is compatible with the plugins
+    (e.g., `mkdocs-awesome-nav` requires Python 3.10+)
+
+MkDocs comes with a built-in dev-server that lets you preview your documentation as you work on it.
+From the root of the repository, run:
+
+```bash
+mkdocs serve                           # with API ref (~10 minutes)
+API_AUTONAV_EXCLUDE=vllm mkdocs serve  # API ref off (~15 seconds)
+```
+
+Once you see `Serving on http://127.0.0.1:8000/` in the logs, the live preview is ready!
+Open <http://127.0.0.1:8000/> in your browser to see it.
+
+For additional features and advanced configurations, refer to the:
+
+- [MkDocs documentation](https://www.mkdocs.org/)
+- [Material for MkDocs documentation](https://squidfunk.github.io/mkdocs-material/) (the MkDocs theme we use)
+
+### Testing
+
+vLLM uses `pytest` to test the codebase.
+
+```bash
+# Install the test dependencies used in CI (CUDA only)
+uv pip install -r requirements/common.txt -r requirements/dev.txt --torch-backend=auto
+
+# Install some common test dependencies (hardware agnostic)
+uv pip install pytest pytest-asyncio
+
+# Run all tests
+pytest tests/
+
+# Run tests for a single test file with detailed output
+pytest -s -v tests/test_logger.py
+```
+
+!!! tip "Install python3-dev if Python.h is missing"
+    If any of the above commands fails with `Python.h: No such file or directory`, install
+    `python3-dev` with `sudo apt install python3-dev`.
+
+!!! warning "Warnings"
     Currently, the repository is not fully checked by `mypy`.
 
-!!! note
+    ---
+
     Currently, not all unit tests pass when run on CPU platforms. If you don't have access to a GPU
     platform to run unit tests locally, rely on the continuous integration system to run the tests for
     now.
@@ -135,7 +158,7 @@ For additional features and advanced configurations, refer to the official [MkDo
 If you encounter a bug or have a feature request, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
 !!! important
-    If you discover a security vulnerability, please follow the instructions [here](gh-file:SECURITY.md#reporting-a-vulnerability).
+    If you discover a security vulnerability, please follow the instructions [here](../../SECURITY.md).
 
 ## Pull Requests & Code Reviews
 
@@ -145,7 +168,7 @@ code quality and improve the efficiency of the review process.
 
 ### DCO and Signed-off-by
 
-When contributing changes to this project, you must agree to the <gh-file:DCO>.
+When contributing changes to this project, you must agree to the [DCO](../../DCO).
 Commits must include a `Signed-off-by:` header which certifies agreement with
 the terms of the DCO.
 
@@ -153,7 +176,7 @@ Using `-s` with `git commit` will automatically add this header.
 
 !!! tip
     You can enable automatic sign-off via your IDE:
-  
+
     - **PyCharm**: Click on the `Show Commit Options` icon to the right of the `Commit and Push...` button in the `Commit` window.
       It will bring up a `git` window where you can modify the `Author` and enable `Sign-off commit`.
     - **VSCode**: Open the [Settings editor](https://code.visualstudio.com/docs/configure/settings)
@@ -187,8 +210,7 @@ appropriately to indicate the type of change. Please use one of the following:
 The PR needs to meet the following code quality standards:
 
 - We adhere to [Google Python style guide](https://google.github.io/styleguide/pyguide.html) and [Google C++ style guide](https://google.github.io/styleguide/cppguide.html).
-- Pass all linter checks. Please use `pre-commit` to format your code. See
-  <https://pre-commit.com/#usage> if `pre-commit` is new to you.
+- Pass all linter checks.
 - The code needs to be well-documented to ensure future contributors can easily
   understand the code.
 - Include sufficient tests to ensure the project stays correct and robust. This

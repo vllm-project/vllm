@@ -1,156 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv, round_up
-
-
-@triton.jit
-def moe_align_block_size_stage1(
-    topk_ids_ptr,
-    tokens_cnts_ptr,
-    num_experts: tl.constexpr,
-    numel: tl.constexpr,
-    tokens_per_thread: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    start_idx = pid * tokens_per_thread
-
-    off_c = (pid + 1) * num_experts
-
-    for i in range(tokens_per_thread):
-        if start_idx + i < numel:
-            idx = tl.load(topk_ids_ptr + start_idx + i)
-            token_cnt = tl.load(tokens_cnts_ptr + off_c + idx)
-            tl.store(tokens_cnts_ptr + off_c + idx, token_cnt + 1)
-
-
-@triton.jit
-def moe_align_block_size_stage2(
-    tokens_cnts_ptr,
-    num_experts: tl.constexpr,
-):
-    pid = tl.program_id(0)
-
-    last_cnt = 0
-    for i in range(1, num_experts + 1):
-        token_cnt = tl.load(tokens_cnts_ptr + i * num_experts + pid)
-        last_cnt = last_cnt + token_cnt
-        tl.store(tokens_cnts_ptr + i * num_experts + pid, last_cnt)
-
-
-@triton.jit
-def moe_align_block_size_stage3(
-    total_tokens_post_pad_ptr,
-    tokens_cnts_ptr,
-    cumsum_ptr,
-    num_experts: tl.constexpr,
-    block_size: tl.constexpr,
-):
-    last_cumsum = 0
-    off_cnt = num_experts * num_experts
-    for i in range(1, num_experts + 1):
-        token_cnt = tl.load(tokens_cnts_ptr + off_cnt + i - 1)
-        last_cumsum = last_cumsum + tl.cdiv(token_cnt, block_size) * block_size
-        tl.store(cumsum_ptr + i, last_cumsum)
-    tl.store(total_tokens_post_pad_ptr, last_cumsum)
-
-
-@triton.jit
-def moe_align_block_size_stage4(
-    topk_ids_ptr,
-    sorted_token_ids_ptr,
-    expert_ids_ptr,
-    tokens_cnts_ptr,
-    cumsum_ptr,
-    num_experts: tl.constexpr,
-    block_size: tl.constexpr,
-    numel: tl.constexpr,
-    tokens_per_thread: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    start_idx = tl.load(cumsum_ptr + pid)
-    end_idx = tl.load(cumsum_ptr + pid + 1)
-
-    for i in range(start_idx, end_idx, block_size):
-        tl.store(expert_ids_ptr + i // block_size, pid)
-
-    start_idx = pid * tokens_per_thread
-    off_t = pid * num_experts
-
-    for i in range(start_idx, tl.minimum(start_idx + tokens_per_thread,
-                                         numel)):
-        expert_id = tl.load(topk_ids_ptr + i)
-        token_cnt = tl.load(tokens_cnts_ptr + off_t + expert_id)
-        rank_post_pad = token_cnt + tl.load(cumsum_ptr + expert_id)
-        tl.store(sorted_token_ids_ptr + rank_post_pad, i)
-        tl.store(tokens_cnts_ptr + off_t + expert_id, token_cnt + 1)
-
-
-# Triton implementation based on:
-# https://github.com/sgl-project/sglang/commit/ba5112ff691d791a9e38c6c71f59324a5fcb49d0
-def moe_align_block_size_triton(
-    topk_ids: torch.Tensor,
-    num_experts: int,
-    block_size: int,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_pad: torch.Tensor,
-) -> None:
-    numel = topk_ids.numel()
-    grid = (num_experts, )
-    tokens_cnts = torch.zeros((num_experts + 1, num_experts),
-                              dtype=torch.int32,
-                              device=topk_ids.device)
-    cumsum = torch.zeros((num_experts + 1, ),
-                         dtype=torch.int32,
-                         device=topk_ids.device)
-    tokens_per_thread = cdiv(numel, num_experts)
-    sorted_token_ids.fill_(numel)
-    expert_ids.zero_()
-
-    moe_align_block_size_stage1[grid](
-        topk_ids,
-        tokens_cnts,
-        num_experts,
-        numel,
-        tokens_per_thread,
-    )
-    moe_align_block_size_stage2[grid](
-        tokens_cnts,
-        num_experts,
-    )
-    moe_align_block_size_stage3[(1, )](
-        num_tokens_post_pad,
-        tokens_cnts,
-        cumsum,
-        num_experts,
-        block_size,
-    )
-    moe_align_block_size_stage4[grid](
-        topk_ids,
-        sorted_token_ids,
-        expert_ids,
-        tokens_cnts,
-        cumsum,
-        num_experts,
-        block_size,
-        numel,
-        tokens_per_thread,
-    )
+from vllm.triton_utils import triton
+from vllm.utils.math_utils import round_up
 
 
 def moe_align_block_size(
     topk_ids: torch.Tensor,
     block_size: int,
     num_experts: int,
-    expert_map: Optional[torch.Tensor] = None,
-    pad_sorted_ids: bool = False
+    expert_map: torch.Tensor | None = None,
+    pad_sorted_ids: bool = False,
+    ignore_invalid_experts: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -172,7 +36,13 @@ def moe_align_block_size(
         expert parallel shard. If the expert is not in the current expert
         parallel shard, the mapping is set to -1.
     - pad_sorted_ids: A flag indicating whether the sorted_token_ids length
-      should be padded to a multiple of block_size,
+        should be padded to a multiple of block_size,
+    - ignore_invalid_experts: A flag indicating whether to ignore invalid
+        experts. When False, all expert_ids in topk_ids will participate in
+        counting and ranking, but invalid experts in expert_ids will be marked
+        as -1. When True, all invalid expert_ids in topk_ids will be ignored
+        and will not participate in counting or ranking, and there will be no
+        -1 in expert_ids.
 
     Returns:
     - sorted_token_ids: A tensor containing the sorted token indices according
@@ -204,20 +74,119 @@ def moe_align_block_size(
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     if pad_sorted_ids:
         max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-    sorted_ids = torch.empty((max_num_tokens_padded, ),
-                             dtype=torch.int32,
-                             device=topk_ids.device)
+    if topk_ids.numel() < num_experts:
+        max_num_tokens_padded = min(
+            topk_ids.numel() * block_size, max_num_tokens_padded
+        )
+    sorted_ids = torch.empty(
+        (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
+    )
     max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-    expert_ids = torch.empty((max_num_m_blocks, ),
-                             dtype=torch.int32,
-                             device=topk_ids.device)
-    num_tokens_post_pad = torch.empty((1),
-                                      dtype=torch.int32,
-                                      device=topk_ids.device)
+    expert_ids = torch.empty(
+        (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
+    )
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
 
-    ops.moe_align_block_size(topk_ids, num_experts, block_size, sorted_ids,
-                             expert_ids, num_tokens_post_pad)
-    if expert_map is not None:
+    ops.moe_align_block_size(
+        topk_ids,
+        num_experts,
+        block_size,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+        expert_map if ignore_invalid_experts else None,
+    )
+
+    if expert_map is not None and not ignore_invalid_experts:
         expert_ids = expert_map[expert_ids]
+
+    return sorted_ids, expert_ids, num_tokens_post_pad
+
+
+def batched_moe_align_block_size(
+    max_tokens_per_batch: int, block_size: int, expert_num_tokens: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Given num_batches, max_tokens_per_batch, block_size and the number of
+    valid-tokens in each batch, prepare sorted_token_ids, expert_ids and
+    num_tokens_post_pad. sorted_token_ids, expert_ids and num_tokens_post_pad
+    have the same semantics as in moe_align_block_size.
+
+    This function is intended to be a drop in replacement for
+    moe_align_batch_size for the batched case.
+
+    Parameters:
+    - max_tokens_per_batch (int): Number of tokens in each batch (both
+        valid and invalid).
+    - block_size (int): block_size to align the data to.
+    - expert_num_tokens (torch.Tensor): expert_num_tokens[i], indicates
+        the number of valid tokens in batch i.
+
+    Returns:
+    - sorted_token_ids (torch.Tensor): Torch tensor of size
+        (num_batches * max_tokens_per_batch) indicating the token indices for
+        that block.
+    - expert_ids (torch.Tensor): Torch tensor of size
+        ceil((num_batches * max_tokens_per_batch) / block_size) indicating
+        what expert to use for each block.
+    - num_tokens_post_pad (torch.Tensor): Torch tensor of size 1
+        indicating the number of valid blocks with actual data to
+        process. This is represented in terms of num tokens.
+    Example:
+    Let num_batches=5, max_tokens_per_batch=8, block_size=4, and
+    expert_num_tokens=[2, 3, 0, 6, 8]. This expert_num_tokens tensor
+    indicates that,
+     - The first 2 tokens in the 0th batch are valid and the rest 6 are
+     invalid (i.e. in the 2D hidden_states tensor of shape,
+     [num_batches * max_tokens_per_batch, K], indices 0, 1 are valid)
+     - The first 3 tokens in the 1st batch are valid. i.e. indices 8, 9, 10
+     - 0 tokens in the 2nd batch are valid
+     - first 6 tokens in the  3rd batch are valid. i.e. indices,
+     24, 25, 26, 27, 28, 29
+     - so on ...
+
+     In this case,
+      sorted_token_ids will be [0, 1, 40, 40,
+                                8, 9, 10, 40,
+                                24, 25, 26, 27,
+                                28, 29, 40, 40,
+                                32, 33, 34, 35,
+                                36, 37, 38, 39,
+                                40, 40, 40, 40,
+                                (rest all 40, 40, 40, 40)
+                                ...]
+      Here, 40 represents an invalid index. as there is no token index 40.
+      The gemm kernel using this sorted_token_ids is expected to skip the
+      gemm computation when it encounters this invalid index.
+
+      expert_ids will be [0, 1, 3, 3, 4, 5, 5, -1, -1, (rest all -1) ...]
+      Here, -1 represents an invalid expert. The gemm kernel using this
+      expert_ids is expected to skip the gemm computation when it encounters
+      an expert of id -1.
+
+      num_tokens_post_pad will be 24 as sorted_token_ids has valid entries
+      until 24.
+    """
+
+    B = expert_num_tokens.size(0)
+    device = expert_num_tokens.device
+
+    # Round up so each batch can be split to blocks evenly.
+    max_num_tokens_padded = B * round_up(max_tokens_per_batch, block_size)
+
+    sorted_ids = torch.empty((max_num_tokens_padded,), dtype=torch.int32, device=device)
+    assert max_num_tokens_padded % block_size == 0
+    max_num_m_blocks = max_num_tokens_padded // block_size
+    expert_ids = torch.empty((max_num_m_blocks,), dtype=torch.int32, device=device)
+    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=device)
+
+    ops.batched_moe_align_block_size(
+        max_tokens_per_batch,
+        block_size,
+        expert_num_tokens,
+        sorted_ids,
+        expert_ids,
+        num_tokens_post_pad,
+    )
 
     return sorted_ids, expert_ids, num_tokens_post_pad

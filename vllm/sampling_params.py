@@ -1,18 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sampling parameters for text generation."""
+
 import copy
-from dataclasses import dataclass
+from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any, Optional, Union
+from typing import Annotated, Any
 
 import msgspec
-from pydantic import BaseModel
+from pydantic.dataclasses import dataclass
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
+from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
 
@@ -28,60 +31,78 @@ class SamplingType(IntEnum):
 
 # maybe make msgspec?
 @dataclass
-class GuidedDecodingParams:
-    """One of these fields will be used to build a logit processor."""
-    json: Optional[Union[str, dict]] = None
-    regex: Optional[str] = None
-    choice: Optional[list[str]] = None
-    grammar: Optional[str] = None
-    json_object: Optional[bool] = None
-    """These are other options that can be set"""
-    backend: Optional[str] = None
-    backend_was_auto: bool = False
+class StructuredOutputsParams:
+    # One of these fields will be used to build a logit processor.
+    json: str | dict | None = None
+    regex: str | None = None
+    choice: list[str] | None = None
+    grammar: str | None = None
+    json_object: bool | None = None
+    # These are other options that can be set.
     disable_fallback: bool = False
     disable_any_whitespace: bool = False
     disable_additional_properties: bool = False
-    whitespace_pattern: Optional[str] = None
-    structural_tag: Optional[str] = None
+    whitespace_pattern: str | None = None
+    structural_tag: str | None = None
 
-    @staticmethod
-    def from_optional(
-        json: Optional[Union[dict, BaseModel, str]] = None,
-        regex: Optional[str] = None,
-        choice: Optional[list[str]] = None,
-        grammar: Optional[str] = None,
-        json_object: Optional[bool] = None,
-        backend: Optional[str] = None,
-        whitespace_pattern: Optional[str] = None,
-        structural_tag: Optional[str] = None,
-    ) -> Optional["GuidedDecodingParams"]:
-        if all(arg is None for arg in (json, regex, choice, grammar,
-                                       json_object, structural_tag)):
-            return None
-        # Extract json schemas from pydantic models
-        if isinstance(json, (BaseModel, type(BaseModel))):
-            json = json.model_json_schema()
-        return GuidedDecodingParams(
-            json=json,
-            regex=regex,
-            choice=choice,
-            grammar=grammar,
-            json_object=json_object,
-            backend=backend,
-            whitespace_pattern=whitespace_pattern,
-            structural_tag=structural_tag,
-        )
+    _backend: str | None = field(default=None, init=False)
+    """CAUTION: Should only be set by Processor._validate_structured_output"""
+    _backend_was_auto: bool = field(default=False, init=False)
+    """CAUTION: Should only be set by Processor._validate_structured_output"""
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
-        guide_count = sum([
-            self.json is not None, self.regex is not None, self.choice
-            is not None, self.grammar is not None, self.json_object is not None
-        ])
-        if guide_count > 1:
+        count = sum(
+            [
+                self.json is not None,
+                self.regex is not None,
+                self.choice is not None,
+                self.grammar is not None,
+                self.json_object is not None,
+                self.structural_tag is not None,
+            ]
+        )
+        if count > 1:
             raise ValueError(
-                "You can only use one kind of guided decoding but multiple are "
-                f"specified: {self.__dict__}")
+                "You can only use one kind of structured outputs constraint "
+                f"but multiple are specified: {self.__dict__}"
+            )
+        if count < 1:
+            raise ValueError(
+                "You must use one kind of structured outputs constraint "
+                f"but none are specified: {self.__dict__}"
+            )
+
+    def all_constraints_none(self) -> bool:
+        """
+        Returns True if all structured-output constraint fields are None.
+        """
+        return all(
+            getattr(self, field) is None
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+                "structural_tag",
+            )
+        )
+
+    def all_non_structural_tag_constraints_none(self) -> bool:
+        """
+        Returns True if all structured-output constraint fields are None.
+        """
+        return all(
+            getattr(self, field) is None
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+            )
+        )
 
 
 class RequestOutputKind(Enum):
@@ -94,122 +115,114 @@ class RequestOutputKind(Enum):
 
 
 class SamplingParams(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        # required for @cached_property.
-        dict=True):  # type: ignore[call-arg]
+    PydanticMsgspecMixin,
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    # required for @cached_property.
+    dict=True,
+):  # type: ignore[call-arg]
     """Sampling parameters for text generation.
 
     Overall, we follow the sampling parameters from the OpenAI text completion
     API (https://platform.openai.com/docs/api-reference/completions/create).
     In addition, we support beam search, which is not supported by OpenAI.
-
-    Args:
-        n: Number of output sequences to return for the given prompt.
-        best_of: Number of output sequences that are generated from the prompt.
-            From these `best_of` sequences, the top `n` sequences are returned.
-            `best_of` must be greater than or equal to `n`. By default,
-            `best_of` is set to `n`. Warning, this is only supported in V0.
-        presence_penalty: Float that penalizes new tokens based on whether they
-            appear in the generated text so far. Values > 0 encourage the model
-            to use new tokens, while values < 0 encourage the model to repeat
-            tokens.
-        frequency_penalty: Float that penalizes new tokens based on their
-            frequency in the generated text so far. Values > 0 encourage the
-            model to use new tokens, while values < 0 encourage the model to
-            repeat tokens.
-        repetition_penalty: Float that penalizes new tokens based on whether
-            they appear in the prompt and the generated text so far. Values > 1
-            encourage the model to use new tokens, while values < 1 encourage
-            the model to repeat tokens.
-        temperature: Float that controls the randomness of the sampling. Lower
-            values make the model more deterministic, while higher values make
-            the model more random. Zero means greedy sampling.
-        top_p: Float that controls the cumulative probability of the top tokens
-            to consider. Must be in (0, 1]. Set to 1 to consider all tokens.
-        top_k: Integer that controls the number of top tokens to consider. Set
-            to 0 (or -1) to consider all tokens.
-        min_p: Float that represents the minimum probability for a token to be
-            considered, relative to the probability of the most likely token.
-            Must be in [0, 1]. Set to 0 to disable this.
-        seed: Random seed to use for the generation.
-        stop: list of strings that stop the generation when they are generated.
-            The returned output will not contain the stop strings.
-        stop_token_ids: list of tokens that stop the generation when they are
-            generated. The returned output will contain the stop tokens unless
-            the stop tokens are special tokens.
-        bad_words: list of words that are not allowed to be generated.
-            More precisely, only the last token of a corresponding
-            token sequence is not allowed when the next generated token
-            can complete the sequence.
-        include_stop_str_in_output: Whether to include the stop strings in
-            output text. Defaults to False.
-        ignore_eos: Whether to ignore the EOS token and continue generating
-            tokens after the EOS token is generated.
-        max_tokens: Maximum number of tokens to generate per output sequence.
-        min_tokens: Minimum number of tokens to generate per output sequence
-            before EOS or stop_token_ids can be generated
-        logprobs: Number of log probabilities to return per output token.
-            When set to None, no probability is returned. If set to a non-None
-            value, the result includes the log probabilities of the specified
-            number of most likely tokens, as well as the chosen tokens.
-            Note that the implementation follows the OpenAI API: The API will
-            always return the log probability of the sampled token, so there
-            may be up to `logprobs+1` elements in the response.
-        prompt_logprobs: Number of log probabilities to return per prompt token.
-        detokenize: Whether to detokenize the output. Defaults to True.
-        skip_special_tokens: Whether to skip special tokens in the output.
-        spaces_between_special_tokens: Whether to add spaces between special
-            tokens in the output.  Defaults to True.
-        logits_processors: list of functions that modify logits based on
-            previously generated tokens, and optionally prompt tokens as
-            a first argument.
-        truncate_prompt_tokens: If set to -1, will use the truncation size
-            supported by the model. If set to an integer k, will use only
-            the last k tokens from the prompt (i.e., left truncation).
-            Defaults to None (i.e., no truncation).
-        guided_decoding: If provided, the engine will construct a guided
-            decoding logits processor from these parameters. Defaults to None.
-        logit_bias: If provided, the engine will construct a logits processor
-            that applies these logit biases. Defaults to None.
-        allowed_token_ids: If provided, the engine will construct a logits
-            processor which only retains scores for the given token ids.
-            Defaults to None.
-        extra_args: Arbitrary additional args, that can be used by custom
-            sampling implementations, plugins, etc. Not used by any in-tree
-            sampling implementations.
     """
 
     n: int = 1
-    best_of: Optional[int] = None
-    _real_n: Optional[int] = None
+    """Number of outputs to return for the given prompt request.
+
+    NOTE:
+        `AsyncLLM` streams outputs by default. When `n > 1`, all `n` outputs
+        are generated and streamed cumulatively per request. To see all `n`
+        outputs upon completion, use `output_kind=RequestOutputKind.FINAL_ONLY`
+        in `SamplingParams`."""
     presence_penalty: float = 0.0
+    """Penalizes new tokens based on whether they appear in the generated text
+    so far. Values > 0 encourage the model to use new tokens, while values < 0
+    encourage the model to repeat tokens."""
     frequency_penalty: float = 0.0
+    """Penalizes new tokens based on their frequency in the generated text so
+    far. Values > 0 encourage the model to use new tokens, while values < 0
+    encourage the model to repeat tokens."""
     repetition_penalty: float = 1.0
+    """Penalizes new tokens based on whether they appear in the prompt and the
+    generated text so far. Values > 1 encourage the model to use new tokens,
+    while values < 1 encourage the model to repeat tokens."""
     temperature: float = 1.0
+    """Controls the randomness of the sampling. Lower values make the model
+    more deterministic, while higher values make the model more random. Zero
+    means greedy sampling."""
     top_p: float = 1.0
+    """Controls the cumulative probability of the top tokens to consider. Must
+    be in (0, 1]. Set to 1 to consider all tokens."""
     top_k: int = 0
+    """Controls the number of top tokens to consider. Set to 0 (or -1) to
+    consider all tokens."""
     min_p: float = 0.0
-    seed: Optional[int] = None
-    stop: Optional[Union[str, list[str]]] = None
-    stop_token_ids: Optional[list[int]] = None
+    """Represents the minimum probability for a token to be considered,
+    relative to the probability of the most likely token. Must be in [0, 1].
+    Set to 0 to disable this."""
+    seed: int | None = None
+    """Random seed to use for the generation."""
+    stop: str | list[str] | None = None
+    """String(s) that stop the generation when they are generated. The returned
+    output will not contain the stop strings."""
+    stop_token_ids: list[int] | None = None
+    """Token IDs that stop the generation when they are generated. The returned
+    output will contain the stop tokens unless the stop tokens are special
+    tokens."""
     ignore_eos: bool = False
-    max_tokens: Optional[int] = 16
+    """Whether to ignore the EOS token and continue generating
+    tokens after the EOS token is generated."""
+    max_tokens: int | None = 16
+    """Maximum number of tokens to generate per output sequence."""
     min_tokens: int = 0
-    logprobs: Optional[int] = None
-    prompt_logprobs: Optional[int] = None
+    """Minimum number of tokens to generate per output sequence before EOS or
+    `stop_token_ids` can be generated"""
+    logprobs: int | None = None
+    """Number of log probabilities to return per output token. When set to
+    `None`, no probability is returned. If set to a non-`None` value, the
+    result includes the log probabilities of the specified number of most
+    likely tokens, as well as the chosen tokens. Note that the implementation
+    follows the OpenAI API: The API will always return the log probability of
+    the sampled token, so there may be up to `logprobs+1` elements in the
+    response. When set to -1, return all `vocab_size` log probabilities."""
+    prompt_logprobs: int | None = None
+    """Number of log probabilities to return per prompt token.
+    When set to -1, return all `vocab_size` log probabilities."""
+    flat_logprobs: bool = False
+    """Whether to return logprobs in flatten format (i.e. FlatLogprob)
+    for better performance.
+    NOTE: GC costs of FlatLogprobs is significantly smaller than
+    list[dict[int, Logprob]]. After enabled, PromptLogprobs and
+    SampleLogprobs would populated as FlatLogprobs."""
     # NOTE: This parameter is only exposed at the engine level for now.
     # It is not exposed in the OpenAI API server, as the OpenAI API does
     # not support returning only a list of token IDs.
     detokenize: bool = True
+    """Whether to detokenize the output."""
     skip_special_tokens: bool = True
+    """Whether to skip special tokens in the output."""
     spaces_between_special_tokens: bool = True
-    # Optional[list[LogitsProcessor]] type. We use Any here because
-    # Optional[list[LogitsProcessor]] type is not supported by msgspec.
-    logits_processors: Optional[Any] = None
+    """Whether to add spaces between special tokens in the output."""
+    # `list[LogitsProcessor] | None` type. We use Any here because
+    # `list[LogitsProcessor] | None` type is not supported by msgspec.
+    logits_processors: Any | None = None
+    """Functions that modify logits based on previously generated tokens, and
+    optionally prompt tokens as a first argument."""
     include_stop_str_in_output: bool = False
-    truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
+    """Whether to include the stop strings in output text."""
+    truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None
+    """If set to -1, will use the truncation size supported by the model. If
+    set to an integer k, will use only the last k tokens from the prompt
+    (i.e., left truncation). If set to `None`, truncation is disabled."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
+    skip_clone: bool = False
+    """Internal flag indicating that this SamplingParams instance is safe to
+    reuse without cloning. When True, clone() will return self without
+    performing a deep copy. This should only be set when the params object
+    is guaranteed to be dedicated to a single request and won't be modified
+    in ways that would affect other uses."""
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
@@ -217,47 +230,59 @@ class SamplingParams(
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
-    guided_decoding: Optional[GuidedDecodingParams] = None
-    logit_bias: Optional[dict[int, float]] = None
-    allowed_token_ids: Optional[list[int]] = None
-    extra_args: Optional[dict[str, Any]] = None
+    structured_outputs: StructuredOutputsParams | None = None
+    """Parameters for configuring structured outputs."""
+    logit_bias: dict[int, float] | None = None
+    """If provided, the engine will construct a logits processor that applies
+    these logit biases."""
+    allowed_token_ids: list[int] | None = None
+    """If provided, the engine will construct a logits processor which only
+    retains scores for the given token ids."""
+    extra_args: dict[str, Any] | None = None
+    """Arbitrary additional args, that can be used by custom sampling
+    implementations, plugins, etc. Not used by any in-tree sampling
+    implementations."""
 
     # Fields used for bad words
-    bad_words: Optional[list[str]] = None
-    _bad_words_token_ids: Optional[list[list[int]]] = None
+    bad_words: list[str] | None = None
+    """Words that are not allowed to be generated. More precisely, only the
+    last token of a corresponding token sequence is not allowed when the next
+    generated token can complete the sequence."""
+    _bad_words_token_ids: list[list[int]] | None = None
+
+    skip_reading_prefix_cache: bool | None = None
 
     @staticmethod
     def from_optional(
-        n: Optional[int] = 1,
-        best_of: Optional[int] = None,
-        presence_penalty: Optional[float] = 0.0,
-        frequency_penalty: Optional[float] = 0.0,
-        repetition_penalty: Optional[float] = 1.0,
-        temperature: Optional[float] = 1.0,
-        top_p: Optional[float] = 1.0,
+        n: int | None = 1,
+        presence_penalty: float | None = 0.0,
+        frequency_penalty: float | None = 0.0,
+        repetition_penalty: float | None = 1.0,
+        temperature: float | None = 1.0,
+        top_p: float | None = 1.0,
         top_k: int = 0,
         min_p: float = 0.0,
-        seed: Optional[int] = None,
-        stop: Optional[Union[str, list[str]]] = None,
-        stop_token_ids: Optional[list[int]] = None,
-        bad_words: Optional[list[str]] = None,
+        seed: int | None = None,
+        stop: str | list[str] | None = None,
+        stop_token_ids: list[int] | None = None,
+        bad_words: list[str] | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
-        max_tokens: Optional[int] = 16,
+        max_tokens: int | None = 16,
         min_tokens: int = 0,
-        logprobs: Optional[int] = None,
-        prompt_logprobs: Optional[int] = None,
+        logprobs: int | None = None,
+        prompt_logprobs: int | None = None,
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
-        logits_processors: Optional[list[LogitsProcessor]] = None,
-        truncate_prompt_tokens: Optional[Annotated[int,
-                                                   msgspec.Meta(ge=1)]] = None,
+        logits_processors: list[LogitsProcessor] | None = None,
+        truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
-        guided_decoding: Optional[GuidedDecodingParams] = None,
-        logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
-        allowed_token_ids: Optional[list[int]] = None,
-        extra_args: Optional[dict[str, Any]] = None,
+        structured_outputs: StructuredOutputsParams | None = None,
+        logit_bias: dict[int, float] | dict[str, float] | None = None,
+        allowed_token_ids: list[int] | None = None,
+        extra_args: dict[str, Any] | None = None,
+        skip_clone: bool = False,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -269,13 +294,11 @@ class SamplingParams(
 
         return SamplingParams(
             n=1 if n is None else n,
-            best_of=best_of,
-            presence_penalty=0.0
-            if presence_penalty is None else presence_penalty,
-            frequency_penalty=0.0
-            if frequency_penalty is None else frequency_penalty,
+            presence_penalty=0.0 if presence_penalty is None else presence_penalty,
+            frequency_penalty=0.0 if frequency_penalty is None else frequency_penalty,
             repetition_penalty=1.0
-            if repetition_penalty is None else repetition_penalty,
+            if repetition_penalty is None
+            else repetition_penalty,
             temperature=1.0 if temperature is None else temperature,
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
@@ -296,33 +319,22 @@ class SamplingParams(
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
-            guided_decoding=guided_decoding,
+            structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
+            skip_clone=skip_clone,
         )
 
     def __post_init__(self) -> None:
-        # how we deal with `best_of``:
-        # if `best_of`` is not set, we default to `n`;
-        # if `best_of`` is set, we set `n`` to `best_of`,
-        # and set `_real_n`` to the original `n`.
-        # when we return the result, we will check
-        # if we need to return `n` or `_real_n` results
-        if self.best_of:
-            if self.best_of < self.n:
-                raise ValueError(
-                    f"best_of must be greater than or equal to n, "
-                    f"got n={self.n} and best_of={self.best_of}.")
-            if not self._real_n:
-                self._real_n = self.n
-                self.n = self.best_of
-
         if 0 < self.temperature < _MAX_TEMP:
             logger.warning(
                 "temperature %s is less than %s, which may cause numerical "
                 "errors nan or inf in tensors. We have maxed it out to %s.",
-                self.temperature, _MAX_TEMP, _MAX_TEMP)
+                self.temperature,
+                _MAX_TEMP,
+                _MAX_TEMP,
+            )
             self.temperature = max(self.temperature, _MAX_TEMP)
 
         if self.seed == -1:
@@ -362,92 +374,117 @@ class SamplingParams(
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
 
+        if self.skip_reading_prefix_cache is None:
+            # If prefix caching is enabled,
+            # the output of prompt logprobs may less than n_prompt_tokens,
+            # we need to skip reading cache at this request.
+            self.skip_reading_prefix_cache = self.prompt_logprobs is not None
+
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
-            raise ValueError(f"n must be an int, but is of "
-                             f"type {type(self.n)}")
+            raise ValueError(f"n must be an int, but is of type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
-        if self.best_of is not None:
-            if not isinstance(self.best_of, int):
-                raise ValueError(
-                    f"best_of must be an integer, got {type(self.best_of)}")
-            if self.best_of < 1:
-                raise ValueError(
-                    f"best_of must be at least 1, got {self.best_of}")
-            if self.best_of < self.n:
-                raise ValueError(
-                    f"best_of must be greater than or equal to n, "
-                    f"got n={self.n} and best_of={self.best_of}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
-            raise ValueError("presence_penalty must be in [-2, 2], got "
-                             f"{self.presence_penalty}.")
+            raise ValueError(
+                f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
+            )
         if not -2.0 <= self.frequency_penalty <= 2.0:
-            raise ValueError("frequency_penalty must be in [-2, 2], got "
-                             f"{self.frequency_penalty}.")
+            raise ValueError(
+                f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}."
+            )
         if self.repetition_penalty <= 0.0:
             raise ValueError(
                 "repetition_penalty must be greater than zero, got "
-                f"{self.repetition_penalty}.")
+                f"{self.repetition_penalty}."
+            )
         if self.temperature < 0.0:
-            raise ValueError(
-                f"temperature must be non-negative, got {self.temperature}.")
+            raise VLLMValidationError(
+                f"temperature must be non-negative, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
+            )
         if not 0.0 < self.top_p <= 1.0:
-            raise ValueError(f"top_p must be in (0, 1], got {self.top_p}.")
+            raise VLLMValidationError(
+                f"top_p must be in (0, 1], got {self.top_p}.",
+                parameter="top_p",
+                value=self.top_p,
+            )
         # quietly accept -1 as disabled, but prefer 0
         if self.top_k < -1:
-            raise ValueError(f"top_k must be 0 (disable), or at least 1, "
-                             f"got {self.top_k}.")
+            raise ValueError(
+                f"top_k must be 0 (disable), or at least 1, got {self.top_k}."
+            )
         if not isinstance(self.top_k, int):
             raise TypeError(
-                f"top_k must be an integer, got {type(self.top_k).__name__}")
+                f"top_k must be an integer, got {type(self.top_k).__name__}"
+            )
         if not 0.0 <= self.min_p <= 1.0:
-            raise ValueError("min_p must be in [0, 1], got "
-                             f"{self.min_p}.")
+            raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
-            raise ValueError(
-                f"max_tokens must be at least 1, got {self.max_tokens}.")
+            raise VLLMValidationError(
+                f"max_tokens must be at least 1, got {self.max_tokens}.",
+                parameter="max_tokens",
+                value=self.max_tokens,
+            )
         if self.min_tokens < 0:
-            raise ValueError(f"min_tokens must be greater than or equal to 0, "
-                             f"got {self.min_tokens}.")
+            raise ValueError(
+                f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
+            )
         if self.max_tokens is not None and self.min_tokens > self.max_tokens:
             raise ValueError(
                 f"min_tokens must be less than or equal to "
-                f"max_tokens={self.max_tokens}, got {self.min_tokens}.")
-        if self.logprobs is not None and self.logprobs < 0:
-            raise ValueError(
-                f"logprobs must be non-negative, got {self.logprobs}.")
-        if self.prompt_logprobs is not None and self.prompt_logprobs < 0:
-            raise ValueError(f"prompt_logprobs must be non-negative, got "
-                             f"{self.prompt_logprobs}.")
-        if (self.truncate_prompt_tokens is not None
-                and self.truncate_prompt_tokens < 1):
-            raise ValueError(f"truncate_prompt_tokens must be >= 1, "
-                             f"got {self.truncate_prompt_tokens}")
+                f"max_tokens={self.max_tokens}, got {self.min_tokens}."
+            )
+        if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
+            raise VLLMValidationError(
+                f"logprobs must be non-negative or -1, got {self.logprobs}.",
+                parameter="logprobs",
+                value=self.logprobs,
+            )
+        if (
+            self.prompt_logprobs is not None
+            and self.prompt_logprobs != -1
+            and self.prompt_logprobs < 0
+        ):
+            raise VLLMValidationError(
+                f"prompt_logprobs must be non-negative or -1, got "
+                f"{self.prompt_logprobs}.",
+                parameter="prompt_logprobs",
+                value=self.prompt_logprobs,
+            )
+        if self.truncate_prompt_tokens is not None and (
+            self.truncate_prompt_tokens == 0 or self.truncate_prompt_tokens < -1
+        ):
+            raise VLLMValidationError(
+                f"truncate_prompt_tokens must be an integer >= 1 or -1, "
+                f"got {self.truncate_prompt_tokens}",
+                parameter="truncate_prompt_tokens",
+                value=self.truncate_prompt_tokens,
+            )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
-            raise ValueError(f"stop_token_ids must contain only integers, "
-                             f"got {self.stop_token_ids}.")
+            raise ValueError(
+                f"stop_token_ids must contain only integers, got {self.stop_token_ids}."
+            )
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
         if self.stop and not self.detokenize:
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
-                "Set detokenize=True to use stop.")
-        if self.best_of != self._real_n and self.output_kind == (
-                RequestOutputKind.DELTA):
-            raise ValueError("best_of must equal n to use output_kind=DELTA")
+                "Set detokenize=True to use stop."
+            )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
-            raise ValueError("n must be 1 when using greedy sampling, "
-                             f"got {self.n}.")
+            raise ValueError(f"n must be 1 when using greedy sampling, got {self.n}.")
 
     def update_from_generation_config(
-            self,
-            generation_config: dict[str, Any],
-            model_eos_token_id: Optional[int] = None) -> None:
+        self,
+        generation_config: dict[str, Any],
+        model_eos_token_id: int | None = None,
+    ) -> None:
         """Update if there are non-default values from generation_config"""
 
         if model_eos_token_id is not None:
@@ -470,7 +507,7 @@ class SamplingParams(
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
-    def update_from_tokenizer(self, tokenizer: AnyTokenizer) -> None:
+    def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
@@ -481,30 +518,35 @@ class SamplingParams(
             for add_prefix_space in [False, True]:
                 prefix = " " if add_prefix_space else ""
                 prompt = prefix + bad_word.lstrip()
-                prompt_token_ids = tokenizer.encode(text=prompt,
-                                                    add_special_tokens=False)
+                prompt_token_ids = tokenizer.encode(
+                    text=prompt, add_special_tokens=False
+                )
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
                 if (not add_prefix_space) or (
-                        add_prefix_space and prompt_token_ids[0]
-                        != self._bad_words_token_ids[-1][0]
-                        and len(prompt_token_ids) == len(
-                            self._bad_words_token_ids[-1])):
+                    add_prefix_space
+                    and prompt_token_ids[0] != self._bad_words_token_ids[-1][0]
+                    and len(prompt_token_ids) == len(self._bad_words_token_ids[-1])
+                ):
                     self._bad_words_token_ids.append(prompt_token_ids)
 
         invalid_token_ids = [
-            token_id for bad_words_token_ids in self._bad_words_token_ids
+            token_id
+            for bad_words_token_ids in self._bad_words_token_ids
             for token_id in bad_words_token_ids
             if token_id < 0 or token_id > tokenizer.max_token_id
         ]
         if len(invalid_token_ids) > 0:
-            raise ValueError(
-                f"The model vocabulary size is {tokenizer.max_token_id+1},"
+            raise VLLMValidationError(
+                f"The model vocabulary size is {tokenizer.max_token_id + 1},"
                 f" but the following tokens"
                 f" were specified as bad: {invalid_token_ids}."
                 f" All token id values should be integers satisfying:"
-                f" 0 <= token_id <= {tokenizer.max_token_id}.")
+                f" 0 <= token_id <= {tokenizer.max_token_id}.",
+                parameter="bad_words",
+                value=self.bad_words,
+            )
 
     @cached_property
     def sampling_type(self) -> SamplingType:
@@ -519,7 +561,7 @@ class SamplingParams(
         return self._all_stop_token_ids
 
     @property
-    def bad_words_token_ids(self) -> Optional[list[list[int]]]:
+    def bad_words_token_ids(self) -> list[list[int]] | None:
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
 
@@ -530,12 +572,21 @@ class SamplingParams(
         data that is expensive to copy. However, if not copied, the processor
         needs to support parallel decoding for multiple sequences
         See https://github.com/vllm-project/vllm/issues/3087
+
+        If skip_clone is True, uses shallow copy instead of deep copy.
         """
 
-        logit_processor_refs = None if self.logits_processors is None else {
-            id(lp): lp.clone() if hasattr(lp, 'clone') else lp
-            for lp in self.logits_processors
-        }
+        if self.skip_clone:
+            return copy.copy(self)
+
+        logit_processor_refs = (
+            None
+            if self.logits_processors is None
+            else {
+                id(lp): lp.clone() if hasattr(lp, "clone") else lp
+                for lp in self.logits_processors
+            }
+        )
         return copy.deepcopy(self, memo=logit_processor_refs)
 
     def __repr__(self) -> str:
@@ -562,16 +613,19 @@ class SamplingParams(
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
-            f"guided_decoding={self.guided_decoding}, "
-            f"extra_args={self.extra_args})")
+            f"structured_outputs={self.structured_outputs}, "
+            f"extra_args={self.extra_args})"
+        )
 
 
 class BeamSearchParams(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        # required for @cached_property.
-        dict=True):  # type: ignore[call-arg]
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    # required for @cached_property.
+    dict=True,
+):  # type: ignore[call-arg]
     """Beam search parameters for text generation."""
+
     beam_width: int
     max_tokens: int
     ignore_eos: bool = False

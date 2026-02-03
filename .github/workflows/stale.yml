@@ -7,13 +7,15 @@ on:
 
 jobs:
   close-issues-and-pull-requests:
+    # Prevents triggering on forks or other repos
+    if: github.repository == 'vllm-project/vllm'
     permissions:
       issues: write
       pull-requests: write
       actions: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9.1.0
+      - uses: actions/stale@997185467fa4f803885201cee163a9f38240193d # v10.1.1
         with:
           # Increasing this value ensures that changes to this workflow
           # propagate to all issues and PRs in days rather than months

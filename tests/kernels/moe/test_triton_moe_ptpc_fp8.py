@@ -7,19 +7,23 @@ import itertools
 import pytest
 import torch
 
+from tests.kernels.moe.utils import fused_moe
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_moe
+from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.platforms import current_platform
 
 if current_platform.get_device_capability() < (9, 0):
-    pytest.skip("FP8 Triton requires CUDA 9.0 or higher",
-                allow_module_level=True)
+    pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
+
+if current_platform.is_fp8_fnuz():
+    pytest.skip(
+        "Tests in this file require float8_e4m3fn and platform does not support",
+        allow_module_level=True,
+    )
 
 
 def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
@@ -29,14 +33,13 @@ def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):
     B = B.to(torch.float32)
 
     assert A.shape[-1] == B.shape[-1], "Dimension mismatch"
-    assert B.ndim == 2 and B.is_contiguous(
-    ), "B must be a 2D contiguous tensor"
+    assert B.ndim == 2 and B.is_contiguous(), "B must be a 2D contiguous tensor"
 
     # Reshape input
     M = A.numel() // A.shape[-1]
     B = B.t()  # Transpose weight matrix
     N, K = B.shape
-    origin_C_shape = A.shape[:-1] + (K, )
+    origin_C_shape = A.shape[:-1] + (K,)
     A = A.reshape(M, N)
 
     # As is per-token [M, 1], Bs is per-column [1, K]
@@ -86,17 +89,17 @@ def torch_w8a8_per_column_moe(a, w1, w2, w1_s, w2_s, score, topk):
             act_out = SiluAndMul().forward_native(inter_out)
             # Quantize activation output with per-token
             act_out_q, act_out_s = ops.scaled_fp8_quant(
-                act_out, use_per_token_if_dynamic=True)
+                act_out, use_per_token_if_dynamic=True
+            )
 
             # Second MLP layer
-            out[mask] = native_w8a8_per_token_matmul(act_out_q,
-                                                     w2[i],
-                                                     act_out_s,
-                                                     w2_s[i],
-                                                     output_dtype=a.dtype)
+            out[mask] = native_w8a8_per_token_matmul(
+                act_out_q, w2[i], act_out_s, w2_s[i], output_dtype=a.dtype
+            )
     # Apply routing weights and sum
-    return (out.view(B, -1, w2.shape[1]) *
-            topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
+    return (
+        out.view(B, -1, w2.shape[1]) * topk_weight.view(B, -1, 1).to(out.dtype)
+    ).sum(dim=1)
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -114,8 +117,10 @@ TOP_KS = [2, 6]
 SEEDS = [0]
 
 
-@pytest.mark.parametrize("M, N, K, E, topk, dtype, seed",
-                         itertools.product(M, N, K, E, TOP_KS, DTYPES, SEEDS))
+@pytest.mark.parametrize(
+    "M, N, K, E, topk, dtype, seed",
+    itertools.product(M, N, K, E, TOP_KS, DTYPES, SEEDS),
+)
 @torch.inference_mode()
 def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
     torch.manual_seed(seed)
@@ -131,12 +136,10 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
 
     # Generate int8 weights
     w1_fp32 = (torch.rand((E, 2 * N, K), dtype=torch.float32) - 0.5) * 2
-    w1 = (w1_fp32 * fp8_max).clamp(min=fp8_min,
-                                   max=fp8_max).to(torch.float8_e4m3fn)
+    w1 = (w1_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
     w2_fp32 = (torch.rand((E, K, N), dtype=torch.float32) - 0.5) * 2
-    w2 = (w2_fp32 * fp8_max).clamp(min=fp8_min,
-                                   max=fp8_max).to(torch.float8_e4m3fn)
+    w2 = (w2_fp32 * fp8_max).clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
     # Generate scale for each column (per-column quantization)
     w1_s = torch.rand(E, 2 * N, device=w1_fp32.device) * factor_for_scale
@@ -152,15 +155,16 @@ def test_w8a8_fp8_fused_moe(M, N, K, E, topk, dtype, seed):
             score,
             topk,
             renormalize=False,
-            use_fp8_w8a8=True,  # using fp8
-            per_channel_quant=True,
-            w1_scale=w1_s,
-            w2_scale=w2_s,
-            block_shape=None,  # Not using block quantization
+            quant_config=fp8_w8a8_moe_quant_config(
+                per_act_token_quant=True,
+                w1_scale=w1_s,
+                w2_scale=w2_s,
+                block_shape=None,  # Not using block quantization
+            ),
         )
 
     # Check results
-    rel_diff = (torch.mean(
-        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /
-                torch.mean(torch.abs(ref_out.to(torch.float32))))
+    rel_diff = torch.mean(
+        torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))
+    ) / torch.mean(torch.abs(ref_out.to(torch.float32)))
     assert rel_diff < 0.05
