@@ -367,7 +367,7 @@ class SHMConnector(ECConnectorBase):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        if not self.is_producer:
+        if self.is_producer:
             for request_id in finished_req_ids:
                 gc.collect()
                 torch.cuda.empty_cache()
