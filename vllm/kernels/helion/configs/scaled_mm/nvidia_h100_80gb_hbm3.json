@@ -1,0 +1,72 @@
+[
+  {
+    "key": {},
+    "config": {
+      "block_sizes": [
+        16,
+        32,
+        256
+      ],
+      "loop_orders": [
+        [
+          0,
+          1,
+          2
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        0,
+        2
+      ],
+      "range_warp_specializes": [
+        null,
+        null
+      ],
+      "range_num_stages": [],
+      "range_multi_buffers": [
+        null,
+        null
+      ],
+      "range_flattens": [
+        null,
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+      ],
+      "num_warps": 4,
+      "num_stages": 2,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer"
+      ],
+      "atomic_indexing": [
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "split_k": 1,
+      "swap_ab": false
+    }
+  }
+]
