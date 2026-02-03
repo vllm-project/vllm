@@ -1374,7 +1374,6 @@ class LLM:
         tokenizer: TokenizerLike,
         text_1: list[str | TextPrompt | TokensPrompt],
         text_2: list[str | TextPrompt | TokensPrompt],
-        truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         pooling_params: PoolingParams | None = None,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
@@ -1390,7 +1389,6 @@ class LLM:
 
         encoded_output: list[PoolingRequestOutput] = self.encode(
             text_1 + text_2,
-            truncate_prompt_tokens=truncate_prompt_tokens,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             pooling_params=pooling_params,
@@ -1612,10 +1610,10 @@ class LLM:
                 tokenizer,
                 data_1,  # type: ignore[arg-type]
                 data_2,  # type: ignore[arg-type]
-                truncate_prompt_tokens,
-                use_tqdm,
-                pooling_params,
-                lora_request,
+                use_tqdm=use_tqdm,
+                pooling_params=pooling_params,
+                lora_request=lora_request,
+                tokenization_kwargs=encode_kwargs,
             )
         else:
             return self._embedding_score(

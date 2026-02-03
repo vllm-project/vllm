@@ -307,6 +307,53 @@ An OpenAI client example can be found here: [examples/pooling/embed/openai_embed
 
 ## Specific models
 
+### ColBERT Late Interaction Models
+
+[ColBERT](https://arxiv.org/abs/2004.12832) (Contextualized Late Interaction over BERT) is a retrieval model that uses per-token embeddings and MaxSim scoring for document ranking. Unlike single-vector embedding models, ColBERT retains token-level representations and computes relevance scores through late interaction, providing better accuracy while being more efficient than cross-encoders.
+
+vLLM supports ColBERT models for reranking tasks. To use a ColBERT model, you need to override the architecture:
+
+```shell
+vllm serve answerdotai/answerai-colbert-small-v1 \
+    --hf-overrides '{"architectures": ["ColBERTModel"], "dim": 96}'
+```
+
+Then you can use the rerank endpoint:
+
+```shell
+curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
+    "model": "answerdotai/answerai-colbert-small-v1",
+    "query": "What is machine learning?",
+    "documents": [
+        "Machine learning is a subset of artificial intelligence.",
+        "Python is a programming language.",
+        "Deep learning uses neural networks."
+    ]
+}'
+```
+
+Or the score endpoint:
+
+```shell
+curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
+    "model": "answerdotai/answerai-colbert-small-v1",
+    "text_1": "What is machine learning?",
+    "text_2": ["Machine learning is a subset of AI.", "The weather is sunny."]
+}'
+```
+
+You can also get the raw token embeddings using the pooling endpoint with `token_embed` task:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+    "model": "answerdotai/answerai-colbert-small-v1",
+    "input": "What is machine learning?",
+    "task": "token_embed"
+}'
+```
+
+An example can be found here: [examples/pooling/score/colbert_rerank_online.py](../../examples/pooling/score/colbert_rerank_online.py)
+
 ### BAAI/bge-m3
 
 The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`

@@ -20,7 +20,6 @@ def server():
     args = [
         "--max-model-len",
         str(MAX_MODEL_LEN),
-        "--no-enable-prefix-caching",
         "--hf-overrides",
         f'{{"architectures": ["ColBERTModel"], "dim": {COLBERT_DIM}}}',
     ]

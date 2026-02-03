@@ -520,6 +520,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "ColBERTModel": _HfExamplesInfo(
+        "answerdotai/answerai-colbert-small-v1",
+        hf_overrides={"architectures": ["ColBERTModel"], "dim": 96},
+    ),
     "BgeM3EmbeddingModel": _HfExamplesInfo("BAAI/bge-m3"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),

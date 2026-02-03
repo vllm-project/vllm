@@ -38,7 +38,6 @@ def test_colbert_token_embed(vllm_runner, colbert_model_name):
         dtype=DTYPE,
         max_model_len=512,
         enforce_eager=True,
-        enable_prefix_caching=False,
         hf_overrides={"architectures": ["ColBERTModel"], "dim": COLBERT_DIM},
     ) as vllm_model:
         # Get token embeddings for a single text
@@ -61,7 +60,6 @@ def test_colbert_late_interaction_1_to_1(vllm_runner, colbert_model_name):
         dtype=DTYPE,
         max_model_len=512,
         enforce_eager=True,
-        enable_prefix_caching=False,
         hf_overrides={"architectures": ["ColBERTModel"], "dim": COLBERT_DIM},
     ) as vllm_model:
         # Get token embeddings
@@ -89,7 +87,6 @@ def test_colbert_late_interaction_1_to_N(vllm_runner, colbert_model_name):
         dtype=DTYPE,
         max_model_len=512,
         enforce_eager=True,
-        enable_prefix_caching=False,
         hf_overrides={"architectures": ["ColBERTModel"], "dim": COLBERT_DIM},
     ) as vllm_model:
         # Get token embeddings
@@ -120,7 +117,6 @@ def test_colbert_late_interaction_N_to_N(vllm_runner, colbert_model_name):
         dtype=DTYPE,
         max_model_len=512,
         enforce_eager=True,
-        enable_prefix_caching=False,
         hf_overrides={"architectures": ["ColBERTModel"], "dim": COLBERT_DIM},
     ) as vllm_model:
         # Get token embeddings
@@ -157,7 +153,6 @@ def test_colbert_relevance_ordering(vllm_runner, colbert_model_name):
         dtype=DTYPE,
         max_model_len=512,
         enforce_eager=True,
-        enable_prefix_caching=False,
         hf_overrides={"architectures": ["ColBERTModel"], "dim": COLBERT_DIM},
     ) as vllm_model:
         scores = vllm_model.score(query, documents)
@@ -180,7 +175,6 @@ def test_colbert_embed_not_supported(vllm_runner, colbert_model_name):
             dtype=DTYPE,
             max_model_len=512,
             enforce_eager=True,
-            enable_prefix_caching=False,
             hf_overrides={"architectures": ["ColBERTModel"], "dim": COLBERT_DIM},
         ) as vllm_model,
         pytest.raises(ValueError, match="Task embed is not supported"),
@@ -205,7 +199,6 @@ def test_colbert_hf_comparison(vllm_runner, colbert_model_name):
         dtype="float32",
         max_model_len=512,
         enforce_eager=True,
-        enable_prefix_caching=False,
         hf_overrides={"architectures": ["ColBERTModel"], "dim": COLBERT_DIM},
     ) as vllm_model:
         vllm_outputs = vllm_model.token_embed(test_texts)

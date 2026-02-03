@@ -23,7 +23,7 @@ from .bert import BertEmbeddingModel, BertModel
 from .interfaces_base import default_pooling_type
 
 
-@default_pooling_type(tok_pooling_type="ALL")
+@default_pooling_type(seq_pooling_type="CLS", tok_pooling_type="ALL")
 class ColBERTModel(BertEmbeddingModel):
     """ColBERT late interaction model for retrieval/reranking.
 
