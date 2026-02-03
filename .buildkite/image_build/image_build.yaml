@@ -1,6 +1,6 @@
 group: Abuild
 steps:
-  - label: ":docker: Build image"
+  - label: ":docker: Build image (for testing)"
     key: image-build
     depends_on: []
     commands:
