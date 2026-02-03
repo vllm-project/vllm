@@ -49,11 +49,12 @@ class ScoreMultiModalParam(TypedDict, total=False):
 
 
 # Raw input data with content key in ScoreMultiModalParam.
-ScoreInputs = str | ScoreMultiModalParam | list[str | ScoreMultiModalParam]
-ScoreInputsList = list[str | ScoreMultiModalParam]
+ScoreInput = str | ScoreMultiModalParam
+ScoreInputs = ScoreInput | list[ScoreInput]
+ScoreInputList = list[ScoreInput]
 # Score data without content key.
 ScoreData = str | list[ScoreContentPartParam]
-ScoreDataList = list[str | list[ScoreContentPartParam]]
+ScoreDataList = list[ScoreData]
 
 
 def _cosine_similarity(
@@ -102,7 +103,7 @@ def _validate_score_input_lens(
 
 
 def _validate_mm_score_input(
-    data: ScoreInputsList,
+    data: ScoreInputList,
     is_multimodal_model: bool,
     architecture: str,
 ) -> ScoreDataList:

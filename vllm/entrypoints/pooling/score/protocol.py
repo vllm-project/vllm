@@ -14,8 +14,8 @@ from vllm.entrypoints.pooling.base.protocol import (
 )
 from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
+    ScoreInput,
     ScoreInputs,
-    ScoreMultiModalParam,
 )
 from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
@@ -100,7 +100,7 @@ ScoreRequest: TypeAlias = (
 
 
 class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
-    query: str | ScoreMultiModalParam
+    query: ScoreInput
     documents: ScoreInputs
     top_n: int = Field(default_factory=lambda: 0)
 
