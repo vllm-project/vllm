@@ -141,6 +141,7 @@ class OpenAIServingChat(OpenAIServing):
             tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
+        self._tool_parser_cache: dict[int, ToolParser] = {}
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -328,7 +329,10 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 # Apply tool_choice adjustments (e.g., tool_choice="required")
                 if tool_parser is not None and tokenizer is not None:
-                    request = tool_parser(tokenizer).adjust_request(request)
+                    tok_id = id(tokenizer)
+                    if tok_id not in self._tool_parser_cache:
+                        self._tool_parser_cache[tok_id] = tool_parser(tokenizer)
+                    request = self._tool_parser_cache[tok_id].adjust_request(request)
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(e)
