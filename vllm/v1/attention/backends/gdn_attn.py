@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import VllmConfig
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -98,16 +99,16 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.decode_cudagraph_max_bs = (
             self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1)
         )
-        if self.compilation_config.max_cudagraph_capture_size is None:
-            max_cudagraph_capture_size = 0
-        else:
-            max_cudagraph_capture_size = (
-                self.compilation_config.max_cudagraph_capture_size
+        if self.compilation_config.max_cudagraph_capture_size is not None:
+            self.decode_cudagraph_max_bs = min(
+                self.decode_cudagraph_max_bs,
+                self.compilation_config.max_cudagraph_capture_size,
             )
-        self.decode_cudagraph_max_bs = min(
-            self.decode_cudagraph_max_bs,
-            max_cudagraph_capture_size,
-        )
+        if (
+            current_platform.is_xpu()
+            and self.compilation_config.max_cudagraph_capture_size is None
+        ):
+            self.decode_cudagraph_max_bs = 0
 
         self.spec_state_indices_tensor = torch.empty(
             (self.decode_cudagraph_max_bs, self.num_spec + 1),

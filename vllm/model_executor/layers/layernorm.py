@@ -471,6 +471,7 @@ class RMSNormGated(CustomOp):
             norm_before_gate=self.norm_before_gate,
         )
 
+
 class LayerNorm(nn.Module):
     """
     Layer Normalization.
