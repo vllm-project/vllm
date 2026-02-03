@@ -215,7 +215,11 @@ class InternSdpaAttention(nn.Module):
         self.projection_layer = nn.Linear(self.dummy_dim, self.embed_dim)
 
         # Use unified MMEncoderAttention with automatic backend selection
-        self.attn = MMEncoderAttention(self.num_heads, self.head_dim, self.scale)
+        self.attn = MMEncoderAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x shape: (B, N, C)"""
