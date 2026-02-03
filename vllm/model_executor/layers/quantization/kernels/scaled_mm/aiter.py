@@ -155,8 +155,8 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
         ):
             return (
                 False,
-                "Only duynamic per token group activation"
-                "quantization with group shape=(1,12) supported",
+                "Supports only dynamic per token group activation \
+                quantization with group_shape=(1,12).",
             )
 
     @classmethod
