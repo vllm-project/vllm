@@ -343,7 +343,6 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
         self.group_shape = group_shape
-        self.has_col_major_scales = has_col_major_scales
         super().__init__(
             epsilon,
             key,
@@ -403,7 +402,6 @@ class FusedAddRMSNormGroupTMAQuantPattern(RMSNormQuantPattern):
         quant_dtype: torch.dtype,
         group_shape: GroupShape,
         symmetric: bool = True,
-        has_col_major_scales: bool = False,
         is_e8m0: bool = False,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
@@ -412,13 +410,11 @@ class FusedAddRMSNormGroupTMAQuantPattern(RMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
         self.group_shape = group_shape
-        self.has_col_major_scales = has_col_major_scales
-        assert has_col_major_scales, "TMA must be transposed"
         self.is_e8m0 = is_e8m0
         super().__init__(
             epsilon,
             key,
-            has_col_major_scales=has_col_major_scales,
+            has_col_major_scales=True,
             is_e8m0=is_e8m0,
             is_tma_aligned=True,
         )
@@ -477,7 +473,7 @@ class FusedAddRMSNormGroupTMAQuantPattern(RMSNormQuantPattern):
                 scale_ub=None,
                 residual=residual,
                 group_size=self.group_shape[1],
-                is_scale_transposed=self.has_col_major_scales,
+                is_scale_transposed=True,
             )
 
             # result, residual, scale
@@ -501,7 +497,6 @@ class RMSNormGroupTMAQuantPattern(RMSNormQuantPattern):
         quant_dtype: torch.dtype,
         group_shape: GroupShape,
         symmetric: bool = True,
-        has_col_major_scales: bool = False,
         is_e8m0: bool = False,
     ) -> None:
         scale = ScaleDesc(torch.float32, False, group_shape)
@@ -510,12 +505,10 @@ class RMSNormGroupTMAQuantPattern(RMSNormQuantPattern):
             quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
         )
         self.group_shape = group_shape
-        self.has_col_major_scales = has_col_major_scales
-        assert has_col_major_scales, "TMA must be transposed"
         super().__init__(
             epsilon,
             key,
-            has_col_major_scales=has_col_major_scales,
+            has_col_major_scales=True,
             is_e8m0=is_e8m0,
             is_tma_aligned=True,
         )
@@ -567,7 +560,7 @@ class RMSNormGroupTMAQuantPattern(RMSNormQuantPattern):
                 scale_ub=None,
                 residual=None,
                 group_size=self.group_shape[1],
-                is_scale_transposed=self.quant_matcher.has_col_major_scales,
+                is_scale_transposed=True,
             )
 
             # result, scale
@@ -756,7 +749,6 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
                                     epsilon,
                                     FP8_DTYPE,
                                     group_shape=group_shape,
-                                    has_col_major_scales=has_col_major_scales,
                                     is_e8m0=is_e8m0,
                                 ).register(self.patterns)
 
@@ -765,7 +757,6 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
                                     epsilon,
                                     FP8_DTYPE,
                                     group_shape=group_shape,
-                                    has_col_major_scales=has_col_major_scales,
                                     is_e8m0=is_e8m0,
                                 ).register(self.patterns)
 

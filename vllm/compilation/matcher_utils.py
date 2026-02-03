@@ -412,15 +412,10 @@ class MatcherQuantFP8(MatcherCustomOp):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.quant_fp8(input, scale)  # type: ignore[no-any-return]
 
-    def make_scale(
-        self,
-        input: torch.Tensor,
-        transposed: bool = False,
-    ) -> torch.Tensor:
+    def make_scale(self, input: torch.Tensor, transposed: bool = False) -> torch.Tensor:
         normalized_group_shape = _normalize_quant_group_shape(
             input, self.quant_key.scale.group_shape
         )
-
         scale_shape = (
             input.shape[0] // normalized_group_shape[0],
             input.shape[1] // normalized_group_shape[1],
