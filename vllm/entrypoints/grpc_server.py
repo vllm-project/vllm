@@ -97,9 +97,24 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             else:
                 prompt: TextPrompt = {"prompt": request.text}
 
+            # Extract kv_transfer_params for Mooncake PD disaggregation
+            kv_transfer_params = None
+            if request.HasField("kv_transfer_params"):
+                kv_transfer_params = {
+                    "remote_host": request.kv_transfer_params.remote_host,
+                    "remote_port": request.kv_transfer_params.remote_port,
+                }
+                logger.debug(
+                    "Request %s has kv_transfer_params: %s",
+                    request_id, kv_transfer_params
+                )
+
             # Build sampling params with detokenize=False
+            # Pass kv_transfer_params via extra_args for Mooncake PD
             sampling_params = self._sampling_params_from_proto(
-                request.sampling_params, stream=request.stream
+                request.sampling_params,
+                stream=request.stream,
+                kv_transfer_params=kv_transfer_params,
             )
 
             async for output in self.async_llm.generate(
@@ -242,7 +257,9 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
     @staticmethod
     def _sampling_params_from_proto(
-        params: vllm_engine_pb2.SamplingParams, stream: bool = True
+        params: vllm_engine_pb2.SamplingParams,
+        stream: bool = True,
+        kv_transfer_params: dict | None = None,
     ) -> SamplingParams:
         """
         Convert protobuf SamplingParams to vLLM SamplingParams.
@@ -250,6 +267,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Args:
             params: Protobuf SamplingParams message
             stream: Whether streaming is enabled
+            kv_transfer_params: KV transfer params for Mooncake PD disaggregation
 
         Returns:
             vLLM SamplingParams with detokenize=False and structured_outputs
@@ -280,6 +298,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 structured_outputs = StructuredOutputsParams(
                     choice=list(params.choice.choices)
                 )
+
+        # Build extra_args for kv_transfer_params (Mooncake PD)
+        extra_args = None
+        if kv_transfer_params:
+            extra_args = {"kv_transfer_params": kv_transfer_params}
 
         # Create SamplingParams
         # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
@@ -312,6 +335,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if params.HasField("truncate_prompt_tokens")
             else None,
             structured_outputs=structured_outputs,
+            extra_args=extra_args,
             # detokenize must be True if stop strings are used
             detokenize=bool(stop),
             output_kind=RequestOutputKind.DELTA
@@ -385,6 +409,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 ),
             )
 
+        # Build kv_transfer_params if present (Mooncake PD)
+        kv_transfer_params = None
+        if output.kv_transfer_params:
+            kv_transfer_params = vllm_engine_pb2.KvTransferParams(
+                remote_host=output.kv_transfer_params.get("remote_host", ""),
+                remote_port=output.kv_transfer_params.get("remote_port", 0),
+            )
+
         # Build complete response
         # When streaming (DELTA mode): completion.token_ids will be empty/last delta
         # When non-streaming (FINAL_ONLY mode): completion.token_ids has all tokens
@@ -398,6 +430,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 else 0,
                 completion_tokens=len(completion.token_ids),
                 cached_tokens=output.num_cached_tokens,
+                kv_transfer_params=kv_transfer_params,
             ),
         )
 

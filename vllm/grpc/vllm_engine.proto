@@ -101,6 +101,16 @@ message GenerateRequest {
 
   // Streaming
   bool stream = 5;
+
+  // KV transfer parameters for PD disaggregation (Mooncake)
+  // Decode worker uses this to fetch KV cache from prefill worker
+  KvTransferParams kv_transfer_params = 6;
+}
+
+// KV cache transfer parameters for Mooncake PD disaggregation
+message KvTransferParams {
+  string remote_host = 1;  // Prefill worker's side-channel host
+  uint32 remote_port = 2;  // Prefill worker's side-channel port
 }
 
 // =====================
@@ -135,6 +145,10 @@ message GenerateComplete {
   // Logprobs support (TODO: implement in Phase 4)
   // OutputLogProbs output_logprobs = 6;
   // InputLogProbs input_logprobs = 7;
+
+  // KV transfer parameters returned by prefill worker (Mooncake PD)
+  // Contains prefill's side-channel address for decode to fetch KV cache
+  KvTransferParams kv_transfer_params = 8;
 }
 
 // =====================
