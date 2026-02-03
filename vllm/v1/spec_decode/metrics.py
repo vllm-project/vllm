@@ -40,6 +40,13 @@ class SpecDecodingStats:
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
         assert num_accepted_tokens <= self.num_spec_tokens
+        
+        # For dynamic_spec_decode
+        if num_accepted_tokens > len(self.num_accepted_tokens_per_pos):
+            self.num_accepted_tokens_per_pos.extend(
+                [0] * (num_accepted_tokens - len(self.num_accepted_tokens_per_pos))
+            )
+        
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
 
@@ -93,8 +100,23 @@ class SpecDecodingLogging:
         # Conventionally, mean acceptance length includes the bonus token
         mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
 
-        pos_matrix = np.array(self.accepted_tokens_per_pos_lists)
-        acceptance_rates = np.sum(pos_matrix, axis=0) / num_drafts
+        # [FIX] Handle ragged lists by finding max_length and summing manually.
+        if not self.accepted_tokens_per_pos_lists or num_drafts == 0:
+            acceptance_rates = np.array([])
+        else:
+            max_len = max(
+                len(inner_list)
+                for inner_list in self.accepted_tokens_per_pos_lists
+                if inner_list
+            )
+            summed_pos = np.zeros(max_len, dtype=np.int64)
+            for pos_list in self.accepted_tokens_per_pos_lists:
+                # Convert the inner list to a NumPy array for vectorized addition
+                pos_array = np.array(pos_list)
+                summed_pos[: len(pos_array)] += pos_array
+
+            acceptance_rates = summed_pos / num_drafts
+        
         rates_str = ", ".join(f"{p:.3f}" for p in acceptance_rates)
 
         log_fn(

@@ -507,6 +507,7 @@ class EngineArgs:
     logits_processor_pattern: str | None = ModelConfig.logits_processor_pattern
 
     speculative_config: dict[str, Any] | None = None
+    acceptance_rate_threshold: float = SpeculativeConfig.acceptance_rate_threshold
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -1163,6 +1164,12 @@ class EngineArgs:
             "--speculative-config", **vllm_kwargs["speculative_config"]
         )
         vllm_group.add_argument(
+            "--acceptance-rate-threshold",
+            type=float,
+            default=SpeculativeConfig.acceptance_rate_threshold,
+            help=SpeculativeConfig.acceptance_rate_threshold.__doc__,
+        )
+        vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
@@ -1314,6 +1321,8 @@ class EngineArgs:
             pt_load_map_location=self.pt_load_map_location,
         )
 
+        return SpeculativeConfig(**self.speculative_config)
+
     def create_speculative_config(
         self,
         target_model_config: ModelConfig,
@@ -1327,8 +1336,11 @@ class EngineArgs:
         provided as a JSON string input via CLI arguments or directly as a
         dictionary from the engine.
         """
-        if self.speculative_config is None:
+        if self.speculative_config is None and self.acceptance_rate_threshold is None:
             return None
+        
+        if self.speculative_config is None:
+            self.speculative_config = {}
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
@@ -1339,6 +1351,12 @@ class EngineArgs:
                 "target_parallel_config": target_parallel_config,
             }
         )
+        
+        if self.acceptance_rate_threshold is not None:
+             self.speculative_config["acceptance_rate_threshold"] = (
+                 self.acceptance_rate_threshold
+             )
+
         return SpeculativeConfig(**self.speculative_config)
 
     def create_engine_config(

@@ -42,7 +42,7 @@ MTPModelTypes = Literal[
     "mtp",
     "pangu_ultra_moe_mtp",
 ]
-EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
+EagleModelTypes = Literal["eagle", "eagle3", "eagle_dynamic", MTPModelTypes]
 SpeculativeMethod = Literal[
     "ngram",
     "medusa",
@@ -116,6 +116,11 @@ class SpeculativeConfig:
     prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+
+    # Dynamic proposal configuration
+    acceptance_rate_threshold: float = 0.4
+    """The acceptance rate threshold for dynamically adjusting the number of
+    speculative tokens."""
 
     speculative_token_tree: str | None = None
     """Specifies the tree structure for speculative token generation.
@@ -716,7 +721,7 @@ class SpeculativeConfig:
                 )
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in ("eagle", "eagle3", "eagle_dynamic", "mtp")
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
