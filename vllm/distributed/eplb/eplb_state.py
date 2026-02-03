@@ -151,6 +151,11 @@ class EplbModelState:
     CUDA event recorded when the async worker finishes filling the buffer.
     The main thread waits on this before consuming the buffer.
     """
+    buffer_consumed_event: torch.cuda.Event | None
+    """
+    CUDA event recorded after the main thread finishes consuming the buffer.
+    The async worker waits on this before writing to the buffer again.
+    """
     ep_buffer_ready: int
     """
     The flag indicates whether the expert buffer is ready for transfer.
@@ -502,6 +507,7 @@ class EplbState:
             expert_buffer=expert_buffer,
             buffer_lock=threading.Lock(),
             buffer_ready_event=None,
+            buffer_consumed_event=None,
             ep_buffer_ready=0,
             layer_to_transfer=0,
             rebalanced=False,
@@ -970,8 +976,23 @@ class EplbState:
         ep_group: ProcessGroup,
         is_profile: bool = False,
     ):
-        if not model_state.buffer_lock.acquire(blocking=False):
-            return
+        # We call move_to_workspace only when ep_buffer_ready is 1.
+        # It means we only need to wait for the lock for a short time.
+        max_retries = 6  # 1 minute max
+        retries = 0
+        while not model_state.buffer_lock.acquire(blocking=True, timeout=10.0):
+            retries += 1
+            if retries >= max_retries:
+                raise RuntimeError(
+                    f"Rank {ep_group.rank()}: buffer_lock timeout after "
+                    "{max_retries * 10}s"
+                )
+            logger.warning(
+                "Rank %d: EPLB buffer_lock acquire failed, retrying (%d/%d)",
+                ep_group.rank(),
+                retries,
+                max_retries,
+            )
         try:
             assert model_state.new_physical_to_logical_map is not None
             device_index = model_state.cuda_device_index or self.cuda_device_index
@@ -997,6 +1018,12 @@ class EplbState:
                 new_indices=new_indices,
                 ep_rank=ep_group.rank(),
             )
+            # Record event after consuming buffer to signal async thread
+            # that it's safe to overwrite the buffer
+            consumed_event = torch.cuda.Event()
+            consumed_event.record()
+            model_state.buffer_consumed_event = consumed_event
+
             transferred_layer = model_state.layer_to_transfer
             self._update_layer_mapping_from_new(model_state, transferred_layer)
             # After the main thread consumes, advance layer_to_transfer
@@ -1141,6 +1168,15 @@ class EplbState:
         for eplb_model_state in self.model_states.values():
             load_pass_list.append(eplb_model_state.expert_load_pass.clone())
         return self._allreduce_list(load_pass_list)
+
+
+@dataclass
+class EplbLayerState:
+    """Runtime EPLB data stored in the MoE layer."""
+
+    expert_load_view: torch.Tensor | None = None
+    logical_to_physical_map: torch.Tensor | None = None
+    logical_replica_count: torch.Tensor | None = None
 
 
 def _node_count_with_rank_mapping(
