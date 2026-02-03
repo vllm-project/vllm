@@ -31,6 +31,8 @@ Usage:
           Set to 0 for constant values, >0 for random sampling
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -82,9 +84,9 @@ class DecodeBenchConnector(KVConnectorBase_V1):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
@@ -104,7 +106,7 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, DecodeBenchConnectorMetadata)
         self.connector_worker.start_fill_kv(self._connector_metadata)
@@ -133,7 +135,7 @@ class DecodeBenchConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: Request,
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
@@ -142,7 +144,7 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         )
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
@@ -150,14 +152,14 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         )
 
     def build_connector_meta(
-        self, scheduler_output: "SchedulerOutput"
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
@@ -168,7 +170,7 @@ class DecodeBenchConnector(KVConnectorBase_V1):
 class DecodeBenchConnectorScheduler:
     """Scheduler-side implementation for DecodeBenchConnector."""
 
-    def __init__(self, vllm_config: "VllmConfig"):
+    def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
@@ -183,7 +185,7 @@ class DecodeBenchConnectorScheduler:
 
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: Request,
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
         """
@@ -216,7 +218,7 @@ class DecodeBenchConnectorScheduler:
         return num_tokens_to_fill, False
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         """
         Called after blocks are allocated. Store the block IDs so we can
@@ -263,7 +265,7 @@ class DecodeBenchConnectorScheduler:
         )
 
     def build_connector_meta(
-        self, scheduler_output: "SchedulerOutput"
+        self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         """
         Build metadata containing information about which blocks to fill
@@ -276,7 +278,7 @@ class DecodeBenchConnectorScheduler:
 
         return meta
 
-    def request_finished(self, request: "Request"):
+    def request_finished(self, request: Request):
         """
         Called when a request has finished. Clean up any state.
         """
@@ -286,7 +288,7 @@ class DecodeBenchConnectorScheduler:
 class DecodeBenchConnectorWorker:
     """Worker-side implementation for DecodeBenchConnector."""
 
-    def __init__(self, vllm_config: "VllmConfig"):
+    def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 

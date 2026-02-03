@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import threading
 from typing import TYPE_CHECKING, Any
 from weakref import ref as weakref_ref
@@ -63,7 +65,7 @@ class MoRIIOWriter:
     Implements distributed KV cache transfer using the MoRIIO library
     for RDMA-based communication between prefill and decode instances."""
 
-    def __init__(self, worker: "MoRIIOConnectorWorker"):
+    def __init__(self, worker: MoRIIOConnectorWorker):
         """Initialize the writer.
 
         Args:
@@ -76,7 +78,7 @@ class MoRIIOWriter:
         self._deferred_tasks: list[WriteTask] = []
 
     @property
-    def worker(self) -> "MoRIIOConnectorWorker":
+    def worker(self) -> MoRIIOConnectorWorker:
         """Get the worker instance.
 
         Returns:
@@ -340,7 +342,7 @@ class MoRIIOWrapper:
 
     def __init__(
         self,
-        moriio_engine: "IOEngine | None" = None,
+        moriio_engine: IOEngine | None = None,
         tp_rank: int = 0,
         dp_rank: int = 0,
     ):

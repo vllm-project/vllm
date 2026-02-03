@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import os
 from typing import TYPE_CHECKING
 
@@ -122,8 +124,8 @@ def from_layer(
 
 
 def from_layer_logits_processor(
-    layer: "LogitsProcessor",
-    lm_head: "ParallelLMHead",
+    layer: LogitsProcessor,
+    lm_head: ParallelLMHead,
     max_loras: int,
     lora_config: LoRAConfig,
     model_config: PretrainedConfig | None = None,
@@ -150,7 +152,7 @@ def replace_submodule(
 
 
 def parse_fine_tuned_lora_name(
-    name: str, weights_mapper: "WeightsMapper | None" = None
+    name: str, weights_mapper: WeightsMapper | None = None
 ) -> tuple[str, bool]:
     """Parse the name of lora weights.
 

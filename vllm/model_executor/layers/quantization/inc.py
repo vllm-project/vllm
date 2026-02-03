@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from fractions import Fraction
 from typing import TYPE_CHECKING, Any
 
@@ -111,7 +113,7 @@ class INCConfig(QuantizationConfig):
         return ["quantization_config.json"]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "INCConfig":
+    def from_config(cls, config: dict[str, Any]) -> INCConfig:
         return cls(
             weight_bits=cls.get_from_keys(config, ["bits"]),
             group_size=cls.get_from_keys(config, ["group_size"]),
@@ -216,7 +218,7 @@ class INCConfig(QuantizationConfig):
     def check_quantized(self, weight_bits: int) -> bool:
         return weight_bits < 16
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         if self.block_name_to_quantize is not None:
             self.block_name_to_quantize = hf_to_vllm_mapper.apply_list(
                 self.block_name_to_quantize
@@ -456,7 +458,7 @@ class INCConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
-    ) -> "QuantizationMethods | None":
+    ) -> QuantizationMethods | None:
         """Override the `auto-round` method to `inc`."""
         is_auto_round_format = hf_quant_cfg.get("quant_method", None) == "auto-round"
         if is_auto_round_format:

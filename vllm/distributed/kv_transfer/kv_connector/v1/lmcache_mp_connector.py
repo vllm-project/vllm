@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import enum
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -131,7 +133,7 @@ def create_worker_adapter(
 
 
 def convert_block_hashes_to_bytes(
-    block_hashes: list["BlockHash"],
+    block_hashes: list[BlockHash],
 ) -> list[bytes]:
     return cast(list[bytes], block_hashes)
 
@@ -157,7 +159,7 @@ class LMCacheMPRequestTracker:
 
     # Read-only lists to track the token ids and block hashes
     all_token_ids: ConstantList[int]
-    block_hashes: ConstantList["BlockHash"]
+    block_hashes: ConstantList[BlockHash]
 
     # Block ids and hashes will be updated at update_states_after_alloc and
     # during the generation
@@ -179,7 +181,7 @@ class LMCacheMPRequestTracker:
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
 
-    def __init__(self, request: "Request"):
+    def __init__(self, request: Request):
         self.request_id = request.request_id
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
@@ -259,7 +261,7 @@ class LMCacheMPRequestMetadata:
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
         vllm_block_size: int,
-    ) -> "LMCacheMPRequestMetadata | None":
+    ) -> LMCacheMPRequestMetadata | None:
         """
         Generate the store metadata for the current request tracker.
 
@@ -303,7 +305,7 @@ class LMCacheMPRequestMetadata:
     def GetRetrieveMetadata(
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
-    ) -> "LMCacheMPRequestMetadata | None":
+    ) -> LMCacheMPRequestMetadata | None:
         """
         Generate the retrieve metadata for the current request tracker.
 
@@ -383,9 +385,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
@@ -446,7 +448,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self.worker_adapter.register_kv_caches(kv_caches)
         return
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -595,7 +597,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             self.worker_adapter.shutdown()
         return None
 
-    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
         Get the KV connector stats collected during the last interval.
         """
@@ -607,7 +609,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: Request,
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
         """
@@ -674,7 +676,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         return need_to_load, need_to_load > 0
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         """
         Update KVConnector state after block allocation.
@@ -747,7 +749,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """
@@ -768,7 +770,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self._cleanup_request_tracker(request.request_id)
         return True, None
 
-    def take_events(self) -> Iterable["KVCacheEvent"]:
+    def take_events(self) -> Iterable[KVCacheEvent]:
         """
         Take the KV cache events from the connector.
 
@@ -778,7 +780,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         return ()
 
     @classmethod
-    def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
         """
         Get the required KV cache layout for this connector.
         Args:
@@ -810,7 +812,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     @classmethod
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
-    ) -> "KVConnectorStats | None":
+    ) -> KVConnectorStats | None:
         """
         KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
@@ -821,11 +823,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     @classmethod
     def build_prom_metrics(
         cls,
-        vllm_config: "VllmConfig",
-        metric_types: dict[type["PromMetric"], type["PromMetricT"]],
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
-    ) -> "KVConnectorPromMetrics | None":
+    ) -> KVConnectorPromMetrics | None:
         """
         Create a KVConnectorPromMetrics subclass which should register
         per-connector Prometheus metrics and implement observe() to
@@ -905,7 +907,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         return self.request_trackers[request_id]
 
     def _get_or_create_request_tracker(
-        self, request: "Request"
+        self, request: Request
     ) -> LMCacheMPRequestTracker:
         request_id = request.request_id
         # Remove the old trackers that is created before the preemption

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any
 
@@ -112,7 +114,7 @@ class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
     Supports loading kv-cache scaling factors from FP8 checkpoints.
     """
 
-    def __init__(self, quant_config: "ModelOptQuantConfigBase"):
+    def __init__(self, quant_config: ModelOptQuantConfigBase):
         super().__init__(quant_config)
 
 
@@ -168,7 +170,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> "QuantizeMethodBase | None":
+    ) -> QuantizeMethodBase | None:
         # handle kv-cache first so we can focus only on weight quantization thereafter
         if isinstance(layer, Attention):
             return self.KVCacheMethodCls(self)
@@ -203,7 +205,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         return None
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         if len(self.exclude_modules) > 0:
             # This is a workaround for the weights remapping issue:
             # https://github.com/vllm-project/vllm/issues/28072
@@ -237,11 +239,11 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         exclude_modules: list[str],
         original_config: dict[str, Any],
         group_size: int | None,
-    ) -> "ModelOptQuantConfigBase":
+    ) -> ModelOptQuantConfigBase:
         raise NotImplementedError("Please implement this function in sub classes")
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "ModelOptQuantConfigBase":
+    def from_config(cls, config: dict[str, Any]) -> ModelOptQuantConfigBase:
         # Handle both ModelOpt format and compressed-tensors style format
         if "quantization" in config:
             # Traditional ModelOpt format:
@@ -405,7 +407,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         exclude_modules: list[str],
         original_config: dict[str, Any],
         **kwargs: Any,
-    ) -> "ModelOptFp8Config":
+    ) -> ModelOptFp8Config:
         is_checkpoint_fp8_serialized = "FP8" in quant_method
 
         return cls(
@@ -1053,7 +1055,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         original_config: dict[str, Any],
         group_size: int | None,
         **kwargs: Any,
-    ) -> "ModelOptNvFp4Config":
+    ) -> ModelOptNvFp4Config:
         is_checkpoint_nvfp4_serialized = "NVFP4" in quant_method
 
         if group_size is None:

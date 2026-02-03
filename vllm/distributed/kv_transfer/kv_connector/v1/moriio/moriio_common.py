@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import contextlib
 import threading
 import time
@@ -101,14 +103,14 @@ class MoRIIOAgentMetadata(
 class RoleManager:
     """Manages role state across the connector."""
 
-    _instance: "RoleManager | None" = None
+    _instance: RoleManager | None = None
     _lock = threading.Lock()
 
     def __init__(self) -> None:
         self._role: ROLE = ROLE.NOTINIT
 
     @classmethod
-    def get_instance(cls) -> "RoleManager":
+    def get_instance(cls) -> RoleManager:
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -187,7 +189,7 @@ class MoRIIOConfig:
     tp_size: int
 
     @classmethod
-    def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
+    def from_vllm_config(cls, vllm_config: VllmConfig) -> MoRIIOConfig:
         # Port Configuration:
         # local_ping_port   -> Outgoing heartbeat to proxy
         # proxy_ping_port   -> Remote proxy's heartbeat ingress port

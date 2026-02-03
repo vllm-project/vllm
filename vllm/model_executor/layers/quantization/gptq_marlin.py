@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from copy import deepcopy
 from typing import Any
 
@@ -64,7 +66,7 @@ logger = init_logger(__name__)
 
 
 def get_moe_quant_method(
-    config: "GPTQMarlinConfig",
+    config: GPTQMarlinConfig,
     layer: torch.nn.Module,
     prefix: str,
     moe_method_cls: type,
@@ -188,7 +190,7 @@ class GPTQMarlinConfig(QuantizationConfig):
         return ["quantize_config.json"]
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "GPTQMarlinConfig":
+    def from_config(cls, config: dict[str, Any]) -> GPTQMarlinConfig:
         dynamic = cls.get_from_keys_or(config, ["dynamic"], default={})
         dynamic = {} if dynamic is None else dynamic
 
@@ -240,7 +242,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
-    ) -> "QuantizeMethodBase | None":
+    ) -> QuantizeMethodBase | None:
         if isinstance(layer, FusedMoE):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 

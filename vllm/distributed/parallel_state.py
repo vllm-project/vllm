@@ -23,6 +23,8 @@ If you only need to use the distributed environment without model/pipeline
  steps.
 """
 
+from __future__ import annotations
+
 import contextlib
 import gc
 import pickle
@@ -106,10 +108,10 @@ def _get_unique_name(name: str) -> str:
     return newname
 
 
-_groups: dict[str, Callable[[], "GroupCoordinator | None"]] = {}
+_groups: dict[str, Callable[[], GroupCoordinator | None]] = {}
 
 
-def _register_group(group: "GroupCoordinator") -> None:
+def _register_group(group: GroupCoordinator) -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
@@ -784,7 +786,7 @@ class GroupCoordinator:
         self,
         tensor_dict: dict[str, torch.Tensor | Any],
         dst: int | None = None,
-        all_gather_group: "GroupCoordinator | None" = None,
+        all_gather_group: GroupCoordinator | None = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> dict[str, torch.Tensor | Any] | None:
         """Send the input tensor dictionary.
@@ -871,7 +873,7 @@ class GroupCoordinator:
     def recv_tensor_dict(
         self,
         src: int | None = None,
-        all_gather_group: "GroupCoordinator | None" = None,
+        all_gather_group: GroupCoordinator | None = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> dict[str, torch.Tensor | Any] | None:
         """Recv the input tensor dictionary.

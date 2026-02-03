@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import logging
 import math
 import queue
@@ -90,7 +92,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
         super().__init__(vllm_config, role)
         assert vllm_config.kv_transfer_config is not None, (
@@ -138,7 +140,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
             extra_config["notify_port"] = MoRIIOConstants.DEFAULT_NOTIFY_PORT
 
     def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
@@ -146,7 +148,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
         )
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
@@ -162,7 +164,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
@@ -180,7 +182,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs) -> None:
         assert self.connector_worker is not None
         if self.mode == MoRIIOMode.WRITE and get_role() == ROLE.CONSUMER:
             self.connector_worker.moriio_wrapper.async_wait_reqid()
@@ -195,7 +197,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         # Only producer/prefill saves KV Cache
@@ -280,7 +282,7 @@ class MoRIIOConnectorScheduler:
 
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: Request,
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
         """
@@ -330,10 +332,10 @@ class MoRIIOConnectorScheduler:
 
     def update_state_after_alloc(
         self,
-        request: "Request",
-        blocks: "KVCacheBlocks",
+        request: Request,
+        blocks: KVCacheBlocks,
         num_external_tokens: int,
-        connector_worker: "MoRIIOConnectorWorker | None" = None,
+        connector_worker: MoRIIOConnectorWorker | None = None,
     ):
         params = request.kv_transfer_params
         if not params:
@@ -498,7 +500,7 @@ class MoRIIOConnectorScheduler:
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """
@@ -1217,7 +1219,7 @@ class MoRIIOConnectorWorker:
         metadata: MoRIIOConnectorMetadata,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ):
         if not self.is_producer:

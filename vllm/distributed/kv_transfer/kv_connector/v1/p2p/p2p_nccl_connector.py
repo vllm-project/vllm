@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -43,7 +45,7 @@ class ReqMeta:
     @staticmethod
     def make_meta(
         request_id: str, token_ids: list[int], block_ids: list[int], block_size: int
-    ) -> "ReqMeta":
+    ) -> ReqMeta:
         block_ids_tensor = torch.tensor(block_ids)
         return ReqMeta(
             request_id=request_id,
@@ -74,9 +76,9 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
 class P2pNcclConnector(KVConnectorBase_V1):
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
         super().__init__(
             vllm_config=vllm_config,
@@ -108,7 +110,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
     # Worker-side methods
     # ==============================
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
@@ -336,7 +338,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: Request,
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
         """
@@ -364,7 +366,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
         return num_external_tokens, False
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         """
         Update KVConnector state after block allocation.
@@ -477,7 +479,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """

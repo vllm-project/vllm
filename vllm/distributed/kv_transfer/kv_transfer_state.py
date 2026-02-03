@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 from typing import TYPE_CHECKING
 
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
@@ -49,7 +51,7 @@ def is_v1_kv_transfer_group(connector: KVConnectorBaseType | None = None) -> boo
 
 
 def ensure_kv_transfer_initialized(
-    vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig | None" = None
+    vllm_config: VllmConfig, kv_cache_config: KVCacheConfig | None = None
 ) -> None:
     """
     Initialize KV cache transfer parallel group.

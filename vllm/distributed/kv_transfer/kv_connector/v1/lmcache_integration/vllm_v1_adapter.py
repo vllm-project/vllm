@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
+from __future__ import annotations
+
 import os
 import uuid
 from collections.abc import Generator
@@ -140,7 +142,7 @@ class RequestTracker:
 
     # Multimodal hashes and positions
     mm_hashes: list[str] | None = None
-    mm_positions: list["PlaceholderRange"] | None = None
+    mm_positions: list[PlaceholderRange] | None = None
 
     # The configs of the request, includes tags and other configs
     request_configs: dict | None = None
@@ -155,11 +157,11 @@ class RequestTracker:
     @staticmethod
     def from_new_request(
         lmcache_config: LMCacheEngineConfig,
-        new_request: "NewRequestData",
+        new_request: NewRequestData,
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
         skip_save: bool,
-    ) -> "RequestTracker":
+    ) -> RequestTracker:
         """Create the request tracker from a new request.
 
         Args:
@@ -274,7 +276,7 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         discard_partial_chunks: bool = True,
         save_decode_cache: bool = False,
-    ) -> "ReqMeta | None":
+    ) -> ReqMeta | None:
         """Create the request metadata from a request tracker.
 
         Args:
@@ -432,7 +434,7 @@ def _calculate_mtp_layers(vllm_config, model_config):
 
 def _init_lmcache_engine(
     lmcache_config: LMCacheEngineConfig,
-    vllm_config: "VllmConfig",
+    vllm_config: VllmConfig,
 ) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -570,7 +572,7 @@ class LMCacheConnectorMetadata(KVConnectorMetadata):
 class LMCacheConnectorV1Impl:
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        vllm_config: VllmConfig,
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
     ):
@@ -770,7 +772,7 @@ class LMCacheConnectorV1Impl:
         return VLLM_VERSION
 
     @_lmcache_nvtx_annotate
-    def _init_kv_caches_from_forward_context(self, forward_context: "ForwardContext"):
+    def _init_kv_caches_from_forward_context(self, forward_context: ForwardContext):
         for layer_name in forward_context.no_compile_layers:
             attn_layer = forward_context.no_compile_layers[layer_name]
             if not hasattr(attn_layer, "kv_cache"):
@@ -797,7 +799,7 @@ class LMCacheConnectorV1Impl:
             self.lmcache_engine.post_init(kvcaches=kvcaches)
 
     @_lmcache_nvtx_annotate
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
@@ -1142,7 +1144,7 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def get_num_new_matched_tokens(
         self,
-        request: "Request",
+        request: Request,
         num_computed_tokens: int,
     ) -> int | None:
         """
@@ -1230,7 +1232,7 @@ class LMCacheConnectorV1Impl:
         return need_to_allocate
 
     @_lmcache_nvtx_annotate
-    def update_state_after_alloc(self, request: "Request", num_external_tokens: int):
+    def update_state_after_alloc(self, request: Request, num_external_tokens: int):
         """
         Update KVConnector state after temporary buffer alloc.
 
@@ -1411,7 +1413,7 @@ class LMCacheConnectorV1Impl:
     @_lmcache_nvtx_annotate
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         params = (

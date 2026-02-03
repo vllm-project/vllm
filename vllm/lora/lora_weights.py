@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from collections.abc import Sequence as GenericSequence
 
 import torch
@@ -33,7 +35,7 @@ class LoRALayerWeights:
         else:
             self.scaling = scaling
 
-    def optimize(self) -> "LoRALayerWeights":
+    def optimize(self) -> LoRALayerWeights:
         """Optimize the LoRA by merging the scaling into lora_b."""
         if self.scaling == 1:
             return self
@@ -58,7 +60,7 @@ class LoRALayerWeights:
         cls,
         module_name: str,
         peft_helper: PEFTHelper,
-    ) -> "LoRALayerWeights":
+    ) -> LoRALayerWeights:
         # lora_a and lora_b are set to None for config-based construction
         return cls(
             module_name,
@@ -78,7 +80,7 @@ class LoRALayerWeights:
         rank: int,
         dtype: torch.dtype,
         device: torch.types.Device,
-    ) -> "LoRALayerWeights":
+    ) -> LoRALayerWeights:
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         lora_a = torch.zeros(
             [rank, input_dim], dtype=dtype, device=device, pin_memory=pin_memory
@@ -125,8 +127,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
     @classmethod
     def pack(
-        cls, loras: GenericSequence["LoRALayerWeights | None"]
-    ) -> "PackedLoRALayerWeights":
+        cls, loras: GenericSequence[LoRALayerWeights | None]
+    ) -> PackedLoRALayerWeights:
         """Pack a list of LoRAs into a single LoRA.
 
         If LoRA is None, it signifies that the submodule does not have a LoRA.
@@ -154,10 +156,10 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     @classmethod
     def pack_moe(
         cls,
-        loras: GenericSequence["LoRALayerWeights | None"],
+        loras: GenericSequence[LoRALayerWeights | None],
         module_name: str,
         is_non_gated_moe: bool = False,
-    ) -> "PackedLoRALayerWeights":
+    ) -> PackedLoRALayerWeights:
         """Pack a list of LoRAs into a single LoRA.
 
         If LoRA is None, it signifies that the submodule does not have a LoRA.
@@ -227,7 +229,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         )
         return obj
 
-    def optimize(self) -> "PackedLoRALayerWeights":
+    def optimize(self) -> PackedLoRALayerWeights:
         """Optimize the LoRA by merging the scaling into lora_b."""
         for i in range(len(self.lora_b)):
             if self.scaling[i] == 1 or self.lora_b[i] is None:  # type: ignore

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import importlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
@@ -42,9 +44,9 @@ class KVConnectorFactory:
     @classmethod
     def create_connector(
         cls,
-        config: "VllmConfig",
+        config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ) -> KVConnectorBase:
         kv_transfer_config = config.kv_transfer_config
         if kv_transfer_config is None:
@@ -101,7 +103,7 @@ class KVConnectorFactory:
 
     @classmethod
     def _get_connector_class_with_compat(
-        cls, kv_transfer_config: "KVTransferConfig"
+        cls, kv_transfer_config: KVTransferConfig
     ) -> tuple[type[KVConnectorBaseType], bool]:
         connector_name = kv_transfer_config.kv_connector
         if connector_name is None:
@@ -132,7 +134,7 @@ class KVConnectorFactory:
 
     @classmethod
     def get_connector_class(
-        cls, kv_transfer_config: "KVTransferConfig"
+        cls, kv_transfer_config: KVTransferConfig
     ) -> type[KVConnectorBaseType]:
         """Get the connector class by name."""
         connector_cls, _ = cls._get_connector_class_with_compat(kv_transfer_config)

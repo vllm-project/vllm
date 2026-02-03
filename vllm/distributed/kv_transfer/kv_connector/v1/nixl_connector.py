@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import contextlib
 import copy
 import logging
@@ -302,7 +304,7 @@ class NixlConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: KVCacheConfig | None = None,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
@@ -346,7 +348,7 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
 
     def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
@@ -354,7 +356,7 @@ class NixlConnector(KVConnectorBase_V1):
         )
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
@@ -370,7 +372,7 @@ class NixlConnector(KVConnectorBase_V1):
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
@@ -436,7 +438,7 @@ class NixlConnector(KVConnectorBase_V1):
             vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, NixlConnectorMetadata)
         self.connector_worker.start_load_kv(self._connector_metadata)
@@ -604,7 +606,7 @@ class NixlConnectorScheduler:
                 sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
 
     def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
@@ -640,7 +642,7 @@ class NixlConnectorScheduler:
         return 0, False
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         params = request.kv_transfer_params
         logger.debug(
@@ -751,7 +753,7 @@ class NixlConnectorScheduler:
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         """
@@ -2529,7 +2531,7 @@ class NixlKVConnectorStats(KVConnectorStats):
         """Record a request that had its KV blocks expire."""
         self.data["num_kv_expired_reqs"].append(1)
 
-    def clone_and_reset(self) -> "NixlKVConnectorStats":
+    def clone_and_reset(self) -> NixlKVConnectorStats:
         old = copy.copy(self)
         self.reset()
         return old

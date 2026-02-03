@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pydantic models for Anthropic API protocol"""
 
+from __future__ import annotations
+
 import time
 from typing import Any, Literal
 
@@ -135,7 +137,7 @@ class AnthropicStreamEvent(BaseModel):
         "ping",
         "error",
     ]
-    message: "AnthropicMessagesResponse | None" = None
+    message: AnthropicMessagesResponse | None = None
     delta: AnthropicDelta | None = None
     content_block: AnthropicContentBlock | None = None
     index: int | None = None
