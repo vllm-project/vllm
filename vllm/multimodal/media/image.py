@@ -8,12 +8,8 @@ import pybase64
 import torch
 from PIL import Image
 
-from vllm.logger import init_logger
-
 from ..image import convert_image_mode, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
-
-logger = init_logger(__file__)
 
 
 class ImageMediaIO(MediaIO[Image.Image]):
