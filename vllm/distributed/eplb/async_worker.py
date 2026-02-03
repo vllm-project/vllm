@@ -116,7 +116,7 @@ async def transfer_run_periodically(
         assert state.is_async
         for model_state in state.model_states.values():
             rebalancing_algorithm_executed = False
-
+            physical_to_logical_map_cpu = None
             current_num_layers = model_state.model.num_moe_layers
             while (
                 model_state.rebalanced
@@ -150,6 +150,7 @@ async def transfer_run_periodically(
                             )
 
                         assert model_state.new_physical_to_logical_map is not None
+                        assert physical_to_logical_map_cpu is not None
 
                         layer_idx = model_state.layer_to_transfer
                         old_layer_indices = physical_to_logical_map_cpu[layer_idx]
