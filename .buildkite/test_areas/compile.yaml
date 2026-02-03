@@ -34,14 +34,10 @@ steps:
   source_file_dependencies:
   - vllm/compilation/
   - vllm/model_executor/layers
-  - tests/compile/passes/distributed/test_fusion_all_reduce.py
-  - tests/compile/passes/distributed/test_sequence_parallelism.py
-  - tests/compile/passes/distributed/test_async_tp.py
+  - tests/compile/passes/distributed/
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
-  - pytest -v -s tests/compile/passes/distributed/test_sequence_parallelism.py
-  - pytest -v -s tests/compile/passes/distributed/test_async_tp.py
+  - pytest -s -v tests/compile/passes/distributed
 
 - label: Fusion and Compile Unit Tests (B200)
   timeout_in_minutes: 20

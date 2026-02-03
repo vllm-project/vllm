@@ -21,7 +21,7 @@ steps:
   timeout_in_minutes: 20
   source_file_dependencies:
     - vllm/
-    - tests/compile
+    - tests/compile/passes
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
