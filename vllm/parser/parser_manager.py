@@ -283,7 +283,7 @@ class ParserManager:
         for name in [tool_parser_name, reasoning_parser_name]:
             if name:
                 try:
-                    parser = cls.get_parser(name)
+                    parser = cls.get_parser_internal(name)
                     logger.info(
                         "Using unified parser '%s' for both reasoning and tool parsing.",
                         name,
