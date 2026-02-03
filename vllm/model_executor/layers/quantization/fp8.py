@@ -183,38 +183,9 @@ class Fp8Config(QuantizationConfig):
     def get_xpu_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        from vllm.model_executor.layers.quantization.ipex_quant import (
-            XPUFp8LinearMethod,
-            XPUFp8MoEMethod,
+        raise NotImplementedError(
+            "FP8 quantization is not supported during xpu kernel migration."
         )
-
-        fp8_config = Fp8Config(
-            is_checkpoint_fp8_serialized=self.is_checkpoint_fp8_serialized,
-            activation_scheme=self.activation_scheme,
-            ignored_layers=self.ignored_layers,
-            weight_block_size=self.weight_block_size,
-        )
-
-        if isinstance(layer, LinearBase):
-            if is_layer_skipped(
-                prefix=prefix,
-                ignored_layers=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-            ):
-                return UnquantizedLinearMethod()
-            return XPUFp8LinearMethod(fp8_config)
-        elif isinstance(layer, FusedMoE):
-            if is_layer_skipped(
-                prefix=prefix,
-                ignored_layers=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-            ):
-                return UnquantizedFusedMoEMethod(layer.moe_config)
-
-            return XPUFp8MoEMethod(fp8_config, layer)
-        elif isinstance(layer, Attention):
-            return Fp8KVCacheMethod(self)
-        return None
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
