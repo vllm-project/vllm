@@ -103,10 +103,14 @@ def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
 
 def _re_import_modules():
     hf_hub_module_names = [k for k in sys.modules if k.startswith("huggingface_hub")]
+    is_transformers = lambda name: name.startswith("transformers")
+    is_remote_code = lambda name: name.startswith("transformers_modules")
+    aliased_modules = ["tokenization_utils", "tokenization_utils_fast"]
+    is_alias = lambda name: any(f".{name}".endswith(alias) for alias in aliased_modules)
     transformers_module_names = [
         k
         for k in sys.modules
-        if k.startswith("transformers") and not k.startswith("transformers_modules")
+        if is_transformers(k) and not is_remote_code(k) and not is_alias(k)
     ]
 
     reload_exception = None
