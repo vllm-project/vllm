@@ -125,6 +125,13 @@ class Qwen3ASRProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
+    def get_data_parser(self) -> MultiModalDataParser:
+        feature_extractor = self.get_feature_extractor()
+        return Qwen3ASRMultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
 
 class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -194,12 +201,6 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 class Qwen3ASRMultiModalProcessor(
     Qwen3OmniMoeThinkerMultiModalProcessor,
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return Qwen3ASRMultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate,
-        )
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
