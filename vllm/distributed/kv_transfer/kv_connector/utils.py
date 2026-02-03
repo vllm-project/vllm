@@ -193,8 +193,6 @@ def copy_kv_blocks(
         dst_device=dst_device,
     )
 
-    from vllm.platforms import current_platform
-
     if direction == "h2d":
         copy_fn = current_platform.insert_blocks_to_device
     else:
@@ -360,11 +358,7 @@ class TpKVTopology:
         block_size_position = kv_cache_shape.index(_MOCK_BLOCK_SIZE)
 
         assert block_size_position is not None
-        self._block_size_position = (
-            -(len(kv_cache_shape) - block_size_position)
-            if current_platform.device_type != "cpu"
-            else -2
-        )
+        self._block_size_position = -(len(kv_cache_shape) - block_size_position)
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:

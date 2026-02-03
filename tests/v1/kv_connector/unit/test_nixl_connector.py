@@ -1465,6 +1465,7 @@ def test_register_kv_caches(
         expected_base_addrs: list[int]
         expected_num_entries: int
         kv_caches: dict[str, torch.Tensor]
+        assert (not enable_cross_layers) or connector.prefer_cross_layer_blocks
         if connector.prefer_cross_layer_blocks:
             num_layers = 32
             block_size = 16
