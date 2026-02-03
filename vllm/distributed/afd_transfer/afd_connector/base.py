@@ -78,12 +78,14 @@ class AFDConnectorBase(ABC):
         self,
         hidden_states: torch.Tensor,
         metadata: "AFDConnectorMetadata",
+        ubatch_idx: int | None = None,
     ) -> Any:
         """Send attention output to FFN servers.
 
         Args:
             hidden_states: Attention output tensor
             metadata: AFD metadata containing layer_idx, stage_idx, seq_len info
+            ubatch_idx: Optional micro-batch index for ubatching
 
         Returns:
             Any: Handle for tracking this request (backend-specific)
@@ -93,12 +95,14 @@ class AFDConnectorBase(ABC):
     @abstractmethod
     def recv_ffn_output(
         self,
-        handle: Any,
+        handle: Any = None,
+        ubatch_idx: int | None = None,
     ) -> torch.Tensor:
         """Wait for and receive FFN computation result.
 
         Args:
             handle: Handle returned by send_attn_output()
+            ubatch_idx: Optional micro-batch index for ubatching
 
         Returns:
             torch.Tensor: FFN computation result
@@ -109,11 +113,13 @@ class AFDConnectorBase(ABC):
     def recv_attn_output(
         self,
         timeout_ms: int | None = None,
+        ubatch_idx: int | None = None,
     ) -> tuple[torch.Tensor, "AFDConnectorMetadata"]:
         """Receive attention output from attention workers.
 
         Args:
             timeout_ms: Optional timeout in milliseconds
+            ubatch_idx: Optional micro-batch index for ubatching
 
         Returns:
             tuple: (hidden_states, metadata)
@@ -128,6 +134,7 @@ class AFDConnectorBase(ABC):
         self,
         ffn_output: torch.Tensor,
         metadata: "AFDConnectorMetadata",
+        ubatch_idx: int | None = None,
     ) -> None:
         """Send FFN computation result back to attention workers.
 
@@ -135,5 +142,6 @@ class AFDConnectorBase(ABC):
             ffn_output: Computed FFN result
             metadata: AFD metadata containing seq_lens
                       for splitting and routing info
+            ubatch_idx: Optional micro-batch index for ubatching
         """
         raise NotImplementedError

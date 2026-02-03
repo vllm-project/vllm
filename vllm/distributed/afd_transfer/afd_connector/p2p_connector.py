@@ -51,7 +51,6 @@ class P2PAFDConnector(AFDConnectorBase):
         self.local_rank = local_rank
         self.config = config
         self._initialized: bool = False
-        self._need_recv_metadata: bool = True
         self._tensor_metadata_list: dict[int, TensorMetadata] = {}
         self._current_afd_connector_metadata: AFDConnectorMetadata | None = None
         if getattr(self.config.model_config.hf_config, "text_config", None) is not None:
@@ -63,9 +62,6 @@ class P2PAFDConnector(AFDConnectorBase):
                 self.config.model_config.hf_config.num_hidden_layers
             )
 
-        self.recv_attn_output_counter: int = 0
-        self.recv_ffn_output_counter: int = 0
-        self.dp_metadata_list: dict[int, DPMetadata] = {}
         self.a2e_pynccl: PyNcclCommunicator | None = None
         self.e2a_pynccl: PyNcclCommunicator | None = None
         self.ffn_size: int = 0
@@ -183,81 +179,6 @@ class P2PAFDConnector(AFDConnectorBase):
         """
         return self._initialized
 
-    def _build_tensor_metadata_list(
-        self,
-        tensor_metadata: TensorMetadata,
-        connector_metadata: AFDConnectorMetadata,
-    ) -> dict[int, TensorMetadata]:
-        tensor_metadata_list = {}
-        num_of_stages = connector_metadata.num_of_stages
-        for idx in range(num_of_stages):
-            if idx == 0:
-                tensor_metadata_list[0] = tensor_metadata
-            else:
-                new_size = list(tensor_metadata.size)
-                new_size[0] = connector_metadata.afd_tokens_lens[idx]
-                tensor_metadata_list[idx] = TensorMetadata(
-                    tensor_metadata.device,
-                    tensor_metadata.dtype,
-                    torch.Size(new_size),
-                )
-        return tensor_metadata_list
-
-    def _send_metadata(
-        self,
-        metadata: AFDConnectorMetadata,
-        hidden_states: torch.Tensor,
-        dst: int,
-        process_group: GroupCoordinator,
-    ) -> None:
-        if not torch.distributed.is_initialized() or process_group.world_size == 1:
-            return []
-        assert dst < process_group.world_size, f"Invalid dst rank ({dst})"
-
-        tensor_metadata = TensorMetadata(
-            hidden_states.device.type, hidden_states.dtype, hidden_states.size()
-        )
-        metadata_tuple = (metadata, tensor_metadata)
-        process_group.send_object(metadata_tuple, dst=dst)
-        self._tensor_metadata_list = self._build_tensor_metadata_list(
-            tensor_metadata, metadata
-        )
-
-    def _recv_metadata(
-        self,
-        src: int,
-        process_group: GroupCoordinator,
-    ) -> None:
-        (self._current_afd_connector_metadata, tensor_metadata) = (
-            process_group.recv_object(src=src)
-        )
-        self._tensor_metadata_list = self._build_tensor_metadata_list(
-            tensor_metadata, self._current_afd_connector_metadata
-        )
-        if self.config.parallel_config.data_parallel_size > 1:
-            logger.info(
-                "jcz recv_metadata num_of_stages:{}".format(
-                    self._current_afd_connector_metadata.num_of_stages
-                )
-            )
-            for stage_idx in range(self._current_afd_connector_metadata.num_of_stages):
-                num_tokens_per_ubatch = self._tensor_metadata_list[stage_idx].size[0]
-                self.dp_metadata_list[stage_idx] = DPMetadata.make(
-                    self.config.parallel_config,
-                    num_tokens_per_ubatch,
-                    torch.tensor(
-                        [num_tokens_per_ubatch]
-                        * self.config.parallel_config.data_parallel_size,
-                        device="cpu",
-                        dtype=torch.int32,
-                    ),
-                )
-            logger.info(
-                "jcz recv_metadata self.dp_metadata_list:{}".format(
-                    self.dp_metadata_list
-                )
-            )
-
     def _send_hidden_states(
         self,
         hidden_states: torch.Tensor,
@@ -313,13 +234,42 @@ class P2PAFDConnector(AFDConnectorBase):
         else:
             raise RuntimeError("PyNCCL communicator is required but not available.")
         return hidden_states
+    
+    def update_state_from_dp_metadata(
+        self,
+        dp_metadata_list: dict[int, DPMetadata],
+    ) -> None:
+        """Update the connector state based on the received DPMetadata list.
+        This replaces the explicit metadata communication step.
+        """
+        self.dp_metadata_list = dp_metadata_list
+        num_of_stages = len(dp_metadata_list)
+        
+        # Build tensor metadata list for each stage
+        self._tensor_metadata_list = {}
+        
+        for stage_idx in range(num_of_stages):
+            dp_metadata = dp_metadata_list[stage_idx]
+            # In vLLM DPMetadata, num_tokens_across_dp_cpu holds the number of tokens across all dp ranks
+            # For current rank, we need to get the number of tokens using parallel_config.data_parallel_rank
+            dp_rank = self.config.parallel_config.data_parallel_rank
+            num_tokens = dp_metadata.num_tokens_across_dp_cpu[dp_rank].item()
+            
+            self._tensor_metadata_list[stage_idx] = TensorMetadata(
+                torch.device(f"cuda:{self.local_rank}"),
+                self.config.model_config.dtype,
+                torch.Size([num_tokens, self.config.model_config.hf_config.hidden_size]),
+            )
 
     # -------------------------------------------------------------------------
     #                                attn -> ffn
     # -------------------------------------------------------------------------
 
     def send_attn_output(
-        self, hidden_states: torch.Tensor, metadata: AFDConnectorMetadata
+        self,
+        hidden_states: torch.Tensor,
+        metadata: AFDConnectorMetadata,
+        ubatch_idx: int = 0,
     ) -> None:
         """
         Called by ATTN side to send intermediate tensors
@@ -327,32 +277,26 @@ class P2PAFDConnector(AFDConnectorBase):
         """
         try:
             dst = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
-            logger.info(f"jcz send_attn_output rank_in_group:{self.a2e_group.rank_in_group} dst:{dst} world_size:{self.a2e_group.world_size}")
-            if metadata.layer_idx == 0 and metadata.stage_idx == 0:
-                self._send_metadata(metadata, hidden_states, dst, self.a2e_group)
+            logger.info(
+                f"jcz send_attn_output rank_in_group:{self.a2e_group.rank_in_group} dst:{dst} world_size:{self.a2e_group.world_size}"
+            )
+            # Ensure local metadata state is up to date for subsequent recv calls
             self._current_afd_connector_metadata = metadata
             self._send_hidden_states(hidden_states, dst, self.a2e_group)
         except Exception as e:
             raise RuntimeError(f"Communication error: {e}")
 
-    def recv_ffn_output(self) -> torch.Tensor:
+    def recv_ffn_output(self, ubatch_idx: int = 0) -> torch.Tensor:
         """
         Called by the ATTN side to receive MOE output intermediate tensors,
         possibly dispatching from the receiver to other GPUs.
         """
         src = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
-        stage_idx = (
-            self.recv_ffn_output_counter
-            % self._current_afd_connector_metadata.num_of_stages
-        )
         hidden_states = self._recv_hidden_states(
             src,
             self.e2a_group,
-            self._tensor_metadata_list[stage_idx],
+            self._tensor_metadata_list[ubatch_idx],
         )
-        self.recv_ffn_output_counter = (
-            self.recv_ffn_output_counter + 1
-        ) % self._current_afd_connector_metadata.num_of_stages
         return hidden_states
 
     # -------------------------------------------------------------------------
@@ -363,6 +307,7 @@ class P2PAFDConnector(AFDConnectorBase):
         self,
         hidden_states: torch.Tensor,
         metadata: AFDConnectorMetadata,
+        ubatch_idx: int = 0,
     ) -> None:
         """
         Called by FFN side to send intermediate tensors generated by FFN
@@ -370,47 +315,37 @@ class P2PAFDConnector(AFDConnectorBase):
         """
         dst = (self.e2a_group.rank_in_group + 1) % self.e2a_group.world_size
         self._send_hidden_states(hidden_states, dst, self.e2a_group)
-        self.recv_attn_output_counter += 1
-        if (
-            self.recv_attn_output_counter
-            % (
-                self._current_afd_connector_metadata.num_of_stages
-                * self.num_hidden_layers
-            )
-            == 0
-        ):
-            self._need_recv_metadata = True
-            self.recv_attn_output_counter = 0
 
-    def recv_attn_output(self) -> tuple[torch.Tensor, AFDConnectorMetadata]:
+    def recv_attn_output(
+        self, ubatch_idx: int = 0
+    ) -> tuple[torch.Tensor, AFDConnectorMetadata]:
         """
         Called by the FFN side to receive intermediate tensors from ATTN.
         Handles receiving and possibly dispatching tensors.
         """
         src = (self.a2e_group.rank_in_group - 1) % self.a2e_group.world_size
-        logger.info(f"jcz recv_attn_output rank_in_group:{self.a2e_group.rank_in_group} src:{src} world_size:{self.a2e_group.world_size}")
-        if self._need_recv_metadata:
-            self._recv_metadata(src, self.a2e_group)
-            self._need_recv_metadata = False
-
-        stage_idx = (
-            self.recv_attn_output_counter
-            % self._current_afd_connector_metadata.num_of_stages
+        logger.info(
+            f"jcz recv_attn_output rank_in_group:{self.a2e_group.rank_in_group} src:{src} world_size:{self.a2e_group.world_size}"
         )
-        layer_idx = (
-            self.recv_attn_output_counter
-            // self._current_afd_connector_metadata.num_of_stages
-        )
+        
         hidden_states = self._recv_hidden_states(
             src,
             self.a2e_group,
-            self._tensor_metadata_list[stage_idx],
+            self._tensor_metadata_list[ubatch_idx],
         )
-        self._current_afd_connector_metadata.layer_idx = layer_idx
-        self._current_afd_connector_metadata.stage_idx = stage_idx
-        return hidden_states, self._current_afd_connector_metadata
+
+        # TODO(jcz): remove this after.
+        from types import SimpleNamespace
+        metadata = SimpleNamespace(
+            stage_idx=ubatch_idx,
+            # layer_idx=layer_idx, # layer_idx logic was removed in previous snippet context, assuming not needed or handled outside
+            recv_handle_list=None,
+        )
+
+        return hidden_states, metadata
 
     def send_dp_metadata_list(self, data):
+        self.update_state_from_dp_metadata(data)
         for dst in self.dst_list:
             object_bytes = pickle.dumps(data)
             object_tensor_cpu = torch.frombuffer(bytearray(object_bytes), dtype=torch.uint8)
