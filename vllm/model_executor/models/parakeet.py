@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import math
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 
@@ -130,6 +129,8 @@ class ExtractorConfig:
     feature_size: int
     sampling_rate: int
     subsampling_factor: int
+    subsampling_conv_kernel_size: int
+    subsampling_conv_stride: int
 
     @staticmethod
     def from_hf_config(config: PretrainedConfig) -> "ExtractorConfig":
@@ -138,6 +139,8 @@ class ExtractorConfig:
             feature_size=config.num_mel_bins,
             sampling_rate=config.sampling_rate,
             subsampling_factor=config.subsampling_factor,
+            subsampling_conv_kernel_size=config.subsampling_conv_kernel_size,
+            subsampling_conv_stride=config.subsampling_conv_stride,
         )
 
 
@@ -148,8 +151,10 @@ class ParakeetExtractor(ParakeetFeatureExtractor):
 
     def audio_token_count(self, audio_len: int) -> int:
         num_frames = audio_len // self.hop_length
-        n_tokens = math.ceil(num_frames / self.config.subsampling_factor)
-        return max(1, n_tokens)
+        n_tokens = HFParakeetEncoder._get_subsampling_output_length(
+            self, torch.tensor([num_frames], dtype=torch.float)
+        )
+        return max(1, n_tokens.item())
 
     def audio_length(self, audio_tokens: int) -> int:
         return int(audio_tokens * self.config.subsampling_factor * self.hop_length)

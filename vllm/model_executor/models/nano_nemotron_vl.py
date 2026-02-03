@@ -1955,7 +1955,17 @@ class NemotronH_Nano_VL_V2(
         )
         feature_attention_mask = feature_attention_mask.to(device=target_device)
         sound_embeds = self.sound_encoder(input_audio_features, feature_attention_mask)
-        return tuple(sound_embeds.unbind(dim=0))
+
+        valid_input_lens = feature_attention_mask.sum(dim=1)
+        valid_output_lens = self.sound_encoder.encoder._get_subsampling_output_length(
+            valid_input_lens
+        )
+        truncated_embeds = []
+        for i in range(sound_embeds.shape[0]):
+            valid_len = valid_output_lens[i].item()
+            truncated_embeds.append(sound_embeds[i, :valid_len])
+
+        return tuple(truncated_embeds)
 
     def _create_final_video_embeddings(
         self,
