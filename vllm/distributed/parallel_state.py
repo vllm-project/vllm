@@ -780,6 +780,20 @@ class GroupCoordinator:
                 async_handle.wait()
         return tensor_dict
 
+    def _should_use_all_gather(
+        self,
+        key: str,
+        numel: int,
+        all_gather_group: "GroupCoordinator | None",
+        all_gather_tensors: dict[str, bool] | None,
+    ) -> bool:
+        if all_gather_group is None:
+            return False
+        use_all_gather = numel % all_gather_group.world_size == 0
+        if all_gather_tensors is not None:
+            use_all_gather = all_gather_tensors.get(key, use_all_gather)
+        return use_all_gather
+
     def send_tensor_dict(
         self,
         tensor_dict: dict[str, torch.Tensor | Any],
@@ -808,64 +822,14 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return tensor_dict
-        all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
-        all_gather_rank = (
-            0 if all_gather_group is None else all_gather_group.rank_in_group
+        handles = self.isend_tensor_dict(
+            tensor_dict,
+            dst=dst,
+            all_gather_group=all_gather_group,
+            all_gather_tensors=all_gather_tensors,
         )
-
-        group = self.device_group
-        metadata_group = self.cpu_group
-
-        if dst is None:
-            dst = (self.rank_in_group + 1) % self.world_size
-        assert dst < self.world_size, f"Invalid dst rank ({dst})"
-
-        if self.use_cpu_custom_send_recv:
-            if self.device_communicator is None:
-                raise ValueError("No device communicator found")
-            self.device_communicator.send_tensor_dict(  # type: ignore
-                tensor_dict, dst
-            )
-            return None
-
-        metadata_list: list[tuple[Any, Any]] = []
-        assert isinstance(tensor_dict, dict), (
-            f"Expecting a dictionary, got {type(tensor_dict)}"
-        )
-        metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
-        # `metadata_list` lives in CPU memory.
-        # `send_object_list` has serialization & deserialization,
-        # all happening on CPU. Therefore, we can use the CPU group.
-        self.send_object(metadata_list, dst=dst)
-
-        tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
-        assert len(tensor_keys) == len(tensor_list)
-
-        for key, tensor in zip(tensor_keys, tensor_list):
-            if tensor.numel() == 0:
-                # Skip sending empty tensors.
-                continue
-
-            # send-allgather: send only a slice, then do allgather.
-            use_all_gather = (
-                all_gather_group is not None and tensor.numel() % all_gather_size == 0
-            )
-            use_all_gather = (
-                all_gather_tensors.get(key, use_all_gather)
-                if all_gather_tensors is not None
-                else use_all_gather
-            )
-            if use_all_gather:
-                tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
-
-            if tensor.is_cpu:
-                # use metadata_group for CPU tensors
-                torch.distributed.send(
-                    tensor, dst=self.ranks[dst], group=metadata_group
-                )
-            else:
-                # use group for GPU tensors
-                torch.distributed.send(tensor, dst=self.ranks[dst], group=group)
+        for h in handles:
+            h.wait()
         return None
 
     def isend_tensor_dict(
@@ -875,12 +839,14 @@ class GroupCoordinator:
         all_gather_group: "GroupCoordinator | None" = None,
         all_gather_tensors: dict[str, bool] | None = None,
     ) -> list[Any]:
-        if self.world_size == 1:
+        if not torch.distributed.is_initialized() or self.world_size == 1:
             return []
         if self.use_cpu_custom_send_recv:
+            if self.device_communicator is None:
+                raise ValueError("No device communicator found")
             # custom device communicator path is synchronous
-            self.send_tensor_dict(
-                tensor_dict, dst, all_gather_group, all_gather_tensors
+            self.device_communicator.send_tensor_dict(  # type: ignore
+                tensor_dict, dst
             )
             return []
 
@@ -907,15 +873,9 @@ class GroupCoordinator:
             if tensor.numel() == 0:
                 continue
 
-            use_all_gather = (
-                all_gather_group is not None and tensor.numel() % all_gather_size == 0
-            )
-            use_all_gather = (
-                all_gather_tensors.get(key, use_all_gather)
-                if all_gather_tensors is not None
-                else use_all_gather
-            )
-            if use_all_gather:
+            if self._should_use_all_gather(
+                key, tensor.numel(), all_gather_group, all_gather_tensors
+            ):
                 tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
 
             if tensor.is_cuda:
@@ -956,68 +916,15 @@ class GroupCoordinator:
         # Bypass the function if we are using only 1 GPU.
         if not torch.distributed.is_initialized() or self.world_size == 1:
             return None
-        all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
-        all_gather_rank = (
-            0 if all_gather_group is None else all_gather_group.rank_in_group
+        tensor_dict, handles, postprocess = self.irecv_tensor_dict(
+            src=src,
+            all_gather_group=all_gather_group,
+            all_gather_tensors=all_gather_tensors,
         )
-
-        group = self.device_group
-        metadata_group = self.cpu_group
-
-        if src is None:
-            src = (self.rank_in_group - 1) % self.world_size
-        assert src < self.world_size, f"Invalid src rank ({src})"
-
-        if self.use_cpu_custom_send_recv:
-            if self.device_communicator is None:
-                raise ValueError("No device communicator found")
-            return self.device_communicator.recv_tensor_dict(  # type: ignore
-                src
-            )
-
-        recv_metadata_list = self.recv_object(src=src)
-        tensor_dict: dict[str, Any] = {}
-        for key, value in recv_metadata_list:
-            if isinstance(value, TensorMetadata):
-                tensor = torch.empty(value.size, dtype=value.dtype, device=value.device)
-                if tensor.numel() == 0:
-                    # Skip broadcasting empty tensors.
-                    tensor_dict[key] = tensor
-                    continue
-
-                # send-allgather: send only a slice, then do allgather.
-                use_all_gather = (
-                    all_gather_group is not None
-                    and tensor.numel() % all_gather_size == 0
-                )
-                use_all_gather = (
-                    all_gather_tensors.get(key, use_all_gather)
-                    if all_gather_tensors is not None
-                    else use_all_gather
-                )
-
-                if use_all_gather:
-                    orig_shape = tensor.shape
-                    tensor = tensor.reshape(all_gather_size, -1)[all_gather_rank]
-
-                if tensor.is_cpu:
-                    # use metadata_group for CPU tensors
-                    torch.distributed.recv(
-                        tensor, src=self.ranks[src], group=metadata_group
-                    )
-                else:
-                    # use group for GPU tensors
-                    torch.distributed.recv(tensor, src=self.ranks[src], group=group)
-                if use_all_gather:
-                    # do the allgather
-                    tensor = all_gather_group.all_gather(  # type: ignore
-                        tensor, dim=0
-                    )
-                    tensor = tensor.reshape(orig_shape)
-
-                tensor_dict[key] = tensor
-            else:
-                tensor_dict[key] = value
+        for h in handles:
+            h.wait()
+        for fn in postprocess:
+            fn()
         return tensor_dict
 
     def irecv_tensor_dict(
@@ -1028,15 +935,16 @@ class GroupCoordinator:
     ) -> tuple[
         dict[str, torch.Tensor | Any] | None, list[Any], list[Callable[[], None]]
     ]:
-        if self.world_size == 1:
+        if not torch.distributed.is_initialized() or self.world_size == 1:
             return None, [], []
         if self.use_cpu_custom_send_recv:
+            if self.device_communicator is None:
+                raise ValueError("No device communicator found")
             # custom device communicator path is synchronous
-            return (
-                self.recv_tensor_dict(src, all_gather_group, all_gather_tensors),
-                [],
-                [],
+            sync_tensor_dict = self.device_communicator.recv_tensor_dict(  # type: ignore
+                src
             )
+            return sync_tensor_dict, [], []
 
         all_gather_size = 1 if all_gather_group is None else all_gather_group.world_size
         all_gather_rank = (
@@ -1064,17 +972,9 @@ class GroupCoordinator:
                     tensor_dict[key] = full_tensor
                     continue
 
-                use_all_gather = (
-                    all_gather_group is not None
-                    and full_tensor.numel() % all_gather_size == 0
-                )
-                use_all_gather = (
-                    all_gather_tensors.get(key, use_all_gather)
-                    if all_gather_tensors is not None
-                    else use_all_gather
-                )
-
-                if use_all_gather:
+                if self._should_use_all_gather(
+                    key, full_tensor.numel(), all_gather_group, all_gather_tensors
+                ):
                     orig_shape = full_tensor.shape
                     slice_tensor = full_tensor.reshape(all_gather_size, -1)[
                         all_gather_rank
