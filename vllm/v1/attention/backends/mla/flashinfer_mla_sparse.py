@@ -309,41 +309,6 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
-    def _call_kernel(
-        self,
-        q: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        topk_indices: torch.Tensor,
-        seq_lens: torch.Tensor,
-        max_seq_len: int,
-        topk_tokens: int,
-    ) -> torch.Tensor:
-        """Call the FlashInfer sparse MLA kernel for a batch with uniform q_len.
-
-        Args:
-            q: Query tensor of shape (batch_size, q_len, num_heads, head_dim)
-            kv_c_and_k_pe_cache: KV cache tensor
-            topk_indices: Physical indices of shape (batch_size, q_len, topk)
-            seq_lens: Sequence lengths tensor of shape (batch_size,)
-            max_seq_len: Maximum sequence length
-            topk_tokens: Number of top-k tokens for sparse attention
-        """
-        o = trtllm_batch_decode_with_kv_cache_mla(
-            query=q,
-            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=topk_indices,
-            seq_lens=seq_lens,
-            max_seq_len=max_seq_len,
-            bmm1_scale=self.bmm1_scale,
-            bmm2_scale=self.bmm2_scale,
-            sparse_mla_top_k=topk_tokens,
-        )
-        return o
-
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -378,12 +343,18 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         q_reshaped = q.view(1, num_actual_toks, q.shape[-2], q.shape[-1])
         indices_reshaped = topk_indices_physical.view(1, num_actual_toks, -1)
 
-        o = self._call_kernel(
-            q_reshaped,
-            kv_c_and_k_pe_cache,
-            indices_reshaped,
-            attn_metadata.topk_tokens_tensor,
-            attn_metadata.topk_tokens,
-            attn_metadata.topk_tokens,
+        o = trtllm_batch_decode_with_kv_cache_mla(
+            query=q_reshaped,
+            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
+            workspace_buffer=self._workspace_buffer,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            block_tables=indices_reshaped,
+            seq_lens=attn_metadata.topk_tokens_tensor,
+            max_seq_len=attn_metadata.topk_tokens,
+            bmm1_scale=self.bmm1_scale,
+            bmm2_scale=self.bmm2_scale,
+            sparse_mla_top_k=attn_metadata.topk_tokens,
         )
         return o.view(-1, o.shape[-2], o.shape[-1]), None
