@@ -62,3 +62,4 @@ fi
 if [[ -n "${CROSS_LAYERS_BLOCKS:-}" ]]; then
   echo "CROSS_LAYERS_BLOCKS is set, rerunning with --enable-cross-layers"
   run_tests "default backend" "--enable-cross-layers"
+fi
