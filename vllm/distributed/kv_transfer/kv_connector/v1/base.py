@@ -41,7 +41,7 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
-from typing import TYPE_CHECKING, Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
@@ -161,7 +161,7 @@ class KVConnectorBase_V1(ABC):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
@@ -383,13 +383,13 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
-    def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
+    def get_kv_connector_stats(self) -> "KVConnectorStats | None":
         """
         Get the KV connector stats collected during the last interval.
         """
         return None
 
-    def get_kv_connector_kv_cache_events(self) -> Optional["KVConnectorKVEvents"]:
+    def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":
         """
         Get the KV connector kv cache events collected during the last interval.
         This function should be called by the model runner every time after the
@@ -558,7 +558,7 @@ class KVConnectorBase_V1(ABC):
     @classmethod
     def build_kv_connector_stats(
         cls, data: dict[str, Any] | None = None
-    ) -> Optional["KVConnectorStats"]:
+    ) -> "KVConnectorStats | None":
         """
         KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
@@ -584,7 +584,7 @@ class KVConnectorBase_V1(ABC):
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
         per_engine_labelvalues: dict[int, list[object]],
-    ) -> Optional["KVConnectorPromMetrics"]:
+    ) -> "KVConnectorPromMetrics | None":
         """
         Create a KVConnectorPromMetrics subclass which should register
         per-connector Prometheus metrics and implement observe() to

@@ -71,9 +71,7 @@ class BlockTables:
     def _make_ptr_tensor(self, x: Iterable[torch.Tensor]) -> torch.Tensor:
         # NOTE(woosuk): Use uint64 instead of int64 to cover all possible addresses.
         return torch.tensor(
-            [t.data_ptr() for t in x],
-            dtype=torch.uint64,
-            device=self.device,
+            [t.data_ptr() for t in x], dtype=torch.uint64, device=self.device
         )
 
     def append_block_ids(
@@ -96,8 +94,7 @@ class BlockTables:
         self.num_blocks.copy_to_uva()
 
     def gather_block_tables(
-        self,
-        idx_mapping: torch.Tensor,
+        self, idx_mapping: torch.Tensor
     ) -> tuple[torch.Tensor, ...]:
         num_reqs = idx_mapping.shape[0]
         _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs)](
