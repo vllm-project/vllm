@@ -233,6 +233,10 @@ class ResponsesRequest(OpenAIBaseModel):
     # this cannot be used in conjunction with previous_response_id
     # TODO: consider supporting non harmony messages as well
     previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+    structured_outputs: StructuredOutputsParams | None = Field(
+        default=None,
+        description="Additional kwargs for structured outputs",
+    )
 
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
@@ -319,13 +323,20 @@ class ResponsesRequest(OpenAIBaseModel):
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
-        structured_outputs = None
+        structured_outputs = self.structured_outputs
+
+        # Also check text.format for OpenAI-style json_schema
         if self.text is not None and self.text.format is not None:
             response_format = self.text.format
             if (
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None
             ):
+                if structured_outputs is not None:
+                    raise ValueError(
+                        "Cannot specify both structured_outputs and "
+                        "text.format.json_schema"
+                    )
                 structured_outputs = StructuredOutputsParams(
                     json=response_format.schema_
                 )
