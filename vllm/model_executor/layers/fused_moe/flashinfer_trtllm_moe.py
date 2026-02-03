@@ -69,9 +69,14 @@ def _supports_routing_method(
             RoutingMethodType.RenormalizeNaive,
         ]
     elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
-        # NOTE(rob): kernel requires Llama4.
-        return routing_method == RoutingMethodType.Llama4
-
+        # NOTE(dbari): as above, potentially allow others here.
+        return routing_method in [
+            RoutingMethodType.Llama4,
+            # NOTE(mgoin): Disabled to investigate accuracy issues.
+            # See https://github.com/vllm-project/vllm/issues/33532
+            # RoutingMethodType.Renormalize,
+            # RoutingMethodType.RenormalizeNaive,
+        ]
     else:
         raise ValueError("Unsupported quantization scheme.")
 
