@@ -285,7 +285,7 @@ class ParserManager:
                 try:
                     parser = cls.get_parser_internal(name)
                     logger.info(
-                        "Using unified parser '%s' for both reasoning and tool parsing.",
+                        "Using unified parser '%s' for reasoning and tool parsing.",
                         name,
                     )
                     return parser
