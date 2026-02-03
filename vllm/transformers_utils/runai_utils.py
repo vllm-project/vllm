@@ -61,17 +61,38 @@ class ObjectStorageModel:
 
         # base hash
         base_hash = hashlib.sha256(str(url).encode()).hexdigest()[:8]
+
+        # base dir
+        base_dir = os.path.join(get_cache_dir(), "model_streamer")
         # include parent and current pid so concurrent workers get unique dirs
-        parent_pid = os.getppid()
-        my_pid = os.getpid()
-        
+        parent_pid = str(os.getppid())
+        my_pid = str(os.getpid())
+
         dir_name = os.path.join(
-            get_cache_dir(),
-            "model_streamer",
+            base_dir,
             f"{base_hash}-{parent_pid}-{my_pid}",
         )
         if os.path.exists(dir_name):
             shutil.rmtree(dir_name)
+
+        # also delete folders from a past run if needed:
+        for entry in os.scandir(base_dir):
+            if (
+                entry.is_dir(follow_symlinks=False)
+                and entry.name.startswith(base_hash)
+                and parent_pid not in entry.name
+            ):
+                try:
+                    shutil.rmtree(entry.path)
+                except FileNotFoundError:
+                    pass  # already deleted by another worker
+                except OSError as e:
+                    logger.warning(
+                        "Failed to remove stale model cache dir: %s, error: %s",
+                        entry.name,
+                        e,
+                    )
+
         os.makedirs(dir_name)
         self.dir = dir_name
         logger.debug("Init object storage, model cache path is: %s", dir_name)
