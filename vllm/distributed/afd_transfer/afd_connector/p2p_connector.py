@@ -257,6 +257,7 @@ class P2PAFDConnector(AFDConnectorBase):
             
             self._tensor_metadata_list[stage_idx] = TensorMetadata(
                 torch.device(f"cuda:{self.local_rank}"),
+                # TODO(jcz): use dtype from dp_metadata
                 self.config.model_config.dtype,
                 torch.Size([num_tokens, self.config.model_config.hf_config.hidden_size]),
             )
