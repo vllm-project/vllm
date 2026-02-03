@@ -4,7 +4,6 @@ depends_on:
 steps:
 - label: Basic Models Tests (Initialization)
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -16,7 +15,6 @@ steps:
 
 - label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
