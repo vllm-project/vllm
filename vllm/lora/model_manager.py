@@ -11,7 +11,7 @@ from torch import nn
 
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.config.lora import LoRAConfig, ModelConfig
+from vllm.config.lora import LoRAConfig
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -471,6 +471,7 @@ class LoRAModelManager:
             if self.supports_mm and not isinstance(new_module, BaseLayerWithLoRA):
                 continue
             self.register_module(module_name, new_module)
+
             self._register_packed_modules(module_name)
             # All lora layers share the same punica_wrapper based on reference.
             new_module.set_mapping(punica_wrapper)

@@ -191,7 +191,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
-
 logger = init_logger(__name__)
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
@@ -1661,6 +1660,7 @@ class GPUModelRunner(
             self.set_active_loras(
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
+
         return (
             logits_indices,
             spec_decode_metadata,
@@ -3498,6 +3498,7 @@ class GPUModelRunner(
             ) = self._preprocess(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.

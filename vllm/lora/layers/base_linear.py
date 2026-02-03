@@ -39,6 +39,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         self.lora_config = lora_config
+        #
         if isinstance(self.base_layer, ReplicatedLinear):
             lora_a_out_size = lora_config.max_lora_rank
             lora_b_out_size = self.output_size
@@ -105,8 +106,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         assert (
             len(self.lora_a_stacked) == len(self.lora_b_stacked) == self.n_slices == 1
         )
-        self.reset_lora(index)
 
+        self.reset_lora(index)
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)

@@ -191,6 +191,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def forward(self, *args, **kwargs):
         # synchronizing lora load
         self._sync_lora_loads()
+
         return type(self.base_layer).forward(self, *args, **kwargs)
 
     @classmethod

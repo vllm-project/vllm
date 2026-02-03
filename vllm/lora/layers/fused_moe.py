@@ -407,6 +407,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         """Initializes lora matrices."""
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
+
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
         )
@@ -507,7 +508,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         self.w2_lora_a_stacked[0][index].zero_()
         self.w2_lora_b_stacked[0][index].zero_()
-        self.adapter_enabled[index : index + 1].zero_()
+        self.adapter_enabled[index].zero_()
 
     #
 
@@ -526,15 +527,16 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.adapter_enabled[index].fill_(1)
 
         num_experts = self.w13_lora_a_stacked[0].shape[1]
+
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
-
         assert (
             num_experts
             == w1_lora_a.shape[0]
             == w2_lora_a.shape[0]
             == w3_lora_a.shape[0]
         )
+
         slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
         slliced_w1_lora_b = self._slice_w13_b(w1_lora_b)
 
@@ -650,6 +652,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self._base_model = model_config.architectures[0]
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
+
         self.adapter_enabled = torch.tensor(
             [0] * (max_loras + 1), dtype=torch.int, device=self.device
         )
