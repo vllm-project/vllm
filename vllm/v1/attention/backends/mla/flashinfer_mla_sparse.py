@@ -40,10 +40,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
-    split_decodes_and_prefills,
-)
+from vllm.v1.attention.backends.utils import KVCacheLayoutType
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -146,14 +143,6 @@ class FlashInferMLASparseBackend(AttentionBackend):
 
 
 @dataclass
-class FlashInferMLASparseDecodeMetadata:
-    """Decode-specific metadata for FlashInfer MLA Sparse."""
-
-    block_table: torch.Tensor
-    seq_lens: torch.Tensor
-
-
-@dataclass
 class FlashInferMLASparseMetadata(AttentionMetadata):
     """Attention metadata for FlashInfer MLA Sparse backend."""
 
@@ -175,15 +164,6 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     block_size: int = 64
     topk_tokens: int = 2048
 
-    # Decode metadata (None during prefill-only)
-    decode: FlashInferMLASparseDecodeMetadata | None = None
-
-    # For split batches
-    num_decodes: int = 0
-    num_prefills: int = 0
-    num_decode_tokens: int = 0
-    num_prefill_tokens: int = 0
-
 
 class FlashInferMLASparseMetadataBuilder(
     AttentionMetadataBuilder[FlashInferMLASparseMetadata]
@@ -204,9 +184,6 @@ class FlashInferMLASparseMetadataBuilder(
         self.kv_cache_spec = kv_cache_spec
         self.model_config = vllm_config.model_config
         self.device = device
-
-        # Treat requests with query length <= 1 as decodes
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         self.mla_dims = get_mla_dims(self.model_config)
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
@@ -240,25 +217,6 @@ class FlashInferMLASparseMetadataBuilder(
         )
         req_id_per_token_tensor = self.req_id_per_token_buffer[:num_tokens]
 
-        # Split into decode and prefill
-        (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
-            split_decodes_and_prefills(
-                cm,
-                decode_threshold=self.reorder_batch_threshold or 1,
-                require_uniform=True,
-            )
-        )
-
-        # Build decode metadata if we have decode tokens
-        decode_metadata = None
-        if num_decodes > 0:
-            decode_block_table = cm.block_table_tensor[:num_decodes]
-            decode_seq_lens = cm.seq_lens[:num_decodes]
-            decode_metadata = FlashInferMLASparseDecodeMetadata(
-                block_table=decode_block_table,
-                seq_lens=decode_seq_lens,
-            )
-
         return FlashInferMLASparseMetadata(
             num_reqs=cm.num_reqs,
             max_query_len=cm.max_query_len,
@@ -271,11 +229,6 @@ class FlashInferMLASparseMetadataBuilder(
             seq_lens=cm.seq_lens,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
-            decode=decode_metadata,
-            num_decodes=num_decodes,
-            num_prefills=num_prefills,
-            num_decode_tokens=num_decode_tokens,
-            num_prefill_tokens=num_prefill_tokens,
         )
 
 
@@ -393,28 +346,27 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         attn_metadata: FlashInferMLASparseMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward pass for decode with sparse attention.
+        """Forward pass with sparse attention.
 
         For sparse mode:
         - topk_indices contains logical indices per token [num_tokens, topk]
         - These are converted to physical cache slots using the block table
         - The resulting indices are passed as block_tables with shape
-          [batch_size, q_len_per_request, sparse_mla_top_k]
+          [num_reqs, q_len_per_request, sparse_mla_top_k]
 
-        Mixed batches (decode + prefill) are handled by processing each group
-        separately, as the kernel requires uniform query lengths within a batch.
+        Each token is treated independently, so there is no distinction between
+        decode and prefill phases.
         """
-        # Concatenate q if it's a tuple (ql_nope, q_pe)
         if isinstance(q, tuple):
             q = torch.cat(q, dim=-1)
 
         num_actual_toks = q.shape[0]
+        num_reqs = attn_metadata.num_reqs
+        q_len = num_actual_toks // num_reqs
 
-        # Get topk indices
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        # Convert per-request topk indices to global cache slots
         topk_indices_physical = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,
@@ -431,100 +383,15 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         if self.bmm2_scale is None:
             self.bmm2_scale = layer._v_scale_float
 
-        num_decodes = attn_metadata.num_decodes
-        num_prefills = attn_metadata.num_prefills
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        q_reshaped = q.view(num_reqs, q_len, q.shape[-2], q.shape[-1])
+        indices_reshaped = topk_indices_physical.view(num_reqs, q_len, -1)
 
-        # Handle pure decode case (most common, optimized path)
-        if num_prefills == 0 and num_decodes > 0:
-            assert attn_metadata.decode is not None
-            decode_q_len = num_decode_tokens // num_decodes
-
-            q_reshaped = q.view(num_decodes, decode_q_len, q.shape[-2], q.shape[-1])
-            indices_reshaped = topk_indices_physical.view(num_decodes, decode_q_len, -1)
-
-            o = self._call_kernel(
-                q_reshaped,
-                kv_c_and_k_pe_cache,
-                indices_reshaped,
-                attn_metadata.decode.seq_lens,
-                attn_metadata.max_seq_len,
-                attn_metadata.topk_tokens,
-            )
-            return o.view(-1, o.shape[-2], o.shape[-1]), None
-
-        # Handle pure prefill case
-        if num_decodes == 0 and num_prefills > 0:
-            prefill_q_len = num_prefill_tokens // num_prefills
-
-            q_reshaped = q.view(num_prefills, prefill_q_len, q.shape[-2], q.shape[-1])
-            indices_reshaped = topk_indices_physical.view(
-                num_prefills, prefill_q_len, -1
-            )
-
-            o = self._call_kernel(
-                q_reshaped,
-                kv_c_and_k_pe_cache,
-                indices_reshaped,
-                attn_metadata.seq_lens,
-                attn_metadata.max_seq_len,
-                attn_metadata.topk_tokens,
-            )
-            return o.view(-1, o.shape[-2], o.shape[-1]), None
-
-        # Handle mixed batch: process decode and prefill separately
-        # Output tensor to hold results
-        output = q.new_empty(num_actual_toks, self.num_heads, self.kv_lora_rank)
-
-        # Process decode tokens
-        if num_decode_tokens > 0:
-            assert attn_metadata.decode is not None
-            decode_q_len = num_decode_tokens // num_decodes
-
-            decode_q = q[:num_decode_tokens].view(
-                num_decodes, decode_q_len, q.shape[-2], q.shape[-1]
-            )
-            decode_indices = topk_indices_physical[:num_decode_tokens].view(
-                num_decodes, decode_q_len, -1
-            )
-
-            decode_out = self._call_kernel(
-                decode_q,
-                kv_c_and_k_pe_cache,
-                decode_indices,
-                attn_metadata.decode.seq_lens,
-                attn_metadata.max_seq_len,
-                attn_metadata.topk_tokens,
-            )
-            output[:num_decode_tokens] = decode_out.view(
-                num_decode_tokens, decode_out.shape[-2], decode_out.shape[-1]
-            )
-
-        # Process prefill tokens
-        if num_prefill_tokens > 0:
-            prefill_q_len = num_prefill_tokens // num_prefills
-
-            prefill_q = q[num_decode_tokens:].view(
-                num_prefills, prefill_q_len, q.shape[-2], q.shape[-1]
-            )
-            prefill_indices = topk_indices_physical[num_decode_tokens:].view(
-                num_prefills, prefill_q_len, -1
-            )
-
-            # Get seq_lens for prefill requests (they come after decode requests)
-            prefill_seq_lens = attn_metadata.seq_lens[num_decodes:]
-
-            prefill_out = self._call_kernel(
-                prefill_q,
-                kv_c_and_k_pe_cache,
-                prefill_indices,
-                prefill_seq_lens,
-                attn_metadata.max_seq_len,
-                attn_metadata.topk_tokens,
-            )
-            output[num_decode_tokens:] = prefill_out.view(
-                num_prefill_tokens, prefill_out.shape[-2], prefill_out.shape[-1]
-            )
-
-        return output, None
+        o = self._call_kernel(
+            q_reshaped,
+            kv_c_and_k_pe_cache,
+            indices_reshaped,
+            attn_metadata.seq_lens,
+            attn_metadata.max_seq_len,
+            attn_metadata.topk_tokens,
+        )
+        return o.view(-1, o.shape[-2], o.shape[-1]), None
