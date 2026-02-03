@@ -123,9 +123,9 @@ def test_convert_param_value_stricter_type_checking(parser):
     assert parser._convert_param_value("yes", "boolean") == "yes"
     assert parser._convert_param_value("no", "boolean") == "no"
     assert (
-        parser._convert_param_value("TRUE", "boolean") == "TRUE"
-    )  # Note: uppercase not in allowed list
-    assert parser._convert_param_value("FALSE", "boolean") == "FALSE"
+        parser._convert_param_value("TRUE", "boolean") is True
+    )
+    assert parser._convert_param_value("FALSE", "boolean") is False
 
     # Integer and float now raise exceptions for invalid values
     assert parser._convert_param_value("123abc", "integer") == "123abc"
@@ -157,14 +157,6 @@ def test_convert_param_value_edge_cases(parser):
     # Whitespace - trimmed by conversion functions
     assert parser._convert_param_value("  123  ", "integer") == 123
     assert parser._convert_param_value("  true  ", "boolean") is True
-
-    # Case sensitivity for boolean (now stricter - only lowercase allowed)
-    assert (
-        parser._convert_param_value("TRUE", "boolean") == "TRUE"
-    )  # Not in allowed list
-    assert parser._convert_param_value("FALSE", "boolean") == "FALSE"
-    assert parser._convert_param_value("True", "boolean") == "True"
-    assert parser._convert_param_value("False", "boolean") == "False"
 
     # Numeric strings with special characters
     assert parser._convert_param_value("123.45.67", "float") == "123.45.67"

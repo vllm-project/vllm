@@ -222,6 +222,7 @@ class DeepSeekV32ToolParser(ToolParser):
             val = float(value)
             return val if val != int(val) else int(val)
         elif param_type in ["boolean", "bool"]:
+            value = value.strip()
             if value.lower() not in ["false", "0", "true", "1"]:
                 raise ValueError("Invalid boolean value")
             return value.lower() in ["true", "1"]
