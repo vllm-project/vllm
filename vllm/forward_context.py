@@ -271,17 +271,22 @@ def create_forward_context(
     additional_kwargs: dict[str, Any] | None = None,
     skip_compiled: bool = False,
 ):
-    no_compile_layers = vllm_config.compilation_config.static_forward_context
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-
-    remaining_moe_layers = [
-        name for name, layer in no_compile_layers.items() if isinstance(layer, FusedMoE)
-    ]
-    remaining_moe_layers.reverse()
+    if vllm_config.compilation_config.fast_moe_cold_start:
+        if vllm_config.speculative_config is None:
+            all_moe_layers = vllm_config.compilation_config.static_all_moe_layers
+        else:
+            logger.warning_once(
+                "vllm_config.compilation_config.fast_moe_cold_start is not "
+                "compatible with speculative decoding so we are ignoring "
+                "fast_moe_cold_start."
+            )
+            all_moe_layers = None
+    else:
+        all_moe_layers = None
 
     return ForwardContext(
-        no_compile_layers=no_compile_layers,
-        remaining_moe_layers=remaining_moe_layers,
+        no_compile_layers=vllm_config.compilation_config.static_forward_context,
+        all_moe_layers=all_moe_layers,
         virtual_engine=virtual_engine,
         attn_metadata=attn_metadata,
         slot_mapping=slot_mapping or {},
