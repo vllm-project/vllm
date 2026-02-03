@@ -391,13 +391,23 @@ class MooncakeConnectorWorker:
 
         self.engine = TransferEngine()
         self.hostname = get_ip()
+        assert vllm_config.kv_transfer_config
         protocol = self.vllm_config.kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
-        ret_value = self.engine.initialize(self.hostname, "P2PHANDSHAKE", protocol, "")
+        device_name = self.vllm_config.kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
+            "mooncake_device", ""
+        )
+        logger.info(
+            "The Mooncake Transfer Engine is using RDMA device: %s",
+            device_name if device_name else "auto-select",
+        )
+        ret_value = self.engine.initialize(
+            self.hostname, "P2PHANDSHAKE", protocol, device_name
+        )
         if ret_value != 0:
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
 
@@ -418,7 +428,6 @@ class MooncakeConnectorWorker:
         self.tp_group = get_tp_group()
         self.num_blocks = 0
 
-        assert vllm_config.kv_transfer_config
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.num_sender_workers = (
             vllm_config.kv_transfer_config.kv_connector_extra_config.get(
