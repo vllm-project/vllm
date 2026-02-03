@@ -71,7 +71,7 @@ def encode_image_base64(
     image: Image.Image,
     *,
     image_mode: str = "RGB",
-    format: str | None = None,
+    format: str = "PNG",
 ) -> str:
     """
     Encode a pillow image to base64 format.
