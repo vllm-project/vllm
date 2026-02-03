@@ -103,7 +103,7 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
     return get_field(cls, name).init
 
 
-def replace(dataclass_instance: DataclassInstance, /, **kwargs) -> DataclassInstance:
+def replace(dataclass_instance: ConfigT, /, **kwargs) -> ConfigT:
     """Like [`dataclasses.replace`](https://docs.python.org/3/library/dataclasses.html#dataclasses.replace),
     but compatible with Pydantic dataclasses which use `pydantic.fields.Field` instead
     of `dataclasses.field`"""
