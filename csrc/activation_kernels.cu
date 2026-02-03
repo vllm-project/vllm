@@ -205,8 +205,8 @@ template <typename packed_t>
 __device__ __forceinline__ packed_t packed_silu_kernel(const packed_t& val) {
   // x * sigmoid(x)
   float2 fval = cast_to_float2(val);
-  fval.x = fval.x / (1.0f + expf(fval.x));
-  fval.y = fval.y / (1.0f + expf(fval.y));
+  fval.x = fval.x / (1.0f + expf(-fval.x));
+  fval.y = fval.y / (1.0f + expf(-fval.y));
   return cast_to_packed<packed_t>(fval);
 }
 
