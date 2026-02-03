@@ -348,6 +348,17 @@ class ParallelConfig:
                     "num_redundant_experts."
                 )
 
+        # Note(hc): In the current implementation of decode context
+        # parallel(DCP), tp_size needs to be divisible by dcp_size,
+        # because the world size does not change by dcp, it simply
+        # reuses the GPUs of TP group, and split one TP group into
+        # tp_size//dcp_size DCP groups.
+        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+            raise ValueError(
+                f"tp_size={self.tensor_parallel_size} must be divisible by"
+                f"dcp_size={self.decode_context_parallel_size}."
+            )
+
         return self
 
     @property
@@ -538,15 +549,6 @@ class ParallelConfig:
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
-        # Set all2all_backend from env var if not specified, with deprecation warning
-        if envs.is_set("VLLM_ALL2ALL_BACKEND"):
-            logger.warning_once(
-                "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
-                "will be removed in v0.15.0. Please use the "
-                "--all2all-backend command-line argument instead."
-            )
-            self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
-
         # Continue with the rest of the initialization
         self.world_size = (
             self.pipeline_parallel_size

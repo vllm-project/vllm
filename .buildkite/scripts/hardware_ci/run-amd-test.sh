@@ -44,6 +44,17 @@ cleanup_docker() {
   fi
 }
 
+cleanup_network() {
+  for node in $(seq 0 $((NUM_NODES-1))); do
+    if docker pr -a -q -f name="node${node}" | grep -q .; then
+      docker stop "node${node}"
+    fi
+  done
+  if docker network ls | grep docker-net; then
+    docker network rm docker-net
+  fi
+}
+
 # Call the cleanup docker function
 cleanup_docker
 
@@ -223,6 +234,35 @@ if [[ $commands == *"--shard-id="* ]]; then
   if [[ ${#STATUS[@]} -gt 0 && ${at_least_one_shard_with_tests} -eq 0 ]]; then
     echo "All shards reported no tests collected. Failing the build."
     exit 1
+  fi
+
+elif [[ $commands == *"VLLM_TEST_GROUP_NAME=mi325_4-2-node-tests-4-gpus-in-total"* ]]; then
+
+  export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+
+  if [[ "$commands" =~ ^(.*)"["(.*)"] && ["(.*)"]"$ ]]; then
+      prefix=$( echo "${BASH_REMATCH[1]}" | sed 's/;//g')
+      echo "PREFIX: ${prefix}"
+      export composite_command="(command rocm-smi || true)"
+      myIFS=$IFS
+      IFS=','
+      read -ra node0 <<< ${BASH_REMATCH[2]}
+      read -ra node1 <<< ${BASH_REMATCH[3]}
+      IFS=$myIFS
+      for i in "${!node0[@]}";do 
+        command_node_0=$(echo ${node0[i]} | sed 's/\"//g')
+        command_node_1=$(echo ${node1[i]} | sed 's/\"//g')
+        
+        export commands="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
+        echo "COMMANDS: ${commands}"
+        composite_command=$(echo "${composite_command} && ${commands}")
+      done
+      /bin/bash -c "${composite_command}"
+      cleanup_network
+  else
+      echo "Failed to parse node commands! Exiting."
+      cleanup_network
+      exit 111
   fi
 else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
