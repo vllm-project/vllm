@@ -28,8 +28,6 @@ def _make_params(
     trigger: list[int] | None = None,
     forced: list[int] | None = None,
 ) -> SamplingParams:
-    if trigger is None and forced is None:
-        return SamplingParams()
     return SamplingParams(
         extra_args={
             "harmony_tool_required": {

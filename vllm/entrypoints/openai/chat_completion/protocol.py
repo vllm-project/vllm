@@ -354,7 +354,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    _harmony_tool_config: dict[str, Any] | None = Field(default=None, exclude=True)
+    harmony_tool_config: dict[str, Any] | None = Field(default=None, exclude=True)
 
     # --8<-- [end:chat-completion-extra-params]
 
@@ -451,8 +451,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 )
 
         extra_args: dict[str, Any] = dict(self.vllm_xargs) if self.vllm_xargs else {}
-        if self._harmony_tool_config:
-            extra_args["harmony_tool_required"] = self._harmony_tool_config
+        if self.harmony_tool_config:
+            extra_args["harmony_tool_required"] = self.harmony_tool_config
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params

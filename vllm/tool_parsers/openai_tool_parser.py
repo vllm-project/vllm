@@ -157,7 +157,7 @@ class OpenAIToolParser(ToolParser):
 
         if request.tool_choice == "required" and request.tools:
             if self._trigger_pattern and self._forced_sequence:
-                request._harmony_tool_config = {
+                request.harmony_tool_config = {
                     "trigger_pattern": self._trigger_pattern,
                     "forced_sequence": self._forced_sequence,
                 }
