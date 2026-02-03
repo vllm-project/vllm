@@ -49,6 +49,17 @@ All2AllBackend = Literal[
 ]
 
 
+@dataclass
+class EPLBCommunicationConfig:
+    """Runtime-adjusted communication configuration for EPLB."""
+
+    num_groups: int
+    """Effective number of communication groups."""
+
+    batch_size: int | None
+    """Effective batch size for P2P operations."""
+
+
 @config
 @dataclass
 class EPLBConfig:
@@ -84,6 +95,26 @@ class EPLBConfig:
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
+    num_communication_groups: int = Field(default=1, ge=1)
+    """
+    Number of communication groups for P2P operations during rebalancing.
+    Determines how ranks are divided into groups for hierarchical communication.
+    - Ranks are assigned: group_id = rank // (world_size // num_groups)
+    - Communication rounds determined by XOR of group IDs
+    - Total rounds = next power of 2 >= max_group_id
+    - Default is 1 (all ranks in one group, single communication round)
+    - If communication_batch_size is set, this will be overridden to world size
+    """
+
+    communication_batch_size: int | None = Field(default=None, ge=1)
+    """
+    Maximum number of P2P operations to batch together during rebalancing.
+    - When set, num_communication_groups will be overridden to equal world size
+      (one rank per group), and operations will be split into batches
+    - Helps avoid overwhelming communication system with too many concurrent ops
+    - If None (default), no special batching is applied
+    """
+
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
@@ -91,6 +122,56 @@ class EPLBConfig:
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
         return self
+
+    def get_communication_config(self, ep_size: int) -> EPLBCommunicationConfig:
+        """
+        Get the communication configuration for a given EP size.
+
+        This method adjusts num_communication_groups and communication_batch_size
+        based on runtime constraints:
+        - If batch_size is set, forces num_groups = ep_size
+        - Caps num_groups at ep_size
+
+        Args:
+            ep_size: Expert parallel world size
+
+        Returns:
+            EPLBCommunicationConfig
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+
+        num_groups = self.num_communication_groups
+        batch_size = self.communication_batch_size
+
+        # If batch_size is set, num_groups must equal world size
+        if batch_size is not None and num_groups != ep_size:
+            logger.warning(
+                "EPLB: communication_batch_size is set (%d), "
+                "overriding num_communication_groups from %d to %d "
+                "(must equal world size when batch size is specified).",
+                batch_size,
+                num_groups,
+                ep_size,
+            )
+            num_groups = ep_size
+
+        # Cap num_groups at world size
+        if num_groups > ep_size:
+            logger.warning(
+                "EPLB: num_communication_groups (%d) is larger than "
+                "world size (%d). Using %d instead.",
+                num_groups,
+                ep_size,
+                ep_size,
+            )
+            num_groups = ep_size
+
+        return EPLBCommunicationConfig(
+            num_groups=num_groups,
+            batch_size=batch_size,
+        )
 
 
 @config

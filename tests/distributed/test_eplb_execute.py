@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch.distributed
 
+from vllm.config.parallel import EPLBCommunicationConfig
 from vllm.distributed.eplb.rebalance_execute import (
     move_from_buffer,
     rearrange_expert_weights_inplace,
@@ -292,6 +293,11 @@ def _test_async_transfer_layer_without_mtp_worker(
     expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
     cuda_stream = torch.cuda.Stream(device=device)
 
+    comm_config = EPLBCommunicationConfig(
+        num_groups=1,
+        batch_size=None,
+    )
+
     for layer_idx in range(num_layers):
         is_unchanged, is_received_locally, recv_metadata = asyncio.run(
             transfer_layer(
@@ -300,6 +306,7 @@ def _test_async_transfer_layer_without_mtp_worker(
                 expert_weights=expert_weights,
                 expert_weights_buffer=expert_buffer,
                 ep_group=ep_group,
+                communication_config=comm_config,
                 layer=layer_idx,
                 cuda_stream=cuda_stream,
             )
@@ -377,12 +384,19 @@ def _test_rearrange_expert_weights_with_redundancy(
         num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
     )
 
+    # Create default communication config
+    comm_config = EPLBCommunicationConfig(
+        num_groups=1,
+        batch_size=None,
+    )
+
     # Execute weight rearrangement
     rearrange_expert_weights_inplace(
         old_indices,
         new_indices,
         expert_weights,
         ep_group,
+        comm_config,
         is_profile=False,
     )
 
@@ -443,6 +457,133 @@ def test_rearrange_expert_weights_with_redundancy(
     )
 
 
+def _test_rearrange_with_communication_config(
+    env,
+    world_size,
+    num_layers,
+    num_local_experts,
+    num_logical_experts,
+    num_communication_groups,
+    communication_batch_size,
+) -> None:
+    """Test rearrangement with different communication configurations."""
+    set_env_vars_and_device(env)
+    ensure_model_parallel_initialized(
+        tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+    )
+
+    ep_group = get_tp_group().cpu_group
+    ep_rank = torch.distributed.get_rank()
+    device = torch.device(f"cuda:{ep_rank}")
+
+    total_physical_experts = world_size * num_local_experts
+    hidden_sizes = [32, 64]
+
+    # Create redundancy configuration
+    redundancy_config = create_redundancy_config(
+        num_logical_experts, total_physical_experts
+    )
+
+    old_indices = create_expert_indices_with_redundancy(
+        num_layers,
+        num_logical_experts,
+        total_physical_experts,
+        redundancy_config,
+    )
+
+    new_redundancy_config = create_redundancy_config(
+        num_logical_experts, total_physical_experts
+    )
+    new_indices = create_expert_indices_with_redundancy(
+        num_layers,
+        num_logical_experts,
+        total_physical_experts,
+        new_redundancy_config,
+    )
+
+    expert_weights = create_expert_weights(
+        num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
+    )
+
+    # Create communication config
+    comm_config = EPLBCommunicationConfig(
+        num_groups=num_communication_groups,
+        batch_size=communication_batch_size,
+    )
+
+    # Execute weight rearrangement with communication config
+    rearrange_expert_weights_inplace(
+        old_indices,
+        new_indices,
+        expert_weights,
+        ep_group,
+        comm_config,
+        is_profile=False,
+        rank_mapping=None,
+    )
+
+    # Verify the rearrangement result
+    verify_expert_weights_after_shuffle(
+        expert_weights,
+        new_indices,
+        hidden_sizes,
+        ep_rank,
+        num_local_experts,
+    )
+
+    verify_redundant_experts_have_same_weights(
+        expert_weights,
+        new_indices,
+        hidden_sizes,
+        world_size,
+        num_local_experts,
+    )
+
+
+@pytest.mark.parametrize(
+    "world_size,num_layers,num_local_experts,num_logical_experts,"
+    "num_communication_groups,communication_batch_size",
+    [
+        # 2 GPUs, 2 experts per GPU
+        # 3 logical experts, 4 physical experts, 1 redundant expert
+        (2, 1, 2, 3, 1, None),  # Single group (default)
+        (2, 1, 2, 3, 2, None),  # Two groups
+        (2, 1, 2, 3, 2, 32),  # Two groups with batching
+        # 2 GPUs, 3 experts per GPU
+        # 4 logical experts, 6 physical experts, 2 redundant experts
+        (2, 2, 3, 4, 1, None),  # Single group
+        (2, 2, 3, 4, 2, 64),  # Two groups with batching
+        # 4 GPUs, 2 experts per GPU
+        # 6 logical experts, 8 physical experts, 2 redundant experts
+        (4, 1, 2, 6, 1, None),  # Single group
+        (4, 1, 2, 6, 2, None),  # Two groups
+        (4, 1, 2, 6, 4, None),  # Four groups
+        (4, 1, 2, 6, 4, 64),  # Four groups with batching
+    ],
+)
+def test_rearrange_with_communication_config(
+    world_size,
+    num_layers,
+    num_local_experts,
+    num_logical_experts,
+    num_communication_groups,
+    communication_batch_size,
+):
+    """Test expert rearrangement with different communication configurations."""
+    if torch.cuda.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+
+    distributed_run(
+        _test_rearrange_with_communication_config,
+        world_size,
+        num_layers,
+        num_local_experts,
+        num_logical_experts,
+        num_communication_groups,
+        communication_batch_size,
+    )
+
+
 def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
     set_env_vars_and_device(env)
     ensure_model_parallel_initialized(
@@ -479,12 +620,19 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
             layer_copy.append(weight.clone())
         original_weights.append(layer_copy)
 
+    # Create default communication config
+    comm_config = EPLBCommunicationConfig(
+        num_groups=1,
+        batch_size=None,
+    )
+
     # Execute rearrangement (should be no change)
     rearrange_expert_weights_inplace(
         indices,
         indices,  # Same indices
         expert_weights,
         ep_group,
+        comm_config,
         is_profile=False,
     )
 
@@ -580,12 +728,19 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
             layer_copy.append(weight.clone())
         original_weights.append(layer_copy)
 
+    # Create default communication config
+    comm_config = EPLBCommunicationConfig(
+        num_groups=1,
+        batch_size=None,
+    )
+
     # Execute profile mode rearrangement
     rearrange_expert_weights_inplace(
         old_indices,
         new_indices,
         expert_weights,
         ep_group,
+        comm_config,
         is_profile=True,  # Profile mode
     )
 

@@ -19,7 +19,7 @@ from torch.distributed import (
     get_global_rank,
 )
 
-import vllm.envs as envs
+from vllm.config.parallel import EPLBCommunicationConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -158,6 +158,7 @@ def move_to_buffer(
     expert_weights_buffers: Sequence[torch.Tensor],
     cuda_stream: torch.cuda.Stream | None,
     ep_group: ProcessGroup,
+    communication_config: EPLBCommunicationConfig,
 ) -> MoveToBufferResult:
     """
     Rearranges expert weights during EPLB rebalancing.
@@ -172,6 +173,7 @@ def move_to_buffer(
         expert_weights_buffers: Intermediate buffers (one per tensor).
         cuda_stream: CUDA stream for async copies (can be None for sync mode).
         ep_group: Distributed process group for expert parallel comms.
+        communication_config: Communication configuration for P2P operations.
 
     Returns:
         is_unchanged (np.ndarray): (num_local_experts,), True where an expert row
@@ -253,40 +255,10 @@ def move_to_buffer(
     ep_size = ep_group.size()
     rank_to_global = {rank: get_global_rank(ep_group, rank) for rank in range(ep_size)}
 
-    # Get configuration from environment variables
-    num_groups = envs.VLLM_EPLB_NUM_COMMUNICATION_GROUPS
-    batch_size = envs.VLLM_EPLB_COMMUNICATION_BATCH_SIZE
-
-    # Ensure num_groups is at least 1
-    if num_groups < 1:
-        logger.warning(
-            "VLLM_EPLB_NUM_COMMUNICATION_GROUPS (%d) is less than 1. Using 1 instead.",
-            num_groups,
-        )
-        num_groups = 1
-
-    # If batch_size is set, num_groups must equal world size
-    if batch_size is not None and num_groups != ep_size:
-        logger.warning(
-            "VLLM_EPLB_COMMUNICATION_BATCH_SIZE is set (%d), "
-            "overriding VLLM_EPLB_NUM_COMMUNICATION_GROUPS from %d to "
-            "%d (must equal world size when batch size is specified).",
-            batch_size,
-            num_groups,
-            ep_size,
-        )
-        num_groups = ep_size
-
-    # Cap num_groups at world size
-    if num_groups > ep_size:
-        logger.warning(
-            "VLLM_EPLB_NUM_COMMUNICATION_GROUPS (%d) is larger than "
-            "world size (%d). Using %d instead.",
-            num_groups,
-            ep_size,
-            ep_size,
-        )
-        num_groups = ep_size
+    # Use the already-validated configuration from EPLBConfig
+    # (validation and adjustment is done in EPLBConfig.get_communication_config)
+    num_groups = communication_config.num_groups
+    batch_size = communication_config.batch_size
 
     # Calculate group size and number of communication rounds
     group_size = ep_size // num_groups
@@ -592,6 +564,7 @@ async def transfer_layer(
     expert_weights: Sequence[Iterable[torch.Tensor]],
     expert_weights_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
+    communication_config: EPLBCommunicationConfig,
     is_profile: bool = False,
     layer: int = 0,
     cuda_stream: torch.cuda.Stream | None = None,
@@ -656,6 +629,7 @@ async def transfer_layer(
         expert_weights_buffers=expert_weights_buffer,
         cuda_stream=cuda_stream,
         ep_group=ep_group,
+        communication_config=communication_config,
     )
     return is_unchanged, is_received_locally, recv_metadata
 
@@ -665,6 +639,7 @@ def rearrange_expert_weights_inplace(
     new_global_expert_indices: torch.Tensor,
     expert_weights: Sequence[Iterable[torch.Tensor]],
     ep_group: ProcessGroup,
+    communication_config: EPLBCommunicationConfig,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
 ) -> None:
@@ -686,6 +661,7 @@ def rearrange_expert_weights_inplace(
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
+        communication_config: Communication configuration for P2P operations.
     """
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -748,6 +724,7 @@ def rearrange_expert_weights_inplace(
             expert_weights_buffers=weights_buffer,
             cuda_stream=None,
             ep_group=ep_group,
+            communication_config=communication_config,
         )
 
         move_from_buffer(
