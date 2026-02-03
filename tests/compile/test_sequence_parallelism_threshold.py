@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import MagicMock, patch
-
 import pytest
 
 from vllm.compilation.sequence_parallelism import (
@@ -10,43 +8,30 @@ from vllm.compilation.sequence_parallelism import (
     SP_MIN_PER_GPU_SIZE_MB,
     get_sequence_parallelism_threshold,
 )
-from vllm.platforms.interface import DeviceCapability
 
 
 class TestGetSequenceParallelismThreshold:
     """Tests for get_sequence_parallelism_threshold function."""
 
-    def test_non_cuda_returns_none(self):
+    def test_non_cuda_returns_none(self, mock_cuda_platform):
         """Non-CUDA platforms should return None."""
-        mock_platform = MagicMock()
-        mock_platform.is_cuda.return_value = False
-
-        # Patch at vllm.platforms since the function does a local import
-        with patch("vllm.platforms.current_platform", mock_platform):
+        with mock_cuda_platform(is_cuda=False):
             result = get_sequence_parallelism_threshold(
                 hidden_size=8192, tp_size=2, element_size=2
             )
         assert result is None
 
-    def test_unsupported_device_capability_returns_none(self):
+    def test_unsupported_device_capability_returns_none(self, mock_cuda_platform):
         """Unsupported device capabilities (e.g., sm80) should return None."""
-        mock_platform = MagicMock()
-        mock_platform.is_cuda.return_value = True
-        mock_platform.get_device_capability.return_value = DeviceCapability(8, 0)
-
-        with patch("vllm.platforms.current_platform", mock_platform):
+        with mock_cuda_platform(capability=(8, 0)):
             result = get_sequence_parallelism_threshold(
                 hidden_size=8192, tp_size=2, element_size=2
             )
         assert result is None
 
-    def test_small_hidden_size_returns_none(self):
+    def test_small_hidden_size_returns_none(self, mock_cuda_platform):
         """H100 with hidden_size below threshold should return None."""
-        mock_platform = MagicMock()
-        mock_platform.is_cuda.return_value = True
-        mock_platform.get_device_capability.return_value = DeviceCapability(9, 0)
-
-        with patch("vllm.platforms.current_platform", mock_platform):
+        with mock_cuda_platform(capability=(9, 0)):
             result = get_sequence_parallelism_threshold(
                 hidden_size=4096,
                 tp_size=2,
@@ -54,13 +39,9 @@ class TestGetSequenceParallelismThreshold:
             )
         assert result is None
 
-    def test_h100_large_model_returns_threshold(self):
+    def test_h100_large_model_returns_threshold(self, mock_cuda_platform):
         """H100 with large enough hidden_size should return calculated threshold."""
-        mock_platform = MagicMock()
-        mock_platform.is_cuda.return_value = True
-        mock_platform.get_device_capability.return_value = DeviceCapability(9, 0)
-
-        with patch("vllm.platforms.current_platform", mock_platform):
+        with mock_cuda_platform(capability=(9, 0)):
             hidden_size = 8192
             tp_size = 2
             element_size = 2  # float16/bfloat16
@@ -98,14 +79,10 @@ class TestGetSequenceParallelismThreshold:
         ],
     )
     def test_threshold_calculation_variations(
-        self, hidden_size, tp_size, element_size, expected
+        self, mock_cuda_platform, hidden_size, tp_size, element_size, expected
     ):
         """Test threshold calculation with various parameter combinations."""
-        mock_platform = MagicMock()
-        mock_platform.is_cuda.return_value = True
-        mock_platform.get_device_capability.return_value = DeviceCapability(9, 0)
-
-        with patch("vllm.platforms.current_platform", mock_platform):
+        with mock_cuda_platform(capability=(9, 0)):
             result = get_sequence_parallelism_threshold(
                 hidden_size=hidden_size,
                 tp_size=tp_size,
@@ -113,13 +90,9 @@ class TestGetSequenceParallelismThreshold:
             )
             assert result == expected
 
-    def test_hidden_size_boundary(self):
+    def test_hidden_size_boundary(self, mock_cuda_platform):
         """Test behavior at the exact hidden_size boundary."""
-        mock_platform = MagicMock()
-        mock_platform.is_cuda.return_value = True
-        mock_platform.get_device_capability.return_value = DeviceCapability(9, 0)
-
-        with patch("vllm.platforms.current_platform", mock_platform):
+        with mock_cuda_platform(capability=(9, 0)):
             # Just below threshold
             result = get_sequence_parallelism_threshold(
                 hidden_size=SP_MIN_HIDDEN_SIZE[90] - 1,
