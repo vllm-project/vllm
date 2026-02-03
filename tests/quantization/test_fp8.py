@@ -136,11 +136,19 @@ def test_kv_cache_model_load_and_run(
 @pytest.mark.parametrize(
     "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
 )
+@pytest.mark.parametrize(
+    "online_quant_layer_scaling_recipe", ["per-tensor", "blockwise"]
+)
+@pytest.mark.parametrize(
+    "model_name", ["facebook/opt-125m", "allenai/OLMoE-1B-7B-0125-Instruct"]
+)
 def test_online_quantization(
     vllm_runner,
     kv_cache_dtype: str,
     force_marlin: bool,
     use_rocm_aiter: bool,
+    online_quant_layer_scaling_recipe: str,
+    model_name: str,
     monkeypatch,
 ) -> None:
     if use_rocm_aiter:
@@ -149,37 +157,81 @@ def test_online_quantization(
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
+    # Marlin does not support blockwise quantization
+    if force_marlin and online_quant_layer_scaling_recipe == "blockwise":
+        pytest.skip("Marlin does not support blockwise quantization")
+
     if force_marlin:
         monkeypatch.setenv("VLLM_TEST_FORCE_FP8_MARLIN", "1")
 
     with vllm_runner(
-        "facebook/opt-125m",
+        model_name,
         quantization="fp8",
         enforce_eager=True,
         kv_cache_dtype=kv_cache_dtype,
+        online_quantization_layer_scaling_recipe=online_quant_layer_scaling_recipe,
     ) as llm:
 
         def check_model(model):
-            fc1 = model.model.decoder.layers[0].fc1
-            assert isinstance(fc1.quant_method, Fp8LinearMethod)
-            if kv_cache_dtype == "fp8":
-                attn = model.model.decoder.layers[0].self_attn.attn
-                assert isinstance(attn.quant_method, Fp8KVCacheMethod)
-                assert attn._k_scale == 1.0
-                assert attn._v_scale == 1.0
+            if model_name == "facebook/opt-125m":
+                # OPT model: decoder.layers[i].fc1
+                layer = model.model.decoder.layers[0]
+                fc1 = layer.fc1
+                assert isinstance(fc1.quant_method, Fp8LinearMethod)
+                weight_to_check = fc1.weight
+                linear_weight_to_check = None
+                if kv_cache_dtype == "fp8":
+                    attn = layer.self_attn.attn
+                    assert isinstance(attn.quant_method, Fp8KVCacheMethod)
+                    assert attn._k_scale == 1.0
+                    assert attn._v_scale == 1.0
+
+            elif model_name == "allenai/OLMoE-1B-7B-0125-Instruct":
+                # OLMoE model: layers[i].mlp.experts for MoE
+                # and layers[i].self_attn.qkv_proj for linear
+                layer = model.model.layers[0]
+
+                # Check MoE layer
+                moe = layer.mlp.experts
+                assert isinstance(moe, FusedMoE)
+                assert isinstance(moe.quant_method, Fp8MoEMethod)
+
+                # Check linear layer (qkv_proj)
+                qkv_proj = layer.self_attn.qkv_proj
+                assert isinstance(qkv_proj.quant_method, Fp8LinearMethod)
+
+                # Check both weights are FP8
+                weight_to_check = moe.w13_weight
+                linear_weight_to_check = qkv_proj.weight
+
+                if kv_cache_dtype == "fp8":
+                    attn = layer.self_attn.attn
+                    assert isinstance(attn.quant_method, Fp8KVCacheMethod)
+                    assert attn._k_scale == 1.0
+                    assert attn._v_scale == 1.0
+            else:
+                raise ValueError(f"Unknown model: {model_name}")
+
+            # Collect all weights to check
+            weights_to_check = [weight_to_check]
+            if linear_weight_to_check is not None:
+                weights_to_check.append(linear_weight_to_check)
 
             if current_platform.is_cuda():
                 if current_platform.supports_fp8() and not force_marlin:
                     # For GPUs with hardware support, we keep weights in fp8
-                    assert fc1.weight.dtype == torch.float8_e4m3fn
+                    for w in weights_to_check:
+                        assert w.dtype == torch.float8_e4m3fn
                 else:
                     # For GPUs without hardware support, we pack the fp8 weights
                     # for weight-only quantization using Marlin kernels
-                    assert fc1.weight.dtype == torch.int32
+                    for w in weights_to_check:
+                        assert w.dtype == torch.int32
             elif current_platform.is_rocm():
                 if current_platform.supports_fp8() and not force_marlin:
                     # For GPUs with hardware support, we keep weights in fp8
-                    assert fc1.weight.dtype == current_platform.fp8_dtype()
+                    for w in weights_to_check:
+                        assert w.dtype == current_platform.fp8_dtype()
                 else:  # unsupported ROCm platform
                     pytest.skip(
                         "Skip `test_load_fp16_model`. "

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -96,6 +97,7 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
+    per_block_cast_to_fp8,
 )
 
 if TYPE_CHECKING:
@@ -104,6 +106,23 @@ if TYPE_CHECKING:
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
 logger = init_logger(__name__)
+
+
+class OnlineQuantLayerScalingRecipe(Enum):
+    """
+    Defines the quantization scaling recipe for a leaf VLLM layer.
+    For `Linear` layers, the scaling applies to the linear.
+    For `FusedMoE` layers, the scaling applies to every matrix multiply
+    in the MoE layer.
+    """
+
+    # names taken from https://docs.google.com/presentation/d/1IKmXxno5bMkFsHs0poIX8lmJvu0odYTHmsbbhibWCEs/edit?slide=id.g3557e54b7c7_2_182#slide=id.g3557e54b7c7_2_182
+    # TODO proper names?
+    # TODO(before review): align on naming and add descriptive comments
+    # to each enum value
+    PER_TENSOR = "per-tensor"
+    # TODO(before review): should this be w_per-block_a-per-group-per-block ? so long...
+    BLOCKWISE = "blockwise"
 
 
 class Fp8Config(QuantizationConfig):
@@ -115,6 +134,7 @@ class Fp8Config(QuantizationConfig):
         activation_scheme: str = "dynamic",
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,
+        online_quantization_layer_scaling_recipe: str | None = None,
     ) -> None:
         super().__init__()
 
@@ -124,12 +144,23 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
         self.ignored_layers = ignored_layers or []
+
+        if online_quantization_layer_scaling_recipe is not None:
+            self.online_quant_layer_scaling_recipe = OnlineQuantLayerScalingRecipe(
+                online_quantization_layer_scaling_recipe.lower()
+            )
+        else:
+            self.online_quant_layer_scaling_recipe = (
+                OnlineQuantLayerScalingRecipe.PER_TENSOR
+            )
+
+        if (
+            self.online_quant_layer_scaling_recipe
+            == OnlineQuantLayerScalingRecipe.BLOCKWISE
+        ):
+            weight_block_size = [128, 128]  # [block_n, block_k]
+
         if weight_block_size is not None:
-            if not is_checkpoint_fp8_serialized:
-                raise ValueError(
-                    "The block-wise quantization only supports fp8-serialized "
-                    "checkpoint for now."
-                )
             if len(weight_block_size) != 2:
                 raise ValueError(
                     "The quantization block size of weight must have 2 "
@@ -536,6 +567,15 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
     """Online version of Fp8LinearMethod, loads the fp16/bf16 checkpoint
     and quantized the weights during loading."""
 
+    def __init__(self, quant_config: Fp8Config):
+        super().__init__(quant_config)
+
+        # Marlin does not support blockwise quantization
+        if self.block_quant:
+            assert not self.use_marlin, (
+                "Marlin kernels not supported with blockwise quantization"
+            )
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -632,23 +672,51 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             layer.register_parameter("weight", weight)
             initialize_single_dummy_weight(layer.weight)
 
-        # TODO(future): support block_quant in online quant path
-        assert not self.block_quant
-
         layer.input_scale = None
-        qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
-        weight = qweight.t()
 
-        # Update layer with new values.
-        replace_parameter(layer, "weight", weight.data)
-        replace_parameter(layer, "weight_scale", weight_scale.data)
+        if self.block_quant:
+            # Blockwise quantization path
 
-        if self.use_marlin:
-            size_k_first = True
-            prepare_fp8_layer_for_marlin(
-                layer, size_k_first, input_dtype=self.marlin_input_dtype
+            assert self.weight_block_size is not None
+            block_size = self.weight_block_size  # [block_n, block_k]
+
+            # Quantize weights with per-block scaling
+            qweight, weight_scale_inv = per_block_cast_to_fp8(
+                layer.weight,
+                block_size=block_size,
+                use_ue8m0=False,  # Handled by maybe_post_process_fp8_weight_block
             )
-            # Activations not quantized for marlin.
+
+            # Set weight_block_size on layer for post-processing
+            layer.weight_block_size = block_size
+
+            # Process for FNUZ format conversion and padding (for ROCm)
+            qweight, weight_scale_inv = process_fp8_weight_block_strategy(
+                qweight, weight_scale_inv
+            )
+
+            # Update layer with new values (no transpose for blockwise)
+            replace_parameter(layer, "weight", qweight.data)
+            replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
+
+            # DeepGEMM post-processing (scale layout transformation, E8M0, etc.)
+            maybe_post_process_fp8_weight_block(layer)
+
+        else:
+            # Tensorwise (per-tensor) quantization path
+            qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
+            weight = qweight.t()
+
+            # Update layer with new values.
+            replace_parameter(layer, "weight", weight.data)
+            replace_parameter(layer, "weight_scale", weight_scale.data)
+
+            if self.use_marlin:
+                size_k_first = True
+                prepare_fp8_layer_for_marlin(
+                    layer, size_k_first, input_dtype=self.marlin_input_dtype
+                )
+                # Activations not quantized for marlin.
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -1055,9 +1123,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         super().__init__(quant_config, layer)
-        assert not quant_config.is_checkpoint_fp8_serialized
         assert quant_config.activation_scheme == "dynamic"
-        assert quant_config.weight_block_size is None
 
     def create_weights(
         self,
@@ -1072,7 +1138,7 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         layer.hidden_size = hidden_size
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
-        layer.weight_block_size = None
+        layer.weight_block_size = self.weight_block_size if self.block_quant else None
 
         # We are doing online quantization, patch the weight loaded
         # to call `process_weights_after_loading` in a streaming fashion
@@ -1179,16 +1245,37 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         layer._load_device = torch.get_default_device()
 
         # WEIGHT_SCALES
-        # Allocate 2 scales for w1 and w3 respectively.
-        # They will be combined to a single scale after weight loading.
-        w13_weight_scale = torch.nn.Parameter(
-            torch.ones(num_experts, dtype=torch.float32), requires_grad=False
-        )
-        w2_weight_scale = torch.nn.Parameter(
-            torch.ones(num_experts, dtype=torch.float32), requires_grad=False
-        )
-        layer.register_parameter("w13_weight_scale", w13_weight_scale)
-        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        if self.block_quant and self.weight_block_size is not None:
+            # For block quant, scales are per block (typically 128x128)
+            block_n, block_k = self.weight_block_size
+            w13_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    2 * ((intermediate_size_per_partition + block_n - 1) // block_n),
+                    (hidden_size + block_k - 1) // block_k,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+            w2_weight_scale = torch.nn.Parameter(
+                torch.ones(
+                    num_experts,
+                    (hidden_size + block_n - 1) // block_n,
+                    (intermediate_size_per_partition + block_k - 1) // block_k,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
+        else:
+            # For per-tensor quant, scales are per expert
+            w13_weight_scale = torch.nn.Parameter(
+                torch.ones(num_experts, dtype=torch.float32), requires_grad=False
+            )
+            w2_weight_scale = torch.nn.Parameter(
+                torch.ones(num_experts, dtype=torch.float32), requires_grad=False
+            )
+        layer.register_parameter(f"w13_{self.weight_scale_name}", w13_weight_scale)
+        layer.register_parameter(f"w2_{self.weight_scale_name}", w2_weight_scale)
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
@@ -1228,16 +1315,42 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
         w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
-        w13_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
 
-        for expert in range(layer.local_num_experts):
-            w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
-                layer.w13_weight[expert, :, :]
-            )
-            w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
-                layer.w2_weight[expert, :, :]
-            )
+        if self.block_quant and self.weight_block_size is not None:
+            # Blockwise quantization path
+            block_size = self.weight_block_size
+            w13_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+            w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+
+            for expert in range(layer.local_num_experts):
+                # Quantize w13 (shape: [2 * intermediate_size, hidden_size])
+                w13[expert], w13_scale[expert] = per_block_cast_to_fp8(
+                    layer.w13_weight[expert],
+                    block_size=block_size,
+                    use_ue8m0=False,
+                )
+                # Quantize w2 (shape: [hidden_size, intermediate_size])
+                w2[expert], w2_scale[expert] = per_block_cast_to_fp8(
+                    layer.w2_weight[expert],
+                    block_size=block_size,
+                    use_ue8m0=False,
+                )
+
+            # Set weight_block_size on layer for kernel setup
+            layer.weight_block_size = block_size
+
+        else:
+            # Per-tensor quantization path
+            w13_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+
+            for expert in range(layer.local_num_experts):
+                w13[expert, :, :], w13_scale[expert] = ops.scaled_fp8_quant(
+                    layer.w13_weight[expert, :, :]
+                )
+                w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
+                    layer.w2_weight[expert, :, :]
+                )
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(

@@ -193,6 +193,10 @@ class ModelConfig:
     determine the data type of the weights."""
     allow_deprecated_quantization: bool = False
     """Whether to allow deprecated quantization methods."""
+    online_quantization_layer_scaling_recipe: str | None = None
+    """Scaling recipe for online FP8 quantization. Options: 'per-tensor' (default)
+    or 'blockwise'. Only applicable when quantization='fp8' with online
+    quantization (non-serialized checkpoints)."""
     enforce_eager: bool = False
     """Whether to always use eager-mode PyTorch. If True, we will disable CUDA
     graph and always execute the model in eager mode. If False, we will use

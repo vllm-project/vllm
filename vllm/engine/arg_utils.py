@@ -450,6 +450,9 @@ class EngineArgs:
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | None = ModelConfig.quantization
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
+    online_quantization_layer_scaling_recipe: str | None = (
+        ModelConfig.online_quantization_layer_scaling_recipe
+    )
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
@@ -1250,6 +1253,7 @@ class EngineArgs:
             max_model_len=self.max_model_len,
             quantization=self.quantization,
             allow_deprecated_quantization=self.allow_deprecated_quantization,
+            online_quantization_layer_scaling_recipe=self.online_quantization_layer_scaling_recipe,
             enforce_eager=self.enforce_eager,
             enable_return_routed_experts=self.enable_return_routed_experts,
             max_logprobs=self.max_logprobs,

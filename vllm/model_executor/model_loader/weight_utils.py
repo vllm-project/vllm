@@ -321,6 +321,14 @@ def get_quant_config(
 
     # If the quantization config is not found, use the default config.
     if not possible_config_filenames:
+        # For FP8, pass online_quantization_layer_scaling_recipe if available
+        if model_config.quantization == "fp8":
+            # prevent circular import, need the class name here to pass mypy
+            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
+            return Fp8Config(
+                online_quantization_layer_scaling_recipe=model_config.online_quantization_layer_scaling_recipe
+            )
         return quant_cls()
 
     config_files = glob.glob(os.path.join(hf_folder, "*.json"))
