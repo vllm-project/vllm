@@ -4,9 +4,9 @@
 import gc
 import os
 import queue
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import threading
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -156,9 +156,7 @@ class SHMConnector(ECConnectorBase):
                 try:
                     item = self.send_queue.get(timeout=1.0)
                     if item is None:
-                        logger.info(
-                            "Producer thread received sentinel value, exiting..."
-                        )
+                        logger.info("Producer thread received sentinel value, exiting...")
                         self.send_queue.task_done()
                         break
                     feat_key, tensor = item
@@ -212,20 +210,12 @@ class SHMConnector(ECConnectorBase):
                 except queue.Empty:
                     continue
                 except Exception as e:
-                    logger.error(
-                        "Single task process failed, continue next: %s",
-                        e,
-                        exc_info=True,
-                    )
-                    if "item" in locals():
+                    logger.error("Single task process failed, continue next: %s", e, exc_info=True)
+                    if 'item' in locals():
                         self.send_queue.task_done()
                     continue
         except Exception as e:
-            logger.fatal(
-                "Fatal error in producer thread (exit immediately): %s",
-                e,
-                exc_info=True,
-                )
+            logger.fatal("Fatal error in producer thread (exit immediately): %s", e, exc_info=True)
             self._stop_event.set()
         finally:
             logger.info("Producer thread cleanup, rank: %s", self.rpc_rank)
@@ -279,9 +269,7 @@ class SHMConnector(ECConnectorBase):
                 logger.debug("recv tensor for hash %s", mm_data.mm_hash)
             except Exception as e:
                 logger.error(
-                    "Failed to reconstruct tensor for %s despite handle existence, error code: %s",
-                    mm_data.mm_hash,
-                    str(e),
+                    "Failed to reconstruct tensor for %s despite handle existence, error code: %s", mm_data.mm_hash, str(e)
                 )
 
     def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
