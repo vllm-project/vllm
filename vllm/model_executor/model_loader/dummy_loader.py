@@ -25,4 +25,4 @@ class DummyModelLoader(BaseModelLoader):
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         # NOTE(woosuk): For accurate performance evaluation, we assign
         # random values to the weights.
-        initialize_dummy_weights(model)
+        initialize_dummy_weights(model, model_config)
