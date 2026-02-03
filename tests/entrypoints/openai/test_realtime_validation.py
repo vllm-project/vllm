@@ -24,7 +24,7 @@ MISTRAL_FORMAT_ARGS = [
     "mistral",
 ]
 
-MODEL_NAME = "mistralai/Voxtral-Mini-3B-Realtime-2602"
+MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
 
 
 def _audio_to_base64_pcm16(path: str, target_sr: int = 16000) -> str:

@@ -5,7 +5,6 @@ import ast
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.model import ModelConfig
@@ -55,7 +54,6 @@ SpeculativeMethod = Literal[
 
 
 @config
-@dataclass
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 

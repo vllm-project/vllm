@@ -4,7 +4,7 @@ from typing import Any
 
 import torch
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config, replace
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.model_loader import get_model
@@ -191,10 +191,12 @@ def create_vllm_config_for_draft_model(
     old = target_model_vllm_config
     assert old.speculative_config is not None, "speculative_config is not set"
     old_spec_config = old.speculative_config
-    new_parallel_config = old_spec_config.draft_parallel_config.replace(
-        rank=old.parallel_config.rank
+    new_parallel_config = replace(
+        old_spec_config.draft_parallel_config,
+        rank=old.parallel_config.rank,
     )
-    new: VllmConfig = old.replace(
+    new: VllmConfig = replace(
+        old,
         quant_config=None,  # quant_config is recomputed in __init__()
         model_config=old_spec_config.draft_model_config,
         parallel_config=new_parallel_config,

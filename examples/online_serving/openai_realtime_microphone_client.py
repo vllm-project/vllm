@@ -5,7 +5,7 @@ Minimal Gradio demo for real-time speech transcription using the vLLM Realtime A
 
 Start the vLLM server first:
 
-    vllm serve mistralai/Voxtral-Mini-3B-Realtime-2602 --enforce-eager
+    vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --enforce-eager
 
 Then run this script:
 
@@ -166,7 +166,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="mistralai/Voxtral-Mini-3B-Realtime-2602",
+        default="mistralai/Voxtral-Mini-4B-Realtime-2602",
         help="Model that is served and should be pinged.",
     )
     parser.add_argument(

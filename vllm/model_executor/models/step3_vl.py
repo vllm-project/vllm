@@ -759,7 +759,12 @@ class Step3VisionAttention(nn.Module):
         )
 
         # Use unified MMEncoderAttention with automatic backend selection
-        self.attn = MMEncoderAttention(self.num_heads, self.head_dim, self.scale)
+        self.attn = MMEncoderAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            prefix=prefix,
+        )
 
     def forward(
         self,

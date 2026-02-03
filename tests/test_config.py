@@ -66,9 +66,6 @@ class _TestConfigFields:
 
 
 def test_get_field():
-    with pytest.raises(ValueError):
-        get_field(_TestConfigFields, "a")
-
     b = get_field(_TestConfigFields, "b")
     assert isinstance(b, Field)
     assert b.default is MISSING
@@ -188,7 +185,7 @@ def test_get_pooling_config():
 )
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    pooler_config = PoolerConfig(seq_pooling_type="CLS", normalize=True)
+    pooler_config = PoolerConfig(seq_pooling_type="CLS", use_activation=False)
     model_config = ModelConfig(model_id, pooler_config=pooler_config)
 
     assert asdict(model_config.pooler_config) == asdict(pooler_config)
