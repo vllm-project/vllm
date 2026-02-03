@@ -29,22 +29,26 @@ class StreamedResponseHandler:
     def add_chunk(self, chunk_bytes: bytes) -> list[str]:
         """Add a chunk of bytes to the buffer and return any complete
         messages."""
+        messages = []
+        if not chunk_bytes:
+            return messages
+
         chunk_str = chunk_bytes.decode("utf-8")
         self.buffer += chunk_str
-
-        messages = []
 
         # Split by double newlines (SSE message separator)
         while "\n\n" in self.buffer:
             message, self.buffer = self.buffer.split("\n\n", 1)
             message = message.strip()
-            if message:
-                messages.append(message)
+            # Filter out non-data channel in SSE, e.g. event:<xxx>
+            for line in message.splitlines():
+                if line.startswith("data:"):
+                    messages.append(line)
 
         # if self.buffer is not empty, check if it is a complete message
         # by removing data: prefix and check if it is a valid JSON
-        if self.buffer.startswith("data: "):
-            message_content = self.buffer.removeprefix("data: ").strip()
+        if self.buffer.startswith("data:"):
+            message_content = self.buffer.removeprefix("data:").strip()
             if message_content == "[DONE]":
                 messages.append(self.buffer.strip())
                 self.buffer = ""
@@ -197,10 +201,6 @@ async def async_request_openai_completions(
                 handler = StreamedResponseHandler()
 
                 async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
-                    if not chunk_bytes:
-                        continue
-
                     messages = handler.add_chunk(chunk_bytes)
                     for message in messages:
                         # NOTE: SSE comments (often used as pings) start with
@@ -209,7 +209,8 @@ async def async_request_openai_completions(
                         if message.startswith(":"):
                             continue
 
-                        chunk = message.removeprefix("data: ")
+                        # NOTE: SSE packet may come with data:<payload> or data:<space><payload>
+                        chunk = message.removeprefix("data:").strip()
 
                         if chunk != "[DONE]":
                             data = json.loads(chunk)
@@ -325,10 +326,6 @@ async def async_request_openai_chat_completions(
             if response.status == 200:
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
-                    chunk_bytes = chunk_bytes.strip()
-                    if not chunk_bytes:
-                        continue
-
                     messages = handler.add_chunk(chunk_bytes)
                     for message in messages:
                         # NOTE: SSE comments (often used as pings) start with
@@ -337,14 +334,16 @@ async def async_request_openai_chat_completions(
                         if message.startswith(":"):
                             continue
 
-                        chunk = message.removeprefix("data: ")
+                        # NOTE: SSE packet may come with data:<payload> or data:<space><payload>
+                        chunk = message.removeprefix("data:").strip()
 
                         if chunk != "[DONE]":
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
 
                             if choices := data.get("choices"):
-                                content = choices[0]["delta"].get("content")
+                                # Count the CoT token as an output token
+                                content = choices[0]["delta"].get("content") or choices[0]["delta"].get("reasoning_content")
                                 # First token
                                 if ttft == 0.0:
                                     ttft = timestamp - st
@@ -436,13 +435,9 @@ async def async_request_openai_audio(
                     handler = StreamedResponseHandler()
 
                     async for chunk_bytes in response.content.iter_any():
-                        chunk_bytes = chunk_bytes.strip()
-                        if not chunk_bytes:
-                            continue
-
                         messages = handler.add_chunk(chunk_bytes)
                         for message in messages:
-                            chunk = message.decode("utf-8").removeprefix("data: ")
+                            chunk = message.removeprefix("data:").strip()
                             if chunk != "[DONE]":
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
