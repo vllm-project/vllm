@@ -69,16 +69,21 @@ if "HIP_VISIBLE_DEVICES" in os.environ:
     else:
         os.environ["CUDA_VISIBLE_DEVICES"] = val
 
-# Enable PyTorch TunableOp by default for ROCm
+# Enable PyTorch TunableOp by default for ROCm (can disable via env var)
 # This allows choosing between rocBLAS and hipBLASLt for GEMM operations,
 # and selects the best solution index within those BLAS libraries
-torch.cuda.tunable.enable(True)
-torch.cuda.tunable.tuning_enable(True)
-logger.info(
-    "PyTorch TunableOp enabled for ROCm: enabled=%s, tuning=%s",
-    torch.cuda.tunable.is_enabled(),
-    torch.cuda.tunable.tuning_is_enabled(),
-)
+if os.environ.get("VLLM_ROCM_TUNABLEOP_ENABLED", "1") != "0":
+    torch.cuda.tunable.enable(True)
+    # Tuning is enabled by default in PyTorch, so we need to explicitly disable it
+    tuning_enabled = os.environ.get("VLLM_ROCM_TUNABLEOP_TUNING", "1") != "0"
+    torch.cuda.tunable.tuning_enable(tuning_enabled)
+    logger.info(
+        "PyTorch TunableOp enabled for ROCm: enabled=%s, tuning=%s",
+        torch.cuda.tunable.is_enabled(),
+        torch.cuda.tunable.tuning_is_enabled(),
+    )
+else:
+    logger.info("PyTorch TunableOp disabled for ROCm via VLLM_ROCM_TUNABLEOP_ENABLED=0")
 
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
