@@ -236,6 +236,48 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             logits.index_put_(self.logits_slice, self.neg_inf_tensor)
         return logits
 
+    def apply_with_spec_decode(
+        self,
+        logits: torch.Tensor,
+        num_draft_tokens: list[int],
+    ) -> torch.Tensor:
+        if not self.min_toks:
+            return logits
+
+        logit_rows: list[int] = []
+        tok_ids: list[int] = []
+
+        logit_idx = 0
+        for req_idx, n_draft in enumerate(num_draft_tokens):
+            if req_idx not in self.min_toks:
+                logit_idx += n_draft
+                continue
+
+            min_tok, out_tok_ids, stop_tok_ids = self.min_toks[req_idx]
+            current_output_len = len(out_tok_ids)
+
+            if not stop_tok_ids:
+                logit_idx += n_draft
+                continue
+
+            for draft_pos in range(n_draft):
+                effective_output_len = current_output_len + draft_pos
+                if effective_output_len < min_tok:
+                    for stop_tok in stop_tok_ids:
+                        logit_rows.append(logit_idx + draft_pos)
+                        tok_ids.append(stop_tok)
+
+            logit_idx += n_draft
+
+        if logit_rows:
+            logits_slice = (
+                self._device_tensor(logit_rows, torch.int64),
+                self._device_tensor(tok_ids, torch.int64),
+            )
+            logits.index_put_(logits_slice, self.neg_inf_tensor)
+
+        return logits
+
 
 def process_dict_updates(
     req_entries: dict[int, T],

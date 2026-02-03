@@ -188,11 +188,11 @@ class InputProcessor:
 
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.vllm_config.speculative_config is not None and (
-            params.min_tokens > 1 or params.min_p > _SAMPLING_EPS or params.logit_bias
+            params.min_p > _SAMPLING_EPS or params.logit_bias
         ):
             raise ValueError(
-                "The min_tokens, min_p, and logit_bias sampling parameters "
-                "are not yet supported with speculative decoding."
+                "The min_p and logit_bias sampling parameters are not yet "
+                "supported with speculative decoding."
             )
 
     def _validate_params(
