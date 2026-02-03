@@ -1,0 +1,90 @@
+group: Entrypoints
+depends_on: 
+  - image-build
+steps:
+- label: Entrypoints Unit Tests  
+  timeout_in_minutes: 10
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/entrypoints
+  - tests/entrypoints/
+  commands:
+  - pytest -v -s entrypoints/openai/tool_parsers
+  - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
+
+- label: Entrypoints Integration (LLM)
+  timeout_in_minutes: 40
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/llm
+  - tests/entrypoints/offline_mode
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
+  - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
+
+- label: Entrypoints Integration (API Server 1)
+  timeout_in_minutes: 130
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai
+  - tests/entrypoints/test_chat_utils
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/test_chat_utils.py
+
+- label: Entrypoints Integration (API Server 2)
+  timeout_in_minutes: 130
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/tool_use
+  - tests/entrypoints/sleep
+  - tests/entrypoints/instrumentator
+  - tests/entrypoints/rpc
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
+  - pytest -v -s entrypoints/instrumentator
+  - pytest -v -s entrypoints/sleep
+  - pytest -v -s tool_use
+
+- label: Entrypoints Integration (Pooling)
+  timeout_in_minutes: 50
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/pooling
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s entrypoints/pooling
+
+- label: Entrypoints Integration (Responses API)
+  timeout_in_minutes: 50
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/entrypoints/openai/responses
+  commands:
+  - pytest -v -s entrypoints/openai/responses
+
+- label: Entrypoints V1
+  timeout_in_minutes: 50
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    - pytest -v -s v1/entrypoints
+
+- label: OpenAI API Correctness
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - csrc/
+  - vllm/entrypoints/openai/
+  - vllm/model_executor/models/whisper.py
+  commands: # LMEval+Transcription WER check
+  - pytest -s entrypoints/openai/correctness/

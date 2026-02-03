@@ -1,0 +1,61 @@
+# MLA decode-only benchmark configuration
+
+model:
+  name: "deepseek-v3"
+  num_layers: 60
+  num_q_heads: 128
+  num_kv_heads: 1  # MLA uses single latent KV
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+  block_size: 128  # CUTLASS MLA and FlashAttn MLA use 128
+
+batch_specs:
+  # Small batches, varying sequence lengths
+  - "16q1s512"     # 16 requests, 512 KV cache
+  - "16q1s1k"      # 16 requests, 1k KV cache
+  - "16q1s2k"      # 16 requests, 2k KV cache
+  - "16q1s4k"      # 16 requests, 4k KV cache
+
+  # Medium batches
+  - "32q1s1k"      # 32 requests, 1k KV cache
+  - "32q1s2k"      # 32 requests, 2k KV cache
+  - "32q1s4k"      # 32 requests, 4k KV cache
+  - "32q1s8k"      # 32 requests, 8k KV cache
+
+  # Large batches
+  - "64q1s1k"      # 64 requests, 1k KV cache
+  - "64q1s2k"      # 64 requests, 2k KV cache
+  - "64q1s4k"      # 64 requests, 4k KV cache
+  - "64q1s8k"      # 64 requests, 8k KV cache
+
+  # Very large batches
+  - "128q1s1k"     # 128 requests, 1k KV cache
+  - "128q1s2k"     # 128 requests, 2k KV cache
+
+  # Long context
+  - "32q1s16k"     # 32 requests, 16k KV cache
+  - "32q1s32k"     # 32 requests, 32k KV cache
+
+backends:
+  - cutlass_mla
+  - flashinfer_mla
+  - flashattn_mla  # Hopper only
+  - flashmla        # Hopper only
+
+device: "cuda:0"
+repeats: 5
+warmup_iters: 3
+profile_memory: true
+
+# Backend-specific tuning
+cutlass_mla:
+  num_kv_splits: auto  # or specific value like 4, 8, 16
+
+flashattn_mla:
+  reorder_batch_threshold: 512
+
+flashmla:
+  reorder_batch_threshold: 1

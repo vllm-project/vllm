@@ -15,12 +15,11 @@ API documentation for vLLM's configuration classes.
 - [vllm.config.MultiModalConfig][]
 - [vllm.config.PoolerConfig][]
 - [vllm.config.StructuredOutputsConfig][]
+- [vllm.config.ProfilerConfig][]
 - [vllm.config.ObservabilityConfig][]
 - [vllm.config.KVTransferConfig][]
 - [vllm.config.CompilationConfig][]
 - [vllm.config.VllmConfig][]
-
-[](){ #offline-inference-api }
 
 ## Offline Inference
 
@@ -45,18 +44,14 @@ Engine classes for offline and online inference.
 
 Inference parameters for vLLM APIs.
 
-[](){ #sampling-params }
-
 - [vllm.SamplingParams][]
 - [vllm.PoolingParams][]
-
-[](){ #multi-modality }
 
 ## Multi-Modality
 
 vLLM provides experimental support for multi-modal models through the [vllm.multimodal][] package.
 
-Multi-modal inputs can be passed alongside text and token prompts to [supported models][supported-mm-models]
+Multi-modal inputs can be passed alongside text and token prompts to [supported models](../models/supported_models.md#list-of-multimodal-language-models)
 via the `multi_modal_data` field in [vllm.inputs.PromptType][].
 
 Looking to add your own multi-modal model? Please follow the instructions listed [here](../contributing/model/multimodal.md).
@@ -77,7 +72,6 @@ Internal data structures.
 - [vllm.multimodal.inputs.MultiModalFieldConfig][]
 - [vllm.multimodal.inputs.MultiModalKwargsItem][]
 - [vllm.multimodal.inputs.MultiModalKwargsItems][]
-- [vllm.multimodal.inputs.MultiModalKwargs][]
 - [vllm.multimodal.inputs.MultiModalInputs][]
 
 ### Data Parsing
@@ -87,10 +81,6 @@ Internal data structures.
 ### Data Processing
 
 - [vllm.multimodal.processing][]
-
-### Memory Profiling
-
-- [vllm.multimodal.profiling][]
 
 ### Registry
 

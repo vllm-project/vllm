@@ -157,6 +157,37 @@ VLLM_CONFIGURE_LOGGING=0 \
     vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048
 ```
 
+### Example 4: Disable access logs for health check endpoints
+
+In production environments, health check endpoints like `/health`, `/metrics`,
+and `/ping` are frequently called by load balancers and monitoring systems,
+generating a large volume of repetitive access logs. To reduce log noise while
+keeping logs for other endpoints, use the `--disable-access-log-for-endpoints`
+option.
+
+**Disable access logs for health and metrics endpoints:**
+
+```bash
+vllm serve mistralai/Mistral-7B-v0.1 --max-model-len 2048 \
+    --disable-access-log-for-endpoints /health,/metrics,/ping
+```
+
+**Common endpoints to consider filtering:**
+
+| Endpoint   | Description            | Typical Caller                                       |
+| ---------- | ---------------------- | ---------------------------------------------------- |
+| `/health`  | Health check           | Kubernetes liveness/readiness probes, load balancers |
+| `/metrics` | Prometheus metrics     | Prometheus scraper (every 15-60s)                    |
+| `/ping`    | SageMaker health check | SageMaker infrastructure                             |
+| `/load`    | Server load metrics    | Custom monitoring                                    |
+
+**Notes:**
+
+- This option only affects uvicorn access logs, not vLLM application logs
+- Specify multiple endpoints by separating them with commas (no spaces)
+- The filter uses exact path matching, query parameters are ignored (e.g., `/health?verbose=true` matches `/health`)
+- If you need to completely disable all access logs, use `--disable-uvicorn-access-log` instead
+
 ## Additional resources
 
 - [`logging.config` Dictionary Schema Details](https://docs.python.org/3/library/logging.config.html#dictionary-schema-details)

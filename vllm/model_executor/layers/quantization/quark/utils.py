@@ -3,9 +3,10 @@
 
 from collections.abc import Iterable, Mapping
 from types import MappingProxyType
-from typing import Any, Optional
+from typing import Any
 
 import regex as re
+import torch
 
 
 def deep_compare(dict1: Any, dict2: Any) -> bool:
@@ -22,9 +23,9 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
 
 
 def should_ignore_layer(
-    layer_name: Optional[str],
+    layer_name: str | None,
     ignore: Iterable[str],
-    fused_mapping: Mapping[str, list[str]] = MappingProxyType({})
+    fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
 ) -> bool:
     if layer_name is None:
         return False
@@ -50,7 +51,8 @@ def should_ignore_layer(
         should_ignore_layer = None
         for shard_name in shard_names:
             should_ignore_shard = check_equal_or_regex_match(
-                layer_name=shard_name, targets=ignore)
+                layer_name=shard_name, targets=ignore
+            )
 
             # If shard_idx=0, set layer ignore to match shard.
             if should_ignore_layer is None:
@@ -58,35 +60,34 @@ def should_ignore_layer(
 
             # If shard_idx=1+ confirm scheme matches prior shards.
             elif should_ignore_shard != should_ignore_layer:
-                raise ValueError(f"Found a different quantization schemes for "
-                                 f"{shard_proj_names} in {layer_name}. vLLM "
-                                 "requires all to use the same scheme.")
+                raise ValueError(
+                    f"Found a different quantization schemes for "
+                    f"{shard_proj_names} in {layer_name}. vLLM "
+                    "requires all to use the same scheme."
+                )
 
     # Unfused layers like down_proj and o_proj will match
     # the safetensors checkpoint already.
     else:
-        should_ignore_layer = check_equal_or_regex_match(layer_name=layer_name,
-                                                         targets=ignore)
+        should_ignore_layer = check_equal_or_regex_match(
+            layer_name=layer_name, targets=ignore
+        )
 
     assert should_ignore_layer is not None
     return should_ignore_layer
 
 
-def check_equal_or_regex_match(layer_name: str,
-                               targets: Iterable[str]) -> bool:
+def check_equal_or_regex_match(layer_name: str, targets: Iterable[str]) -> bool:
     """
-    Checks whether a layer_name is exactly equal or a regex match for 
+    Checks whether a layer_name is exactly equal or a regex match for
     if target starts with 're:' to any target in list.
     """
-    for target in targets:
-        if _is_equal_or_regex_match(layer_name, target):
-            return True
-    return False
+    return any(_is_equal_or_regex_match(layer_name, target) for target in targets)
 
 
-def _is_equal_or_regex_match(value: str,
-                             target: str,
-                             check_contains: bool = False) -> bool:
+def _is_equal_or_regex_match(
+    value: str, target: str, check_contains: bool = False
+) -> bool:
     """
     Checks whether a value is exactly equal or a regex match for target
     if target starts with 're:'. If check_contains is set to True,
@@ -103,3 +104,16 @@ def _is_equal_or_regex_match(value: str,
     elif target == value:
         return True
     return False
+
+
+# utility for tensor dims > 2 cases
+def quark_quantize_weight_to_mxfp4(w: torch.Tensor):
+    assert w.dtype == torch.bfloat16, (
+        "Quark dynamic quantization is supported only for fp16 weights and only to MXF4"
+    )
+
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    *dims, d = w.shape
+    w, w_scales = dynamic_mxfp4_quant(w.reshape(-1, d))
+    return w.view(*dims, d // 2), w_scales.view(*dims, d // 32)

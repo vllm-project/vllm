@@ -35,13 +35,13 @@ def main():
 
     if args.simulate_failure:
         ktc = KVTransferConfig(
-            kv_connector="RogueSharedStorageConnector",
+            kv_connector="LoadRecoveryExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={
                 "shared_storage_path": "local_storage",
                 "async_load": args.async_load,
             },
-            kv_connector_module_path="rogue_shared_storage_connector",
+            kv_connector_module_path="load_recovery_example_connector",
         )
         out_file = (
             "async_decode_recovered_output.txt"
@@ -50,7 +50,7 @@ def main():
         )
     else:
         ktc = KVTransferConfig(
-            kv_connector="SharedStorageConnector",
+            kv_connector="ExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={
                 "shared_storage_path": "local_storage",

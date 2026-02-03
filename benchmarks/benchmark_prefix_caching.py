@@ -32,16 +32,15 @@ import dataclasses
 import json
 import random
 import time
-from typing import Optional
 
 from transformers import PreTrainedTokenizerBase
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 try:
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 except ImportError:
     from backend_request_func import get_tokenizer
 
@@ -70,7 +69,7 @@ def sample_tokens(tokenizer: PreTrainedTokenizerBase, length: int) -> list[int]:
 
     # Remove the special tokens.
     return random.choices(
-        [v for k, v in vocab.items() if k not in all_special_ids],
+        [v for v in vocab.values() if v not in all_special_ids],
         k=length,
     )
 
@@ -80,7 +79,7 @@ def sample_requests_from_dataset(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     input_length_range: tuple[int, int],
-    fixed_output_len: Optional[int],
+    fixed_output_len: int | None,
 ) -> list[Request]:
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
@@ -128,7 +127,7 @@ def sample_requests_from_random(
     num_requests: int,
     tokenizer: PreTrainedTokenizerBase,
     input_length_range: tuple[int, int],
-    fixed_output_len: Optional[int],
+    fixed_output_len: int | None,
     prefix_len: int,
 ) -> list[Request]:
     requests = []

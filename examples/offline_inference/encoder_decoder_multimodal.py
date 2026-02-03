@@ -13,7 +13,7 @@ from typing import NamedTuple
 
 from vllm import LLM, EngineArgs, PromptType, SamplingParams
 from vllm.assets.audio import AudioAsset
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class ModelRequestData(NamedTuple):
@@ -77,7 +77,7 @@ def parse_args():
     parser.add_argument(
         "--seed",
         type=int,
-        default=None,
+        default=0,
         help="Set the seed when initializing `vllm.LLM`.",
     )
     return parser.parse_args()

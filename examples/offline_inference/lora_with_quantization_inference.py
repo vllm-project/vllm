@@ -8,7 +8,6 @@ Requires HuggingFace credentials for access.
 """
 
 import gc
-from typing import Optional
 
 import torch
 from huggingface_hub import snapshot_download
@@ -19,36 +18,28 @@ from vllm.lora.request import LoRARequest
 
 def create_test_prompts(
     lora_path: str,
-) -> list[tuple[str, SamplingParams, Optional[LoRARequest]]]:
+) -> list[tuple[str, SamplingParams, LoRARequest | None]]:
     return [
         # this is an example of using quantization without LoRA
         (
             "My name is",
-            SamplingParams(
-                temperature=0.0, logprobs=1, prompt_logprobs=1, max_tokens=128
-            ),
+            SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
             None,
         ),
         # the next three examples use quantization with LoRA
         (
             "my name is",
-            SamplingParams(
-                temperature=0.0, logprobs=1, prompt_logprobs=1, max_tokens=128
-            ),
+            SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
             LoRARequest("lora-test-1", 1, lora_path),
         ),
         (
             "The capital of USA is",
-            SamplingParams(
-                temperature=0.0, logprobs=1, prompt_logprobs=1, max_tokens=128
-            ),
+            SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
             LoRARequest("lora-test-2", 1, lora_path),
         ),
         (
             "The capital of France is",
-            SamplingParams(
-                temperature=0.0, logprobs=1, prompt_logprobs=1, max_tokens=128
-            ),
+            SamplingParams(temperature=0.0, logprobs=1, max_tokens=128),
             LoRARequest("lora-test-3", 1, lora_path),
         ),
     ]
@@ -56,7 +47,7 @@ def create_test_prompts(
 
 def process_requests(
     engine: LLMEngine,
-    test_prompts: list[tuple[str, SamplingParams, Optional[LoRARequest]]],
+    test_prompts: list[tuple[str, SamplingParams, LoRARequest | None]],
 ):
     """Continuously process a list of prompts and handle the outputs."""
     request_id = 0
@@ -78,7 +69,7 @@ def process_requests(
 
 
 def initialize_engine(
-    model: str, quantization: str, lora_repo: Optional[str]
+    model: str, quantization: str, lora_repo: str | None
 ) -> LLMEngine:
     """Initialize the LLMEngine."""
 

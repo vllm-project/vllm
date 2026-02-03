@@ -15,6 +15,5 @@ class DummyRotaryEmbedding(RotaryEmbedding):
         super().__init__(*args, **kwargs)
         self.addition_config = True
 
-    def forward_oot(self, *args,
-                    **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward_oot(self, *args, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
         return super().forward_oot(*args, **kwargs)

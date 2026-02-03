@@ -1,4 +1,4 @@
-ARG BASE_UBI_IMAGE_TAG=9.5-1741850109
+ARG BASE_UBI_IMAGE_TAG=9.6-1754584681
 
 ###############################################################
 # Stage to build openblas
@@ -7,9 +7,9 @@ ARG BASE_UBI_IMAGE_TAG=9.5-1741850109
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS openblas-builder
 
 ARG MAX_JOBS
-ARG OPENBLAS_VERSION=0.3.29
-RUN microdnf install -y dnf && dnf install -y gcc-toolset-13 make wget unzip \
-    && source /opt/rh/gcc-toolset-13/enable \
+ARG OPENBLAS_VERSION=0.3.30
+RUN microdnf install -y dnf && dnf install -y gcc-toolset-14 make wget unzip \
+    && source /opt/rh/gcc-toolset-14/enable \
     && wget https://github.com/OpenMathLib/OpenBLAS/releases/download/v$OPENBLAS_VERSION/OpenBLAS-$OPENBLAS_VERSION.zip \
     && unzip OpenBLAS-$OPENBLAS_VERSION.zip \
     && cd OpenBLAS-$OPENBLAS_VERSION \
@@ -22,13 +22,13 @@ RUN microdnf install -y dnf && dnf install -y gcc-toolset-13 make wget unzip \
 ###############################################################
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS centos-deps-builder
 RUN  microdnf install -y dnf && \ 
-     dnf install -y https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-gpg-keys-9.0-24.el9.noarch.rpm \
-        https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-stream-repos-9.0-24.el9.noarch.rpm \
+     dnf install -y https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-gpg-keys-9.0-26.el9.noarch.rpm \
+        https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-stream-repos-9.0-26.el9.noarch.rpm \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
         dnf config-manager --set-enabled crb
 
-RUN dnf install -y openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel && \
-    dnf remove -y centos-gpg-keys-9.0-24.el9.noarch centos-stream-repos-9.0-24.el9.noarch 
+RUN dnf install -y openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel yajl-devel && \
+    dnf remove -y centos-gpg-keys-9.0-24.el9.noarch centos-stream-repos-9.0-26.el9.noarch 
 
 
 ###############################################################
@@ -38,7 +38,7 @@ RUN dnf install -y openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel 
 FROM centos-deps-builder AS base-builder
 
 ARG PYTHON_VERSION=3.12
-ARG OPENBLAS_VERSION=0.3.29
+ARG OPENBLAS_VERSION=0.3.30
 
 # Set Environment Variables for venv, cargo & openblas
 ENV VIRTUAL_ENV=/opt/vllm
@@ -57,11 +57,11 @@ COPY --from=openblas-builder /tmp/control /dev/null
 RUN --mount=type=bind,from=openblas-builder,source=/OpenBLAS-$OPENBLAS_VERSION/,target=/openblas/,rw \
     dnf install -y openssl-devel \
     && dnf install -y \
-       git tar gcc-toolset-13 automake libtool \
+       git tar gcc-toolset-14 automake libtool \
        pkgconfig xsimd zeromq-devel kmod findutils protobuf* \
        libtiff-devel libjpeg-devel zlib-devel freetype-devel libwebp-devel \
        harfbuzz-devel libraqm-devel libimagequant-devel libxcb-devel \
-       python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip \
+       python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip clang-devel \
     && dnf clean all \
     && PREFIX=/usr/local make -C /openblas install \
     && ln -sf /usr/lib64/libatomic.so.1 /usr/lib64/libatomic.so \
@@ -79,12 +79,12 @@ RUN --mount=type=bind,from=openblas-builder,source=/OpenBLAS-$OPENBLAS_VERSION/,
 FROM base-builder AS torch-builder
 
 ARG MAX_JOBS
-ARG TORCH_VERSION=2.6.0
+ARG TORCH_VERSION=2.7.0
 ARG _GLIBCXX_USE_CXX11_ABI=1
-ARG OPENBLAS_VERSION=0.3.29
+ARG OPENBLAS_VERSION=0.3.30
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable &&  \
+    source /opt/rh/gcc-toolset-14/enable &&  \
     git clone --recursive https://github.com/pytorch/pytorch.git -b v${TORCH_VERSION} && \
     cd pytorch && \
     uv pip install -r requirements.txt && \
@@ -93,18 +93,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     MAX_JOBS=${MAX_JOBS:-$(nproc)} \
     PYTORCH_BUILD_VERSION=${TORCH_VERSION} PYTORCH_BUILD_NUMBER=1 uv build --wheel --out-dir /torchwheels/
 
-ARG TORCHVISION_VERSION=0.21.0
+ARG TORCHVISION_VERSION=0.22.0
 ARG TORCHVISION_USE_NVJPEG=0
 ARG TORCHVISION_USE_FFMPEG=0
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
+    source /opt/rh/gcc-toolset-14/enable && \
     git clone --recursive https://github.com/pytorch/vision.git -b v${TORCHVISION_VERSION} && \
     cd vision && \
     MAX_JOBS=${MAX_JOBS:-$(nproc)} \
     BUILD_VERSION=${TORCHVISION_VERSION} \
     uv build --wheel --out-dir /torchwheels/ --no-build-isolation
 
-ARG TORCHAUDIO_VERSION=2.6.0
+ARG TORCHAUDIO_VERSION=2.7.0
 ARG BUILD_SOX=1
 ARG BUILD_KALDI=1
 ARG BUILD_RNNT=1
@@ -113,7 +113,7 @@ ARG USE_ROCM=0
 ARG USE_CUDA=0
 ARG TORCHAUDIO_TEST_ALLOW_SKIP_IF_NO_FFMPEG=1
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
+    source /opt/rh/gcc-toolset-14/enable && \
     git clone --recursive https://github.com/pytorch/audio.git -b v${TORCHAUDIO_VERSION} && \
     cd audio && \
     MAX_JOBS=${MAX_JOBS:-$(nproc)} \
@@ -128,9 +128,9 @@ FROM base-builder AS arrow-builder
 
 ARG MAX_JOBS
 ARG PYARROW_PARALLEL
-ARG PYARROW_VERSION=19.0.1
+ARG PYARROW_VERSION=21.0.0
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
+    source /opt/rh/gcc-toolset-14/enable && \
     git clone --recursive https://github.com/apache/arrow.git -b apache-arrow-${PYARROW_VERSION} && \
     cd arrow/cpp && \
     mkdir build && cd build && \
@@ -145,7 +145,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     make install -j ${MAX_JOBS:-$(nproc)} && \
     cd ../../python/ && \
     uv pip install -v -r requirements-build.txt && uv pip install numpy==2.1.3 && \
-    pip show numpy && ls -lrt /opt/vllm/lib/python3.12/site-packages/numpy && \
     PYARROW_PARALLEL=${PYARROW_PARALLEL:-$(nproc)} \
     python setup.py build_ext \
     --build-type=release --bundle-arrow-cpp \
@@ -163,7 +162,7 @@ ARG OPENCV_VERSION=86
 ARG OPENCV_PATCH=97f3f39
 ARG ENABLE_HEADLESS=1
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
+    source /opt/rh/gcc-toolset-14/enable && \
     git clone --recursive https://github.com/opencv/opencv-python.git -b ${OPENCV_VERSION} && \
     cd opencv-python && \
     sed -i -E -e 's/"setuptools.+",/"setuptools",/g' pyproject.toml && \
@@ -188,6 +187,23 @@ RUN git clone --recursive https://github.com/numactl/numactl.git -b v${NUMACTL_V
 
 
 ###############################################################
+# Stage to build numba 
+###############################################################
+
+FROM base-builder AS numba-builder
+
+ARG MAX_JOBS
+ARG NUMBA_VERSION=0.61.2
+
+# Clone all required dependencies
+RUN dnf install ninja-build llvm15 llvm15-devel -y && source /opt/rh/gcc-toolset-14/enable && export PATH=$PATH:/usr/lib64/llvm15/bin && \
+    git clone --recursive https://github.com/numba/numba.git -b ${NUMBA_VERSION} && \
+    cd ./numba && \
+    if ! grep '#include "dynamic_annotations.h"' numba/_dispatcher.cpp; then \
+       sed -i '/#include "internal\/pycore_atomic.h"/i\#include "dynamic_annotations.h"' numba/_dispatcher.cpp; \
+    fi && python -m build --wheel --installer=uv --outdir /numbawheels/
+
+###############################################################
 # Stage to build vllm - this stage builds and installs
 # vllm, tensorizer and vllm-tgis-adapter and builds uv cache
 # for transitive dependencies - eg. grpcio
@@ -195,10 +211,14 @@ RUN git clone --recursive https://github.com/numactl/numactl.git -b v${NUMACTL_V
 
 FROM base-builder AS vllmcache-builder
 
+ENV LLVM_CONFIG=/usr/lib64/llvm15/bin/llvm-config
+ENV PATH=/usr/lib64/llvm15/bin:$PATH
+
 COPY --from=torch-builder /tmp/control /dev/null
 COPY --from=arrow-builder /tmp/control /dev/null
 COPY --from=cv-builder /tmp/control /dev/null
 COPY --from=numa-builder /tmp/control /dev/null
+COPY --from=numba-builder /tmp/control /dev/null
 
 ARG VLLM_TARGET_DEVICE=cpu
 ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
@@ -206,24 +226,32 @@ ARG GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 # this step installs vllm and populates uv cache
 # with all the transitive dependencies
 RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-13/enable && \
+    dnf install llvm15 llvm15-devel -y && \
+    rpm -ivh --nodeps https://mirror.stream.centos.org/9-stream/CRB/ppc64le/os/Packages/protobuf-lite-devel-3.14.0-16.el9.ppc64le.rpm && \
+    source /opt/rh/gcc-toolset-14/enable && \
     git clone https://github.com/huggingface/xet-core.git && cd xet-core/hf_xet/ && \
     uv pip install maturin && \
     uv build --wheel --out-dir /hf_wheels/
+
+ENV CXXFLAGS="-fno-lto -Wno-error=free-nonheap-object" \
+    CFLAGS="-fno-lto"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=torch-builder,source=/torchwheels/,target=/torchwheels/,ro \
     --mount=type=bind,from=arrow-builder,source=/arrowwheels/,target=/arrowwheels/,ro \
     --mount=type=bind,from=cv-builder,source=/opencvwheels/,target=/opencvwheels/,ro \
     --mount=type=bind,from=numa-builder,source=/numactl/,target=/numactl/,rw \
+    --mount=type=bind,from=numba-builder,source=/numbawheels/,target=/numbawheels/,ro \
     --mount=type=bind,src=.,dst=/src/,rw \
-    source /opt/rh/gcc-toolset-13/enable && \
-    uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl && \
+    source /opt/rh/gcc-toolset-14/enable && \
+    export PATH=$PATH:/usr/lib64/llvm15/bin && \
+    uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl /numbawheels/*.whl && \
     sed -i -e 's/.*torch.*//g' /src/pyproject.toml /src/requirements/*.txt && \
-    uv pip install pandas pythran pybind11 /hf_wheels/*.whl && \
+    sed -i -e 's/.*sentencepiece.*//g' /src/pyproject.toml /src/requirements/*.txt && \
+    uv pip install sentencepiece==0.2.0 pandas pythran nanobind pybind11 /hf_wheels/*.whl && \
     make -C /numactl install && \
     # sentencepiece.pc is in some pkgconfig inside uv cache
     export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && \
-    uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt -r /src/requirements/build.txt --no-build-isolation && \
+    nanobind_DIR=$(uv pip show nanobind | grep Location | sed 's/^Location: //;s/$/\/nanobind\/cmake/') && uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt -r /src/requirements/build.txt --no-build-isolation && \
     cd /src/ && \
     uv build --wheel --out-dir /vllmwheel/ --no-build-isolation && \
     uv pip install /vllmwheel/*.whl
@@ -238,7 +266,7 @@ FROM base-builder AS lapack-builder
 ARG MAX_JOBS
 ARG LAPACK_VERSION=3.12.1
 RUN git clone --recursive https://github.com/Reference-LAPACK/lapack.git -b v${LAPACK_VERSION} \
-    && cd lapack && source /opt/rh/gcc-toolset-13/enable \
+    && cd lapack && source /opt/rh/gcc-toolset-14/enable \
     && cmake -B build -S . \
     && cmake --build build -j ${MAX_JOBS:-$(nproc)}
 
@@ -250,7 +278,7 @@ RUN git clone --recursive https://github.com/Reference-LAPACK/lapack.git -b v${L
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS vllm-openai
 
 ARG PYTHON_VERSION=3.12
-ARG OPENBLAS_VERSION=0.3.29
+ARG OPENBLAS_VERSION=0.3.30
 
 # Set Environment Variables for venv & openblas
 ENV VIRTUAL_ENV=/opt/vllm
@@ -268,6 +296,7 @@ COPY --from=vllmcache-builder /tmp/control /dev/null
 COPY --from=numa-builder /tmp/control /dev/null
 COPY --from=lapack-builder /tmp/control /dev/null
 COPY --from=openblas-builder /tmp/control /dev/null
+COPY --from=numba-builder /tmp/control /dev/null
 
 # install gcc-11, python, openblas, numactl, lapack
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -276,13 +305,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=openblas-builder,source=/OpenBLAS-$OPENBLAS_VERSION/,target=/openblas/,rw \
     rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
     microdnf install --nodocs -y \
-    tar findutils openssl \
+    libomp libicu tar findutils openssl llvm15 llvm15-devel \
     pkgconfig xsimd g++ gcc-fortran libsndfile \
     libtiff libjpeg openjpeg2 zlib zeromq \
     freetype lcms2 libwebp tcl tk utf8proc \
-    harfbuzz fribidi libraqm libimagequant libxcb \
+    harfbuzz fribidi libraqm libimagequant libxcb util-linux \
     python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip \
-    && microdnf clean all \
+    && export PATH=$PATH:/usr/lib64/llvm15/bin && microdnf clean all \
     && python${PYTHON_VERSION} -m venv ${VIRTUAL_ENV} \
     && python -m pip install -U pip uv --no-cache \
     && make -C /numactl install \
@@ -298,7 +327,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=cv-builder,source=/opencvwheels/,target=/opencvwheels/,ro \
     --mount=type=bind,from=vllmcache-builder,source=/hf_wheels/,target=/hf_wheels/,ro \
     --mount=type=bind,from=vllmcache-builder,source=/vllmwheel/,target=/vllmwheel/,ro \
-    HOME=/root uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl /hf_wheels/*.whl /vllmwheel/*.whl
+    --mount=type=bind,from=numba-builder,source=/numbawheels/,target=/numbawheels/,ro \
+    export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && uv pip install sentencepiece==0.2.0 && \
+    HOME=/root uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl /numbawheels/*.whl /hf_wheels/*.whl /vllmwheel/*.whl
+
 
 COPY ./ /workspace/vllm
 WORKDIR /workspace/vllm

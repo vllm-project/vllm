@@ -1,6 +1,6 @@
 # Dockerfile
 
-We provide a <gh-file:docker/Dockerfile> to construct the image for running an OpenAI compatible server with vLLM.
+We provide a [docker/Dockerfile](../../../docker/Dockerfile) to construct the image for running an OpenAI compatible server with vLLM.
 More information about deploying with Docker can be found [here](../../deployment/docker.md).
 
 Below is a visual representation of the multi-stage Dockerfile. The build graph contains the following nodes:

@@ -21,11 +21,13 @@
 void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
-                             torch::Tensor const& input_sf);
+                             torch::Tensor const& input_sf,
+                             bool is_sf_swizzled_layout);
 #endif
 
-#if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
-void scaled_fp4_experts_quant_sm100a(
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+void scaled_fp4_experts_quant_sm1xxa(
     torch::Tensor& output, torch::Tensor& output_scale,
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
     torch::Tensor const& input_offset_by_experts,
@@ -40,11 +42,22 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,
                                      torch::Tensor& input_sf);
 #endif
 
-void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
-                      torch::Tensor& output_sf, torch::Tensor const& input_sf) {
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
     (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
-  return scaled_fp4_quant_sm1xxa(output, input, output_sf, input_sf);
+void silu_and_mul_scaled_fp4_experts_quant_sm1xxa(
+    torch::Tensor& output, torch::Tensor& output_scale,
+    torch::Tensor const& input, torch::Tensor const& input_global_scale,
+    torch::Tensor const& input_offset_by_experts,
+    torch::Tensor const& output_scale_offset_by_experts);
+#endif
+
+void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
+                      torch::Tensor& output_sf, torch::Tensor const& input_sf,
+                      bool is_sf_swizzled_layout) {
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+  return scaled_fp4_quant_sm1xxa(output, input, output_sf, input_sf,
+                                 is_sf_swizzled_layout);
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(false, "No compiled nvfp4 quantization kernel");
 }
@@ -54,8 +67,9 @@ void scaled_fp4_experts_quant(
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
     torch::Tensor const& input_offset_by_experts,
     torch::Tensor const& output_scale_offset_by_experts) {
-#if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
-  return scaled_fp4_experts_quant_sm100a(
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+  return scaled_fp4_experts_quant_sm1xxa(
       output, output_scale, input, input_global_scale, input_offset_by_experts,
       output_scale_offset_by_experts);
 #endif
@@ -71,4 +85,19 @@ void silu_and_mul_nvfp4_quant(torch::Tensor& output, torch::Tensor& output_sf,
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
       false, "No compiled silu_and_mul nvfp4 quantization kernel");
+}
+
+void silu_and_mul_scaled_fp4_experts_quant(
+    torch::Tensor& output, torch::Tensor& output_scale,
+    torch::Tensor const& input, torch::Tensor const& input_global_scale,
+    torch::Tensor const& input_offset_by_experts,
+    torch::Tensor const& output_scale_offset_by_experts) {
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+  return silu_and_mul_scaled_fp4_experts_quant_sm1xxa(
+      output, output_scale, input, input_global_scale, input_offset_by_experts,
+      output_scale_offset_by_experts);
+#endif
+  TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "No compiled silu_and_mul nvfp4 experts quantization kernel");
 }

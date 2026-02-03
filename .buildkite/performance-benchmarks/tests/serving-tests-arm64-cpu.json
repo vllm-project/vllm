@@ -1,0 +1,130 @@
+{
+  "defaults": {
+    "qps_list": [
+      "inf"
+    ],
+    "max_concurrency_list": [
+      12,
+      16,
+      24,
+      32,
+      64,
+      128,
+      200
+    ],
+    "server_environment_variables": {
+      "VLLM_RPC_TIMEOUT": 100000,
+      "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
+      "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+      "VLLM_CPU_SGL_KERNEL": 1,
+      "VLLM_CPU_KVCACHE_SPACE": 40
+    },
+    "server_parameters": {
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "tensor_parallel_size": 1,
+      "dtype": "bfloat16",
+      "distributed_executor_backend": "mp",
+      "block_size": 128,
+      "trust_remote_code": "",
+      "disable_log_stats": "",
+      "enforce_eager": "",
+      "max_num_batched_tokens": 2048,
+      "max_num_seqs": 256,
+      "load_format": "dummy"
+    },
+    "client_parameters": {
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "backend": "vllm",
+      "ignore-eos": "",
+      "num_prompts": 200
+    }
+  },
+  "tests": [
+    {
+      "test_name": "serving_llama8B_tp1_sharegpt",
+      "server_parameters": {
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {
+        "dataset_name": "sharegpt",
+        "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json"
+      }
+    },
+    {
+      "test_name": "serving_llama8B_tp2_sharegpt",
+      "server_parameters": {
+        "tensor_parallel_size": 2
+      },
+      "client_parameters": {
+        "dataset_name": "sharegpt",
+        "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json"
+      }
+    },
+    {
+      "test_name": "serving_llama8B_tp1_random_128_128",
+      "server_parameters": {
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {
+        "dataset_name": "random",
+        "random-input-len": 128,
+        "random-output-len": 128
+      }
+    },
+    {
+      "test_name": "serving_llama8B_tp2_random_128_128",
+      "server_parameters": {
+        "tensor_parallel_size": 2
+      },
+      "client_parameters": {
+        "dataset_name": "random",
+        "random-input-len": 128,
+        "random-output-len": 128
+      }
+    },
+    {
+      "test_name": "serving_llama8B_tp1_random_128_2048",
+      "server_parameters": {
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {
+        "dataset_name": "random",
+        "random-input-len": 128,
+        "random-output-len": 2048
+      }
+    },
+    {
+      "test_name": "serving_llama8B_tp2_random_128_2048",
+      "server_parameters": {
+        "tensor_parallel_size": 2
+      },
+      "client_parameters": {
+        "dataset_name": "random",
+        "random-input-len": 128,
+        "random-output-len": 2048
+      }
+    },
+    {
+      "test_name": "serving_llama8B_tp1_random_2048_128",
+      "server_parameters": {
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {
+        "dataset_name": "random",
+        "random-input-len": 2048,
+        "random-output-len": 128
+      }
+    },
+    {
+      "test_name": "serving_llama8B_tp2_random_2048_128",
+      "server_parameters": {
+        "tensor_parallel_size": 2
+      },
+      "client_parameters": {
+        "dataset_name": "random",
+        "random-input-len": 2048,
+        "random-output-len": 128
+      }
+    }
+  ]
+}

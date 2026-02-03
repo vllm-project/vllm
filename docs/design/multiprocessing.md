@@ -2,7 +2,7 @@
 
 ## Debugging
 
-Please see the [Troubleshooting][troubleshooting-python-multiprocessing]
+Please see the [Troubleshooting](../usage/troubleshooting.md#python-multiprocessing)
 page for information on known issues and how to solve them.
 
 ## Introduction
@@ -82,7 +82,7 @@ There are other miscellaneous places hard-coding the use of `spawn`:
 
 Related PRs:
 
-- <gh-pr:8823>
+- <https://github.com/vllm-project/vllm/pull/8823>
 
 ## Prior State in v1
 

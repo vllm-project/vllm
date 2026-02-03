@@ -83,7 +83,7 @@ MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=100000000000 # A very large number
 ```
 
-#### 2. Maximize Throughput with a Latency Requirement
+### 2. Maximize Throughput with a Latency Requirement
 
 - **Goal**: Find the best server parameters when P99 end-to-end latency must be below 500ms.
 - **Configuration**:
@@ -96,7 +96,7 @@ MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=500
 ```
 
-#### 3. Maximize Throughput with Prefix Caching and Latency Requirements
+### 3. Maximize Throughput with Prefix Caching and Latency Requirements
 
 - **Goal**: Find the best server parameters assuming a 60% prefix cache hit rate and a latency requirement of 500ms.
 - **Configuration**:

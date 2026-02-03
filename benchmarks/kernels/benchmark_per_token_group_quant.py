@@ -3,8 +3,8 @@
 
 import argparse
 import math
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable
 from unittest.mock import patch
 
 import torch
@@ -30,8 +30,8 @@ def _time_cuda(
         fn()
     torch.cuda.synchronize()
 
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+    start = torch.Event(enable_timing=True)
+    end = torch.Event(enable_timing=True)
 
     start.record()
     for _ in range(bench_iters):

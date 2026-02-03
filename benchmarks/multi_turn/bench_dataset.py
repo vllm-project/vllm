@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from statistics import mean
-from typing import Any, NamedTuple, Optional, Union
+from typing import Any, NamedTuple
 
 import numpy as np  # type: ignore
 import pandas as pd  # type: ignore
@@ -11,6 +11,7 @@ from bench_utils import (
     Color,
     logger,
 )
+from tqdm import tqdm
 from transformers import AutoTokenizer  # type: ignore
 
 # Conversation ID is a string (e.g: "UzTK34D")
@@ -35,8 +36,8 @@ class Distribution(ABC):
 class UniformDistribution(Distribution):
     def __init__(
         self,
-        min_val: Union[int, float],
-        max_val: Union[int, float],
+        min_val: int | float,
+        max_val: int | float,
         is_integer: bool = True,
     ) -> None:
         self.min_val = min_val
@@ -56,7 +57,7 @@ class UniformDistribution(Distribution):
 
 
 class ConstantDistribution(Distribution):
-    def __init__(self, value: Union[int, float]) -> None:
+    def __init__(self, value: int | float) -> None:
         self.value = value
         self.max_val = value
 
@@ -68,7 +69,7 @@ class ConstantDistribution(Distribution):
 
 
 class ZipfDistribution(Distribution):
-    def __init__(self, alpha: float, max_val: Optional[int] = None) -> None:
+    def __init__(self, alpha: float, max_val: int | None = None) -> None:
         self.alpha = alpha
         self.max_val = max_val
 
@@ -83,7 +84,7 @@ class ZipfDistribution(Distribution):
 
 
 class PoissonDistribution(Distribution):
-    def __init__(self, alpha: float, max_val: Optional[int] = None) -> None:
+    def __init__(self, alpha: float, max_val: int | None = None) -> None:
         self.alpha = alpha
         self.max_val = max_val
 
@@ -100,11 +101,11 @@ class PoissonDistribution(Distribution):
 class LognormalDistribution(Distribution):
     def __init__(
         self,
-        mean: Optional[float] = None,
-        sigma: Optional[float] = None,
-        average: Optional[int] = None,
-        median_ratio: Optional[float] = None,
-        max_val: Optional[int] = None,
+        mean: float | None = None,
+        sigma: float | None = None,
+        average: int | None = None,
+        median_ratio: float | None = None,
+        max_val: int | None = None,
     ) -> None:
         self.average = average
         self.median_ratio = median_ratio
@@ -417,6 +418,10 @@ def generate_conversations(
             data = file.read()
             tokens_in_file = tokenizer.encode(data, add_special_tokens=False)
             list_of_tokens.extend(tokens_in_file)
+        logger.info(
+            f"Loaded {len(tokens_in_file)} tokens from file {filename}, "
+            f"total tokens so far: {len(list_of_tokens)}"
+        )
 
     conversations: ConversationsMap = {}
     conv_id = 0
@@ -449,18 +454,25 @@ def generate_conversations(
         )
         base_offset += common_prefix_tokens
 
-    for conv_id in range(args.num_conversations):
+    for conv_id in tqdm(
+        range(args.num_conversations),
+        total=args.num_conversations,
+        desc="Generating conversations",
+        unit="conv",
+    ):
         # Generate a single conversation
         messages: MessagesList = []
 
         nturns = turn_count[conv_id]
 
         # User prompt token count per turn (with lower limit)
-        input_token_count: np.ndarray = args.input_num_tokens.sample(nturns)
+        input_token_count: np.ndarray = args.input_num_tokens.sample(nturns).astype(int)
         input_token_count = np.maximum(input_token_count, base_prompt_token_count)
 
         # Assistant answer token count per turn (with lower limit)
-        output_token_count: np.ndarray = args.output_num_tokens.sample(nturns)
+        output_token_count: np.ndarray = args.output_num_tokens.sample(nturns).astype(
+            int
+        )
         output_token_count = np.maximum(output_token_count, 1)
 
         user_turn = True

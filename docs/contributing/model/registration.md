@@ -8,11 +8,11 @@ This page provides detailed instructions on how to do so.
 
 ## Built-in models
 
-To add a model directly to the vLLM library, start by forking our [GitHub repository](https://github.com/vllm-project/vllm) and then [build it from source][build-from-source].
+To add a model directly to the vLLM library, start by forking our [GitHub repository](https://github.com/vllm-project/vllm) and then [build it from source](../../getting_started/installation/gpu.md#build-wheel-from-source).
 This gives you the ability to modify the codebase and test your model.
 
-After you have implemented your model (see [tutorial](basic.md)), put it into the <gh-dir:vllm/model_executor/models> directory.
-Then, add your model class to `_VLLM_MODELS` in <gh-file:vllm/model_executor/models/registry.py> so that it is automatically registered upon importing vLLM.
+After you have implemented your model (see [tutorial](basic.md)), put it into the [vllm/model_executor/models](../../../vllm/model_executor/models) directory.
+Then, add your model class to `_VLLM_MODELS` in [vllm/model_executor/models/registry.py](../../../vllm/model_executor/models/registry.py) so that it is automatically registered upon importing vLLM.
 Finally, update our [list of supported models](../../models/supported_models.md) to promote your model!
 
 !!! important
@@ -42,7 +42,7 @@ def register():
 
     ModelRegistry.register_model(
         "YourModelForCausalLM",
-        "your_code:YourModelForCausalLM"
+        "your_code:YourModelForCausalLM",
     )
 ```
 

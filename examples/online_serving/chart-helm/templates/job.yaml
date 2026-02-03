@@ -1,4 +1,4 @@
-{{-   if .Values.extraInit  }}
+{{- if and .Values.extraInit .Values.extraInit.modelDownload.enabled }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -12,13 +12,17 @@ spec:
    spec:
     containers:
     - name: job-download-model
-      image: {{ include "chart.extraInitImage" . }}
-      command: 
-        - /bin/bash
+      image: {{ .Values.extraInit.modelDownload.image.repository }}:{{ .Values.extraInit.modelDownload.image.tag }}
+      imagePullPolicy: {{ .Values.extraInit.modelDownload.image.pullPolicy }}
+      command: {{ .Values.extraInit.modelDownload.downloadJob.command | toJson }}
       args:
-        - -eucx
-        - aws --endpoint-url $S3_ENDPOINT_URL s3 sync s3://$S3_BUCKET_NAME/$S3_PATH /data
-      env: {{- include "chart.extraInitEnv" . | nindent 8 }}
+      {{- toYaml .Values.extraInit.modelDownload.downloadJob.args | nindent 8 }}
+      env:
+      {{- if .Values.extraInit.modelDownload.downloadJob.env }}
+      {{- toYaml .Values.extraInit.modelDownload.downloadJob.env | nindent 8 }}
+      {{- else }}
+      {{- include "chart.extraInitEnv" . | nindent 8 }}
+      {{- end }}
       volumeMounts:
         - name: {{ .Release.Name }}-storage
           mountPath: /data

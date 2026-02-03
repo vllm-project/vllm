@@ -51,6 +51,7 @@ hooks:
   - docs/mkdocs/hooks/remove_announcement.py
   - docs/mkdocs/hooks/generate_examples.py
   - docs/mkdocs/hooks/generate_argparse.py
+  - docs/mkdocs/hooks/generate_metrics.py
   - docs/mkdocs/hooks/url_schemes.py
 
 plugins:
@@ -79,6 +80,7 @@ plugins:
         - "re:vllm\\._.*"  # Internal modules
         - "vllm.third_party"
         - "vllm.vllm_flash_attn"
+        - "re:vllm\\.grpc\\..*_pb2.*"  # Auto-generated protobuf files
         - !ENV [API_AUTONAV_EXCLUDE, "re:^$"]  # Match nothing by default
   - mkdocstrings:
       handlers:
@@ -86,7 +88,8 @@ plugins:
           options:
             show_symbol_type_heading: true
             show_symbol_type_toc: true
-            filters: []
+            filters:
+              - "!.*_pb2_grpc"  # Exclude auto-generated gRPC stubs
             summary:
               modules: true
             show_if_no_docstring: true
@@ -105,6 +108,7 @@ plugins:
 
 markdown_extensions:
   - attr_list
+  - def_list
   - md_in_html
   - admonition
   - pymdownx.details
@@ -142,8 +146,3 @@ extra_javascript:
   - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js
   - mkdocs/javascript/edit_and_feedback.js
   - mkdocs/javascript/slack_and_forum.js
-
-# Makes the url format end in .html rather than act as a dir
-# So index.md generates as index.html and is available under URL /index.html
-# https://www.mkdocs.org/user-guide/configuration/#use_directory_urls
-use_directory_urls: false

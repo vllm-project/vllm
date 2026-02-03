@@ -6,18 +6,26 @@ See https://github.com/vllm-project/vllm/issues/11926 for more details.
 
 Run `pytest tests/quantization/test_register_quantization_config.py`.
 """
-from typing import Any, Optional
+
+import logging
+from typing import Any
 
 import pytest
 import torch
 import torch.nn.functional as F
 
-from vllm.model_executor.layers.linear import LinearBase  # noqa: E501
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.linear import (
+    LinearBase,  # noqa: E501
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization import (
-    QuantizationMethods, get_quantization_config, register_quantization_config)
-from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
-    QuantizationConfig)
+    QuantizationMethods,
+    get_quantization_config,
+    register_quantization_config,
+)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,  # noqa: E501
+)
 
 
 class FakeQuantLinearMethod(UnquantizedLinearMethod):
@@ -28,10 +36,12 @@ class FakeQuantLinearMethod(UnquantizedLinearMethod):
         super().__init__()
         self.num_bits = num_bits
 
-    def apply(self,
-              layer: "torch.nn.Module",
-              x: "torch.Tensor",
-              bias: Optional["torch.Tensor"] = None) -> "torch.Tensor":
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Perform fake quantization before the linear layer."""
 
         # Calculate the scales dynamically
@@ -40,8 +50,11 @@ class FakeQuantLinearMethod(UnquantizedLinearMethod):
         scales = (max_val - min_val) / (2**self.num_bits - 1)
 
         # Fake quantize the input
-        quant_x = torch.clamp(torch.round(x / scales), -2**(self.num_bits - 1),
-                              2**(self.num_bits - 1) - 1)
+        quant_x = torch.clamp(
+            torch.round(x / scales),
+            -(2 ** (self.num_bits - 1)),
+            2 ** (self.num_bits - 1) - 1,
+        )
         dequant_x = quant_x * scales
 
         return F.linear(dequant_x, layer.weight, bias)
@@ -60,7 +73,7 @@ class CustomQuantConfig(QuantizationConfig):
         """Name of the quantization method."""
         return "custom_quant"
 
-    def get_supported_act_dtypes(self) -> list["torch.dtype"]:
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
         """List of supported activation dtypes."""
         return [torch.float16, torch.bfloat16]
 
@@ -79,38 +92,46 @@ class CustomQuantConfig(QuantizationConfig):
         """Create a config class from the model's quantization config."""
         return CustomQuantConfig(num_bits=config.get("num_bits", 8))
 
-    def get_quant_method(self, layer: "torch.nn.Module",
-                         prefix: str) -> Optional["FakeQuantLinearMethod"]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> FakeQuantLinearMethod | None:
         """Get the quantize method to use for the quantized layer."""
         if isinstance(layer, LinearBase):
             return FakeQuantLinearMethod(num_bits=self.num_bits)
         return None
 
 
-def test_register_quantization_config():
+def test_register_quantization_config(caplog_vllm):
     """Test register custom quantization config."""
 
     # The quantization method `custom_quant` should be registered.
     assert get_quantization_config("custom_quant") == CustomQuantConfig
 
     # The quantization method `custom_quant` is already exists,
-    # should raise an error.
-    with pytest.raises(ValueError):
+    # should raise a warning when re-registering it.
+    with caplog_vllm.at_level(logging.WARNING):
         register_quantization_config("custom_quant")(CustomQuantConfig)
 
+    assert any(
+        "The quantization method 'custom_quant' already exists" in message
+        for message in caplog_vllm.messages
+    ), "Expected a warning when re-registering custom_quant"
 
-@pytest.mark.parametrize(argnames="model",
-                         argvalues=[
-                             "meta-llama/Llama-3.2-1B-Instruct",
-                         ])
+
+@pytest.mark.parametrize(
+    argnames="model",
+    argvalues=[
+        "meta-llama/Llama-3.2-1B-Instruct",
+    ],
+)
 def test_custom_quant(vllm_runner, model, monkeypatch):
     """Test infer with the custom quantization method."""
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-    with vllm_runner(model_name=model,
-                     quantization="custom_quant",
-                     enforce_eager=True) as llm:
+    with vllm_runner(
+        model_name=model, quantization="custom_quant", enforce_eager=True
+    ) as llm:
 
         def check_model(model):
             layer = model.model.layers[0]
@@ -121,5 +142,5 @@ def test_custom_quant(vllm_runner, model, monkeypatch):
 
         llm.apply_model(check_model)
 
-        output = llm.generate_greedy("Hello my name is", max_tokens=20)
+        output = llm.generate_greedy("Hello my name is", max_tokens=1)
         assert output

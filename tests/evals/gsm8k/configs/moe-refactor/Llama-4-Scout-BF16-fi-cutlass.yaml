@@ -1,0 +1,7 @@
+model_name: "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+accuracy_threshold: 0.92
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 8192 --tensor-parallel-size 2 --enable-expert-parallel"
+env:
+  VLLM_USE_FLASHINFER_MOE_FP16: "1"

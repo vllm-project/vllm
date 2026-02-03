@@ -1,17 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.v1.kv_offload.abstract import LoadStoreSpec
-from vllm.v1.kv_offload.worker.worker import (OffloadingHandler,
-                                              OffloadingWorker, TransferResult,
-                                              TransferSpec)
+from vllm.v1.kv_offload.worker.worker import (
+    OffloadingHandler,
+    OffloadingWorker,
+    TransferResult,
+    TransferSpec,
+)
 
 
 class LoadStoreSpec1(LoadStoreSpec):
-
-    def __init__(self,
-                 submit_success: bool = True,
-                 async_success: bool = True,
-                 exception: bool = False):
+    def __init__(
+        self,
+        submit_success: bool = True,
+        async_success: bool = True,
+        exception: bool = False,
+    ):
         self.finished = False
         self.submit_success = submit_success
         self.async_success = async_success
@@ -26,7 +30,6 @@ class LoadStoreSpec1(LoadStoreSpec):
 
 
 class LoadStoreSpec2(LoadStoreSpec):
-
     @staticmethod
     def medium() -> str:
         return "2"
@@ -36,7 +39,6 @@ class LoadStoreSpec2(LoadStoreSpec):
 
 
 class OffloadingHandler1To2(OffloadingHandler):
-
     def __init__(self):
         self.transfers: dict[int, LoadStoreSpec1] = {}
 
@@ -61,9 +63,14 @@ class OffloadingHandler1To2(OffloadingHandler):
                 del self.transfers[job_id]
         return finished
 
+    def wait(self, job_ids: set[int]) -> None:
+        for job_id in job_ids:
+            spec = self.transfers.get(job_id)
+            if spec:
+                assert spec.finished
+
 
 class OffloadingHandler2To1(OffloadingHandler):
-
     def __init__(self):
         self.transfers: dict[int, LoadStoreSpec1] = {}
 
@@ -82,6 +89,12 @@ class OffloadingHandler2To1(OffloadingHandler):
                 finished.append((job_id, spec.async_success))
                 del self.transfers[job_id]
         return finished
+
+    def wait(self, job_ids: set[int]) -> None:
+        for job_id in job_ids:
+            spec = self.transfers.get(job_id)
+            if spec:
+                assert spec.finished
 
 
 def test_offloading_worker():
@@ -144,9 +157,9 @@ def test_offloading_worker():
     assert 7 in handler2to1.transfers
 
     # verify result of 3rd and 4th transfers
-    assert (sorted(worker.get_finished()) == [(3, False), (4, True)])
+    assert sorted(worker.get_finished()) == [(3, False), (4, True)]
 
     # complete 6th and 7th transfers
     src6.finished = True
     dst7.finished = True
-    assert (sorted(worker.get_finished()) == [(6, True), (7, True)])
+    assert sorted(worker.get_finished()) == [(6, True), (7, True)]

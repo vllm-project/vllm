@@ -12,28 +12,31 @@ import torch
 
 # Assuming these are imported from your module
 from vllm.distributed.device_communicators.shm_object_storage import (
-    MsgpackSerde, SingleWriterShmObjectStorage, SingleWriterShmRingBuffer)
-from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargsItem,
-                                    MultiModalSharedField)
+    MsgpackSerde,
+    SingleWriterShmObjectStorage,
+    SingleWriterShmRingBuffer,
+)
+from vllm.multimodal.inputs import (
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalSharedField,
+)
 
 
-def _dummy_elem(modality: str, key: str, size: int):
+def _dummy_elem(size: int):
     return MultiModalFieldElem(
-        modality=modality,
-        key=key,
-        data=torch.empty((size, ), dtype=torch.int8),
-        field=MultiModalSharedField(1),
+        data=torch.empty((size,), dtype=torch.int8),
+        field=MultiModalSharedField(batch_size=1),
     )
 
 
-def _dummy_item(modality: str, size_by_key: dict[str, int]):
-    return MultiModalKwargsItem.from_elems([
-        _dummy_elem(modality, key, size) for key, size in size_by_key.items()
-    ])
+def _dummy_item(size_by_key: dict[str, int]):
+    return MultiModalKwargsItem(
+        {key: _dummy_elem(size) for key, size in size_by_key.items()}
+    )
 
 
 class TestSingleWriterShmObjectStorage(unittest.TestCase):
-
     def setUp(self):
         """Set up test fixtures before each test method."""
         ring_buffer = SingleWriterShmRingBuffer(
@@ -51,12 +54,12 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
     def tearDown(self):
         """Clean up after each test."""
         if self.storage:
-            del self.storage
+            self.storage.close()
 
     def test_minimal_put_get_cycle(self):
         """Test basic put and get operations."""
         key = "test_key"
-        value = _dummy_item("text", {"field1": 10, "field2": 20})
+        value = _dummy_item({"field1": 10, "field2": 20})
 
         # Put operation
         address, monotonic_id = self.storage.put(key, value)
@@ -208,8 +211,7 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
         with self.assertRaises(ValueError) as context:
             self.storage.get(address, monotonic_id + 100)
 
-        self.assertIn("has been modified or is invalid", \
-            str(context.exception))
+        self.assertIn("has been modified or is invalid", str(context.exception))
 
     def test_clear_storage(self):
         """Test clearing the storage."""
@@ -234,8 +236,7 @@ class TestSingleWriterShmObjectStorage(unittest.TestCase):
 # Reader process function
 def reader_process(process_id, storage_handle, items_to_read):
     """Reader process that connects to existing shared memory and reads data."""
-    reader_storage = SingleWriterShmObjectStorage.create_from_handle(
-        storage_handle)
+    reader_storage = SingleWriterShmObjectStorage.create_from_handle(storage_handle)
 
     print(f"Reader {process_id} started")
 
@@ -276,11 +277,7 @@ def run_multiprocess_example():
 
         # Test basic data types
         test_data = [
-            ("user_data", {
-                "name": "Alice",
-                "age": 30,
-                "scores": [95, 87, 92]
-            }),
+            ("user_data", {"name": "Alice", "age": 30, "scores": [95, 87, 92]}),
             ("simple_string", "Hello, World!"),
             ("number", 42),
             ("list_data", [1, 2, 3, "four", 5.0]),
@@ -301,8 +298,9 @@ def run_multiprocess_example():
         # initialize lock for reader processes
         handle.reader_lock = Lock()
         for i in range(storage.n_readers):
-            p = multiprocessing.Process(target=reader_process,
-                                        args=(i, handle, stored_items))
+            p = multiprocessing.Process(
+                target=reader_process, args=(i, handle, stored_items)
+            )
             processes.append(p)
             p.start()
 
