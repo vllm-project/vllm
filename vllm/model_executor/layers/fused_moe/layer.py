@@ -538,12 +538,15 @@ class FusedMoE(CustomOp):
             else None
         )
 
-        # Determine is_mxfp4_quant by inspecting quant_config directly,
-        # without creating quant_method first.
+        # Determine is_mxfp4_quant by inspecting quant_config directly.
         # This is used for proper hidden_size rounding before moe_config creation.
-        self.is_mxfp4_quant = self._is_mxfp4_quant(quant_config, prefix)
+        self.is_mxfp4_quant = (
+            quant_config.is_mxfp4_quant(prefix, self)
+            if quant_config is not None
+            else False
+        )
 
-        # Round up hidden size BEFORE creating moe_config.
+        # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
         hidden_size = maybe_roundup_hidden_size(
             hidden_size,
@@ -572,7 +575,6 @@ class FusedMoE(CustomOp):
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
         )
-
         if self.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
                 "Mori needs to be used with aiter fused_moe for now."
@@ -850,44 +852,6 @@ class FusedMoE(CustomOp):
                     dp_size=get_dp_group().world_size,
                 )
 
-    def _is_mxfp4_quant(
-        self,
-        quant_config: QuantizationConfig | None,
-        prefix: str,
-    ) -> bool:
-        """
-        Determine if mxfp4 quantization will be used by inspecting quant_config
-        directly, WITHOUT needing to instantiate quant_method first.
-        This allows hidden_size rounding to happen before moe_config creation.
-        """
-        if not quant_config:
-            return False
-
-        name = quant_config.get_name()
-        if name == "mxfp4":
-            return True
-
-        if name == "quark":
-            # For Quark, determine if it's OCP MXFP4 by checking config directly
-            from vllm.model_executor.layers.quantization.quark.quark import (
-                QuarkConfig,
-            )
-
-            if isinstance(quant_config, QuarkConfig):
-                layer_quant_config = quant_config._find_matched_config(prefix, self)
-                weight_config = layer_quant_config.get("weight")
-                input_config = layer_quant_config.get("input_tensors")
-
-                if (
-                    quant_config._is_w_ocp_mx_a_x(weight_config, input_config)
-                    and weight_config
-                    and weight_config.get("dtype") == "fp4"
-                    and getattr(torch, "float4_e2m1fn_x2", None) is not None
-                ):
-                    return True
-
-        return False
-
     def _maybe_setup_shared_experts_stream(
         self,
         hidden_states: torch.Tensor,
@@ -1044,7 +1008,6 @@ class FusedMoE(CustomOp):
             loaded_weight = loaded_weight.narrow(
                 shard_dim, shard_size * tp_rank, shard_size
             )
-
         # Narrow parameter and load.
         # w1, gate_proj: Load into first logical weight of w13.
         if shard_id == "w1":

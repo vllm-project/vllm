@@ -376,6 +376,22 @@ class QuarkConfig(QuantizationConfig):
 
         return True
 
+    def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
+        """
+        For Quark, determine if it's OCP MXFP4 by checking config directly.
+        This allows hidden_size rounding to happen before moe_config creation.
+        """
+        layer_quant_config = self._find_matched_config(prefix, layer)
+        weight_config = layer_quant_config.get("weight")
+        input_config = layer_quant_config.get("input_tensors")
+
+        return (
+            self._is_w_ocp_mx_a_x(weight_config, input_config)
+            and weight_config
+            and weight_config.get("dtype") == "fp4"
+            and getattr(torch, "float4_e2m1fn_x2", None) is not None
+        )
+
     def _find_matched_config(
         self, layer_name: str, module: torch.nn.Module
     ) -> dict[str, Any]:
