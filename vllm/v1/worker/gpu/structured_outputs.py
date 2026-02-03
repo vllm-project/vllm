@@ -10,12 +10,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class StructuredOutputsWorker:
-    def __init__(
-        self,
-        max_num_logits: int,
-        vocab_size: int,
-        device: torch.device,
-    ):
+    def __init__(self, max_num_logits: int, vocab_size: int, device: torch.device):
         self.logits_indices = torch.zeros(
             max_num_logits, dtype=torch.int32, device=device
         )
