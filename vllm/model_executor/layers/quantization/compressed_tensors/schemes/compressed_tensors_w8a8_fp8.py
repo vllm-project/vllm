@@ -12,9 +12,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
-from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
-    init_fp8_block_scaled_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
@@ -83,21 +80,16 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             activation_quant_key = create_fp8_quant_key(
                 static=False, group_shape=self.act_q_group_shape
             )
-            self.w8a8_block_fp8_linear = init_fp8_block_scaled_linear_kernel(
-                weight_quant_key=weight_quant_key,
-                activation_quant_key=activation_quant_key,
-                out_dtype=self.out_dtype,
-                module_name=self.__class__.__name__,
-            )
         else:
             activation_quant_key = activation_quant_key_mapping[is_static_input_scheme]
             weight_quant_key = weight_quant_key_mapping[self.strategy]
-            self.fp8_linear = init_fp8_linear_kernel(
-                activation_quant_key=activation_quant_key,
-                weight_quant_key=weight_quant_key,
-                out_dtype=self.out_dtype,
-                module_name=self.__class__.__name__,
-            )
+
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -171,7 +163,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         elif self.strategy == QuantizationStrategy.BLOCK:
             assert self.is_static_input_scheme is False
-            self.w8a8_block_fp8_linear.process_weights_after_loading(layer)
+            self.fp8_linear.process_weights_after_loading(layer)
             input_scale = None
 
         else:
@@ -198,11 +190,4 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.weight_block_size is not None:
-            return self.w8a8_block_fp8_linear.apply_weights(
-                layer,
-                x,
-                bias,
-            )
-
         return self.fp8_linear.apply_weights(layer, x, bias)

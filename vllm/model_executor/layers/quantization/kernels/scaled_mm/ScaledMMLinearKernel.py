@@ -2,26 +2,30 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Generic, TypeVar
 
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    convert_to_channelwise,
+)
 from vllm.platforms import current_platform
 
+from ..base import (
+    FP8Params,
+    Int8Params,
+    MMLinearKernel,
+    MMLinearLayerConfig,
+)
+
 
 @dataclass
-class ScaledMMLinearLayerConfig:
-    pass
-
-
-@dataclass
-class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
+class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
     is_static_input_scheme: bool
     is_channelwise: bool
@@ -29,104 +33,46 @@ class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
 
 
 @dataclass
-class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
+class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
     out_dtype: torch.dtype | None
 
 
-_FP8ParamsT = tuple[
-    torch.Tensor,  # weight
-    torch.Tensor,  # weight_scale
-    torch.Tensor | None,  # input_scale,
-    torch.Tensor | None,  # input_scale_ub,
-]
-_Int8ParamsT = tuple[
-    torch.Tensor,  # weight
-    torch.Tensor,  # weight_scale
-    torch.Tensor | None,  # input_scale,
-    torch.Tensor | None,  # input_zp
-    torch.Tensor | None,  # azp_adj
-]
-
-_ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT)
-_ConfigT = TypeVar("_ConfigT", bound=ScaledMMLinearLayerConfig)
-
-
-class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
-    @classmethod
-    @abstractmethod
-    def is_supported(
-        cls, compute_capability: int | None = None
-    ) -> tuple[bool, str | None]:
-        raise NotImplementedError
-
-    @classmethod
-    @abstractmethod
-    def can_implement(cls, c: _ConfigT) -> tuple[bool, str | None]:
-        raise NotImplementedError
-
-    def __init__(self, c: _ConfigT, layer_param_names: Sequence[str]) -> None:
-        assert self.can_implement(c)[0]
-        assert self.is_supported()[0]
-        self.config = c
-        self.layer_param_names = layer_param_names
-
-    @abstractmethod
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        raise NotImplementedError
-
-    # return a covariant type in the subclass
-    @abstractmethod
-    def _get_layer_params(self, layer) -> _ParamsT:
-        raise NotImplementedError
-
-
 class FP8ScaledMMLinearKernel(
-    ScaledMMLinearKernel[FP8ScaledMMLinearLayerConfig, _FP8ParamsT], ABC
+    MMLinearKernel[FP8ScaledMMLinearLayerConfig, FP8Params], ABC
 ):
-    def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
-    ) -> None:
-        act_scale_descriptor = c.activation_quant_key.scale
-        self.quant_fp8 = QuantFP8(
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+        super().__init__(config)
+        act_scale_descriptor = config.activation_quant_key.scale
+        self.input_quant_op = QuantFP8(
             static=act_scale_descriptor.static,
             group_shape=act_scale_descriptor.group_shape,
             num_token_padding=self.get_output_padding(),
         )
         self.fp8_dtype = current_platform.fp8_dtype()
-        super().__init__(c, layer_param_names)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
-    def _get_layer_params(self, layer) -> _FP8ParamsT:
-        w, w_s, x_s, x_s_ub = self.layer_param_names
-        return (
-            getattr(layer, w),
-            getattr(layer, w_s),
-            getattr(layer, x_s, None),
-            getattr(layer, x_s_ub, None),
-        )
+    def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> FP8Params:
+        return FP8Params.from_layer(layer)
 
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
+        **kwargs,
     ) -> torch.Tensor:
         fp8_dtype = self.fp8_dtype
         maybe_out_dtype = self.config.out_dtype
-        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
+        params = self._get_layer_params(layer)
+
+        w = params.weight
+        w_s = params.weight_scale
+        x_s = params.input_scale
+        x_s_ub = params.input_scale_ub
 
         #   ops.scaled_fp8_quant supports both dynamic and static quant.
         #   If dynamic, layer.input_scale is None and x_s computed from x.
@@ -140,7 +86,7 @@ class FP8ScaledMMLinearKernel(
         # TODO(luka) remove this path if not used anymore
         x_2d_q = x_2d
         if x.dtype != fp8_dtype:
-            x_2d_q, x_s = self.quant_fp8(
+            x_2d_q, x_s = self.input_quant_op(
                 x_2d,
                 x_s,
                 x_s_ub,
@@ -174,14 +120,91 @@ class FP8ScaledMMLinearKernel(
 
 
 class Int8ScaledMMLinearKernel(
-    ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, _Int8ParamsT], ABC
+    MMLinearKernel[Int8ScaledMMLinearLayerConfig, Int8Params]
 ):
-    def _get_layer_params(self, layer) -> _Int8ParamsT:
-        w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
-        return (
-            getattr(layer, w_q),
-            getattr(layer, w_s),
-            getattr(layer, i_s, None),
-            getattr(layer, i_zp, None),
-            getattr(layer, azp_adj, None),
+    @classmethod
+    def can_implement(
+        cls, config: Int8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        params = self._get_layer_params(layer)
+        config = self.config
+        # WEIGHT
+        # Cutlass kernels need transposed weight.
+        weight = params.weight
+        replace_parameter(
+            layer,
+            params.WEIGHT,
+            torch.nn.Parameter(weight.t().data, requires_grad=False),
         )
+
+        # WEIGHT SCALE
+        # Cutlass kernels support only per-tensor and per-channel.
+        # If we have a fused module (QKV, MLP) with per tensor scales (thus N
+        # scales being passed to the kernel), convert to the per-channel case.
+        is_fused_module = len(layer.logical_widths) > 1
+        weight_scale = params.weight_scale
+        if is_fused_module and not config.is_channelwise:
+            weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
+        replace_parameter(
+            layer,
+            params.WEIGHT_SCALE,
+            torch.nn.Parameter(weight_scale.data, requires_grad=False),
+        )
+
+        # INPUT SCALE
+        if config.is_static_input_scheme:
+            input_scale = params.input_scale
+            i_s_name = params.INPUT_SCALE
+            i_zp_name = params.INPUT_ZERO_POINT
+
+            if config.input_symmetric:
+                assert input_scale is not None
+                replace_parameter(
+                    layer,
+                    i_s_name,
+                    torch.nn.Parameter(input_scale.max(), requires_grad=False),
+                )
+                setattr(layer, i_zp_name, None)
+            else:
+                input_zero_point = getattr(layer, i_zp_name)
+
+                # reconstruct the ranges
+                int8_traits = torch.iinfo(torch.int8)
+                azps = input_zero_point.to(dtype=torch.int32)
+                range_max = (input_scale * (int8_traits.max - azps)).max()
+                range_min = (input_scale * (int8_traits.min - azps)).min()
+
+                scale = (range_max - range_min) / (int8_traits.max - int8_traits.min)
+                replace_parameter(
+                    layer, i_s_name, torch.nn.Parameter(scale, requires_grad=False)
+                )
+
+                # AZP loaded as int8 but used as int32
+                azp = (int8_traits.min - range_min / scale).to(dtype=torch.int32)
+                replace_parameter(
+                    layer, i_zp_name, torch.nn.Parameter(azp, requires_grad=False)
+                )
+
+        # azp_adj is the AZP adjustment term, used to account for weights.
+        # It does not depend on scales or azp, so it is the same for
+        # static and dynamic quantization.
+        # For more details, see csrc/quantization/w8a8/cutlass/Epilogues.md
+        # https://github.com/vllm-project/vllm/blob/main/csrc/quantization/w8a8/cutlass/Epilogues.md
+        if not config.input_symmetric:
+            weight = getattr(layer, params.WEIGHT)
+            azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)
+            if config.is_static_input_scheme:
+                # cutlass_w8a8 requires azp to be folded into azp_adj
+                # in the per-tensor case
+                azp_adj = getattr(layer, i_zp_name) * azp_adj
+            setattr(
+                layer,
+                params.AZP_ADJ,
+                torch.nn.Parameter(azp_adj, requires_grad=False),
+            )
+
+    def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> Int8Params:
+        return Int8Params.from_layer(layer)

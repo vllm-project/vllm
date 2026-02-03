@@ -49,7 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from ..utils import TestBlockFP8Layer, TestFP8Layer
+from ..utils import TestFP8Layer
 from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -155,7 +155,7 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
             static=True, group_shape=GroupShape(hidden_size, hidden_size)
         )
 
-        self.w8a8_block_fp8_linear = TestBlockFP8Layer(
+        self.w8a8_block_fp8_linear = TestFP8Layer(
             weight_shape=(hidden_size, hidden_size),
             weight_quant_key=self.weight_quant_key,
             activation_quant_key=self.act_quant_key,
