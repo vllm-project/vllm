@@ -204,11 +204,6 @@ class CacheConfig:
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 
-    def metrics_info(self):
-        # convert cache_config to dict(key: str, value: str) for prometheus
-        # metrics info
-        return {key: str(value) for key, value in self.__dict__.items()}
-
     @field_validator("cache_dtype", mode="after")
     @classmethod
     def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:

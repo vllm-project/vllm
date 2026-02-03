@@ -168,3 +168,24 @@ class QuantizationConfig(ABC):
         Interface to update values after config initialization.
         """
         pass
+
+    def __repr__(self) -> str:
+        """
+        Provide a string representation (used for metrics or logging).
+        """
+        # Get the quantization method name
+        try:
+            name: str = str(self.get_name())
+        except Exception:
+            name = self.__class__.__name__
+
+        attrs = []
+        for key, value in sorted(self.__dict__.items()):
+            if value is None:
+                continue
+            attrs.append(f"{key}={value!r}")
+
+        if attrs:
+            return f"{self.__class__.__name__}(name={name!r}, {', '.join(attrs)})"
+        else:
+            return f"{self.__class__.__name__}(name={name!r})"

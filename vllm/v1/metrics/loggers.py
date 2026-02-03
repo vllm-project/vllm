@@ -5,7 +5,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import TypeAlias
+from typing import TypeAlias, cast
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -970,6 +970,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         if type == "cache_config":
             name = "vllm:cache_config_info"
             documentation = "Information of the LLMEngine CacheConfig"
+        elif type == "vllm_config":
+            name = "vllm:vllm_config_info"
+            documentation = "Information of the LLMEngine VllmConfig"
         assert name is not None, f"Unknown metrics info type {type}"
 
         # Info type metrics are syntactic sugar for a gauge permanently set to 1
@@ -1148,7 +1151,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
 
     def log_engine_initialized(self):
-        self.log_metrics_info("cache_config", self.vllm_config.cache_config)
+        # Use cast to make mypy happy (the @config decorator injects
+        # metrics_info method at runtime).
+        self.log_metrics_info(
+            "cache_config", cast(SupportsMetricsInfo, self.vllm_config.cache_config)
+        )
+        self.log_metrics_info(
+            "vllm_config", cast(SupportsMetricsInfo, self.vllm_config)
+        )
 
 
 PromMetric: TypeAlias = Gauge | Counter | Histogram

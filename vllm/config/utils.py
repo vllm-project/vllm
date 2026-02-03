@@ -44,7 +44,36 @@ def config(cls: ConfigT) -> ConfigT:
 
     Config validation is performed by the tools/pre_commit/validate_config.py
     script, which is invoked during the pre-commit checks.
+
+    Injects a `metrics_info` method that converts the config to a
+    dict[str, str] for prometheus metrics.
     """
+    # Only inject metrics_info if the class doesn't already have it
+    if not hasattr(cls, "metrics_info"):
+
+        def metrics_info(self) -> dict[str, str]:
+            """
+            If a nested config has a `metrics_info` method, it will be called
+            recursively and keys will be prefixed with the field name. Otherwise,
+            all fields will be converted to strings automatically.
+            """
+            metrics_info_dict = {}
+            for key, value in self.__dict__.items():
+                if hasattr(value, "metrics_info"):
+                    for sub_key, sub_value in value.metrics_info().items():
+                        metrics_info_dict[f"{key}_{sub_key}"] = str(sub_value)
+                else:
+                    # Using `repr()` handles objects likeQuantizationConfig that
+                    # implement __repr__ but not metrics_info
+                    metrics_info_dict[key] = (
+                        repr(value)
+                        if not isinstance(value, (str, int, float, bool))
+                        else str(value)
+                    )
+            return metrics_info_dict
+
+        cls.metrics_info = metrics_info
+
     return cls
 
 
