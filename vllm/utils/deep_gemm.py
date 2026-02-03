@@ -264,7 +264,9 @@ def fp8_mqa_logits(
     _lazy_init()
     if _fp8_mqa_logits_impl is None:
         return _missing()
-    return _fp8_mqa_logits_impl(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=clean_logits)
+    return _fp8_mqa_logits_impl(
+        q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=clean_logits
+    )
 
 
 def get_paged_mqa_logits_metadata(

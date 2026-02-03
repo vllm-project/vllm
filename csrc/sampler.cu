@@ -1,4 +1,5 @@
-// Portions of this file are adapted from SGLang PR: https://github.com/sgl-project/sglang/pull/11194
+// Portions of this file are adapted from SGLang PR:
+// https://github.com/sgl-project/sglang/pull/11194
 
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
@@ -19,17 +20,18 @@ constexpr int kThreadsPerBlock = 1024;  // Threads per block
 
 // Shared memory budget
 #if defined(USE_ROCM)
-constexpr size_t kSmem = 48 * 1024; // ROCm default: 48KB
+constexpr size_t kSmem = 48 * 1024;  // ROCm default: 48KB
 #else
-constexpr size_t kSmem = 128 * 1024; // CUDA: 128KB
+constexpr size_t kSmem = 128 * 1024;  // CUDA: 128KB
 #endif
 
 struct FastTopKParams {
-    const float* __restrict__ input;         // [batch, seq_len] Logits
-    const int32_t* __restrict__ row_starts;  // [batch] Offset into each row (optional)
-    int32_t* __restrict__ indices;           // [batch, TopK] Output top-k indices
-    int32_t* __restrict__ lengths;           // [batch] Sequence lengths per row
-    int64_t input_stride;                    // Stride between rows
+  const float* __restrict__ input;         // [batch, seq_len] Logits
+  const int32_t* __restrict__ row_starts;  // [batch] Offset into each row
+                                           // (optional)
+  int32_t* __restrict__ indices;           // [batch, TopK] Output top-k indices
+  int32_t* __restrict__ lengths;           // [batch] Sequence lengths per row
+  int64_t input_stride;                    // Stride between rows
 };
 
 template <typename scalar_t>
@@ -71,15 +73,16 @@ __device__ __forceinline__ auto convert_to_uint32(float x) -> uint32_t {
 }
 
 __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
-    uint32_t bits = __float_as_uint(x);
-    return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+  uint32_t bits = __float_as_uint(x);
+  return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
 __device__ __forceinline__ auto convert_to_uint8(float x) -> uint8_t {
-    __half h = __float2half_rn(x);
-    uint16_t bits = __half_as_ushort(h);
-    uint16_t key = (bits & 0x8000) ? static_cast<uint16_t>(~bits) : static_cast<uint16_t>(bits | 0x8000);
-    return static_cast<uint8_t>(key >> 8);
+  __half h = __float2half_rn(x);
+  uint16_t bits = __half_as_ushort(h);
+  uint16_t key = (bits & 0x8000) ? static_cast<uint16_t>(~bits)
+                                 : static_cast<uint16_t>(bits | 0x8000);
+  return static_cast<uint8_t>(key >> 8);
 }
 
 template <int step>
@@ -632,33 +635,32 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
       indices, logits, rowStart, rowEnd, outIndices, outLogits, stride1, topK);
 }
 
-
-__device__ void naive_topk_cuda(
-    const float* __restrict__ logits,
-    int32_t* __restrict__ output_indices,
-    int32_t seq_len)
-{
+__device__ void naive_topk_cuda(const float* __restrict__ logits,
+                                int32_t* __restrict__ output_indices,
+                                int32_t seq_len) {
   const int thread_id = threadIdx.x;
   for (int i = thread_id; i < TopK; i += kThreadsPerBlock) {
     output_indices[i] = (i < seq_len) ? i : -1;
   }
 }
 
-// Adapted from: https://github.com/sgl-project/sglang/blob/v0.5.8/sgl-kernel/csrc/elementwise/topk.cu#L87
+// Adapted from:
+// https://github.com/sgl-project/sglang/blob/v0.5.8/sgl-kernel/csrc/elementwise/topk.cu#L87
 // by: DarkSharpness
-// which at the same time is an optimized topk kernel copied from tilelang kernel
+// which at the same time is an optimized topk kernel copied from tilelang
+// kernel
 __device__ void fast_topk_cuda_tl(
-    const float* __restrict__ logits,     // Input logits [seq_len]
-    int* __restrict__ output_indices,     // Output top-k indices [TopK]
-    int logits_offset,                    // Starting offset in logits array
-    int seq_len)                          // Number of valid logits to process
+    const float* __restrict__ logits,  // Input logits [seq_len]
+    int* __restrict__ output_indices,  // Output top-k indices [TopK]
+    int logits_offset,                 // Starting offset in logits array
+    int seq_len)                       // Number of valid logits to process
 {
   constexpr int RADIX = 256;
   constexpr int MAX_BUFFERED_ITEMS = kSmem / (2 * sizeof(int));
 
   alignas(128) __shared__ int shared_histogram[2][RADIX + 128];
-  alignas(128) __shared__ int shared_output_count;   
-  alignas(128) __shared__ int shared_threshold_bin;   
+  alignas(128) __shared__ int shared_output_count;
+  alignas(128) __shared__ int shared_threshold_bin;
   alignas(128) __shared__ int shared_buffered_count[2];
 
   extern __shared__ int buffered_indices[][MAX_BUFFERED_ITEMS];
@@ -678,9 +680,11 @@ __device__ void fast_topk_cuda_tl(
   }
   __syncthreads();
 
-  // Helper: Compute cumulative sum (suffix sum) over histogram using ping-pong buffers
+  // Helper: Compute cumulative sum (suffix sum) over histogram using ping-pong
+  // buffers
   auto compute_cumulative_sum = [&]() {
-    static_assert(1 << 8 == RADIX, "Radix must be 256 for 8 unrolled iterations");
+    static_assert(1 << 8 == RADIX,
+                  "Radix must be 256 for 8 unrolled iterations");
 #pragma unroll 8
     for (int i = 0; i < 8; ++i) {
       if (C10_LIKELY(thread_id < RADIX)) {
@@ -701,8 +705,7 @@ __device__ void fast_topk_cuda_tl(
   compute_cumulative_sum();
 
   // Find threshold bin where cumsum crosses remaining_k
-  if (thread_id < RADIX &&
-      shared_histogram[0][thread_id] > remaining_k &&
+  if (thread_id < RADIX && shared_histogram[0][thread_id] > remaining_k &&
       shared_histogram[0][thread_id + 1] <= remaining_k) {
     shared_threshold_bin = thread_id;
     shared_buffered_count[0] = 0;
@@ -763,7 +766,8 @@ __device__ void fast_topk_cuda_tl(
   // Passes 1-4: Refine using 8-bit passes over FP32 bits
   // ============================================================================
   // FP32 bits [31:0] split into 4 bytes processed MSB-first:
-  // Pass 1: bits [31:24], Pass 2: bits [23:16], Pass 3: bits [15:8], Pass 4: bits [7:0]
+  // Pass 1: bits [31:24], Pass 2: bits [23:16], Pass 3: bits [15:8], Pass 4:
+  // bits [7:0]
 #pragma unroll 4
   for (int pass = 0; pass < 4; ++pass) {
     __shared__ int shared_final_k;  // For final pass: remaining slots to fill
@@ -772,13 +776,13 @@ __device__ void fast_topk_cuda_tl(
 
     // Clamp buffered count to prevent overflow
     const int raw_buffered = shared_buffered_count[src_buffer];
-    const int num_buffered = (raw_buffered < MAX_BUFFERED_ITEMS) ? raw_buffered : MAX_BUFFERED_ITEMS;
+    const int num_buffered =
+        (raw_buffered < MAX_BUFFERED_ITEMS) ? raw_buffered : MAX_BUFFERED_ITEMS;
 
     compute_cumulative_sum();
 
     // Find threshold bin for this pass
-    if (thread_id < RADIX &&
-        shared_histogram[0][thread_id] > remaining_k &&
+    if (thread_id < RADIX && shared_histogram[0][thread_id] > remaining_k &&
         shared_histogram[0][thread_id + 1] <= remaining_k) {
       shared_threshold_bin = thread_id;
       shared_buffered_count[dst_buffer] = 0;
@@ -796,7 +800,8 @@ __device__ void fast_topk_cuda_tl(
     if (remaining_k == 0) {
       for (int i = thread_id; i < num_buffered; i += kThreadsPerBlock) {
         const int idx = buffered_indices[src_buffer][i];
-        const uint32_t fp32_bits = convert_to_uint32_v2(logits[idx + logits_offset]);
+        const uint32_t fp32_bits =
+            convert_to_uint32_v2(logits[idx + logits_offset]);
         const int bin = (fp32_bits >> bit_offset) & 0xFF;
         if (bin > threshold_bin) {
           const int output_pos = ::atomicAdd(&shared_output_count, 1);
@@ -834,7 +839,8 @@ __device__ void fast_topk_cuda_tl(
           }
         } else {
           // Buffer for next pass and build next histogram
-          const int buffer_pos = ::atomicAdd(&shared_buffered_count[dst_buffer], 1);
+          const int buffer_pos =
+              ::atomicAdd(&shared_buffered_count[dst_buffer], 1);
           if (C10_LIKELY(buffer_pos < MAX_BUFFERED_ITEMS)) {
             buffered_indices[dst_buffer][buffer_pos] = idx;
             // Fused: Build histogram for next pass
@@ -849,9 +855,8 @@ __device__ void fast_topk_cuda_tl(
   }
 }
 
-__global__ __launch_bounds__(kThreadsPerBlock)
-void topk_kernel(const FastTopKParams params)
-{
+__global__ __launch_bounds__(kThreadsPerBlock) void topk_kernel(
+    const FastTopKParams params) {
   const auto& [input, row_starts, indices, lengths, input_stride] = params;
   const uint64_t batch_idx = blockIdx.x;
   const int logits_offset = row_starts == nullptr ? 0 : row_starts[batch_idx];
@@ -868,16 +873,15 @@ void topk_kernel(const FastTopKParams params)
 }
 
 FastTopKParams get_params(
-    const at::Tensor& score,
-    const at::Tensor& lengths,
+    const at::Tensor& score, const at::Tensor& lengths,
     std::optional<at::Tensor> row_starts_opt = std::nullopt,
-    std::optional<at::Tensor> indices_opt = std::nullopt)
-{
+    std::optional<at::Tensor> indices_opt = std::nullopt) {
   const int64_t batch_size = score.size(0);
 
   TORCH_CHECK(score.dim() == 2 && score.stride(1) == 1,
               "score must be 2D with contiguous rows");
-  TORCH_CHECK(lengths.dim() == 1 && lengths.is_contiguous() && lengths.size(0) == batch_size,
+  TORCH_CHECK(lengths.dim() == 1 && lengths.is_contiguous() &&
+                  lengths.size(0) == batch_size,
               "lengths must be 1D contiguous with size matching batch");
 
   const int32_t* row_starts_ptr = nullptr;
@@ -892,7 +896,7 @@ FastTopKParams get_params(
   if (indices_opt.has_value()) {
     const auto& indices = *indices_opt;
     TORCH_CHECK(indices.dim() == 2 && indices.is_contiguous() &&
-                indices.size(0) == batch_size && indices.size(1) == TopK,
+                    indices.size(0) == batch_size && indices.size(1) == TopK,
                 "indices must be 2D contiguous [batch, TopK]");
     indices_ptr = indices.data_ptr<int32_t>();
   }
@@ -914,13 +918,13 @@ void setup_kernel_smem_once() {
 #else
     auto func_ptr = kernel_func;
 #endif
-    return cudaFuncSetAttribute(func_ptr,
-                                cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                smem_bytes);
+    return cudaFuncSetAttribute(
+        func_ptr, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
   }();
 
-  TORCH_CHECK(result == cudaSuccess,
-              "Failed to set kernel shared memory limit: ", cudaGetErrorString(result));
+  TORCH_CHECK(
+      result == cudaSuccess,
+      "Failed to set kernel shared memory limit: ", cudaGetErrorString(result));
 }
 
 }  // namespace vllm
@@ -1050,12 +1054,9 @@ void top_k_per_row_prefill(const torch::Tensor& logits,
   }
 }
 
-void fast_topk(
-    const torch::Tensor& logits,
-    torch::Tensor& indices,
-    const torch::Tensor& seq_lens,
-    c10::optional<torch::Tensor> row_starts = c10::nullopt)
-{
+void fast_topk(const torch::Tensor& logits, torch::Tensor& indices,
+               const torch::Tensor& seq_lens,
+               c10::optional<torch::Tensor> row_starts = c10::nullopt) {
   TORCH_CHECK(logits.is_cuda(), "logits must be a CUDA tensor");
   TORCH_CHECK(indices.is_cuda(), "indices must be a CUDA tensor");
   TORCH_CHECK(seq_lens.is_cuda(), "seq_lens must be a CUDA tensor");
