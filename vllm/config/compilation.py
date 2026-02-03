@@ -311,6 +311,13 @@ class DynamicShapesConfig:
     - UNBACKED: falls back to torch._inductor.config.unbacked_symint_fallback (8192)
     """
 
+    @field_validator("autotune_batch_hint")
+    @classmethod
+    def validate_autotune_batch_hint(cls, v: int | None) -> int | None:
+        if v is not None and v <= 0:
+            raise ValueError("autotune_batch_hint must be a positive integer.")
+        return v
+
     def compute_hash(self) -> str:
         """
         Provide a hash for DynamicShapesConfig
