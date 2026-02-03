@@ -847,8 +847,9 @@ steps:
   - vllm/
   - tests/models/test_transformers.py
   - tests/models/test_registry.py
+  - tests/models/test_atom.py
   commands:
-    - pytest -v -s models/test_transformers.py models/test_registry.py
+    - pytest -v -s models/test_transformers.py models/test_registry.py models/test_atom.py
 
 - label: Basic Models Test (Other CPU) # 5min
   mirror_hardwares: [amdexperimental, amdproduction]

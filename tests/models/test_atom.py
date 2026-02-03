@@ -22,13 +22,8 @@ from ..conftest import VllmRunner
 from ..utils import multi_gpu_test
 from .utils import check_logprobs_close
 
-# NOTE: This model is very large and is expected to be run only in
-# dedicated ROCm+ATOM environments (hence most tests here are optional).
-ATOM_TEST_MODEL_ID = "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+ATOM_TEST_MODEL_ID = "Qwen/Qwen3-30B-A3B-Instruct-2507-FP8"
 
-# Follow the common test pattern in this repo:
-# - use module-level `pytestmark` for simple platform gating
-# - use runtime `pytest.skip(...)` for dynamic conditions / error-based skipping
 _ATOM_PKG_AVAILABLE = importlib.util.find_spec("atom") is not None
 pytestmark = pytest.mark.skipif(
     (not current_platform.is_rocm()) or (not _ATOM_PKG_AVAILABLE),
@@ -93,6 +88,7 @@ def test_models(
     kwargs_common = dict(
         tensor_parallel_size=8,
         enable_expert_parallel=True,
+        enforce_eager=True,
     )
 
     check_implementation(

@@ -163,11 +163,10 @@ if current_platform.is_rocm():
         # assert dequant is True, "Currently, we only support "\
         # "gather cache with dequant"
         # For k cache layout: [num_blocks, num_heads, page_size, head_dim]
-        if kv_cache_layout == "NHD":
-            assert head_dim == key_cache.shape[3], (
-                "We assume your kv cache layout is [num_blocks, "
-                "page_size, num_heads, head_dim], but got otherwise"
-            )
+        assert head_dim == key_cache.shape[3], (
+            "We assume your kv cache layout is [num_blocks, "
+            "page_size, num_heads, head_dim], but got otherwise"
+        )
         page_size = key_cache.shape[1]
         num_heads = key_cache.shape[2]
 
