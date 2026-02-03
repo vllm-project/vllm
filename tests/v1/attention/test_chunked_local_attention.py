@@ -6,14 +6,14 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 import torch
+from vllm.attention.layers.chunked_local_attention import (
+    create_chunked_local_attention_backend,
+)
 
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
     create_vllm_config,
-)
-from vllm.attention.layers.chunked_local_attention import (
-    create_chunked_local_attention_backend,
 )
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
