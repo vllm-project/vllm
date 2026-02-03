@@ -114,16 +114,19 @@ class AnthropicMessagesRequest(BaseModel):
 class AnthropicDelta(BaseModel):
     """Delta for streaming responses"""
 
-    type: Literal["text_delta", "input_json_delta", "thinking_delta",
-                  "signature_delta"] | None = None
+    type: (
+        Literal["text_delta", "input_json_delta", "thinking_delta", "signature_delta"]
+        | None
+    ) = None
     text: str | None = None
     thinking: str | None = None
     partial_json: str | None = None
     signature: str | None = None
 
     # Message delta
-    stop_reason: (Literal["end_turn", "max_tokens", "stop_sequence",
-                          "tool_use"] | None) = None
+    stop_reason: (
+        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None
+    ) = None
     stop_sequence: str | None = None
 
 
