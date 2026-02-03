@@ -1342,6 +1342,7 @@ class LLM:
                 raise NotImplementedError(
                     "Embedding scores currently do not support multimodal input."
                 )
+            input_texts.append(text)
 
         encoded_output = self.encode(
             input_texts,
