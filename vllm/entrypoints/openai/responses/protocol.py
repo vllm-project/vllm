@@ -327,21 +327,18 @@ class ResponsesRequest(OpenAIBaseModel):
 
         # Also check text.format for OpenAI-style json_schema
         if self.text is not None and self.text.format is not None:
+            if structured_outputs is not None:
+                raise ValueError(
+                    "Cannot specify both structured_outputs and text.format"
+                )
             response_format = self.text.format
             if (
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None
             ):
-                if structured_outputs is not None:
-                    raise ValueError(
-                        "Cannot specify both structured_outputs and "
-                        "text.format.json_schema"
-                    )
                 structured_outputs = StructuredOutputsParams(
                     json=response_format.schema_
                 )
-            elif response_format.type == "json_object":
-                raise NotImplementedError("json_object is not supported")
 
         stop = self.stop if self.stop else []
         if isinstance(stop, str):
