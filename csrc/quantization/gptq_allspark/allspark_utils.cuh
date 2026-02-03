@@ -7,8 +7,8 @@
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <iostream>
-#include "../gptq_marlin/marlin_dtypes.cuh"
-using marlin::ScalarType;
+#include "../marlin/marlin_dtypes.cuh"
+using marlin::MarlinScalarType2;
 
 namespace allspark {
 
@@ -72,10 +72,10 @@ __global__ void f16_gemm_splitk_reduce_kernel(const FType* C_split, FType* C,
 
   int n_mat = N_MATRIX > 0 ? N_MATRIX : (int)n_matrix;
   for (int i = 0; i < n_mat; ++i) {
-    sum += ScalarType<FType>::num2float(C_split[idx + i * matrix_size]);
+    sum += MarlinScalarType2<FType>::num2float(C_split[idx + i * matrix_size]);
   }
 
-  C[idx] = ScalarType<FType>::float2num(sum);
+  C[idx] = MarlinScalarType2<FType>::float2num(sum);
 }
 
 template <typename FType>

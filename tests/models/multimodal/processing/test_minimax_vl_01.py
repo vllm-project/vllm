@@ -29,7 +29,11 @@ def test_processor_override(
     image = Image.new("RGB", size=(364, 364))
     mm_data = {"image": [image] * num_imgs}
 
-    processed_inputs = processor.apply(prompt, mm_data, {})
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
     image_placeholders = processed_inputs["mm_placeholders"]["image"]
 
     assert len(image_placeholders) == num_imgs
@@ -46,7 +50,11 @@ def _validate_image_prompt_replacements_one(
     mm_data = {"image": [image] * num_imgs}
 
     try:
-        processed_inputs = processor.apply(prompt, mm_data, {})
+        processed_inputs = processor.apply(
+            prompt,
+            mm_items=processor.info.parse_mm_data(mm_data),
+            hf_processor_mm_kwargs={},
+        )
 
         image_placeholders = processed_inputs["mm_placeholders"]["image"]
         assert len(image_placeholders) == num_imgs
@@ -61,17 +69,17 @@ def _test_image_prompt_replacements(
     num_imgs: int,
     image_sizes: list[ImageSize],
 ) -> None:
-
     failed_size_excs = list[tuple[ImageSize, Exception]]()
 
     for size in image_sizes:
-        _validate_image_prompt_replacements_one(processor, num_imgs,
-                                                failed_size_excs, size)
+        _validate_image_prompt_replacements_one(
+            processor, num_imgs, failed_size_excs, size
+        )
 
     if failed_size_excs:
-        msg = "Found failing image sizes:" \
-            + "\n========\n".join(f"[{size}]\n{exc}"
-                                  for size, exc in failed_size_excs)
+        msg = "Found failing image sizes:" + "\n========\n".join(
+            f"[{size}]\n{exc}" for size, exc in failed_size_excs
+        )
         raise AssertionError(msg)
 
 
@@ -85,11 +93,17 @@ def test_processor_prompt_replacements_regression(model_id, num_imgs):
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
-    image_ratios = [(171, 152), (184, 161), (198, 176), (333, 296), (369, 328),
-                    (488, 183), (2560, 1669)]
+    image_ratios = [
+        (171, 152),
+        (184, 161),
+        (198, 176),
+        (333, 296),
+        (369, 328),
+        (488, 183),
+        (2560, 1669),
+    ]
     image_sizes = [
-        size for w, h in image_ratios
-        for size in [ImageSize(w, h), ImageSize(h, w)]
+        size for w, h in image_ratios for size in [ImageSize(w, h), ImageSize(h, w)]
     ]
 
     _test_image_prompt_replacements(

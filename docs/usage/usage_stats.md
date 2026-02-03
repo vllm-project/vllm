@@ -6,7 +6,7 @@ A subset of the data, after cleaning and aggregation, will be publicly released 
 
 ## What data is collected?
 
-The list of data collected by the latest version of vLLM can be found here: <gh-file:vllm/usage/usage_lib.py>
+The list of data collected by the latest version of vLLM can be found here: [vllm/usage/usage_lib.py](../../vllm/usage/usage_lib.py)
 
 Here is an example as of v0.4.0:
 

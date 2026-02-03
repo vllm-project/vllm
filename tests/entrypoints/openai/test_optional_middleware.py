@@ -37,8 +37,9 @@ def server(request: pytest.FixtureRequest):
         "--enforce-eager",
         "--max-num-seqs",
         "2",
-        *passed_params
+        *passed_params,
     ]
+
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
@@ -73,8 +74,9 @@ async def test_missing_api_token(server: RemoteOpenAIServer):
 )
 @pytest.mark.asyncio
 async def test_passed_api_token(server: RemoteOpenAIServer):
-    response = requests.get(server.url_for("v1/models"),
-                            headers={"Authorization": "Bearer test"})
+    response = requests.get(
+        server.url_for("v1/models"), headers={"Authorization": "Bearer test"}
+    )
     assert response.status_code == HTTPStatus.OK
 
 
@@ -110,7 +112,8 @@ async def test_enable_request_id_header(server: RemoteOpenAIServer):
 )
 @pytest.mark.asyncio
 async def test_custom_request_id_header(server: RemoteOpenAIServer):
-    response = requests.get(server.url_for("health"),
-                            headers={"X-Request-Id": "Custom"})
+    response = requests.get(
+        server.url_for("health"), headers={"X-Request-Id": "Custom"}
+    )
     assert "X-Request-Id" in response.headers
     assert response.headers.get("X-Request-Id") == "Custom"

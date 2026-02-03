@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import os
+from typing import Any, Literal
+
+from pydantic import Field, model_validator
+from typing_extensions import Self
+
+from vllm.config.utils import config
+from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
+
+logger = init_logger(__name__)
+
+ProfilerKind = Literal["torch", "cuda"]
+
+
+def _is_uri_path(path: str) -> bool:
+    """Check if path is a URI (scheme://...), excluding Windows drive letters.
+
+    Supports custom URI schemes like gs://, s3://, hdfs://, etc.
+    These paths should not be converted to absolute paths.
+    """
+    if "://" in path:
+        scheme = path.split("://")[0]
+        # Windows drive letters are single characters (e.g., C://)
+        # Valid URI schemes have more than one character
+        return len(scheme) > 1
+    return False
+
+
+@config
+class ProfilerConfig:
+    """Dataclass which contains profiler config for the engine."""
+
+    profiler: ProfilerKind | None = None
+    """Which profiler to use. Defaults to None. Options are:
+
+    - 'torch': Use PyTorch profiler.\n
+    - 'cuda': Use CUDA profiler."""
+
+    torch_profiler_dir: str = ""
+    """Directory to save torch profiler traces. Both AsyncLLM's CPU traces and
+    worker's traces (CPU & GPU) will be saved under this directory. Note that
+    it must be an absolute path."""
+
+    torch_profiler_with_stack: bool = True
+    """If `True`, enables stack tracing in the torch profiler. Enabled by default."""
+
+    torch_profiler_with_flops: bool = False
+    """If `True`, enables FLOPS counting in the torch profiler. Disabled by default."""
+
+    torch_profiler_use_gzip: bool = True
+    """If `True`, saves torch profiler traces in gzip format. Enabled by default"""
+
+    torch_profiler_dump_cuda_time_total: bool = True
+    """If `True`, dumps total CUDA time in torch profiler traces. Enabled by default."""
+
+    torch_profiler_record_shapes: bool = False
+    """If `True`, records tensor shapes in the torch profiler. Disabled by default."""
+
+    torch_profiler_with_memory: bool = False
+    """If `True`, enables memory profiling in the torch profiler.
+    Disabled by default."""
+
+    ignore_frontend: bool = False
+    """If `True`, disables the front-end profiling of AsyncLLM when using the
+    'torch' profiler. This is needed to reduce overhead when using delay/limit options,
+    since the front-end profiling does not track iterations and will capture the
+    entire range.
+    """
+
+    delay_iterations: int = Field(default=0, ge=0)
+    """Number of engine iterations to skip before starting profiling.
+    Defaults to 0, meaning profiling starts immediately after receiving /start_profile.
+    """
+
+    max_iterations: int = Field(default=0, ge=0)
+    """Maximum number of engine iterations to profile after starting profiling.
+    Defaults to 0, meaning no limit.
+    """
+
+    def compute_hash(self) -> str:
+        """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+        """
+        # no factors to consider.
+        # this config will not affect the computation graph.
+        factors: list[Any] = []
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
+        return hash_str
+
+    @model_validator(mode="after")
+    def _validate_profiler_config(self) -> Self:
+        has_delay_or_limit = self.delay_iterations > 0 or self.max_iterations > 0
+        if self.profiler == "torch" and has_delay_or_limit and not self.ignore_frontend:
+            logger.warning_once(
+                "Using 'torch' profiler with delay_iterations or max_iterations "
+                "while ignore_frontend is False may result in high overhead."
+            )
+
+        profiler_dir = self.torch_profiler_dir
+        if profiler_dir and self.profiler != "torch":
+            raise ValueError(
+                "torch_profiler_dir is only applicable when profiler is set to 'torch'"
+            )
+        if self.profiler == "torch" and not profiler_dir:
+            raise ValueError("torch_profiler_dir must be set when profiler is 'torch'")
+
+        # Support any URI scheme (gs://, s3://, hdfs://, etc.)
+        # These paths should not be converted to absolute paths
+        if profiler_dir and not _is_uri_path(profiler_dir):
+            self.torch_profiler_dir = os.path.abspath(os.path.expanduser(profiler_dir))
+
+        return self

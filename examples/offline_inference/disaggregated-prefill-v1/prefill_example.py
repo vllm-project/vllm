@@ -26,7 +26,7 @@ def main():
         enforce_eager=True,
         gpu_memory_utilization=0.8,
         kv_transfer_config=KVTransferConfig(
-            kv_connector="SharedStorageConnector",
+            kv_connector="ExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         ),

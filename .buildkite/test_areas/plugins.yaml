@@ -1,0 +1,34 @@
+group: Plugins
+depends_on: 
+  - image-build
+steps:
+- label: Plugin Tests (2 GPUs)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/plugins/
+  - tests/plugins/
+  commands:
+  # begin platform plugin and general plugin tests, all the code in-between runs on dummy platform
+  - pip install -e ./plugins/vllm_add_dummy_platform
+  - pytest -v -s plugins_tests/test_platform_plugins.py
+  - pip uninstall vllm_add_dummy_platform -y
+  # end platform plugin tests
+  # begin io_processor plugins test, all the code in between uses the prithvi_io_processor plugin
+  - pip install -e ./plugins/prithvi_io_processor_plugin
+  - pytest -v -s plugins_tests/test_io_processor_plugins.py
+  - pip uninstall prithvi_io_processor_plugin -y
+  # end io_processor plugins test
+  # begin stat_logger plugins test
+  - pip install -e ./plugins/vllm_add_dummy_stat_logger
+  - pytest -v -s plugins_tests/test_stats_logger_plugins.py
+  - pip uninstall dummy_stat_logger -y
+  # end stat_logger plugins test
+  # other tests continue here:
+  - pytest -v -s plugins_tests/test_scheduler_plugins.py
+  - pip install -e ./plugins/vllm_add_dummy_model
+  - pytest -v -s distributed/test_distributed_oot.py
+  - pytest -v -s entrypoints/openai/test_oot_registration.py # it needs a clean process
+  - pytest -v -s models/test_oot_registration.py # it needs a clean process
+  - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins

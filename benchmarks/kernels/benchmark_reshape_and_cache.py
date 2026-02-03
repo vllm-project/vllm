@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import random
 import time
 
@@ -10,11 +8,11 @@ from tabulate import tabulate
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
-from vllm.utils import (
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
-    FlexibleArgumentParser,
     create_kv_caches_with_random,
+    set_random_seed,
 )
 
 logger = init_logger(__name__)
@@ -38,7 +36,7 @@ def run_benchmark(
     if kv_cache_dtype == "fp8" and head_size % 16:
         raise ValueError("fp8 kv-cache requires head_size to be a multiple of 16.")
 
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     torch.set_default_device(device)
 
     # create random key / value tensors [T, H, D].

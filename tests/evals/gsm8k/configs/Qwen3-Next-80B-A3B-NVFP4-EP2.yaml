@@ -1,0 +1,12 @@
+model_name: "nm-testing/Qwen3-Next-80B-A3B-Instruct-NVFP4"
+accuracy_threshold: 0.75
+num_questions: 1319
+num_fewshot: 5
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --tensor-parallel-size 2
+  --enable-expert-parallel
+  --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}'
+env:
+  VLLM_USE_FLASHINFER_MOE_FP4: "1"

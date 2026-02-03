@@ -9,9 +9,75 @@ To run this example:
 ```bash
 $ torchrun --nproc-per-node=2 examples/offline_inference/torchrun_dp_example.py
 ```
+
+With custom parallelism settings:
+```bash
+$ torchrun --nproc-per-node=8 examples/offline_inference/torchrun_dp_example.py \
+    --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+```
 """
 
+import argparse
+
 from vllm import LLM, SamplingParams
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Data-parallel inference with torchrun"
+    )
+    parser.add_argument(
+        "--tp-size",
+        type=int,
+        default=1,
+        help="Tensor parallel size (default: 1)",
+    )
+    parser.add_argument(
+        "--pp-size",
+        type=int,
+        default=1,
+        help="Pipeline parallel size (default: 1)",
+    )
+    parser.add_argument(
+        "--dp-size",
+        type=int,
+        default=2,
+        help="Data parallel size (default: 2)",
+    )
+    parser.add_argument(
+        "--enable-ep",
+        action="store_true",
+        help="Enable expert parallel (default: False)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="microsoft/Phi-mini-MoE-instruct",
+        help="Model name or path (default: microsoft/Phi-mini-MoE-instruct)",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=4096,
+        help="Maximum model length (default: 4096)",
+    )
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=0.6,
+        help="GPU memory utilization (default: 0.6)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=1,
+        help="Random seed (default: 1)",
+    )
+    return parser.parse_args()
+
+
+args = parse_args()
+
 
 # Create prompts, the same across all ranks
 prompts = [
@@ -30,15 +96,15 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 # all ranks have the same random seed, so that sampling can be
 # deterministic across ranks.
 llm = LLM(
-    model="microsoft/Phi-mini-MoE-instruct",
-    tensor_parallel_size=1,
-    data_parallel_size=2,
-    pipeline_parallel_size=1,
-    enable_expert_parallel=False,
+    model=args.model,
+    tensor_parallel_size=args.tp_size,
+    data_parallel_size=args.dp_size,
+    pipeline_parallel_size=args.pp_size,
+    enable_expert_parallel=args.enable_ep,
     distributed_executor_backend="external_launcher",
-    max_model_len=4096,
-    gpu_memory_utilization=0.6,
-    seed=1,
+    max_model_len=args.max_model_len,
+    gpu_memory_utilization=args.gpu_memory_utilization,
+    seed=args.seed,
 )
 
 dp_rank = llm.llm_engine.vllm_config.parallel_config.data_parallel_rank

@@ -15,8 +15,8 @@ The engine argument classes, [EngineArgs][vllm.engine.arg_utils.EngineArgs] and 
 
 ## `EngineArgs`
 
---8<-- "docs/argparse/engine_args.md"
+--8<-- "docs/generated/argparse/engine_args.inc.md"
 
 ## `AsyncEngineArgs`
 
---8<-- "docs/argparse/async_engine_args.md"
+--8<-- "docs/generated/argparse/async_engine_args.inc.md"

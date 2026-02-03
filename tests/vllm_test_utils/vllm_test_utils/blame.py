@@ -5,8 +5,7 @@ import contextlib
 import dataclasses
 import sys
 import traceback
-from collections.abc import Generator
-from typing import Callable
+from collections.abc import Callable, Generator
 
 
 @dataclasses.dataclass
@@ -26,7 +25,7 @@ def blame(func: Callable) -> Generator[BlameResult, None, None]:
     ```python
     with blame(lambda: some_condition()) as result:
         # do something
-    
+
     if result.found:
         print(result.trace_stack)
     """
@@ -34,7 +33,7 @@ def blame(func: Callable) -> Generator[BlameResult, None, None]:
 
     def _trace_calls(frame, event, arg=None):
         nonlocal result
-        if event in ['call', 'return']:
+        if event in ["call", "return"]:
             # for every function call or return
             try:
                 # Temporarily disable the trace function

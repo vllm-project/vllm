@@ -55,6 +55,10 @@ output_num_chunks  166.0    99.01   11.80    79.00    90.00    98.00   108.75   
 ----------------------------------------------------------------------------------------------------
 ```
 
+If you run with `--warmup-step`, the summary will also include `warmup_runtime_sec`
+and `total_runtime_incl_warmup_sec` (while `runtime_sec` continues to reflect the
+benchmark-only runtime so the reported throughput stays comparable).
+
 ### JSON configuration file for synthetic conversations generation
 
 The input flag `--input-file` is used to determine the input conversations for the benchmark.<br/>

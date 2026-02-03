@@ -7,9 +7,8 @@ This directory contains a replacement for the lm-eval-harness GSM8K evaluation, 
 ### Run tests with pytest (like buildkite)
 
 ```bash
-pytest -s -v tests/gsm8k/test_gsm8k_correctness.py \
-    --config-list-file=configs/models-small.txt \
-    --tp-size=1
+pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
+    --config-list-file=configs/models-small.txt
 ```
 
 ### Run standalone evaluation script
@@ -31,5 +30,11 @@ model_name: "Qwen/Qwen2.5-1.5B-Instruct"
 accuracy_threshold: 0.54  # Minimum expected accuracy
 num_questions: 1319       # Number of questions (default: full test set)
 num_fewshot: 5            # Few-shot examples from train set
-max_model_len: 4096       # Model context length
+server_args: "--max-model-len 4096 --tensor-parallel-size 2"  # Server arguments
+env:                      # Environment variables (optional)
+  VLLM_USE_FLASHINFER_MOE_FP4: "1"
 ```
+
+The `server_args` field accepts any arguments that can be passed to `vllm serve`.
+
+The `env` field accepts a dictionary of environment variables to set for the server process.

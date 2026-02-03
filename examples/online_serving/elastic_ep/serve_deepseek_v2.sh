@@ -55,8 +55,6 @@ done
 echo "Starting vLLM server for $MODEL_NAME with data parallel size: $DATA_PARALLEL_SIZE and redundant experts: $REDUNDANT_EXPERTS"
 
 export RAY_DEDUP_LOGS=0
-export VLLM_USE_V1=1
-export VLLM_ALL2ALL_BACKEND="pplx"
 export VLLM_USE_DEEP_GEMM=1
 
 vllm serve $MODEL_NAME \
@@ -66,6 +64,7 @@ vllm serve $MODEL_NAME \
     --enforce-eager \
     --enable-expert-parallel \
     --enable-eplb \
+    --all2all-backend pplx \
     --num-redundant-experts $REDUNDANT_EXPERTS \
     --trust-remote-code \
     --host $HOST \

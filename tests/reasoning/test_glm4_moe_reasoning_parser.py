@@ -21,55 +21,54 @@ def glm45_tokenizer():
 
 WITH_THINK = {
     "output": "<think>This is a reasoning section</think>This is the rest",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 
 WITH_THINK_STREAM = {
     "output": "<think>This is a reasoning section</think>This is the rest",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 
 WITHOUT_THINK = {
     "output": "This is the rest",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
     "is_reasoning_end": False,
 }
 
 WITHOUT_THINK_STREAM = {
     "output": "This is the rest",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
     "is_reasoning_end": False,
 }
 
 COMPLETE_REASONING = {
     "output": "<think>This is a reasoning section</think>",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": True,
 }
 MULTILINE_REASONING = {
-    "output":
-    "<think>This is a reasoning\nsection</think>This is the rest\nThat",
-    "reasoning_content": "This is a reasoning\nsection",
+    "output": "<think>This is a reasoning\nsection</think>This is the rest\nThat",
+    "reasoning": "This is a reasoning\nsection",
     "content": "This is the rest\nThat",
     "is_reasoning_end": True,
 }
 ONLY_OPEN_TAG = {
     "output": "<think>This is a reasoning section",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "<think>This is a reasoning section",
     "is_reasoning_end": False,
 }
 
 ONLY_OPEN_TAG_STREAM = {
     "output": "<think>This is a reasoning section",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": False,
 }
@@ -158,12 +157,12 @@ The capital of Chile is Santiago."""
 REASONING_END_TEST_CASES = [
     pytest.param(STILL_REASONING_PROMPT, False, id="still_reasoning"),
     pytest.param(DONE_REASONING_PROMPT, True, id="done_reasoning"),
-    pytest.param(MULTI_TURN_STILL_REASONING_PROMPT,
-                 False,
-                 id="multi_turn_still_reasoning"),
-    pytest.param(MULTI_TURN_DONE_REASONING_PROMPT,
-                 True,
-                 id="multi_turn_done_reasoning")
+    pytest.param(
+        MULTI_TURN_STILL_REASONING_PROMPT, False, id="multi_turn_still_reasoning"
+    ),
+    pytest.param(
+        MULTI_TURN_DONE_REASONING_PROMPT, True, id="multi_turn_done_reasoning"
+    ),
 ]
 
 
@@ -177,14 +176,15 @@ def test_reasoning(
     output_tokens: list[str] = [
         glm45_tokenizer.convert_tokens_to_string([token]) for token in output
     ]
-    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
-        parser_name)(glm45_tokenizer)
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm45_tokenizer
+    )
 
-    reasoning, content = run_reasoning_extraction(parser,
-                                                  output_tokens,
-                                                  streaming=streaming)
+    reasoning, content = run_reasoning_extraction(
+        parser, output_tokens, streaming=streaming
+    )
 
-    assert reasoning == param_dict["reasoning_content"]
+    assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
 
     output_ids = glm45_tokenizer.convert_tokens_to_ids(output)
@@ -193,10 +193,12 @@ def test_reasoning(
 
 
 @pytest.mark.parametrize("prompt, is_reasoning_end", REASONING_END_TEST_CASES)
-def test_is_reasoning_end_full_prompt(prompt: str, is_reasoning_end: bool,
-                                      glm45_tokenizer):
-    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(
-        parser_name)(glm45_tokenizer)
+def test_is_reasoning_end_full_prompt(
+    prompt: str, is_reasoning_end: bool, glm45_tokenizer
+):
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm45_tokenizer
+    )
     tokens = glm45_tokenizer.tokenize(prompt)
     token_ids = glm45_tokenizer.convert_tokens_to_ids(tokens)
     check_is_reasoning_end = parser.is_reasoning_end(token_ids)

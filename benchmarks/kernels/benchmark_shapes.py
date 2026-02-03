@@ -78,11 +78,11 @@ WEIGHT_SHAPES = {
 }
 
 WEIGHT_SHAPES_MOE = {
-    "nm-testing/Mixtral-8x7B-Instruct-v0.1": [
+    "mistralai/Mixtral-8x7B-Instruct-v0.1": [
         [8, 2, 4096, 28672],
         [8, 2, 14336, 4096],
     ],
-    "nm-testing/deepseekv2-lite": [
+    "deepseek-ai/DeepSeek-V2-Lite": [
         [64, 6, 2048, 1408],
     ],
     "ibm-granite/granite-3.0-1b-a400m": [

@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    pack_quantized_values_into_int32)
-from vllm.model_executor.parameter import (BasevLLMParameter,
-                                           permute_param_layout_)
+    pack_quantized_values_into_int32,
+)
+from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
@@ -25,31 +25,47 @@ class ExllamaLinearKernel(MPLinearKernel):
         return 60
 
     @classmethod
-    def can_implement(cls,
-                      c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
-        if c.has_g_idx and\
-            c.partition_weight_shape[0] != c.full_weight_shape[0]:
-            return False, "Act reordering currently not supported by Exllama, "\
-                          "when the input features are partitioned across "\
-                          "devices"
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda_alike():
+            return (
+                False,
+                "Exllama is only supported on CUDA and ROCm",
+            )
+
+        if c.has_g_idx and c.partition_weight_shape[0] != c.full_weight_shape[0]:
+            return (
+                False,
+                "Act reordering currently not supported by Exllama, "
+                "when the input features are partitioned across "
+                "devices",
+            )
 
         if c.partition_weight_shape[1] % (32 // c.weight_type.size_bits) != 0:
-            return False, "Output features must be a multiple of the pack " \
-                            "factor (32 / num_bits) so that we can correctly " \
-                            "pack the zero points"
+            return (
+                False,
+                "Output features must be a multiple of the pack "
+                "factor (32 / num_bits) so that we can correctly "
+                "pack the zero points",
+            )
 
         if c.act_type != torch.float16:
             return False, "Exllama only supports float16 activations"
 
         if c.weight_type not in cls.SUPPORTED_QUANT_TYPES:
-            return False, f"Quant type ({c.weight_type}) not supported by "\
-                           "Exllama, supported types are: "\
-                           f"{cls.SUPPORTED_QUANT_TYPES}"
+            return (
+                False,
+                f"Quant type ({c.weight_type}) not supported by "
+                "Exllama, supported types are: "
+                f"{cls.SUPPORTED_QUANT_TYPES}",
+            )
 
         if c.full_weight_shape[0] % c.group_size != 0:
-            return False, f"Group size ({c.group_size}) does not evenly divide"\
-                           " the number of input features "\
-                           f"({c.full_weight_shape[0]})"
+            return (
+                False,
+                f"Group size ({c.group_size}) does not evenly divide"
+                " the number of input features "
+                f"({c.full_weight_shape[0]})",
+            )
 
         return True, None
 
@@ -70,21 +86,23 @@ class ExllamaLinearKernel(MPLinearKernel):
                 # exllama kernel adding 1 to the zero points during inference)
                 # Documentation of the bug can be found here:
                 #  https://garden.danieldk.eu/GPTQ-Checkpoint-Format
-                zeros = torch.full((groups, out_features),
-                                   c.weight_type.bias - 1,
-                                   dtype=torch.int32,
-                                   device=device)
+                zeros = torch.full(
+                    (groups, out_features),
+                    c.weight_type.bias - 1,
+                    dtype=torch.int32,
+                    device=device,
+                )
             else:
                 raise NotImplementedError(
                     "A 0 zero-point is not supported by Exllama due to "
                     "a bug in the original GPTQ checkpoint format leading to "
                     "exllama kernel adding 1 to the zero points during "
-                    "inference")
-            zeros = pack_quantized_values_into_int32(zeros,
-                                                     c.weight_type,
-                                                     packed_dim=1)
-            setattr(layer, self.w_zp_name,
-                    torch.nn.Parameter(zeros, requires_grad=False))
+                    "inference"
+                )
+            zeros = pack_quantized_values_into_int32(zeros, c.weight_type, packed_dim=1)
+            setattr(
+                layer, self.w_zp_name, torch.nn.Parameter(zeros, requires_grad=False)
+            )
 
         if c.has_g_idx:
 
@@ -93,13 +111,12 @@ class ExllamaLinearKernel(MPLinearKernel):
                 # indices
                 return torch.argsort(x).to(torch.int)
 
-            self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)
+            self._transform_param(layer, self.w_gidx_name, transform_w_g_idx)  # type: ignore
         else:
             self.w_gidx_name = "g_idx"
-            empty_g_idx = torch.nn.Parameter(torch.empty((0, ),
-                                                         dtype=torch.int,
-                                                         device=device),
-                                             requires_grad=False)
+            empty_g_idx = torch.nn.Parameter(
+                torch.empty((0,), dtype=torch.int, device=device), requires_grad=False
+            )
             setattr(layer, self.w_gidx_name, empty_g_idx)
 
         def transform_w_q(x):
@@ -122,21 +139,29 @@ class ExllamaLinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
-    def apply_weights(self,
-                      layer: torch.nn.Module,
-                      x: torch.Tensor,
-                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         c = self.config
 
         x_2d = x.reshape(-1, x.shape[-1])
-        out_shape = x.shape[:-1] + (c.partition_weight_shape[1], )
+        out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)
 
         w_q, w_s, w_zp, w_g_idx = self._get_weight_params(layer)
 
+        # gptq_gemm supports GPTQv2 format by passing use_v2_format=True.
+        # However, the MPLinearLayerConfig doesn't contain format info.
+        # So hardcode GPTQv1 format here, to keep its behavior unchanged.
+        use_v2_format = False
+
         assert w_zp is not None, "Zero points are required by Exllama"
         assert w_g_idx is not None, "Group index is required by Exllama"
-        output = ops.gptq_gemm(x_2d, w_q, w_zp, w_s, w_g_idx, True,
-                               c.weight_type.size_bits)
+        output = ops.gptq_gemm(
+            x_2d, w_q, w_zp, w_s, w_g_idx, True, use_v2_format, c.weight_type.size_bits
+        )
 
         if bias is not None:
             output.add_(bias)

@@ -3,14 +3,40 @@
 set -ex
 
 # Clean up old nightly builds from DockerHub, keeping only the last 14 builds
-# This script uses DockerHub API to list and delete old tags with "nightly-" prefix
+# This script uses DockerHub API to list and delete old tags with specified prefix
+# Usage: cleanup-nightly-builds.sh [TAG_PREFIX]
+# Example: cleanup-nightly-builds.sh "nightly-" or cleanup-nightly-builds.sh "cu130-nightly-"
+
+# Get tag prefix from argument, default to "nightly-" if not provided
+TAG_PREFIX="${1:-nightly-}"
+
+echo "Cleaning up tags with prefix: $TAG_PREFIX"
 
 # DockerHub API endpoint for vllm/vllm-openai repository
 REPO_API_URL="https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags"
 
-# Get DockerHub token from environment
+# Get DockerHub credentials from environment
 if [ -z "$DOCKERHUB_TOKEN" ]; then
     echo "Error: DOCKERHUB_TOKEN environment variable is not set"
+    exit 1
+fi
+
+if [ -z "$DOCKERHUB_USERNAME" ]; then
+    echo "Error: DOCKERHUB_USERNAME environment variable is not set"
+    exit 1
+fi
+
+# Get DockerHub bearer token
+echo "Getting DockerHub bearer token..."
+set +x
+BEARER_TOKEN=$(curl -s -X POST \
+    -H "Content-Type: application/json" \
+    -d "{\"username\": \"$DOCKERHUB_USERNAME\", \"password\": \"$DOCKERHUB_TOKEN\"}" \
+    "https://hub.docker.com/v2/users/login" | jq -r '.token')
+set -x
+
+if [ -z "$BEARER_TOKEN" ] || [ "$BEARER_TOKEN" = "null" ]; then
+    echo "Error: Failed to get DockerHub bearer token"
     exit 1
 fi
 
@@ -20,11 +46,13 @@ get_all_tags() {
     local all_tags=""
     
     while true; do
-        local response=$(curl -s -H "Authorization: Bearer $DOCKERHUB_TOKEN" \
+        set +x
+        local response=$(curl -s -H "Authorization: Bearer $BEARER_TOKEN" \
             "$REPO_API_URL?page=$page&page_size=100")
+        set -x
         
         # Get both last_updated timestamp and tag name, separated by |
-        local tags=$(echo "$response" | jq -r '.results[] | select(.name | startswith("nightly-")) | "\(.last_updated)|\(.name)"')
+        local tags=$(echo "$response" | jq -r --arg prefix "$TAG_PREFIX" '.results[] | select(.name | startswith($prefix)) | "\(.last_updated)|\(.name)"')
         
         if [ -z "$tags" ]; then
             break
@@ -43,7 +71,9 @@ delete_tag() {
     echo "Deleting tag: $tag_name"
     
     local delete_url="https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/$tag_name"
-    local response=$(curl -s -X DELETE -H "Authorization: Bearer $DOCKERHUB_TOKEN" "$delete_url")
+    set +x
+    local response=$(curl -s -X DELETE -H "Authorization: Bearer $BEARER_TOKEN" "$delete_url")
+    set -x
     
     if echo "$response" | jq -e '.detail' > /dev/null 2>&1; then
         echo "Warning: Failed to delete tag $tag_name: $(echo "$response" | jq -r '.detail')"

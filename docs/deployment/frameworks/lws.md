@@ -35,7 +35,7 @@ Deploy the following yaml file `lws.yaml`
               - name: vllm-leader
                 image: docker.io/vllm/vllm-openai:latest
                 env:
-                  - name: HUGGING_FACE_HUB_TOKEN
+                  - name: HF_TOKEN
                     value: <your-hf-token>
                 command:
                   - sh
@@ -83,7 +83,7 @@ Deploy the following yaml file `lws.yaml`
                     ephemeral-storage: 800Gi
                     cpu: 125
                 env:
-                  - name: HUGGING_FACE_HUB_TOKEN
+                  - name: HF_TOKEN
                     value: <your-hf-token>
                 volumeMounts:
                   - mountPath: /dev/shm
