@@ -8,6 +8,8 @@ import pybase64
 import torch
 from PIL import Image
 
+from vllm.utils.serial_utils import tensor2base64
+
 from ..image import convert_image_mode, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
 
@@ -108,4 +110,4 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
             return tensor.to_dense()
 
     def encode_base64(self, media: torch.Tensor) -> str:
-        return pybase64.b64encode(media.numpy()).decode("utf-8")
+        return tensor2base64(media)
