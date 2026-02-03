@@ -201,9 +201,6 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 class Qwen3ASRMultiModalProcessor(
     Qwen3OmniMoeThinkerMultiModalProcessor,
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        return self.info.get_data_parser()
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
