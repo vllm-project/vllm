@@ -4,7 +4,7 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, cast
+from typing import Any
 
 from fastapi import Request
 
@@ -83,13 +83,12 @@ class ServingScores(OpenAIServing):
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
-        input_texts = data_1 + data_2
-        for text in input_texts:
+        input_texts: list[str] = []
+        for text in data_1 + data_2:
             if not isinstance(text, str):
                 raise NotImplementedError(
                     "Embedding scores currently do not support multimodal input."
                 )
-        input_texts = cast(list[str], input_texts)
 
         model_config = self.model_config
         tokenizer = self.renderer.get_tokenizer()

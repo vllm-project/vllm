@@ -1517,7 +1517,7 @@ class LLM:
         is_multimodal_model = model_config.is_multimodal_model
         architecture = model_config.architecture
 
-        data_1, data_2 = validate_score_input(
+        score_inputs_1, score_inputs_2 = validate_score_input(
             data_1,  # type: ignore[arg-type]
             data_2,  # type: ignore[arg-type]
             is_multimodal_model=is_multimodal_model,
@@ -1529,8 +1529,8 @@ class LLM:
 
         if model_config.is_cross_encoder:
             return self._cross_encoding_score(
-                data_1,
-                data_2,
+                score_inputs_1,
+                score_inputs_2,
                 use_tqdm=use_tqdm,
                 pooling_params=pooling_params,
                 lora_request=lora_request,
@@ -1539,8 +1539,8 @@ class LLM:
             )
         else:
             return self._embedding_score(
-                data_1,
-                data_2,
+                score_inputs_1,
+                score_inputs_2,
                 use_tqdm=use_tqdm,
                 pooling_params=pooling_params,
                 lora_request=lora_request,

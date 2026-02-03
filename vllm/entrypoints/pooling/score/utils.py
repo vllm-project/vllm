@@ -234,8 +234,8 @@ def get_score_prompt(
     model_config: ModelConfig,
     tokenizer: TokenizerLike,
     tokenization_kwargs: dict[str, Any],
-    data_1: ScoreDataList,
-    data_2: ScoreDataList,
+    data_1: ScoreData,
+    data_2: ScoreData,
     score_template: str | None = None,
 ) -> tuple[str, TokensPrompt]:
     prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
