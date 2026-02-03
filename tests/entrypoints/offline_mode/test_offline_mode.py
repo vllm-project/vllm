@@ -114,7 +114,7 @@ def _re_import_modules():
 
     reload_exception = None
     for module_name in hf_hub_module_names + transformers_module_names:
-        if any(module_name.endswith(alias) for alias in aliased_modules):
+        if any(module_name.endswith(f".{alias}") for alias in aliased_modules):
             # Remove from sys.modules so they are re-aliased on next import
             del sys.modules[module_name]
             continue
