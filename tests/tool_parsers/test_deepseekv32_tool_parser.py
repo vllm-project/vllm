@@ -122,9 +122,7 @@ def test_convert_param_value_stricter_type_checking(parser):
     # These should return original string (not valid boolean values)
     assert parser._convert_param_value("yes", "boolean") == "yes"
     assert parser._convert_param_value("no", "boolean") == "no"
-    assert (
-        parser._convert_param_value("TRUE", "boolean") is True
-    )
+    assert parser._convert_param_value("TRUE", "boolean") is True
     assert parser._convert_param_value("FALSE", "boolean") is False
 
     # Integer and float now raise exceptions for invalid values
