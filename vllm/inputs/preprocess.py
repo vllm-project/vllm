@@ -104,7 +104,7 @@ class InputPreprocessor:
             dec_start_token_id = self.get_bos_token_id()
 
         if dec_start_token_id is None:
-            raise RuntimeError("Cannot find decoder start token id")
+            raise RuntimeError("Cannot find decoder start token id or <BOS>")
 
         return dec_start_token_id
 
