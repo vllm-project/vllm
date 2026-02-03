@@ -17,3 +17,5 @@ steps:
       device: mi325_1
       depends_on:
       - image-build-amd
+      commands:
+      - pytest -v -s -m 'not skip_v1' samplers
