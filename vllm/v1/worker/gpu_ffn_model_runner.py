@@ -128,22 +128,18 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                      dp_metadata_list: dict | None = None):
         num_ubatches = len(dp_metadata_list) if dp_metadata_list else 1
         rank_ffn_output = None
+
+        assert dp_metadata_list is not None
+        self.connector.update_state_from_dp_metadata(dp_metadata_list)
         
         # TODO(jcz): process first_k_dense_replace
         # for layer_idx in range(self.first_k_dense_replace,self.num_layers):
         for layer_idx in range(0, self.num_layers):
             for ubatch_idx in range(num_ubatches):
-                hidden_states, recv_metadata = self.connector.recv_attn_output()
-                if dp_metadata_list:
-                    dp_metadata = dp_metadata_list.get(
-                        recv_metadata.stage_idx, None
-                    )
-                elif hasattr(self.connector, "dp_metadata_list"):
-                    dp_metadata = self.connector.dp_metadata_list.get(
-                        recv_metadata.stage_idx, None
-                    )
-                else:
-                    dp_metadata = None
+                hidden_states, recv_metadata = self.connector.recv_attn_output(ubatch_idx=ubatch_idx)
+                dp_metadata = dp_metadata_list.get(
+                    recv_metadata.stage_idx, None
+                )
                 num_tokens = hidden_states.shape[0]
                 if recv_metadata is not None and recv_metadata.recv_handle_list is not None:
                     for work in recv_metadata.recv_handle_list:
@@ -170,7 +166,7 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                         )
 
                 recv_metadata.recv_handle_list = None
-                self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
+                self.connector.send_ffn_output(rank_ffn_output, recv_metadata, ubatch_idx=ubatch_idx)
         return rank_ffn_output
     
     @torch.inference_mode()
