@@ -3,6 +3,7 @@
 import ast
 from dataclasses import replace
 from importlib.util import find_spec
+from typing import cast
 
 import numpy as np
 import torch
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
@@ -62,8 +64,8 @@ class SpecDecodeBaseProposer:
         runner=None,
     ):
         self.vllm_config = vllm_config
+        assert vllm_config.speculative_config is not None
         self.speculative_config = vllm_config.speculative_config
-        assert self.speculative_config is not None
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
@@ -181,7 +183,9 @@ class SpecDecodeBaseProposer:
                 RocmAttentionMetadata,
             ]
             # ROCM_AITER_FA is an optional backend
-            if find_spec(
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            if rocm_aiter_ops.is_enabled() and find_spec(
                 AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
             ):
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
@@ -206,6 +210,7 @@ class SpecDecodeBaseProposer:
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
+        assert spec_token_tree is not None
         self.tree_choices: list[tuple[int, ...]] = ast.literal_eval(spec_token_tree)
         tree_depth = len(self.tree_choices[-1])
         # Precompute per-level properties of the tree.
@@ -1035,7 +1040,7 @@ class SpecDecodeBaseProposer:
         # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
         # [0, 1, 0, 1, 2, 3, 0, 1, 2]
         #  _r1_  ____r2____  ___r3__
-        token_offests = (
+        token_offsets = (
             self.token_arange_np[:total_num_tokens] - new_query_start_locs_expanded
         )
 
@@ -1050,7 +1055,7 @@ class SpecDecodeBaseProposer:
         # [0, 1,                                // req 1
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
         #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
-        token_indices_np = token_offests + old_query_start_locs_expanded
+        token_indices_np = token_offsets + old_query_start_locs_expanded
         token_indices = torch.from_numpy(token_indices_np).to(device, non_blocking=True)
 
         spec_common_attn_metadata = CommonAttentionMetadata(
@@ -1077,9 +1082,12 @@ class SpecDecodeBaseProposer:
         return model.__class__.__name__
 
     def load_model(self, target_model: nn.Module) -> None:
-        draft_model_config = self.vllm_config.speculative_config.draft_model_config
+        draft_model_config = self.speculative_config.draft_model_config
         target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
+            get_layers_from_vllm_config(
+                self.vllm_config,
+                AttentionLayerBase,  # type: ignore[type-abstract]
+            ).keys()
         )
         # FIXME: support hybrid kv for draft model
         target_indexer_layer_names = set(
@@ -1096,7 +1104,10 @@ class SpecDecodeBaseProposer:
             )
 
         draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys()
+            get_layers_from_vllm_config(
+                self.vllm_config,
+                AttentionLayerBase,  # type: ignore[type-abstract]
+            ).keys()
             - target_attn_layer_names
         )
         indexer_layers = get_layers_from_vllm_config(
@@ -1136,6 +1147,7 @@ class SpecDecodeBaseProposer:
 
         if supports_multimodal(target_model):
             # handle multimodality
+            assert hasattr(target_model, "config")
             if self.get_model_name(target_model) in [
                 "Qwen2_5_VLForConditionalGeneration",
                 "Qwen3VLForConditionalGeneration",
@@ -1152,16 +1164,21 @@ class SpecDecodeBaseProposer:
                 self.model.config.image_token_index = (
                     target_model.config.image_token_index
                 )
-            target_language_model = target_model.get_language_model()
+            target_language_model = cast(
+                SupportsMultiModal, target_model
+            ).get_language_model()
         else:
             target_language_model = target_model
 
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
-            if hasattr(target_language_model.model, "embed_tokens"):
-                target_embed_tokens = target_language_model.model.embed_tokens
-            elif hasattr(target_language_model.model, "embedding"):
-                target_embed_tokens = target_language_model.model.embedding
+            inner_model = getattr(target_language_model, "model", None)
+            if inner_model is None:
+                raise AttributeError("Target model does not have 'model' attribute")
+            if hasattr(inner_model, "embed_tokens"):
+                target_embed_tokens = inner_model.embed_tokens
+            elif hasattr(inner_model, "embedding"):
+                target_embed_tokens = inner_model.embedding
             else:
                 raise AttributeError(
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
