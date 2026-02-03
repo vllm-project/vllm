@@ -47,6 +47,7 @@ def convert_to_pytorch_benchmark_format(
         return records
 
     for name, benchmark_values in metrics.items():
+        assert isinstance(benchmark_values, list)
         record = {
             "benchmark": {
                 "name": "vLLM benchmark",
