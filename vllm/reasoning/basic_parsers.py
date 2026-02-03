@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from itertools import islice
 from typing import TYPE_CHECKING, Any
 
@@ -78,7 +78,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         return False
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         end_token_id = self.end_token_id
         return end_token_id in delta_ids
