@@ -12,6 +12,7 @@ from typing import final
 import torch
 
 from vllm.lora.layers import LoRAMapping
+from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
 
@@ -48,8 +49,16 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
 
+        # Compute captured LoRA counts for cudagraph specialization.
+        captured_lora_counts = get_captured_lora_counts(
+            self.max_loras, self.lora_config.specialize_active_lora
+        )
+
         self.token_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras, max_num_batched_tokens, device=device
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
         )
 
         # When speculative decoding is enabled, max_num_samples is
@@ -57,7 +66,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         # This line can be optimized by replacing max_num_batched_tokens
         # to  max_batches * (num_speculative_decoding_tokens + 1).
         self.prompt_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras, max_num_batched_tokens, device=device
+            self.max_loras,
+            max_num_batched_tokens,
+            device=device,
+            captured_lora_counts=captured_lora_counts,
         )
 
     def update_metadata(
@@ -102,7 +114,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_a_stacked,
             y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
+            *self.token_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
             scale,
         )
 
@@ -143,7 +157,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             lora_b_stacked,
             y,
-            *self.token_mapping_meta.meta_args(num_tokens),
+            *self.token_mapping_meta.meta_args(
+                num_tokens, self.lora_config.specialize_active_lora
+            ),
             offset_start=offset_start,
             add_inputs=True,
         )
@@ -175,7 +191,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x.unsqueeze(dim=0),
             (lora_b_stacked,),
             y,
-            *self.token_mapping_meta.meta_args(x.size(0)),
+            *self.token_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
             offset_start=0,
             add_inputs=add_inputs,
         )
@@ -287,7 +305,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             x,
             [lora_a_stacked],
             buffer.unsqueeze(dim=0),
-            *self.prompt_mapping_meta.meta_args(x.size(0)),
+            *self.prompt_mapping_meta.meta_args(
+                x.size(0), self.lora_config.specialize_active_lora
+            ),
             scale,
         )
 
@@ -295,7 +315,9 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             buffer.unsqueeze(dim=0),
             [lora_b_stacked],
             y,
-            *self.prompt_mapping_meta.meta_args(buffer.size(0)),
+            *self.prompt_mapping_meta.meta_args(
+                buffer.size(0), self.lora_config.specialize_active_lora
+            ),
             add_inputs=True,
         )
         y = y.view_as(y_org)
@@ -316,8 +338,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
         """
-        (token_lora_mapping, _, _, _, lora_ids, _) = self.token_mapping_meta.meta_args(
-            num_tokens
+        (token_lora_mapping, _, _, _, lora_ids, _, _) = (
+            self.token_mapping_meta.meta_args(
+                num_tokens, self.lora_config.specialize_active_lora
+            )
         )
         if naive_block_assignment:
             expert_ids = topk_ids.reshape(-1)
@@ -392,7 +416,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             _,
             lora_ids,
             _,
-        ) = self.token_mapping_meta.meta_args(x.size(0))
+            num_active_loras,
+        ) = self.token_mapping_meta.meta_args(
+            x.size(0), self.lora_config.specialize_active_lora
+        )
         if token_lora_mapping is None:
             token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(
@@ -408,6 +435,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             max_lora_rank,
             top_k_num,
             lora_ids,
+            num_active_loras,
             adapter_enabled,
             shrink_config.get("BLOCK_SIZE_M", 64),
             shrink_config.get("BLOCK_SIZE_N", 64),
