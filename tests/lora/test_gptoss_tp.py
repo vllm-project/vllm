@@ -5,6 +5,7 @@ import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.utils.import_utils import has_nvshmem4py
 
 from ..utils import multi_gpu_test
 
@@ -122,6 +123,7 @@ def test_gpt_oss_lora_tp2(
         generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
 
 
+@pytest.mark.skipif(not has_nvshmem4py(), reason="nvshmem4py not installed")
 def test_gpt_oss_lora_async_loading(
     monkeypatch: pytest.MonkeyPatch, gptoss20b_lora_files
 ):
@@ -150,6 +152,7 @@ def test_gpt_oss_lora_async_loading(
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(not has_nvshmem4py(), reason="nvshmem4py not installed")
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
 @pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
 def test_gpt_oss_lora_async_loading_tp2(

@@ -56,6 +56,11 @@ def import_pynvml():
 
 
 @cache
+def has_nvshmem4py() -> bool:
+    return _has_module("nvshmem.core")
+
+
+@cache
 def import_triton_kernels():
     """
     For convenience, prioritize triton_kernels that is available in

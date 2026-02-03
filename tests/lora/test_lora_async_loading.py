@@ -38,8 +38,8 @@ def test_nvshmem_init_when_enabled(dist_init, dummy_model, device):
     """Verify NVSHMEM is initialized when async loading enabled."""
     with (
         patch.dict(os.environ, {"VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA": "1"}),
-        patch("vllm.lora.model_manager.nvshmem") as mock_nvshmem,
-        patch("vllm.lora.layers.base.nvshmem_tensor") as mock_tensor,
+        patch("vllm.lora.model_manager.nvshmem", create=True) as mock_nvshmem,
+        patch("vllm.lora.layers.base.nvshmem_tensor", create=True) as mock_tensor,
     ):
         mock_nvshmem.get_unique_id.return_value = MagicMock()
         mock_tensor.return_value = torch.zeros(1, dtype=torch.int64)
@@ -64,7 +64,7 @@ def test_nvshmem_not_init_when_disabled(dist_init, dummy_model, device):
     """Verify NVSHMEM is NOT initialized when async loading disabled."""
     with (
         patch.dict(os.environ, {"VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA": "0"}),
-        patch("vllm.lora.model_manager.nvshmem") as mock_nvshmem,
+        patch("vllm.lora.model_manager.nvshmem", create=True) as mock_nvshmem,
     ):
         _ = LoRAModelManager(
             dummy_model,
@@ -90,8 +90,8 @@ def test_loading_stream_created_when_enabled(dist_init, dummy_model, device):
     """Verify loading stream is created when async loading enabled."""
     with (
         patch.dict(os.environ, {"VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA": "1"}),
-        patch("vllm.lora.model_manager.nvshmem") as mock_nvshmem,
-        patch("vllm.lora.layers.base.nvshmem_tensor") as mock_tensor,
+        patch("vllm.lora.model_manager.nvshmem", create=True) as mock_nvshmem,
+        patch("vllm.lora.layers.base.nvshmem_tensor", create=True) as mock_tensor,
     ):
         mock_nvshmem.get_unique_id.return_value = MagicMock()
         mock_tensor.return_value = torch.zeros(1, dtype=torch.int64)

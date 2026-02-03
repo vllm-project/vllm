@@ -9,20 +9,21 @@ from transformers import PretrainedConfig
 
 from vllm import envs
 from vllm.config.lora import LoRAConfig
+from vllm.utils.import_utils import has_nvshmem4py
 from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
 
-if envs.VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA:
-    try:
-        import nvshmem.bindings as bindings
-        from nvshmem.core import ComparisonType
-        from nvshmem.core.interop.torch import tensor as nvshmem_tensor
-    except ImportError as e:
-        raise ImportError(
-            "pip install nvshmem4py-cu12 # Required for async LoRA loading with NVSHMEM"
-        ) from e
+if has_nvshmem4py:
+    import nvshmem.bindings as bindings
+    from nvshmem.core import ComparisonType
+    from nvshmem.core.interop.torch import tensor as nvshmem_tensor
+
+if envs.VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA and not has_nvshmem4py:
+    raise ImportError(
+        "pip install nvshmem4py-cu12 # Required for async LoRA loading with NVSHMEM"
+    )
 
 
 # NVSHMEM implementation

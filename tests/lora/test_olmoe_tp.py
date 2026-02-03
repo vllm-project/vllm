@@ -6,6 +6,7 @@ import pytest
 
 import vllm
 from vllm.lora.request import LoRARequest
+from vllm.utils.import_utils import has_nvshmem4py
 
 from ..utils import multi_gpu_test
 
@@ -163,6 +164,7 @@ def test_olmoe_lora_tp4(olmoe_lora_files, fully_sharded_loras):
     )
 
 
+@pytest.mark.skipif(not has_nvshmem4py(), reason="nvshmem4py not installed")
 def test_olmoe_lora_async_loading_sync(olmoe_lora_files, monkeypatch):
     """Test async LoRA loading synchronization."""
     with monkeypatch.context() as m:
