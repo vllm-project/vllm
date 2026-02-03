@@ -119,8 +119,7 @@ class MultiConnectorKVEvents(KVConnectorKVEvents):
 
     def add_events(self, events: list[KVCacheEvent]) -> None:
         for event in events:
-            if not isinstance(event, ConnectorKVCacheEvents):
-                continue
+            assert isinstance(event, ConnectorKVCacheEvents)
 
             connector_name = event.connector_name
             if connector_name not in self._data:
@@ -135,8 +134,7 @@ class MultiConnectorKVEvents(KVConnectorKVEvents):
     def get_all_events(self) -> list[KVCacheEvent]:
         result: list[KVCacheEvent] = []
         for connector_name, kv_events in self._data.items():
-            connector_events = kv_events.get_all_events()
-            if connector_events:
+            if connector_events := kv_events.get_all_events():
                 result.append(
                     ConnectorKVCacheEvents(
                         connector_name=connector_name,
@@ -357,8 +355,7 @@ class MultiConnector(KVConnectorBase_V1):
         events_by_connector: dict[str, KVConnectorKVEvents] = {}
 
         for c in self._connectors:
-            connector_events = c.get_kv_connector_kv_cache_events()
-            if connector_events is not None:
+            if connector_events := c.get_kv_connector_kv_cache_events():
                 events_by_connector[c.__class__.__name__] = connector_events
 
         if not events_by_connector:
@@ -418,11 +415,12 @@ class MultiConnector(KVConnectorBase_V1):
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         original_kv_cache_events = connector_output.kv_cache_events
-        if original_kv_cache_events is None:
-            return
 
-        if isinstance(original_kv_cache_events, MultiConnectorKVEvents):
-            for c in self._connectors:
+        for c in self._connectors:
+            kv_cache_events_per_connector = None
+            if original_kv_cache_events is not None and isinstance(
+                original_kv_cache_events, MultiConnectorKVEvents
+            ):
                 try:
                     kv_cache_events_per_connector = (
                         original_kv_cache_events.get_connector_events(
@@ -432,10 +430,10 @@ class MultiConnector(KVConnectorBase_V1):
                 except KeyError:
                     kv_cache_events_per_connector = None
 
-                connector_output_per_connector = dataclasses.replace(
-                    connector_output, kv_cache_events=kv_cache_events_per_connector
-                )
-                c.update_connector_output(connector_output_per_connector)
+            connector_output_per_connector = dataclasses.replace(
+                connector_output, kv_cache_events=kv_cache_events_per_connector
+            )
+            c.update_connector_output(connector_output_per_connector)
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
