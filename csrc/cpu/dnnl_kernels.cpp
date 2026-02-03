@@ -14,13 +14,11 @@ struct KernelVecType<float> {
   using cvt_vec_type = vec_op::FP32Vec16;
 };
 
-#if !defined(__aarch64__) || defined(ARM_BF16_SUPPORT)
 template <>
 struct KernelVecType<c10::BFloat16> {
   using load_vec_type = vec_op::BF16Vec16;
   using cvt_vec_type = vec_op::FP32Vec16;
 };
-#endif
 
 template <>
 struct KernelVecType<c10::Half> {
