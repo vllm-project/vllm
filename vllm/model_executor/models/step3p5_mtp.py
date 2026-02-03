@@ -67,9 +67,12 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
+        embed_tokens: VocabParallelEmbedding | None = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
-        assert inputs_embeds is not None
+        if inputs_embeds is None:
+            assert embed_tokens is not None
+            inputs_embeds = embed_tokens(input_ids)
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
@@ -115,14 +118,13 @@ class Step3p5AMultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
         current_step_idx = spec_step_idx % self.num_mtp_layers
         return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
             input_ids,
             positions,
             previous_hidden_states,
             inputs_embeds,
+            self.embed_tokens,
             current_step_idx,
         )
 

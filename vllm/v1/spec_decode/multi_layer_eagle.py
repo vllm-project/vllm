@@ -283,10 +283,6 @@ class MultiLayerEagleProposer(EagleProposer):
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
             )
-        else:
-            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
-                self.input_ids[:num_tokens],
-            )
 
     def draft_model_forward(
         self,
@@ -314,7 +310,7 @@ class MultiLayerEagleProposer(EagleProposer):
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
             input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            inputs_embeds = None
 
         model_kwargs = {
             "input_ids": input_ids,
@@ -570,7 +566,7 @@ class MultiLayerEagleProposer(EagleProposer):
                     inputs_embeds = self.inputs_embeds[:num_input_tokens]
                 else:
                     input_ids = self.input_ids[:num_input_tokens]
-                    inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                    inputs_embeds = None
 
                 model_kwargs = {
                     "input_ids": input_ids,
@@ -659,7 +655,7 @@ def _multi_layer_eagle_shift_and_cache(
         cached_prev: torch.Tensor,
         out_cached: torch.Tensor,
     ):
-        _ml_eagle_shift_1d_kernel[(batch_size, num_blocks)](
+        _shift_1d_kernel[(batch_size, num_blocks)](
             src,
             dst,
             cached_prev,
@@ -671,7 +667,7 @@ def _multi_layer_eagle_shift_and_cache(
             BLOCK_TOKENS=BLOCK_TOKENS,
         )
 
-        _ml_eagle_gather_cache_1d_kernel[(batch_size,)](
+        _gather_cache_1d_kernel[(batch_size,)](
             dst,
             out_cached,
             cache_start,
@@ -714,7 +710,7 @@ def _multi_layer_eagle_shift_and_cache(
                 out_cached_positions[row],
             )
 
-    _ml_eagle_shift_hidden_kernel[(batch_size, num_blocks, num_hidden_blocks)](
+    _shift_hidden_kernel[(batch_size, num_blocks, num_hidden_blocks)](
         src_hidden_states,
         dst_hidden_states,
         cached_prev_hidden_states,
@@ -736,7 +732,7 @@ def _multi_layer_eagle_shift_and_cache(
         num_warps=4,
     )
 
-    _ml_eagle_gather_cache_hidden_kernel[(batch_size, num_hidden_blocks)](
+    _gather_cache_hidden_kernel[(batch_size, num_hidden_blocks)](
         dst_hidden_states,
         out_cached_hidden_states,
         cache_start,
@@ -756,7 +752,7 @@ def _multi_layer_eagle_shift_and_cache(
 
 
 @triton.jit
-def _ml_eagle_shift_1d_kernel(
+def _shift_1d_kernel(
     src_ptr,
     dst_ptr,
     cached_ptr,
@@ -804,7 +800,7 @@ def _ml_eagle_shift_1d_kernel(
 
 
 @triton.jit
-def _ml_eagle_shift_hidden_kernel(
+def _shift_hidden_kernel(
     src_ptr,
     dst_ptr,
     cached_ptr,
@@ -869,7 +865,7 @@ def _ml_eagle_shift_hidden_kernel(
 
 
 @triton.jit
-def _ml_eagle_gather_cache_1d_kernel(
+def _gather_cache_1d_kernel(
     src_ptr,
     out_ptr,
     cache_start_ptr,
@@ -891,7 +887,7 @@ def _ml_eagle_gather_cache_1d_kernel(
 
 
 @triton.jit
-def _ml_eagle_gather_cache_hidden_kernel(
+def _gather_cache_hidden_kernel(
     src_ptr,
     out_ptr,
     cache_start_ptr,

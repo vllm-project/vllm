@@ -465,11 +465,8 @@ class SpecDecodeBaseProposer:
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
-            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
-                self.input_ids[:num_tokens]
-            )
             input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            inputs_embeds = None
 
         model_kwargs = {
             "input_ids": input_ids,
@@ -666,9 +663,8 @@ class SpecDecodeBaseProposer:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:input_batch_size]
             else:
-                self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
                 input_ids = self.input_ids[:input_batch_size]
-                inputs_embeds = self.inputs_embeds[:input_batch_size]
+                inputs_embeds = None
 
             # Run the model.
             model_kwargs = {
@@ -1120,7 +1116,6 @@ class SpecDecodeBaseProposer:
             num_tokens = attn_metadata.num_actual_tokens
             input_ids = tree_input_ids.view(-1)
             self.input_ids[:num_tokens] = input_ids
-            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(input_ids)
             self.positions[:num_tokens] = tree_positions.view(-1)
             self.hidden_states[:num_tokens] = tree_hidden_states.view(num_tokens, -1)
 
@@ -1142,7 +1137,7 @@ class SpecDecodeBaseProposer:
                     input_ids=self.input_ids[:num_input_tokens],
                     positions=self.positions[:num_input_tokens],
                     hidden_states=self.hidden_states[:num_input_tokens],
-                    inputs_embeds=self.inputs_embeds[:num_input_tokens],
+                    inputs_embeds=None,
                 )
 
             # Get the output hidden states for the draft tokens.
@@ -1561,7 +1556,7 @@ class SpecDecodeBaseProposer:
                     inputs_embeds = self.inputs_embeds[:num_input_tokens]
                 else:
                     input_ids = self.input_ids[:num_input_tokens]
-                    inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                    inputs_embeds = None
 
                 kwargs = dict(
                     input_ids=input_ids,
