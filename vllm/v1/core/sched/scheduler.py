@@ -493,14 +493,11 @@ class Scheduler(SchedulerInterface):
                 )
                 if num_scheduled_spec_tokens > 0:
                     spec_token_ids = request.spec_token_ids
-                    if len(spec_token_ids) > num_scheduled_spec_tokens:
-                        scheduled_spec_decode_tokens[request.request_id] = (
-                            spec_token_ids[:num_scheduled_spec_tokens]
-                        )
-                    else:
-                        scheduled_spec_decode_tokens[request.request_id] = (
-                            spec_token_ids
-                        )
+                    scheduled_spec_decode_tokens[request.request_id] = (
+                        spec_token_ids
+                        if len(spec_token_ids) <= num_scheduled_spec_tokens
+                        else spec_token_ids[:num_scheduled_spec_tokens]
+                    )
 
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.
