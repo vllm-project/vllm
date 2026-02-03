@@ -30,6 +30,7 @@ logger = init_logger(__name__)
 
 _LOCAL_CONNECTOR: Optional["SHMConnector"] = None
 
+
 def _rpc_receive_handle(feat_key: str, handle_data: Any) -> str:
     """Synchronously receive RPC data and write directly to cache.
 
@@ -73,7 +74,7 @@ class SHMConnector(ECConnectorBase):
 
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
-  
+
         self.handle_caches: dict[str, Any] = {}
         self._mm_datas_need_loads: dict[str, int] = {}
 
@@ -225,7 +226,7 @@ class SHMConnector(ECConnectorBase):
                 "Fatal error in producer thread (exit immediately): %s",
                 e,
                 exc_info=True,
-                )
+            )
             self._stop_event.set()
         finally:
             logger.info("Producer thread cleanup, rank: %s", self.rpc_rank)
