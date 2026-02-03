@@ -16,7 +16,10 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
@@ -24,6 +27,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -145,25 +149,46 @@ class SonicMoeExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def __init__(
         self,
-        out_dtype: torch.dtype,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG,
         weights_prepermuted: bool = False,
     ):
-        super().__init__(quant_config)
-        self.out_dtype = out_dtype
+        super().__init__(moe_config, quant_config)
+        self.out_dtype = moe_config.in_dtype
         self.weights_prepermuted = weights_prepermuted
         self._w1_sonic: torch.Tensor | None = None
         self._w2_sonic: torch.Tensor | None = None
         self._w1_id: int = -1
         self._w2_id: int = -1
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return is_sonic_moe_supported()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (None, None)
+
+    @staticmethod
+    def _supports_activation(activation: str) -> bool:
+        return activation in ("silu", "silu_and_mul")
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return (
-            mk.FusedMoEActivationFormat.Standard,
-            mk.FusedMoEActivationFormat.Standard,
+            not moe_parallel_config.use_ep
+            and not moe_parallel_config.is_sequence_parallel
         )
 
     def supports_expert_map(self) -> bool:
@@ -356,9 +381,22 @@ def sonic_moe_forward(
         )
 
     dtype = hidden_states.dtype
+    moe_config = FusedMoEConfig(
+        num_experts=w1.size(0),
+        experts_per_token=topk_ids.size(1),
+        hidden_dim=hidden_states.size(1),
+        intermediate_size_per_partition=w1.size(1) // 2,
+        num_local_experts=w1.size(0),
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=activation,
+        in_dtype=dtype,
+        device=hidden_states.device,
+        routing_method=RoutingMethodType.TopK,
+        is_act_and_mul=True,
+    )
     fused_experts = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        SonicMoeExperts(out_dtype=dtype),
+        SonicMoeExperts(moe_config=moe_config),
     )
 
     return fused_experts(

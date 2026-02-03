@@ -5,6 +5,7 @@
 import pytest
 import torch
 
+from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe.sonic_moe import (
     SonicMoeExperts,
     _check_sonicmoe_available,
@@ -73,7 +74,14 @@ def test_permute_weights_for_sonic():
 
 def test_sonic_moe_experts_init():
     """Test SonicMoeExperts initialization."""
-    experts = SonicMoeExperts(out_dtype=torch.bfloat16)
+    moe_config = make_dummy_moe_config(
+        num_experts=1,
+        experts_per_token=1,
+        hidden_dim=1,
+        intermediate_size_per_partition=1,
+        in_dtype=torch.bfloat16,
+    )
+    experts = SonicMoeExperts(moe_config=moe_config)
     assert experts.out_dtype == torch.bfloat16
     assert experts.supports_chunking() is True
     assert experts.supports_expert_map() is False
@@ -205,9 +213,16 @@ def test_sonic_moe_vs_triton(
     )
 
     w1_sonic = permute_weights_for_sonic(w1)
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size_per_partition=n // 2,
+        in_dtype=dtype,
+    )
     sonic_kernel = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        SonicMoeExperts(out_dtype=dtype, weights_prepermuted=True),
+        SonicMoeExperts(moe_config=moe_config, weights_prepermuted=True),
     )
     out_sonic = sonic_kernel(
         hidden_states=hidden_states,
@@ -269,9 +284,16 @@ def test_sonic_moe_apply_router_weight_on_input():
     )
 
     w1_sonic = permute_weights_for_sonic(w1)
+    moe_config = make_dummy_moe_config(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size_per_partition=n // 2,
+        in_dtype=dtype,
+    )
     sonic_kernel = mk.FusedMoEModularKernel(
         MoEPrepareAndFinalizeNoEP(),
-        SonicMoeExperts(out_dtype=dtype, weights_prepermuted=True),
+        SonicMoeExperts(moe_config=moe_config, weights_prepermuted=True),
     )
     out_sonic = sonic_kernel(
         hidden_states=hidden_states,
