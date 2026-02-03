@@ -206,7 +206,9 @@ class DeepSeekV32ToolParser(ToolParser):
         end = input_str.find('"', start)
         return input_str[start:end] if start > 0 and end > start else input_str
 
-    def _convert_param_value_checked(self, value: str, param_type: str | list[str]) -> Any:
+    def _convert_param_value_checked(
+        self, value: str, param_type: str | list[str]
+    ) -> Any:
         """Convert parameter value to the correct type."""
         if value.lower() == "null":
             return None
@@ -221,7 +223,7 @@ class DeepSeekV32ToolParser(ToolParser):
             return val if val != int(val) else int(val)
         elif param_type in ["boolean", "bool"]:
             if not value.lower() in ["false", "0", "true", "1"]:
-                raise Exception("Invalid boolean value")
+                raise ValueError("Invalid boolean value")
             return value.lower() in ["true", "1"]
         elif param_type in ["object", "array"]:
             return json.loads(value)
