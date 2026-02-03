@@ -26,7 +26,7 @@ class Sampler:
         device: torch.device,
         logprobs_mode: LogprobsMode = "raw_logprobs",
     ):
-        if logprobs_mode not in ["processed_logprobs", "raw_logprobs"]:
+        if logprobs_mode not in ("processed_logprobs", "raw_logprobs"):
             raise NotImplementedError(f"Unsupported logprobs_mode: {logprobs_mode}")
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
@@ -36,10 +36,7 @@ class Sampler:
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
 
     def add_request(
-        self,
-        req_idx: int,
-        prompt_len: int,
-        sampling_params: SamplingParams,
+        self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
@@ -74,11 +71,8 @@ class Sampler:
 
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
         if max_num_logprobs != NO_LOGPROBS:
-            logits = (
-                processed_logits
-                if self.logprobs_mode == "processed_logprobs"
-                else logits
-            )
+            if self.logprobs_mode == "processed_logprobs":
+                logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
             logprobs_tensors = compute_topk_logprobs(
