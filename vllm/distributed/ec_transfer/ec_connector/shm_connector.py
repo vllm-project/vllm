@@ -369,9 +369,6 @@ class SHMConnector(ECConnectorBase):
         """
         if not self.is_producer:
             for request_id in finished_req_ids:
-                self.handle_caches.pop(request_id + "-image-0", None)
-        else:
-            for request_id in finished_req_ids:
                 gc.collect()
                 torch.cuda.empty_cache()
         return None, None
