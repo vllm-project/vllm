@@ -1,0 +1,15 @@
+model_name: "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.695
+  - name: "exact_match,flexible-extract"
+    value: 0.447
+limit: 1319
+num_fewshot: 5
+max_model_len: 262144
+enforce_eager: false
+apply_chat_template: true
+fewshot_as_multiturn: true
+trust_remote_code: true
