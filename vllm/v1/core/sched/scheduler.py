@@ -216,9 +216,7 @@ class Scheduler(SchedulerInterface):
                 self.num_lookahead_tokens = self.num_spec_tokens
 
         # reusable read only placeholder list for speculative decoding.
-        self._spec_token_placeholders: list[int] = (
-            [-1] * self.num_spec_tokens if self.num_spec_tokens else []
-        )
+        self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
 
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
