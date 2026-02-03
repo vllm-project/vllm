@@ -1,0 +1,177 @@
+syntax = "proto3";
+
+package vllm.grpc.render;
+
+// RenderService provides tokenization and chat message rendering.
+// This is a lightweight service that only handles input preprocessing,
+// without any LLM inference capabilities.
+service RenderService {
+  // Render chat messages to tokenized prompt
+  rpc RenderChat(RenderChatRequest) returns (RenderChatResponse);
+
+  // Render completion input to tokenized prompt
+  rpc RenderCompletion(RenderCompletionRequest) returns (RenderCompletionResponse);
+
+  // Tokenize text
+  rpc Tokenize(TokenizeRequest) returns (TokenizeResponse);
+
+  // Detokenize token IDs to text
+  rpc Detokenize(DetokenizeRequest) returns (DetokenizeResponse);
+
+  // Get renderer information
+  rpc GetInfo(GetInfoRequest) returns (GetInfoResponse);
+
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// =====================
+// Chat Message Types
+// =====================
+
+message ChatMessage {
+  string role = 1;  // "system", "user", "assistant", "tool"
+  string content = 2;
+  optional string name = 3;
+  repeated ToolCall tool_calls = 4;
+  optional string tool_call_id = 5;
+  optional string reasoning = 6;
+}
+
+message ToolCall {
+  string id = 1;
+  string type = 2;  // "function"
+  FunctionCall function = 3;
+}
+
+message FunctionCall {
+  string name = 1;
+  string arguments = 2;  // JSON string
+}
+
+message ToolDefinition {
+  string type = 1;  // "function"
+  FunctionDefinition function = 2;
+}
+
+message FunctionDefinition {
+  string name = 1;
+  optional string description = 2;
+  optional string parameters = 3;  // JSON schema string
+}
+
+message Document {
+  string title = 1;
+  string text = 2;
+}
+
+// =====================
+// RenderChat
+// =====================
+
+message RenderChatRequest {
+  repeated ChatMessage messages = 1;
+  repeated ToolDefinition tools = 2;
+  optional string tool_choice = 3;
+  optional string reasoning_effort = 4;
+
+  // Template options
+  optional string chat_template = 5;
+  map<string, string> chat_template_kwargs = 6;
+
+  // Generation options
+  bool add_generation_prompt = 7;
+  bool continue_final_message = 8;
+  bool add_special_tokens = 9;
+
+  // Truncation
+  optional int32 max_completion_tokens = 10;
+  optional int32 truncate_prompt_tokens = 11;
+
+  // RAG documents
+  repeated Document documents = 12;
+}
+
+message RenderChatResponse {
+  repeated int32 prompt_token_ids = 1;
+  string prompt_text = 2;
+  int32 num_tokens = 3;
+  repeated ConversationMessage conversation = 4;
+}
+
+message ConversationMessage {
+  string role = 1;
+  string content = 2;
+}
+
+// =====================
+// RenderCompletion
+// =====================
+
+message RenderCompletionRequest {
+  oneof input {
+    string text = 1;
+    TokensInput tokens = 2;
+  }
+
+  optional int32 max_total_tokens = 3;
+  int32 max_output_tokens = 4;
+  optional int32 truncate_prompt_tokens = 5;
+  optional bool add_special_tokens = 6;
+}
+
+message TokensInput {
+  repeated int32 token_ids = 1;
+}
+
+message RenderCompletionResponse {
+  repeated int32 prompt_token_ids = 1;
+  int32 num_tokens = 2;
+}
+
+// =====================
+// Tokenize / Detokenize
+// =====================
+
+message TokenizeRequest {
+  string text = 1;
+  bool add_special_tokens = 2;
+  optional int32 truncation = 3;
+}
+
+message TokenizeResponse {
+  repeated int32 token_ids = 1;
+  int32 num_tokens = 2;
+}
+
+message DetokenizeRequest {
+  repeated int32 token_ids = 1;
+  bool skip_special_tokens = 2;
+}
+
+message DetokenizeResponse {
+  string text = 1;
+}
+
+// =====================
+// Info / Health
+// =====================
+
+message GetInfoRequest {}
+
+message GetInfoResponse {
+  string model_path = 1;
+  int32 max_model_len = 2;
+  int32 vocab_size = 3;
+  string tokenizer_mode = 4;
+  bool has_chat_template = 5;
+  repeated string special_tokens = 6;
+  bool uses_harmony = 7;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string message = 2;
+}
