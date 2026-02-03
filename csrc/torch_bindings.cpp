@@ -220,7 +220,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "rms_norm_per_block_quant(Tensor! result, Tensor input, "
       "Tensor weight, Tensor! scale, float epsilon, "
       "Tensor? scale_ub, Tensor!? residual, int group_size, "
-      "bool is_scale_transposed, int tma_alignment) -> ()");
+      "bool is_scale_transposed) -> ()");
   ops.impl("rms_norm_per_block_quant", torch::kCUDA, &rms_norm_per_block_quant);
 
   // Rotary embedding

@@ -495,7 +495,6 @@ def rms_norm_per_block_quant(
         residual,
         group_size[1],
         is_scale_transposed,
-        tma_alignment,
     )
     return output, scales
 

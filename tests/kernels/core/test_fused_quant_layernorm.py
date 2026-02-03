@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import itertools
+
 import pytest
 import torch
 
@@ -154,8 +156,10 @@ def ops_impl(
 @pytest.mark.parametrize("has_scale_ub", SCALE_UBS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
-@pytest.mark.parametrize("group_size", GROUP_SIZES)
-@pytest.mark.parametrize("tma_alignment", TMA_ALIGNMENTS)
+@pytest.mark.parametrize(
+    "group_size, tma_alignment",
+    [(None, 0), *itertools.product(GROUP_SIZES, TMA_ALIGNMENTS)],
+)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
@@ -199,9 +203,6 @@ def test_rms_norm(
     ):
         # Skip tests where TMA alignment doesn't create extra padding to save time
         return
-
-    if group_size is not None and tma_alignment != 0:
-        print("tma_alignment:", tma_alignment, hidden_size // group_size[1])
 
     if has_scale_ub and quant_dtype != current_platform.fp8_dtype():
         # skip

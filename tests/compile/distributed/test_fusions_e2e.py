@@ -257,7 +257,7 @@ def test_tp2_attn_quant_async_tp(
     # Test rms norm+group quant_fp8 fusion
     list[tuple[Any, ...]](flat_product(MODELS_GROUP_FP8, CUSTOM_OPS_QUANT_RMS_NORM)),
 )
-@pytest.mark.parametrize("inductor_graph_partition", [True])
+@pytest.mark.parametrize("inductor_graph_partition", [True, False])
 # TODO: remove skip after we fix the fusion thoroughly
 @pytest.mark.skipif(is_blackwell(), reason="Temporarily disabled on Blackwell")
 def test_rms_group_quant(
@@ -289,9 +289,6 @@ def test_rms_group_quant(
     # To capture subprocess logs, we need to know whether spawn or fork is used.
     # Force spawn as it is more general.
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-
-    # TODO: remove this after fusion is fixed
-    monkeypatch.setenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "0")
 
     model_kwargs["attention_config"] = {"backend": backend.name}
 
