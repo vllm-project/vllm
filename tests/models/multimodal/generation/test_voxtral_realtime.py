@@ -19,7 +19,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
 from vllm.v1.engine.async_llm import AsyncLLM, StreamingInput
 
-MODEL_NAME = "mistralai/Voxtral-Mini-3B-Realtime-2602"
+MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
 ENGINE_CONFIG = dict(
     model=MODEL_NAME,
     max_model_len=8192,
