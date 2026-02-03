@@ -14,7 +14,6 @@ ECRole = Literal[ECProducer, ECConsumer]
 
 
 @config
-@dataclass
 class ECTransferConfig:
     """Configuration for distributed EC cache transfer."""
 

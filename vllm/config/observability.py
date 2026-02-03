@@ -6,7 +6,6 @@ from typing import Literal, cast
 
 from packaging.version import parse
 from pydantic import Field, field_validator, model_validator
-from pydantic.dataclasses import dataclass
 
 from vllm import version
 from vllm.config.utils import CompileFactors, config
@@ -15,7 +14,6 @@ DetailedTraceModules = Literal["model", "worker", "all"]
 
 
 @config
-@dataclass
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
 

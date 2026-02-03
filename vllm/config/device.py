@@ -6,15 +6,13 @@ from typing import Literal
 
 import torch
 from pydantic import ConfigDict, SkipValidation
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import CompileFactors, config
 
 Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 

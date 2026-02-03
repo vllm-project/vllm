@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import CompileFactors, config, get_compile_factors
@@ -25,8 +24,7 @@ MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
 LoRAExtraVocabSize = Literal[256, 512]
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class LoRAConfig:
     """Configuration for LoRA."""
 

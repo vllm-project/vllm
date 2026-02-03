@@ -4,7 +4,6 @@
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field, field_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import CompileFactors, config
 from vllm.logger import init_logger
@@ -20,7 +19,6 @@ logger = init_logger(__name__)
 
 
 @config
-@dataclass
 class LoadConfig:
     """Configuration for loading the model weights."""
 

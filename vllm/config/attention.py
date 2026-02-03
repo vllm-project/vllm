@@ -4,14 +4,12 @@
 from typing import Any, Literal
 
 from pydantic import field_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @config
-@dataclass
 class AttentionConfig:
     """Configuration for attention mechanisms in vLLM."""
 

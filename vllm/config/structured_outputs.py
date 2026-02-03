@@ -4,7 +4,6 @@
 from typing import Literal
 
 from pydantic import model_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import CompileFactors, config
@@ -15,7 +14,6 @@ StructuredOutputsBackend = Literal[
 
 
 @config
-@dataclass
 class StructuredOutputsConfig:
     """Dataclass which contains structured outputs config for the engine."""
 

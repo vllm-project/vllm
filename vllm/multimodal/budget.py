@@ -54,17 +54,17 @@ class MultiModalBudget:
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        cache = mm_registry.processor_only_cache_from_config(vllm_config)
-        processor = mm_registry.create_processor(model_config, cache=cache)
-
-        self.cache = cache
-        self.mm_limits = mm_limits = processor.info.allowed_mm_limits
-
-        active_modalities = {
-            modality for modality, limit in mm_limits.items() if limit > 0
-        }
-
         with set_default_torch_num_threads():  # Avoid hang during startup
+            cache = mm_registry.processor_only_cache_from_config(vllm_config)
+            processor = mm_registry.create_processor(model_config, cache=cache)
+
+            self.cache = cache
+            self.mm_limits = mm_limits = processor.info.allowed_mm_limits
+
+            active_modalities = {
+                modality for modality, limit in mm_limits.items() if limit > 0
+            }
+
             all_mm_max_toks_per_item = get_mm_max_toks_per_item(
                 model_config,
                 mm_registry,

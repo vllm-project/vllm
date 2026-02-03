@@ -18,7 +18,6 @@ TOK_POOLING_TYPES: tuple[TokenPoolingType, ...] = get_args(TokenPoolingType)
 
 
 @config
-@dataclass
 class PoolerConfig:
     """Controls the behavior of output pooling in pooling models."""
 

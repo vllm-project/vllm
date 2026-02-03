@@ -50,7 +50,6 @@ DummyOptions: TypeAlias = (
 
 
 @config
-@dataclass
 class MultiModalConfig:
     """Controls the behavior of multimodal models."""
 
