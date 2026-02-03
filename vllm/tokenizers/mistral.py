@@ -19,7 +19,7 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 
 from .protocol import TokenizerLike

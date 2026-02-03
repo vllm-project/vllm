@@ -4,7 +4,7 @@
 import time
 from collections.abc import Callable, Mapping
 from copy import copy
-from typing import Any, cast
+from typing import Any
 
 import torch.nn as nn
 from typing_extensions import TypeVar
@@ -21,9 +21,10 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
+from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
@@ -31,6 +32,7 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
+from vllm.v1.engine.utils import get_prompt_text
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
@@ -84,12 +86,7 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        if self.model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cached_tokenizer_from_config(self.model_config)
-
-        self.input_processor = InputProcessor(self.vllm_config, tokenizer)
+        self.input_processor = InputProcessor(self.vllm_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
@@ -249,10 +246,7 @@ class LLMEngine:
                 trace_headers,
                 priority,
             )
-            if isinstance(prompt, str):
-                prompt_text = prompt
-            elif isinstance(prompt, Mapping):
-                prompt_text = cast(str | None, prompt.get("prompt"))
+            prompt_text = get_prompt_text(prompt)
 
         self.input_processor.assign_request_id(request)
 
@@ -336,6 +330,14 @@ class LLMEngine:
             reset_running_requests, reset_connector
         )
 
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings computed with old weights are not reused.
+        """
+        self.engine_core.reset_encoder_cache()
+
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 
@@ -360,12 +362,11 @@ class LLMEngine:
         return self.input_processor.tokenizer
 
     def get_tokenizer(self) -> TokenizerLike:
-        if self.tokenizer is None:
-            raise ValueError(
-                "Unable to get tokenizer because `skip_tokenizer_init=True`"
-            )
+        return self.input_processor.get_tokenizer()
 
-        return self.tokenizer
+    @property
+    def renderer(self) -> BaseRenderer:
+        return self.input_processor.renderer
 
     def do_log_stats(self) -> None:
         """Log stats if logging is enabled."""

@@ -10,9 +10,12 @@ from vllm.model_executor.custom_op import CustomOp
 from .common import ApplyRotaryEmb
 
 
+# --8<-- [start:rotary_embedding]
 @CustomOp.register("rotary_embedding")
 class RotaryEmbeddingBase(CustomOp):
     """Original rotary positional embedding."""
+
+    # --8<-- [end:rotary_embedding]
 
     def __init__(
         self,
@@ -238,17 +241,14 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from vllm._ipex_ops import ipex_ops as ops
-
         self._match_cos_sin_cache_dtype(query)
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
         if key is None:
-            # XPU kernel doesn't support key=None so fall back to native impl
-            # TODO(sarckk): add support for optional key in
-            # ipex.llm.functional.rotary_embedding_batched
             return self.forward_native(positions, query, key)
         else:
+            from vllm import _custom_ops as ops
+
             ops.rotary_embedding(
                 positions,
                 query,

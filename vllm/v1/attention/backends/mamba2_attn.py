@@ -5,15 +5,15 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
-)
-from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -89,6 +89,10 @@ def compute_varlen_chunk_metadata(
 
 class Mamba2AttentionBackend(AttentionBackend):
     @staticmethod
+    def get_name() -> str:
+        return "MAMBA2_ATTN"
+
+    @staticmethod
     def get_builder_cls() -> type["Mamba2AttentionMetadataBuilder"]:
         return Mamba2AttentionMetadataBuilder
 
@@ -101,7 +105,7 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
     # cu_chunk_seqlen_p is a tensor of shape (nchunks+1,) that contains, for
-    # each chunk, its offests into the varlen sequence dimension. It is defined
+    # each chunk, its offsets into the varlen sequence dimension. It is defined
     # such that the i-th chunk contains tokens from cu_chunk_seqlen_p[i] to
     # cu_chunk_seqlen_p[i+1].
     cu_chunk_seqlen_p: torch.Tensor | None = None

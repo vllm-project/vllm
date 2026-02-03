@@ -14,8 +14,8 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 from transformers.utils import torch_int
 
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear

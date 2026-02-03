@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Iterable, Mapping
-from functools import cached_property
+from functools import cached_property, partial
 from typing import Annotated, Literal
 
 import torch
@@ -15,19 +15,21 @@ from transformers import (
     SiglipVisionConfig,
 )
 
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import (
+    EncoderOnlyAttention,
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
@@ -44,13 +46,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptIndexTargets,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -62,6 +64,7 @@ from .vision import (
     VisionFeatureSelectStrategy,
     VisionFeatureSelectStrategyStr,
     get_num_selected_vision_tokens,
+    is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
 )
 
@@ -127,7 +130,7 @@ class SiglipProcessingInfo(BaseProcessingInfo):
                 image_width=image_width,
                 image_height=image_height,
             ),
-            _get_vision_feature_select_strategy(pooler_config.pooling_type),
+            _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -184,20 +187,20 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        if prompt and mm_data:
+        if prompt and mm_items:
             raise ValueError(
                 "Siglip accepts text-only or image-only inputs, not both! "
                 "Image-only inputs means passing an image with an empty text "
                 "prompt."
             )
 
-        if mm_data:
+        if mm_items:
             # For multi-modal data, the prompt after processing should
             # only contain the image token
             tokenization_kwargs = {
@@ -207,7 +210,7 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
 
         return super().apply(
             prompt=prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
@@ -354,7 +357,6 @@ class SiglipAttention(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
@@ -374,11 +376,7 @@ class SiglipAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
 
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
@@ -407,7 +405,6 @@ class SiglipAttention(nn.Module):
                 self.head_dim,
                 self.scale,
                 prefix=f"{prefix}.attn",
-                multimodal_config=multimodal_config,
             )
         else:
             self.attn = attn_cls(
@@ -435,17 +432,12 @@ class SiglipMLP(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
 
         self.config = config
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.activation_fn = get_act_fn(config.hidden_act)
 
         # Special handling for BNB and torchao quantization
@@ -485,7 +477,6 @@ class SiglipEncoderLayer(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MMEncoderAttention],
@@ -497,7 +488,6 @@ class SiglipEncoderLayer(nn.Module):
         self.self_attn = SiglipAttention(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
@@ -505,7 +495,6 @@ class SiglipEncoderLayer(nn.Module):
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
@@ -533,7 +522,6 @@ class SiglipEncoder(nn.Module):
         self,
         config: SiglipVisionConfig | SiglipTextConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
@@ -553,7 +541,6 @@ class SiglipEncoder(nn.Module):
                 SiglipEncoderLayer(
                     config,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_cls=attn_cls,
                 )
@@ -658,7 +645,6 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -672,7 +658,6 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         self.mlp = SiglipMLP(
             config=config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -688,9 +673,9 @@ class SiglipMultiheadAttentionPoolingHead(nn.Module):
         hidden_state = self.mlp(hidden_state)
         hidden_state += residual
 
-        pooled = hidden_state[:, 0]
-
-        return pooled.unsqueeze(1)
+        # Handled by resolve_visual_encoder_outputs
+        # return hidden_state[:, 0]
+        return hidden_state
 
 
 class SiglipVisionTransformer(nn.Module):
@@ -698,11 +683,11 @@ class SiglipVisionTransformer(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         prefix: str = "",
+        use_head: bool | None = False,
     ) -> None:
         super().__init__()
 
@@ -714,7 +699,6 @@ class SiglipVisionTransformer(nn.Module):
         self.encoder = SiglipEncoder(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
             attn_cls=MMEncoderAttention,
@@ -736,16 +720,29 @@ class SiglipVisionTransformer(nn.Module):
         else:
             self.post_layernorm = None
 
-        self.use_head = (
-            True if not hasattr(config, "vision_use_head") else config.vision_use_head
-        )
-        if self.use_head:
-            self.head = SiglipMultiheadAttentionPoolingHead(
+        # Fall back to the config if a bool is not provided explicitly;
+        # note that many config types, including SiglipVisionConfig,
+        # do not have vision_use_head as a defined attribute.
+        if isinstance(use_head, bool):
+            self.use_head = use_head
+        else:
+            self.use_head = (
+                True
+                if not hasattr(config, "vision_use_head")
+                else config.vision_use_head
+            )
+
+        # Only create and load the head weights if we actually need them
+        self.head = (
+            SiglipMultiheadAttentionPoolingHead(
                 config=config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=f"{prefix}.head",
             )
+            if self.use_head
+            else None
+        )
+        self.last_hs_proc = partial(self.maybe_layer_norm_and_apply_head)
 
     @property
     def dtype(self):
@@ -774,21 +771,35 @@ class SiglipVisionTransformer(nn.Module):
             return_all_hidden_states=select_layers is not None,
         )
 
-        if self.post_layernorm is not None:
-            encoder_outputs = self.post_layernorm(encoder_outputs)
-
-        if self.use_head:
-            encoder_outputs = self.head(encoder_outputs)
-
-        # stacks feature layers if needed
+        # In the case that we have multiple feature layers,
+        # we stack and concatenate them into a tensor.
+        # NOTE: post layer norm and the attention pooling head
+        # are handled by last_hs_proc, which runs before applying
+        # the vision feature selection strategy.
         encoder_outputs = resolve_visual_encoder_outputs(
             encoder_outputs,
             None,
             select_layers=select_layers,
             max_possible_layers=self.config.num_hidden_layers,
+            last_hs_proc=self.last_hs_proc,
             feature_select_strategy=feature_select_strategy,
         )
 
+        return encoder_outputs
+
+    def maybe_layer_norm_and_apply_head(
+        self, encoder_outputs: torch.Tensor
+    ) -> torch.Tensor:
+        """Apply the post layer norm and head if they are enabled,
+        given the last hidden states tensor.
+
+        args:
+            encoder_outputs: The last hidden states from the visual encoder.
+        """
+        if self.post_layernorm is not None:
+            encoder_outputs = self.post_layernorm(encoder_outputs)
+        if self.head is not None:
+            encoder_outputs = self.head(encoder_outputs)
         return encoder_outputs
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -805,6 +816,11 @@ class SiglipVisionTransformer(nn.Module):
         for name, loaded_weight in weights:
             # post_layernorm is not needed in SiglipVisionTransformer
             if name.startswith("post_layernorm") and self.post_layernorm is None:
+                continue
+
+            # if the model configuration is not going to use
+            # the pooling head for inference, don't load its weights
+            if self.head is None and name.startswith("head"):
                 continue
 
             # omit layers when num_hidden_layers_override is set
@@ -834,11 +850,11 @@ class SiglipVisionModel(nn.Module):
         self,
         config: SiglipVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
         prefix: str = "",
+        use_head: bool | None = False,
     ) -> None:
         super().__init__()
 
@@ -846,10 +862,10 @@ class SiglipVisionModel(nn.Module):
         self.vision_model = SiglipVisionTransformer(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
             prefix=f"{prefix}.vision_model",
+            use_head=use_head,
         )
 
     def get_input_embeddings(self) -> nn.Module:
@@ -894,6 +910,11 @@ class SiglipVisionModel(nn.Module):
                 name.startswith("vision_model.post_layernorm")
                 and self.vision_model.post_layernorm is None
             ):
+                continue
+
+            # if the model configuration is not going to use
+            # the pooling head for inference, don't load its weights
+            if self.vision_model.head is None and name.startswith("vision_model.head"):
                 continue
 
             # omit layers when num_hidden_layers_override is set
@@ -996,7 +1017,7 @@ class SiglipTextEmbeddings(nn.Module):
 
 
 # Assume EOS token corresponds to CLS token in text model
-@default_pooling_type("CLS")
+@default_pooling_type(seq_pooling_type="CLS")
 @MULTIMODAL_REGISTRY.register_processor(
     SiglipMultiModalProcessor,
     info=SiglipProcessingInfo,
@@ -1019,9 +1040,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
         config: SiglipConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
-        self.multimodal_config = multimodal_config
 
         if hasattr(config, "num_labels"):
             config.num_labels = 0
@@ -1031,31 +1050,28 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
 
         self.text_embed_dim = text_config.hidden_size
         self.vision_embed_dim = vision_config.hidden_size
-
-        self.text_model = SiglipTextTransformer(
-            text_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "text_model"),
-        )
-        self.vision_model = SiglipVisionTransformer(
-            vision_config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
-
         self.text_projection_size = text_config.projection_size
+
+        with self._mark_language_model(vllm_config):
+            self.text_model = SiglipTextTransformer(
+                text_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "text_model"),
+            )
+
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_model = SiglipVisionTransformer(
+                vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+                use_head=None,  # Allows potential pooling head
+            )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
         self.pooler_config = pooler_config
 
-        self.pooler = DispatchPooler(
-            {
-                "token_embed": Pooler.for_token_embed(pooler_config),
-                "embed": Pooler.for_embed(pooler_config),
-            }
-        )
+        self.pooler = DispatchPooler.for_embedding(pooler_config)
 
         self._is_text_input = True
 
@@ -1128,7 +1144,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     ) -> torch.Tensor:
         if feature_select_strategy is None:
             feature_select_strategy = _get_vision_feature_select_strategy(
-                self.pooler_config.pooling_type
+                self.pooler_config.seq_pooling_type
             )
 
         pooled_output = self.vision_model(
@@ -1157,9 +1173,6 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         pixel_values = inputs["data"]
 
         return self.get_image_features(pixel_values)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.text_model
 
     def _embed_text_input_ids(
         self,

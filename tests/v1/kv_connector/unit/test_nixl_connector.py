@@ -185,18 +185,21 @@ class FakeNixlWrapper:
 def _make_fake_nixl_pkg():
     """Context manager that creates a temporary package making
        `from nixl._api import nixl_agent` resolve to our FakeNixlWrapper.
+       Also creates rixl package for ROCm compatibility.
 
     Automatically cleans up the temporary directory when done.
     """
     with tempfile.TemporaryDirectory() as td:
-        pkg_root = os.path.join(td, "nixl", "_api")
-        os.makedirs(pkg_root, exist_ok=True)
+        # Create both nixl and rixl packages for cross-platform compatibility
+        for pkg_name in ["nixl", "rixl"]:
+            pkg_root = os.path.join(td, pkg_name, "_api")
+            os.makedirs(pkg_root, exist_ok=True)
 
-        # Get the source code of FakeNixlWrapper class and dedent it
-        fake_nixl_source = inspect.getsource(FakeNixlWrapper)
-        fake_nixl_source = textwrap.dedent(fake_nixl_source)
+            # Get the source code of FakeNixlWrapper class and dedent it
+            fake_nixl_source = inspect.getsource(FakeNixlWrapper)
+            fake_nixl_source = textwrap.dedent(fake_nixl_source)
 
-        stub = f"""\
+            stub = f"""\
 # Copy of FakeNixlWrapper implementation for Ray workers
 import uuid
 from collections import defaultdict
@@ -206,16 +209,17 @@ from collections import defaultdict
 # Export as nixl_agent
 nixl_agent = FakeNixlWrapper
 """
-        with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
-            f.write(stub)
+            with open(os.path.join(pkg_root, "__init__.py"), "w") as f:
+                f.write(stub)
 
-        # Mock nixlXferTelemetry class
-        pkg_root2 = os.path.join(td, "nixl", "_bindings")
-        os.makedirs(pkg_root2, exist_ok=True)
-        with open(os.path.join(pkg_root2, "__init__.py"), "w") as f:
-            f.write("class nixlXferTelemetry: pass")
-        # touch parent package
-        open(os.path.join(td, "nixl", "__init__.py"), "w").close()
+            # Mock nixlXferTelemetry class
+            pkg_root2 = os.path.join(td, pkg_name, "_bindings")
+            os.makedirs(pkg_root2, exist_ok=True)
+            with open(os.path.join(pkg_root2, "__init__.py"), "w") as f:
+                f.write("class nixlXferTelemetry: pass")
+            # touch parent package
+            open(os.path.join(td, pkg_name, "__init__.py"), "w").close()
+
         yield td
 
 
@@ -514,11 +518,12 @@ class TestNixlHandshake:
                 )
             connector.bind_connector_metadata(metadata)
 
-            # Mimic maybe_setup_kv_connector in gpu_model_runner.
+            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
                 virtual_engine=0,
+                slot_mapping={},
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -527,7 +532,7 @@ class TestNixlHandshake:
                 f"start_load_kv took {_after_load - _before_load} seconds"
             )
 
-            # Mimic get_finished_kv_transfers in gpu_model_runner.
+            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
             _, done_recving = connector.get_finished(finished_req_ids=set())
             if len(done_recving) > 0:
                 assert request_id in done_recving
@@ -589,6 +594,7 @@ class TestNixlHandshake:
                 no_compile_layers={},
                 attn_metadata={},
                 virtual_engine=0,
+                slot_mapping={},
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -815,6 +821,7 @@ class TestNixlHandshake:
                 no_compile_layers={},
                 attn_metadata={},
                 virtual_engine=0,
+                slot_mapping={},
             )
             _before_load = time.perf_counter()
             connector.start_load_kv(dummy_ctx)
@@ -977,6 +984,7 @@ def test_kv_connector_stats(default_vllm_config, dist_init):
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1435,7 +1443,7 @@ def test_register_kv_caches(default_vllm_config, dist_init, attn_backend):
         patch(f"{nixl_module}.NixlWrapper") as mock_nixl_wrapper,
         patch(f"{nixl_module}.threading.Event"),
         patch(f"{nixl_module}.threading.Thread") as mock_thread,
-        patch(f"{nixl_module}.get_attn_backend") as mock_get_attn_backend,
+        patch(f"{nixl_module}.get_current_attn_backend") as mock_get_attn_backend,
     ):
         # Ensure get_attn_backend returns the correct value due to
         # _cached_get_attn_backend returning the backend from previous
@@ -1666,6 +1674,7 @@ def test_aborted_request_removed_from_worker_in_batch(default_vllm_config, dist_
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1701,6 +1710,8 @@ class FailingNixlWrapper(FakeNixlWrapper):
         self.fail_handshake = False
         self.fail_transfer_setup = False
         self.fail_send_notif = False
+        self.fail_transfer_state = False  # Returns "ERR" state
+        self.fail_transfer_exception = False  # Raises exception in check_xfer_state
 
     def add_remote_agent(self, agent_metadata: bytes) -> str:
         if self.fail_handshake:
@@ -1734,6 +1745,151 @@ class FailingNixlWrapper(FakeNixlWrapper):
         if self.fail_send_notif:
             raise RuntimeError("Simulated send_notif failure")
         return super().send_notif(agent_name, notif_msg)
+
+    def check_xfer_state(self, handle: int) -> str:
+        if self.fail_transfer_exception:
+            raise RuntimeError("Simulated check_xfer_state exception")
+        if self.fail_transfer_state:
+            return "ERR"  # Bad transfer state
+        return super().check_xfer_state(handle)
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper",
+    FailingNixlWrapper,
+)
+@pytest.mark.parametrize(
+    "failure_type,wrapper_config,needs_get_finished",
+    [
+        ("transfer_setup_failed", {"fail_transfer_setup": True}, False),
+        ("handshake_failed", {"fail_handshake": True}, False),
+        ("notification_failed", {"fail_send_notif": True}, False),
+        ("transfer_failed", {"fail_transfer_state": True}, True),
+        ("transfer_exception", {"fail_transfer_exception": True}, True),
+    ],
+)
+def test_transfer_failure_logging(
+    default_vllm_config,
+    dist_init,
+    failure_type,
+    wrapper_config,
+    needs_get_finished,
+):
+    """Test that transfer failures are logged with structured context.
+
+    Run with `pytest -sv` to see the log output.
+
+    Covers failure types:
+    - transfer_setup_failed: make_prepped_xfer fails
+    - handshake_failed: add_remote_agent fails during request handshake
+    - notification_failed: send_notif fails
+    - transfer_failed: check_xfer_state returns bad state (e.g., "ERR")
+    - transfer_exception: check_xfer_state raises exception
+    """
+    import logging
+
+    vllm_config = create_vllm_config()
+
+    connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config, connector.engine_id, hand_shake_latency=0.0
+    )
+
+    # Configure FailingNixlWrapper to fail in the specified way
+    for key, value in wrapper_config.items():
+        setattr(connector.connector_worker.nixl_wrapper, key, value)
+
+    request_id = f"test_{failure_type}_req"
+
+    # For notification_failed, we need empty local blocks
+    # (full cache hit path to trigger send_notif)
+    local_blocks = [] if failure_type == "notification_failed" else [10, 11, 12]
+    remote_blocks = [20, 21, 22]
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id=request_id,
+        local_block_ids=local_blocks,
+        kv_transfer_params={
+            "remote_block_ids": remote_blocks,
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+        },
+    )
+    connector.bind_connector_metadata(metadata)
+
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        virtual_engine=0,
+        slot_mapping={},
+    )
+
+    # Capture logs from the nixl_connector logger specifically
+    # vLLM loggers have propagate=False, so we need to capture directly
+    nixl_logger = logging.getLogger(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector"
+    )
+    captured_logs: list[logging.LogRecord] = []
+
+    class LogCapture(logging.Handler):
+        def emit(self, record):
+            captured_logs.append(record)
+
+    handler = LogCapture()
+    handler.setLevel(logging.ERROR)
+    nixl_logger.addHandler(handler)
+
+    try:
+        connector.start_load_kv(dummy_ctx)
+        # Process the ready_requests queue (for async handshake)
+        connector.bind_connector_metadata(NixlConnectorMetadata())
+        # Wait for async handshake to complete
+        time.sleep(0.2)
+        connector.start_load_kv(dummy_ctx)
+
+        # For transfer_failed/transfer_exception, the error happens in
+        # get_finished() when checking transfer state
+        if needs_get_finished:
+            connector.get_finished(finished_req_ids=set())
+    finally:
+        nixl_logger.removeHandler(handler)
+
+    # Print logs for manual comparison between commits
+    error_logs = [r for r in captured_logs if r.levelno >= logging.ERROR]
+    print("\n" + "=" * 60)
+    print(f"CAPTURED ERROR LOGS for {failure_type}:")
+    print("=" * 60)
+    for i, record in enumerate(error_logs):
+        print(f"\n--- Log {i + 1} ---")
+        print(f"Message: {record.message}")
+    print("=" * 60 + "\n")
+
+    assert len(error_logs) >= 1, f"Expected at least one error log for {failure_type}"
+
+    # Verify structured logging output (new format)
+    # Check that at least one log matches the expected format
+    all_messages = [r.message for r in error_logs]
+    combined_logs = "\n".join(all_messages)
+
+    assert any("NIXL transfer failure" in msg for msg in all_messages), (
+        f"Expected structured log format with 'NIXL transfer failure' prefix "
+        f"for {failure_type}. Got: {all_messages}"
+    )
+    assert any("failure_type" in msg for msg in all_messages), (
+        f"Expected 'failure_type' in logs. Got: {all_messages}"
+    )
+    assert any("Context:" in msg for msg in all_messages), (
+        f"Expected 'Context:' in logs. Got: {all_messages}"
+    )
+    # Check that the expected failure_type appears in at least one log
+    # Note: handshake_failed also triggers handshake_setup_failed
+    assert failure_type in combined_logs or (
+        failure_type == "handshake_failed" and "handshake_setup_failed" in combined_logs
+    ), f"Expected '{failure_type}' in logs. Got: {all_messages}"
 
 
 @patch(
@@ -1770,6 +1926,7 @@ def test_handshake_failure_returns_finished(default_vllm_config, dist_init):
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 
@@ -1820,6 +1977,7 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
         no_compile_layers={},
         attn_metadata={},
         virtual_engine=0,
+        slot_mapping={},
     )
     connector.start_load_kv(dummy_ctx)
 

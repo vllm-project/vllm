@@ -39,12 +39,12 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -383,46 +383,47 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         tokenizer = cached_tokenizer_from_config(model_config)
         self.image_token_id = tokenizer.vocab[_IMAGE_TOKEN]
 
-        self.sam_model = build_sam_vit_b()
-        clip_vision_config = CLIPVisionConfig(
-            hidden_size=1024,
-            intermediate_size=4096,
-            num_attention_heads=16,
-            num_hidden_layers=24,
-            image_size=224,
-            patch_size=14,
-            projection_dim=512,
-            layer_norm_eps=1e-5,
-        )
-        self.vision_model = DeepCLIPVisionTransformer(
-            config=clip_vision_config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
-
-        self.projector = MlpProjector(self.projector_config)
-        self.tile_tag = config.tile_tag
-        self.global_view_pos = config.global_view_pos
-
-        # special token for image token sequence format
-        n_embed = self.projector_config.n_embed
-        embed_std = 1 / torch.sqrt(torch.tensor(n_embed, dtype=torch.float32))
-        if self.tile_tag == "2D":
-            # <|view_separator|>, <|\n|>
-            self.image_newline = nn.Parameter(torch.randn(n_embed) * embed_std)
-            # This is a typo in original implementation
-            self.view_seperator = nn.Parameter(torch.randn(n_embed) * embed_std)
-        else:
-            raise ValueError(
-                f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
+        with self._mark_tower_model(vllm_config, "image"):
+            self.sam_model = build_sam_vit_b()
+            clip_vision_config = CLIPVisionConfig(
+                hidden_size=1024,
+                intermediate_size=4096,
+                num_attention_heads=16,
+                num_hidden_layers=24,
+                image_size=224,
+                patch_size=14,
+                projection_dim=512,
+                layer_norm_eps=1e-5,
+            )
+            self.vision_model = DeepCLIPVisionTransformer(
+                config=clip_vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
             )
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=self.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
+            self.projector = MlpProjector(self.projector_config)
+            self.tile_tag = config.tile_tag
+            self.global_view_pos = config.global_view_pos
+
+            # special token for image token sequence format
+            n_embed = self.projector_config.n_embed
+            embed_std = 1 / torch.sqrt(torch.tensor(n_embed, dtype=torch.float32))
+            if self.tile_tag == "2D":
+                # <|view_separator|>, <|\n|>
+                self.image_newline = nn.Parameter(torch.randn(n_embed) * embed_std)
+                # This is a typo in original implementation
+                self.view_seperator = nn.Parameter(torch.randn(n_embed) * embed_std)
+            else:
+                raise ValueError(
+                    f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
+                )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=self.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -438,19 +439,16 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
         if pixel_values is None or torch.sum(pixel_values).item() == 0:
             return None
 
-        if pixel_values is not None:
-            base_size = self.vision_config.image_size
-            return DeepseekOCRImagePixelInputs(
-                type="pixel_values",
-                data=pixel_values,
-                images_crop=images_crop,
-                images_spatial_crop=images_spatial_crop,
-                resolve_bindings={
-                    "base_size": base_size,
-                },
-            )
-
-        raise AssertionError("This line should be unreachable.")
+        base_size = self.vision_config.image_size
+        return DeepseekOCRImagePixelInputs(
+            type="pixel_values",
+            data=pixel_values,
+            images_crop=images_crop,
+            images_spatial_crop=images_spatial_crop,
+            resolve_bindings={
+                "base_size": base_size,
+            },
+        )
 
     def _encode_global_features(self, image_tensor: torch.Tensor) -> torch.Tensor:
         global_features_1 = self.sam_model(image_tensor)
@@ -555,9 +553,6 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
 
         return vision_features
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -567,7 +562,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

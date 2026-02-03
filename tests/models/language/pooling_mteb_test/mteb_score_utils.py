@@ -79,9 +79,9 @@ class VllmMtebCrossEncoder(MtebCrossEncoderMixin):
         outputs = self.llm.score(
             queries,
             corpus,
-            truncate_prompt_tokens=-1,
             use_tqdm=False,
             chat_template=self.chat_template,
+            tokenization_kwargs={"truncate_prompt_tokens": -1},
         )
         scores = np.array(outputs)
         scores = scores[np.argsort(r)]
@@ -117,8 +117,8 @@ class ScoreClientMtebEncoder(MtebCrossEncoderMixin):
             self.url,
             json={
                 "model": self.model_name,
-                "text_1": query,
-                "text_2": corpus,
+                "queries": query,
+                "documents": corpus,
                 "truncate_prompt_tokens": -1,
             },
         ).json()
@@ -254,8 +254,11 @@ def mteb_test_rerank_models(
         assert model_config.hf_config.num_labels == 1
 
         # Confirm whether the important configs in model_config are correct.
-        if model_info.pooling_type is not None:
-            assert model_config.pooler_config.pooling_type == model_info.pooling_type
+        pooler_config = model_config.pooler_config
+        if model_info.seq_pooling_type is not None:
+            assert pooler_config.seq_pooling_type == model_info.seq_pooling_type
+        if model_info.tok_pooling_type is not None:
+            assert pooler_config.tok_pooling_type == model_info.tok_pooling_type
         if model_info.attn_type is not None:
             assert model_config.attn_type == model_info.attn_type
         if model_info.is_prefix_caching_supported is not None:

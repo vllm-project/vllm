@@ -37,9 +37,12 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
+# --8<-- [start:transformers_fused_moe]
 @CustomOp.register("transformers_fused_moe")
 class TransformersFusedMoE(FusedMoE):
     """Custom FusedMoE for the Transformers modeling backend."""
+
+    # --8<-- [end:transformers_fused_moe]
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -115,7 +118,7 @@ direct_register_custom_op(
 
 class MoEMixin(MixtureOfExperts):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        self.check_version("5.0.0.dev0", "MoE models support")
+        self.check_version("5.0.0", "MoE models support")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 

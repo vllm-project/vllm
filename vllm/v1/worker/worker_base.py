@@ -12,7 +12,6 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -117,6 +116,12 @@ class WorkerBase:
     def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
         """Apply a function on the model inside this worker."""
         return fn(self.get_model())
+
+    def get_model_inspection(self) -> str:
+        """Return a transformers-style hierarchical view of the model."""
+        from vllm.model_inspection import format_model_inspection
+
+        return format_model_inspection(self.get_model())
 
     def load_model(self) -> None:
         """Load model onto target device."""
@@ -297,10 +302,11 @@ class WorkerWrapperBase:
 
             self.mm_receiver_cache = None
         else:
-            self.mm_receiver_cache = worker_receiver_cache_from_config(
-                vllm_config,
-                MULTIMODAL_REGISTRY,
-                shared_worker_lock,
+            self.mm_receiver_cache = (
+                MULTIMODAL_REGISTRY.worker_receiver_cache_from_config(
+                    vllm_config,
+                    shared_worker_lock,
+                )
             )
 
         with set_current_vllm_config(self.vllm_config):

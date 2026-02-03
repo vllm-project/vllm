@@ -6,8 +6,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
 from vllm.config import (
     CacheConfig,
     VllmConfig,
@@ -23,6 +21,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -43,6 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import MixtureOfExperts, SupportsPP
 from .utils import (
@@ -478,7 +478,7 @@ class MiMoV2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -693,7 +693,7 @@ class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

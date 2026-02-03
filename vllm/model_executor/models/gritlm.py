@@ -9,17 +9,20 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import (
     DispatchPooler,
-    Pooler,
-    PoolerNormalize,
-    PoolingMethod,
     PoolingParamsUpdate,
-    TokenPoolerHeadOutput,
-    TokenPoolingMethodOutput,
 )
+from vllm.model_executor.layers.pooler.activations import PoolerNormalize
+from vllm.model_executor.layers.pooler.seqwise import (
+    EmbeddingPoolerHead,
+    SequencePooler,
+    SequencePoolingMethod,
+    SequencePoolingMethodOutput,
+    get_seq_pooling_method,
+)
+from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.tasks import PoolingTask
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.v1.outputs import TokenPoolerOutput
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from .interfaces_base import default_pooling_type
@@ -27,7 +30,7 @@ from .interfaces_base import default_pooling_type
 logger = init_logger(__name__)
 
 
-class GritLMMeanPool(PoolingMethod):
+class GritLMMeanPool(SequencePoolingMethod):
     """As `MeanPool`, but only includes non-instruction tokens."""
 
     def __init__(self, model_config: ModelConfig):
@@ -151,7 +154,7 @@ class GritLMMeanPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolingMethodOutput:
+    ) -> SequencePoolingMethodOutput:
         prompt_lens = pooling_metadata.prompt_lens
         instr_lens = torch.tensor(
             [
@@ -174,37 +177,25 @@ class GritLMMeanPool(PoolingMethod):
         return pooled_data
 
 
-class GritLMPooler(Pooler):
+class GritLMPooler(SequencePooler):
     def __init__(self, model_config: ModelConfig):
-        super().__init__()
+        pooler_config = model_config.pooler_config
+        assert pooler_config is not None
 
-        self.pooling = GritLMMeanPool(model_config)
-        self.activation = PoolerNormalize()
-
-    def get_supported_tasks(self) -> Set[PoolingTask]:
-        return self.pooling.get_supported_tasks()
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return self.pooling.get_pooling_updates(task)
-
-    def head(
-        self,
-        pooled_data: TokenPoolingMethodOutput,
-        pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerHeadOutput:
-        return self.activation(pooled_data)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> TokenPoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
-        return pooled_data
+        super().__init__(
+            pooling=(
+                GritLMMeanPool(model_config)
+                if pooler_config.seq_pooling_type == "MEAN"
+                else get_seq_pooling_method(pooler_config.seq_pooling_type)
+            ),
+            head=EmbeddingPoolerHead(
+                head_dtype=model_config.head_dtype,
+                activation=PoolerNormalize(),
+            ),
+        )
 
 
-@default_pooling_type("MEAN")
+@default_pooling_type(seq_pooling_type="MEAN")
 class GritLM(LlamaForCausalLM):
     """This class implements the embedding model for parasail-ai/GritLM-7B-vllm.
 
@@ -245,7 +236,7 @@ class GritLM(LlamaForCausalLM):
         if pooler_config is not None:
             self.pooler = DispatchPooler(
                 {
-                    "token_embed": Pooler.for_token_embed(pooler_config),
+                    "token_embed": pooler_for_token_embed(pooler_config),
                     "embed": GritLMPooler(vllm_config.model_config),
                 }
             )

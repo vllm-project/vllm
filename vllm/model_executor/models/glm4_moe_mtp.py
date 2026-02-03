@@ -21,7 +21,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only GLM-4.5 MTP model compatible with HuggingFace weights."""
+"""Inference-only GLM-4.5, GLM-4.6, GLM-4.7 MTP
+model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
 
@@ -47,7 +48,6 @@ from .glm4_moe import (
     Glm4MoeDecoderLayer,
     get_spec_layer_idx_from_weight_name,
 )
-from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 
@@ -184,7 +184,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
         return logits
 
 
-class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
+class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -216,7 +216,7 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
@@ -268,11 +268,6 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 if spec_layer is None:
                     continue
                 name = self._rewrite_spec_layer_name(spec_layer, name)
-            # Some checkpoints include weight scale tensors for the LM head even
-            # when the quantized head isn't built. Skip them if the model does
-            # not expose a matching parameter to avoid KeyError during load.
-            if name.endswith(".weight_scale") and name not in params_dict:
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -314,6 +309,12 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # Some checkpoints include weight scale tensors for the
+                    # LM head even when the quantized head isn't built. Skip
+                    # them if the model does not expose a matching parameter
+                    # to avoid KeyError during load.
+                    if name.endswith(".weight_scale") and name not in params_dict:
                         continue
 
                     # According to DeepSeek-V3 Technical Report, MTP modules

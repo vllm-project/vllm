@@ -12,14 +12,14 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
-from vllm.attention.selector import _cached_get_attn_backend
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.rocm import RocmPlatform
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.selector import _cached_get_attn_backend
 
 
 @pytest.fixture(autouse=True)

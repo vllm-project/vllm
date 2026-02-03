@@ -14,19 +14,18 @@ from transformers import (
     CLIPVisionConfig,
 )
 
-from vllm.attention.layer import Attention
-from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -41,13 +40,13 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptIndexTargets,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -59,6 +58,7 @@ from .vision import (
     VisionFeatureSelectStrategy,
     VisionFeatureSelectStrategyStr,
     get_num_selected_vision_tokens,
+    is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
 )
 
@@ -145,7 +145,7 @@ class CLIPProcessingInfo(BaseProcessingInfo):
                 image_width=image_width,
                 image_height=image_height,
             ),
-            _get_vision_feature_select_strategy(pooler_config.pooling_type),
+            _get_vision_feature_select_strategy(pooler_config.seq_pooling_type),
         )
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -201,20 +201,20 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        if prompt and mm_data:
+        if prompt and mm_items:
             raise ValueError(
                 "CLIP accepts text-only or image-only inputs, not both! "
                 "Image-only inputs means passing an image with an empty text "
                 "prompt."
             )
 
-        if mm_data:
+        if mm_items:
             # For multi-modal data, the prompt after processing should
             # only contain the dummy image tokens
             tokenization_kwargs = {
@@ -224,7 +224,7 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
 
         return super().apply(
             prompt=prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
@@ -353,7 +353,6 @@ class CLIPAttention(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[Attention] | type[MMEncoderAttention],
@@ -372,11 +371,7 @@ class CLIPAttention(nn.Module):
             )
         self.scale = self.head_dim**-0.5
 
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
             head_size=self.head_dim,
@@ -405,7 +400,6 @@ class CLIPAttention(nn.Module):
                 self.head_dim,
                 self.scale,
                 prefix=f"{prefix}.attn",
-                multimodal_config=multimodal_config,
             )
         else:
             self.attn = attn_cls(
@@ -434,17 +428,12 @@ class CLIPMLP(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
 
         self.config = config
-        use_data_parallel = (
-            multimodal_config.mm_encoder_tp_mode == "data"
-            if multimodal_config
-            else False
-        )
+        use_data_parallel = is_vit_use_data_parallel()
         self.activation_fn = get_act_fn(config.hidden_act)
 
         self.fc1 = ColumnParallelLinear(
@@ -477,7 +466,6 @@ class CLIPEncoderLayer(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         prefix: str = "",
         attn_cls: type[Attention] | type[MMEncoderAttention],
@@ -487,7 +475,6 @@ class CLIPEncoderLayer(nn.Module):
         self.self_attn = CLIPAttention(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
         )
@@ -495,7 +482,6 @@ class CLIPEncoderLayer(nn.Module):
         self.mlp = CLIPMLP(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
         self.layer_norm2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -528,7 +514,6 @@ class CLIPEncoder(nn.Module):
         self,
         config: CLIPTextConfig | CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         num_hidden_layers_override: int | None = None,
         *,
         prefix: str = "",
@@ -548,7 +533,6 @@ class CLIPEncoder(nn.Module):
                 CLIPEncoderLayer(
                     config=config,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_cls=attn_cls,
                 )
@@ -658,7 +642,6 @@ class CLIPVisionTransformer(nn.Module):
         self,
         config: CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -678,7 +661,6 @@ class CLIPVisionTransformer(nn.Module):
         self.encoder = CLIPEncoder(
             config=config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
             attn_cls=MMEncoderAttention,
@@ -780,7 +762,6 @@ class CLIPVisionModel(nn.Module):
         self,
         config: CLIPVisionConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         *,
         num_hidden_layers_override: int | None = None,
         require_post_norm: bool | None = None,
@@ -791,7 +772,6 @@ class CLIPVisionModel(nn.Module):
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
             prefix=f"{prefix}.vision_model",
@@ -819,7 +799,7 @@ class CLIPVisionModel(nn.Module):
 
 
 # Assume EOS token corresponds to LAST token in text model
-@default_pooling_type("LAST")
+@default_pooling_type(seq_pooling_type="LAST")
 @MULTIMODAL_REGISTRY.register_processor(
     CLIPMultiModalProcessor,
     info=CLIPProcessingInfo,
@@ -853,39 +833,35 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         self.text_embed_dim = text_config.hidden_size
         self.vision_embed_dim = vision_config.hidden_size
 
-        self.text_model = CLIPTextTransformer(
-            text_config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "text_model"),
-        )
-        self.vision_model = CLIPVisionTransformer(
-            vision_config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            prefix=maybe_prefix(prefix, "vision_model"),
-        )
+        with self._mark_language_model(vllm_config):
+            self.text_model = CLIPTextTransformer(
+                text_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "text_model"),
+            )
+            self.text_projection = nn.Linear(
+                self.text_embed_dim,
+                self.projection_dim,
+                bias=False,
+            )
 
-        self.visual_projection = nn.Linear(
-            self.vision_embed_dim,
-            self.projection_dim,
-            bias=False,
-        )
-        self.text_projection = nn.Linear(
-            self.text_embed_dim,
-            self.projection_dim,
-            bias=False,
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_model = CLIPVisionTransformer(
+                vision_config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_model"),
+            )
+            self.visual_projection = nn.Linear(
+                self.vision_embed_dim,
+                self.projection_dim,
+                bias=False,
+            )
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
         self.pooler_config = pooler_config
 
-        self.pooler = DispatchPooler(
-            {
-                "token_embed": Pooler.for_token_embed(pooler_config),
-                "embed": Pooler.for_embed(pooler_config),
-            }
-        )
+        self.pooler = DispatchPooler.for_embedding(pooler_config)
 
         # Assumes that self.forward is called after self.embed_input_ids
         self._is_text_input = True
@@ -913,7 +889,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     ) -> torch.Tensor:
         if feature_select_strategy is None:
             feature_select_strategy = _get_vision_feature_select_strategy(
-                self.pooler_config.pooling_type
+                self.pooler_config.seq_pooling_type
             )
 
         pooled_output = self.vision_model(
@@ -944,9 +920,6 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         pixel_values = inputs["data"]
 
         return self.get_image_features(pixel_values)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.text_model
 
     def _embed_text_input_ids(
         self,
