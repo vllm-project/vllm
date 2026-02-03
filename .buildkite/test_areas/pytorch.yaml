@@ -3,7 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: PyTorch Compilation Unit Tests
-  timeout_in_minutes: 30
+  timeout_in_minutes: 10
   source_file_dependencies:
     - vllm/
     - tests/compile
@@ -16,6 +16,14 @@ steps:
   # However, find does not normally propagate error codes, so we combine it with xargs
   # (using -0 for proper path handling)
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
+
+- label: PyTorch Compilation Passes Unit Tests
+  timeout_in_minutes: 20
+  source_file_dependencies:
+    - vllm/
+    - tests/compile
+  commands:
+  - pytest -s -v compile/passes --ignore compile/passes/distributed
 
 - label: PyTorch Fullgraph Smoke Test
   timeout_in_minutes: 35

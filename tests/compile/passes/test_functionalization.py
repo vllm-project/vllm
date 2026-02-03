@@ -5,6 +5,8 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from tests.compile.backend import TestBackend
+from tests.utils import TestFP8Layer
 from vllm.compilation.passes.fusion.act_quant_fusion import (
     ActivationQuantFusionPass,
 )
@@ -29,9 +31,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
-
-from ..utils import TestFP8Layer
-from .backend import TestBackend
 
 TEST_FP8 = current_platform.supports_fp8()
 FP8_DTYPE = current_platform.fp8_dtype()

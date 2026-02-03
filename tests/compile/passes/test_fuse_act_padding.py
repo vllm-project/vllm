@@ -6,6 +6,7 @@ import pytest
 import torch
 
 import vllm.config
+from tests.compile.backend import TestBackend
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
@@ -18,8 +19,6 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.utils import rocm_unquantized_gemm
-
-from .backend import TestBackend
 
 
 class TestModel(torch.nn.Module):

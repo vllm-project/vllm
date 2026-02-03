@@ -6,6 +6,8 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from tests.compile.backend import TestBackend
+from tests.utils import TestFP8Layer, has_module_attribute, multi_gpu_test
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.allreduce_rms_fusion import AllReduceFusionPass
 from vllm.compilation.passes.utility.fix_functionalization import (
@@ -34,9 +36,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
-
-from ...utils import TestFP8Layer, has_module_attribute, multi_gpu_test
-from ..backend import TestBackend
 
 
 class TestAllReduceRMSNormModel(torch.nn.Module):

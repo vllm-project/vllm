@@ -5,10 +5,9 @@ import pytest
 import torch
 
 import vllm
+from tests.compile.backend import TestBackend
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, CompilationMode, PassConfig, VllmConfig
-
-from .backend import TestBackend
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])

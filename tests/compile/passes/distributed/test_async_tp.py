@@ -7,6 +7,13 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from tests.compile.backend import TestBackend
+from tests.models.registry import HF_EXAMPLE_MODELS
+from tests.utils import (
+    compare_two_settings,
+    create_new_process_for_each_test,
+    multi_gpu_test,
+)
 from vllm.compilation.passes.fusion.collective_fusion import AsyncTPPass
 from vllm.config import (
     CompilationConfig,
@@ -28,14 +35,6 @@ from vllm.distributed.parallel_state import (
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
-
-from ...models.registry import HF_EXAMPLE_MODELS
-from ...utils import (
-    compare_two_settings,
-    create_new_process_for_each_test,
-    multi_gpu_test,
-)
-from ..backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
 

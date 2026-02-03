@@ -7,6 +7,8 @@ import torch
 
 import vllm.config
 import vllm.plugins
+from tests.compile.backend import TestBackend
+from tests.utils import TestBlockFP8Layer, TestFP8Layer
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
@@ -54,9 +56,6 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     is_deep_gemm_supported,
 )
-
-from ..utils import TestBlockFP8Layer, TestFP8Layer
-from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
