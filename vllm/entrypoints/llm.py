@@ -1354,7 +1354,7 @@ class LLM:
         )
 
         encoded_output_1 = encoded_output[0 : len(data_1)]
-        encoded_output_2 = encoded_output[len(data_2) :]
+        encoded_output_2 = encoded_output[len(data_1) :]
 
         if len(encoded_output_1) == 1:
             encoded_output_1 = encoded_output_1 * len(encoded_output_2)
