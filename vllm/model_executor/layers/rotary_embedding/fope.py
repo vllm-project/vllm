@@ -36,13 +36,13 @@ class FourierRotaryEmbedding(RotaryEmbedding):
         self.fope_init_factor = fope_init_factor
 
         super().__init__(
-            head_size,
-            rotary_dim,
-            max_position_embeddings,
-            base,
-            is_neox_style,
-            dtype,
-            init_cache,
+            head_size=head_size,
+            rotary_dim=rotary_dim,
+            max_position_embeddings=max_position_embeddings,
+            base=base,
+            is_neox_style=is_neox_style,
+            dtype=dtype,
+            init_cache=init_cache,
         )
 
         # setup buffers and parameters
