@@ -58,7 +58,7 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
             attn = getattr(layer.self_attn, "attn", None)
             if attn is not None and hasattr(attn, "get_kv_cache_spec"):
                 # Patch to return None (encoder-only doesn't need KV cache)
-                attn.get_kv_cache_spec = lambda vllm_config, self=attn: None
+                attn.get_kv_cache_spec = lambda *args, **kwargs: None
 
     def forward(self, *args, **kwargs):
         out = super().forward(*args, **kwargs)
