@@ -570,9 +570,7 @@ void swigluoai_and_mul(torch::Tensor& out,    // [..., d]
 namespace vllm {
 
 // Element-wise activation kernel template.
-template <typename scalar_t, typename packed_t,
-          scalar_t (*ACT_FN)(const scalar_t&),
-          packed_t (*PACKED_ACT_FN)(const packed_t&), bool use_vec,
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&), bool use_vec,
           bool use_256b = false>
 __global__ void activation_kernel(
     scalar_t* __restrict__ out,          // [..., d]
@@ -585,10 +583,10 @@ __global__ void activation_kernel(
     // Fast path: 128-bit/256-bit vectorized loop
     using vec_t = typename VecTraits<use_256b>::vec_t;
     constexpr int ARCH_MAX_VEC_SIZE = VecTraits<use_256b>::ARCH_MAX_VEC_SIZE;
-    constexpr int VEC_SIZE = ARCH_MAX_VEC_SIZE / sizeof(packed_t);
+    constexpr int VEC_SIZE = ARCH_MAX_VEC_SIZE / sizeof(scalar_t);
     const vec_t* in_vec = reinterpret_cast<const vec_t*>(in_ptr);
     vec_t* out_vec = reinterpret_cast<vec_t*>(out_ptr);
-    const int num_vecs = d / 2 / VEC_SIZE;
+    const int num_vecs = d / VEC_SIZE;
 
     for (int i = threadIdx.x; i < num_vecs; i += blockDim.x) {
       vec_t v;
@@ -597,10 +595,10 @@ __global__ void activation_kernel(
       } else {
         v = VLLM_LDG(&in_vec[i]);
       }
-      auto* vp = reinterpret_cast<packed_t*>(&v);
+      auto* vp = reinterpret_cast<scalar_t*>(&v);
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; j++) {
-        vp[j] = PACKED_ACT_FN(vp[j]);
+        vp[j] = ACT_FN(vp[j]);
       }
       if constexpr (use_256b) {
         st256(v, &out_vec[i]);
@@ -620,50 +618,42 @@ __global__ void activation_kernel(
 }  // namespace vllm
 
 // Launch element-wise activation kernel.
-#define LAUNCH_ACTIVATION_KERNEL(KERNEL, PACKED_KERNEL)                       \
-  auto dtype = input.scalar_type();                                           \
-  int d = input.size(-1);                                                     \
-  int64_t num_tokens = input.numel() / input.size(-1);                        \
-  if (num_tokens == 0) {                                                      \
-    return;                                                                   \
-  }                                                                           \
-  dim3 grid(num_tokens);                                                      \
-  int cc_major = at::cuda::getCurrentDeviceProperties()->major;               \
-  int support_vec = (cc_major >= 10 && num_tokens > 128) ? 32 : 16;           \
-  int vec_size = support_vec / at::elementSize(dtype);                        \
-  const bool use_vec = (d % vec_size == 0);                                   \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));           \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();               \
-  if (use_vec) {                                                              \
-    dim3 block(std::min(d / vec_size, 1024));                                 \
-    if (cc_major >= 10 && num_tokens > 128) {                                 \
-      VLLM_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {          \
-        vllm::activation_kernel<                                              \
-            scalar_t, vllm::PackedTraits<scalar_t>::packed_t,                 \
-            KERNEL<scalar_t>,                                                 \
-            PACKED_KERNEL<typename vllm::PackedTraits<scalar_t>::packed_t>,   \
-            true, true><<<grid, block, 0, stream>>>(                          \
-            out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d);         \
-      });                                                                     \
-    } else {                                                                  \
-      VLLM_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {          \
-        vllm::activation_kernel<                                              \
-            scalar_t, vllm::PackedTraits<scalar_t>::packed_t,                 \
-            KERNEL<scalar_t>,                                                 \
-            PACKED_KERNEL<typename vllm::PackedTraits<scalar_t>::packed_t>,   \
-            true, false><<<grid, block, 0, stream>>>(                         \
-            out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d);         \
-      });                                                                     \
-    }                                                                         \
-  } else {                                                                    \
-    dim3 block(std::min(d, 1024));                                            \
-    VLLM_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {            \
-      vllm::activation_kernel<                                                \
-          scalar_t, vllm::PackedTraits<scalar_t>::packed_t, KERNEL<scalar_t>, \
-          PACKED_KERNEL<typename vllm::PackedTraits<scalar_t>::packed_t>,     \
-          false><<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),        \
-                                             input.data_ptr<scalar_t>(), d);  \
-    });                                                                       \
+#define LAUNCH_ACTIVATION_KERNEL(KERNEL)                                 \
+  auto dtype = input.scalar_type();                                      \
+  int d = input.size(-1);                                                \
+  int64_t num_tokens = input.numel() / input.size(-1);                   \
+  if (num_tokens == 0) {                                                 \
+    return;                                                              \
+  }                                                                      \
+  dim3 grid(num_tokens);                                                 \
+  int cc_major = at::cuda::getCurrentDeviceProperties()->major;          \
+  int support_vec = (cc_major >= 10 && num_tokens > 128) ? 32 : 16;      \
+  int vec_size = support_vec / at::elementSize(dtype);                   \
+  const bool use_vec = (d % vec_size == 0);                              \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));      \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();          \
+  if (use_vec) {                                                         \
+    dim3 block(std::min(d / vec_size, 1024));                            \
+    if (cc_major >= 10 && num_tokens > 128) {                            \
+      VLLM_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {     \
+        vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, true, true>  \
+            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),       \
+                                         input.data_ptr<scalar_t>(), d); \
+      });                                                                \
+    } else {                                                             \
+      VLLM_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {     \
+        vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, true, false> \
+            <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),       \
+                                         input.data_ptr<scalar_t>(), d); \
+      });                                                                \
+    }                                                                    \
+  } else {                                                               \
+    dim3 block(std::min(d, 1024));                                       \
+    VLLM_DISPATCH_FLOATING_TYPES(dtype, "activation_kernel", [&] {       \
+      vllm::activation_kernel<scalar_t, KERNEL<scalar_t>, false>         \
+          <<<grid, block, 0, stream>>>(out.data_ptr<scalar_t>(),         \
+                                       input.data_ptr<scalar_t>(), d);   \
+    });                                                                  \
   }
 
 namespace vllm {
@@ -675,19 +665,6 @@ __device__ __forceinline__ T gelu_new_kernel(const T& x) {
   return ((T)0.5) * x * (((T)1.0) + t);
 }
 
-template <typename packed_t>
-__device__ __forceinline__ packed_t
-packed_gelu_new_kernel(const packed_t& val) {
-  float2 fval = cast_to_float2(val);
-  float x3 = fval.x * fval.x * fval.x;
-  float tx = tanhf(0.79788456f * (fval.x + (0.044715f * x3)));
-  fval.x = 0.5f * fval.x * (1.0f + tx);
-  float y3 = fval.y * fval.y * fval.y;
-  float ty = tanhf(0.79788456f * (fval.y + (0.044715f * y3)));
-  fval.y = 0.5f * fval.y * (1.0f + ty);
-  return cast_to_packed<packed_t>(fval);
-}
-
 template <typename T>
 __device__ __forceinline__ T gelu_fast_kernel(const T& x) {
   const float f = (float)x;
@@ -696,33 +673,10 @@ __device__ __forceinline__ T gelu_fast_kernel(const T& x) {
   return ((T)0.5) * x * (((T)1.0) + t);
 }
 
-template <typename packed_t>
-__device__ __forceinline__ packed_t
-packed_gelu_fast_kernel(const packed_t& val) {
-  float2 fval = cast_to_float2(val);
-  float tx =
-      tanhf((fval.x * 0.79788456f) * (1.0f + (0.044715f * fval.x) * fval.x));
-  fval.x = 0.5f * fval.x * (1.0f + tx);
-  float ty =
-      tanhf((fval.y * 0.79788456f) * (1.0f + (0.044715f * fval.y) * fval.y));
-  fval.y = 0.5f * fval.y * (1.0f + ty);
-  return cast_to_packed<packed_t>(fval);
-}
-
 template <typename T>
 __device__ __forceinline__ T gelu_quick_kernel(const T& x) {
   // x * sigmoid(1.702 * x)
   return (T)(((float)x) / (1.0f + expf(-1.702f * (float)x)));
-}
-
-template <typename packed_t>
-__device__ __forceinline__ packed_t
-packed_gelu_quick_kernel(const packed_t& val) {
-  // x * sigmoid(1.702 * x)
-  float2 fval = cast_to_float2(val);
-  fval.x = fval.x / (1.0f + expf(-1.702f * fval.x));
-  fval.y = fval.y / (1.0f + expf(-1.702f * fval.y));
-  return cast_to_packed<packed_t>(fval);
 }
 
 }  // namespace vllm
@@ -730,19 +684,17 @@ packed_gelu_quick_kernel(const packed_t& val) {
 void gelu_new(torch::Tensor& out,    // [..., d]
               torch::Tensor& input)  // [..., d]
 {
-  LAUNCH_ACTIVATION_KERNEL(vllm::gelu_new_kernel, vllm::packed_gelu_new_kernel);
+  LAUNCH_ACTIVATION_KERNEL(vllm::gelu_new_kernel);
 }
 
 void gelu_fast(torch::Tensor& out,    // [..., d]
                torch::Tensor& input)  // [..., d]
 {
-  LAUNCH_ACTIVATION_KERNEL(vllm::gelu_fast_kernel,
-                           vllm::packed_gelu_fast_kernel);
+  LAUNCH_ACTIVATION_KERNEL(vllm::gelu_fast_kernel);
 }
 
 void gelu_quick(torch::Tensor& out,    // [..., d]
                 torch::Tensor& input)  // [..., d]
 {
-  LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel,
-                           vllm::packed_gelu_quick_kernel);
+  LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel);
 }
