@@ -16,12 +16,13 @@ if current_platform.is_cuda():
     )
 
 elif current_platform.is_xpu():
+    from vllm import _custom_ops as ops
+
+    reshape_and_cache_flash = ops.reshape_and_cache_flash
     from vllm._ipex_ops import ipex_ops
 
-    reshape_and_cache_flash = ipex_ops.reshape_and_cache_flash
     flash_attn_varlen_func = ipex_ops.flash_attn_varlen_func  # type: ignore[assignment]
     get_scheduler_metadata = ipex_ops.get_scheduler_metadata  # type: ignore[assignment]
-
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]

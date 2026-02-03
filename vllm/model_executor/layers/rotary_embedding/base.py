@@ -232,17 +232,14 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        from vllm._ipex_ops import ipex_ops as ops
-
         self._match_cos_sin_cache_dtype(query)
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
         if key is None:
-            # XPU kernel doesn't support key=None so fall back to native impl
-            # TODO(sarckk): add support for optional key in
-            # ipex.llm.functional.rotary_embedding_batched
             return self.forward_native(positions, query, key)
         else:
+            from vllm import _custom_ops as ops
+
             ops.rotary_embedding(
                 positions,
                 query,
