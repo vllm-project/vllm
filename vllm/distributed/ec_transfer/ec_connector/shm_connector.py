@@ -6,6 +6,7 @@ import os
 import queue
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import threading
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -36,11 +37,11 @@ def _rpc_receive_handle(feat_key: str, handle_data: Any) -> str:
         feat_key (str): Feature key for the cached data (corresponds to mm_hash).
         handle_data (Any): Data to be stored in the cache (encoder cache tensor).
     """
-    if _LOCAL_CONNECTOR is not None and hasattr(_LOCAL_CONNECTOR, 'handle_caches'):
+    if _LOCAL_CONNECTOR is not None and hasattr(_LOCAL_CONNECTOR, "handle_caches"):
         _LOCAL_CONNECTOR.handle_caches[feat_key] = handle_data
         logger.debug("RPC received and cached key: %s", feat_key)
         return "ACK"
-    
+
     return "NOT_READY"
 
 
@@ -72,7 +73,7 @@ class SHMConnector(ECConnectorBase):
 
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
-                
+  
         self.handle_caches: dict[str, Any] = {}
         self._mm_datas_need_loads: dict[str, int] = {}
 
@@ -137,6 +138,7 @@ class SHMConnector(ECConnectorBase):
 
         if transfer_config.ec_role == "ec_producer":
             self.send_queue: queue.Queue[tuple[str, torch.Tensor]] = queue.Queue()
+            self._stop_event = threading.Event()
             self.consumer_names = [
                 f"worker_{i}" for i in range(producer_size, self.rpc_world_size)
             ]
@@ -149,58 +151,81 @@ class SHMConnector(ECConnectorBase):
         logger.info("SHMConnector %s initialized successfully.", self.rpc_name)
 
     def producer_run(self):
-        while True:
-            try:
-                feat_key, tensor = self.send_queue.get()
-                shared_handle = reduce_tensor(tensor.detach().clone())
-                futs = []
-                for worker_name in self.consumer_names:
-                    fut = rpc.rpc_async(
-                        to=worker_name,
-                        func=_rpc_receive_handle,
-                        args=(feat_key, shared_handle),
-                        timeout=20.0,
-                    )
-                    futs.append((worker_name, fut))
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    item = self.send_queue.get(timeout=1.0)
+                    if item is None:
+                        logger.info("Producer thread received sentinel value, exiting...")
+                        self.send_queue.task_done()
+                        break
+                    feat_key, tensor = item
+                    shared_handle = reduce_tensor(tensor.detach().clone())
+                    futs = []
+                    for worker_name in self.consumer_names:
+                        fut = rpc.rpc_async(
+                            to=worker_name,
+                            func=_rpc_receive_handle,
+                            args=(feat_key, shared_handle),
+                            timeout=20.0,
+                        )
+                        futs.append((worker_name, fut))
 
-                all_received = True
-                for worker_name, fut in futs:
-                    try:
-                        result = fut.wait()
-                        if result != "ACK":
-                            logger.warning(
-                                "Worker %s did not ACK %s, got: %s",
+                    all_received = True
+                    for worker_name, fut in futs:
+                        try:
+                            result = fut.wait()
+                            if result != "ACK":
+                                logger.warning(
+                                    "Worker %s did not ACK %s, got: %s",
+                                    worker_name,
+                                    feat_key,
+                                    result,
+                                )
+                                all_received = False
+                        except Exception as e:
+                            logger.error(
+                                "Critical: Worker %s failed to receive %s. Error: %s",
                                 worker_name,
                                 feat_key,
-                                result,
+                                e,
                             )
                             all_received = False
-                    except Exception as e:
-                        logger.error(
-                            "Critical: Worker %s failed to receive %s. Error: %s",
-                            worker_name,
+
+                    if all_received:
+                        self._generate_filename_debug(feat_key)
+                        logger.info(
+                            "Broadcast Success: %s received by all %d workers.",
                             feat_key,
-                            e,
+                            len(self.consumer_names),
                         )
-                        all_received = False
+                    else:
+                        logger.error(
+                            "Broadcast Incomplete: %s might be missing on some workers.",
+                            feat_key,
+                        )
 
-                if all_received:
-                    self._generate_filename_debug(feat_key)
-                    logger.info(
-                        "Broadcast Success: %s received by all %d workers.",
-                        feat_key,
-                        len(self.consumer_names),
-                    )
-                else:
-                    logger.error(
-                        "Broadcast Incomplete: %s might be missing on some workers.",
-                        feat_key,
-                    )
+                    self.send_queue.task_done()
 
-                self.send_queue.task_done()
-                
-            except Exception as e:
-                logger.error("Producer thread fatal error: %s", e)
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    logger.error("Single task process failed, continue next: %s", e, exc_info=True)
+                    if 'item' in locals():
+                        self.send_queue.task_done()
+                    continue
+        except Exception as e:
+            logger.fatal("Fatal error in producer thread (exit immediately): %s", e, exc_info=True)
+            self._stop_event.set()
+        finally:
+            logger.info("Producer thread cleanup, rank: %s", self.rpc_rank)
+            while not self.send_queue.empty():
+                try:
+                    self.send_queue.get_nowait()
+                    self.send_queue.task_done()
+                except queue.Empty:
+                    break
+            logger.info("Producer thread exited completely, rank: %s", self.rpc_rank)
 
     def start_load_caches(self, encoder_cache, **kwargs) -> None:
         """
@@ -244,7 +269,7 @@ class SHMConnector(ECConnectorBase):
                 logger.debug("recv tensor for hash %s", mm_data.mm_hash)
             except Exception as e:
                 logger.error(
-                    "Unhandled Cache Miss %s, error code: %s", mm_data.mm_hash, str(e)
+                    "Failed to reconstruct tensor for %s despite handle existence, error code: %s", mm_data.mm_hash, str(e)
                 )
 
     def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
@@ -280,7 +305,7 @@ class SHMConnector(ECConnectorBase):
             return False
         else:
             return self._found_match_for_mm_data(identifier)
-    
+
     def update_state_after_alloc(
         self,
         request: "Request",
@@ -367,10 +392,7 @@ class SHMConnector(ECConnectorBase):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        if not self.is_producer:
-            for request_id in finished_req_ids:
-                self.handle_caches.pop(request_id + "-image-0", None)
-        else:
+        if self.is_producer:
             for request_id in finished_req_ids:
                 gc.collect()
                 torch.cuda.empty_cache()
