@@ -11,15 +11,14 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
-    MLACommonMetadataBuilder,
 )
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.triton_utils import triton
 from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backend import (
-    AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     is_quantized_kv_cache,
@@ -27,12 +26,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 logger = init_logger(__name__)
-
-
-class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
 
 
 class TritonMLABackend(MLACommonBackend):
@@ -45,10 +38,6 @@ class TritonMLABackend(MLACommonBackend):
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
-
-    @staticmethod
-    def get_builder_cls() -> type["TritonMLAMetadataBuilder"]:
-        return TritonMLAMetadataBuilder
 
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
@@ -152,8 +141,24 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if vllm_is_batch_invariant():
             num_kv_splits = 1
         else:
-            heads_per_64 = (q_num_heads + 63) // 64
-            num_kv_splits = min(max(self._sm_count // heads_per_64, 1), 16)
+            max_seq_len = attn_metadata.max_seq_len
+            work_size = max_seq_len * B
+
+            # Minimum work per split
+            # hardware dependent
+            min_work_per_split = 256
+
+            ideal_splits = max(1, work_size // min_work_per_split)
+
+            # use power of 2 to avoid excessive kernel instantiations
+            ideal_splits = triton.next_power_of_2(ideal_splits)
+
+            # Calculate SM-based maximum splits with occupancy multiplier
+            # 2-4x allows multiple blocks per SM for latency hiding
+            # hardware dependent
+            occupancy_multiplier = 2
+            max_splits = self._sm_count * occupancy_multiplier
+            num_kv_splits = min(ideal_splits, max_splits)
 
         # TODO(lucas) Allocate ahead of time
         attn_logits = torch.empty(
