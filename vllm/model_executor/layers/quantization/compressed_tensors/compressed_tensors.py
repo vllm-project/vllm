@@ -374,6 +374,24 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
 
     @staticmethod
+    def _is_xpu_w8a16_fp8(
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+    ) -> bool:
+        if not current_platform.is_xpu():
+            return False
+            
+        is_8_bits = weight_quant.num_bits == 8
+
+        is_fp8_type = (
+            weight_quant.type == "float" 
+            or weight_quant.zp_dtype == torch.float8_e4m3fn
+        )
+        
+        is_weight_only = (input_quant is None)
+
+        return is_8_bits and is_fp8_type and is_weight_only
+
+    @staticmethod
     def _is_mxfp4(quant_args: QuantizationArgs) -> bool:
         if quant_args is None:
             return False
