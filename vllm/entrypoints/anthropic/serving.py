@@ -543,7 +543,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     error_response = AnthropicStreamEvent(
                         type="error",
                         error=AnthropicError(
-                            type="api_error",
+                            type="internal_error",
                             message="Invalid data format received",
                         ),
                     )
@@ -555,7 +555,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             logger.exception("Error in message stream converter.")
             error_response = AnthropicStreamEvent(
                 type="error",
-                error=AnthropicError(type="api_error", message=str(e)),
+                error=AnthropicError(type="internal_error", message=str(e)),
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
