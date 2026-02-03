@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ==============================================================================
 # cards_topology.py
 #
@@ -17,10 +19,10 @@
 #
 # ==============================================================================
 import os
-import re
 import shutil
 import subprocess
-from typing import Optional, Tuple, Dict
+
+import regex as re
 
 
 class CardsTopology:
@@ -33,7 +35,9 @@ class CardsTopology:
     def _run_cmd(self, cmd: str, check: bool = True) -> str:
         """Run a shell command and return stdout."""
         try:
-            result = subprocess.run(cmd, shell=True, check=check, capture_output=True, text=True)
+            result = subprocess.run(
+                cmd, shell=True, check=check, capture_output=True, text=True
+            )
             return result.stdout
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Command failed: {cmd}\n{e.stderr}") from e
@@ -53,19 +57,26 @@ class CardsTopology:
         s = (raw or "").strip()
 
         # Fix broken double-domain: 0000:00000000:18:00.0
-        m = re.fullmatch(r"([0-9a-fA-F]{4}):([0-9a-fA-F]{8}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}\.[0-7])", s)
+        m = re.fullmatch(
+            r"([0-9a-fA-F]{4}):([0-9a-fA-F]{8}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}\.[0-7])",
+            s,
+        )
         if m:
             _, dom8, bb, dd_fn = m.groups()
             return f"{dom8[-4:]}:{bb}:{dd_fn}".lower()
 
         # 8-hex domain: 00000000:18:00.0
-        m = re.fullmatch(r"([0-9a-fA-F]{8}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}\.[0-7])", s)
+        m = re.fullmatch(
+            r"([0-9a-fA-F]{8}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}\.[0-7])", s
+        )
         if m:
             dom8, bb, dd_fn = m.groups()
             return f"{dom8[-4:]}:{bb}:{dd_fn}".lower()
 
         # 4-hex domain: 0000:18:00.0
-        m = re.fullmatch(r"([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}\.[0-7])", s)
+        m = re.fullmatch(
+            r"([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2}\.[0-7])", s
+        )
         if m:
             return s.lower()
 
@@ -79,7 +90,7 @@ class CardsTopology:
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _clean_numa_node(v: Optional[str]) -> Optional[str]:
+    def _clean_numa_node(v: str | None) -> str | None:
         if v is None:
             return None
         s = str(v).strip()
@@ -88,10 +99,10 @@ class CardsTopology:
         return s
 
     # ------------------------------------------------------------------
-    def _get_sysfs_info(self, bus_id: str) -> dict[str, Optional[str]]:
+    def _get_sysfs_info(self, bus_id: str) -> dict[str, str | None]:
         """Fetch NUMA node and local CPU list from sysfs."""
         sys_path = f"/sys/bus/pci/devices/{bus_id}"
-        info: dict[str, Optional[str]] = {
+        info: dict[str, str | None] = {
             "numa_node": None,
             "local_cpulist": None,
             "_sysfs_path": sys_path,
@@ -120,7 +131,9 @@ class CardsTopology:
         |   0  HL-325L             N/A  | 0000:97:00.0     N/A | ...
         """
         cards = []
-        pattern = re.compile(r"^\|\s*(\d+)\s+([A-Z0-9-]+)\s+N/A\s+\|\s*([0-9a-fA-F:.]+)\s+N/A\s*\|")
+        pattern = re.compile(
+            r"^\|\s*(\d+)\s+([A-Z0-9-]+)\s+N/A\s+\|\s*([0-9a-fA-F:.]+)\s+N/A\s*\|"
+        )
         for line in text.splitlines():
             match = pattern.match(line)
             if not match:
@@ -184,13 +197,15 @@ class CardsTopology:
         return cards
 
     # ------------------------------------------------------------------
-    def _parse_nvidia_topo_affinity(self, topo_text: str) -> Tuple[Dict[int, str], Dict[int, str]]:
+    def _parse_nvidia_topo_affinity(
+        self, topo_text: str
+    ) -> tuple[dict[int, str], dict[int, str]]:
         """
         Robustly parse `nvidia-smi topo -m` for CPU Affinity and NUMA Affinity.
         Uses character-column slicing based on header substring offsets.
         """
-        cpu_aff: Dict[int, str] = {}
-        numa_aff: Dict[int, str] = {}
+        cpu_aff: dict[int, str] = {}
+        numa_aff: dict[int, str] = {}
 
         lines = topo_text.splitlines()
         header_i = None
@@ -248,7 +263,9 @@ class CardsTopology:
             return []
 
         try:
-            out = self._run_cmd("nvidia-smi --query-gpu=index,name,pci.bus_id --format=csv,noheader")
+            out = self._run_cmd(
+                "nvidia-smi --query-gpu=index,name,pci.bus_id --format=csv,noheader"
+            )
         except Exception:
             return []
 
@@ -261,7 +278,9 @@ class CardsTopology:
         except Exception:
             topo_out = ""
 
-        cpu_aff_by_gpu, numa_aff_by_gpu = self._parse_nvidia_topo_affinity(topo_out) if topo_out else ({}, {})
+        cpu_aff_by_gpu, numa_aff_by_gpu = (
+            self._parse_nvidia_topo_affinity(topo_out) if topo_out else ({}, {})
+        )
 
         for c in cards:
             c.update(self._get_sysfs_info(c["bus_id"]))
@@ -305,14 +324,14 @@ class CardsTopology:
         return sorted(self.cards, key=sort_key)
 
     # ------------------------------------------------------------------
-    def get_numa_for_card(self, card_id: int) -> Optional[str]:
+    def get_numa_for_card(self, card_id: int) -> str | None:
         for c in self.cards:
             if c["card_id"] == card_id:
                 return c.get("numa_node")
         return None
 
     # ------------------------------------------------------------------
-    def get_cpus_for_card(self, card_id: int) -> Optional[str]:
+    def get_cpus_for_card(self, card_id: int) -> str | None:
         for c in self.cards:
             if c["card_id"] == card_id:
                 return c.get("local_cpulist")
@@ -323,7 +342,11 @@ if __name__ == "__main__":
     topo = CardsTopology()
     cards = topo.get_cards()
     if not cards:
-        print("No Gaudi or NVIDIA devices discovered (hl-smi / nvidia-smi not found or no devices).")
+        print(
+            "No Gaudi or NVIDIA devices discovered (hl-smi / nvidia-smi not found "
+            "or no devices)."
+        )
+
         raise SystemExit(0)
 
     vendor = cards[0].get("vendor", "unknown")
@@ -340,4 +363,3 @@ if __name__ == "__main__":
             print(f"  NUMA Affinity : {card.get('numa_affinity')}")
             print(f"  Sysfs Path    : {card.get('_sysfs_path')}")
         print()
-
