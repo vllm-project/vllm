@@ -90,12 +90,6 @@ class XgrammarBackend(StructuredOutputBackend):
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
 
-        self.num_speculative_tokens = 0
-        if self.vllm_config.speculative_config is not None:
-            self.num_speculative_tokens = (
-                self.vllm_config.speculative_config.num_speculative_tokens
-            )
-
     def compile_grammar(
         self, request_type: StructuredOutputOptions, grammar_spec: str
     ) -> StructuredOutputGrammar:
@@ -137,7 +131,7 @@ class XgrammarBackend(StructuredOutputBackend):
         return XgrammarGrammar(
             matcher=xgr.GrammarMatcher(
                 ctx,
-                max_rollback_tokens=self.num_speculative_tokens,
+                max_rollback_tokens=self.max_num_spec_tokens,
             ),
             vocab_size=self.vocab_size,
             ctx=ctx,
