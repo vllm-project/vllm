@@ -73,9 +73,9 @@ def encode_pooling_bytes(
     pooling_outputs: list[PoolingRequestOutput],
     embed_dtype: EmbedDType,
     endianness: Endianness,
-) -> tuple[list[bytes], list[MetadataItem], dict[str, int]]:
+) -> tuple[list[bytes], list[dict[str, int]], dict[str, int]]:
     num_prompt_tokens = 0
-    items: list[MetadataItem] = []
+    items: list[dict[str, int]] = []
     body: list[bytes] = []
     offset = 0
     for idx, output in enumerate(pooling_outputs):
@@ -86,7 +86,8 @@ def encode_pooling_bytes(
         )
         size = len(binary)
 
-        item = MetadataItem(
+        # Dictionary form of MetadataItem
+        item = dict(
             index=idx,
             embed_dtype=embed_dtype,
             endianness=endianness,
