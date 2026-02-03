@@ -2311,16 +2311,18 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.chunked_context is not None
 
+        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+
         output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
 
-        if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
-            q = q.to(attn_metadata.prefill.q_data_type)
+        if use_fp8_prefill:
+            q = q.to(prefill_metadata.q_data_type)
 
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
-            if attn_metadata.prefill.q_data_type != current_platform.fp8_dtype():
+            if not use_fp8_prefill:
                 ops.gather_and_maybe_dequant_cache(
                     src_cache=kv_c_and_k_pe_cache,
                     dst=workspace,
@@ -2353,9 +2355,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             )
 
             # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
-            if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
-                kv_nope = kv_nope.to(attn_metadata.prefill.q_data_type)
-                k_pe = k_pe.to(attn_metadata.prefill.q_data_type)
+            if use_fp8_prefill:
+                kv_nope = kv_nope.to(prefill_metadata.q_data_type)
+                k_pe = k_pe.to(prefill_metadata.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
@@ -2458,39 +2460,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 toks=toks,
             )
 
-            # Allocate k and v together in layout: [k_nope | k_pe | v]
-            num_tokens = kv_c_normed.shape[0]
-            kv = torch.empty(
-                (
-                    num_tokens,
-                    self.num_heads,
-                    self.qk_nope_head_dim + self.qk_rope_head_dim + self.v_head_dim,
-                ),
-                dtype=kv_c_normed.dtype,
-                device=kv_c_normed.device,
-            )
-
-            # kv_b_proj returns [k_nope, v] concatenated - split and write to
-            # correct positions
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
-            kv[..., : self.qk_nope_head_dim] = kv_nope[
-                ..., : self.qk_nope_head_dim
-            ]  # k_nope
-            kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :] = kv_nope[
-                ..., self.qk_nope_head_dim :
-            ]  # v
-
-            # Write k_pe to kv buffer
-            kv[
-                ...,
-                self.qk_nope_head_dim : self.qk_nope_head_dim + self.qk_rope_head_dim,
-            ] = k_pe
-
-            # Create views for k and v
-            k = kv[..., : self.qk_nope_head_dim + self.qk_rope_head_dim]
-            v = kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :]
+            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
             attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
                 prefill=prefill_metadata,
@@ -2533,51 +2507,27 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size != -1
 
+        prefill_metadata = attn_metadata.prefill
+        use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
+
         # Convert q to FP8 if FP8 prefill attention is enabled
-        if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
-            q = q.to(attn_metadata.prefill.q_data_type)
+        if use_fp8_prefill:
+            q = q.to(prefill_metadata.q_data_type)
 
-        has_context = attn_metadata.prefill.chunked_context is not None
+        has_context = prefill_metadata.chunked_context is not None
 
-        # Allocate k and v together in layout: [k_nope | k_pe | v]
-        num_tokens = kv_c_normed.shape[0]
-        kv = torch.empty(
-            (
-                num_tokens,
-                self.num_heads,
-                self.qk_nope_head_dim + self.qk_rope_head_dim + self.v_head_dim,
-            ),
-            dtype=kv_c_normed.dtype,
-            device=kv_c_normed.device,
-        )
-
-        # kv_b_proj returns [k_nope, v] concatenated - split and write to
-        # correct positions
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
-        kv[..., : self.qk_nope_head_dim] = kv_nope[
-            ..., : self.qk_nope_head_dim
-        ]  # k_nope
-        kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :] = kv_nope[
-            ..., self.qk_nope_head_dim :
-        ]  # v
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
-        # Write k_pe to kv buffer
-        kv[
-            ..., self.qk_nope_head_dim : self.qk_nope_head_dim + self.qk_rope_head_dim
-        ] = k_pe
-
-        # Create views for k and v
-        k = kv[..., : self.qk_nope_head_dim + self.qk_rope_head_dim]
-        v = kv[..., self.qk_nope_head_dim + self.qk_rope_head_dim :]
-
-        if attn_metadata.prefill.q_data_type == current_platform.fp8_dtype():
-            k = k.to(attn_metadata.prefill.q_data_type)
-            v = v.to(attn_metadata.prefill.q_data_type)
+        if use_fp8_prefill:
+            k = k.to(prefill_metadata.q_data_type)
+            v = v.to(prefill_metadata.q_data_type)
 
         output_prefill = self._run_prefill_new_tokens(
-            prefill=attn_metadata.prefill,
+            prefill=prefill_metadata,
             q=q,
             k=k,
             v=v,
