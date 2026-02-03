@@ -350,12 +350,12 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 activation_quant_key = kFp8DynamicTensorSym
 
-            self.fp8_linear = init_fp8_linear_kernel(
-                activation_quant_key=activation_quant_key,
-                weight_quant_key=weight_quant_key,
-                out_dtype=self.out_dtype,
-                module_name=self.__class__.__name__,
-            )
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
 
     def create_weights(
         self,

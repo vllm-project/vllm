@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
     AiterFp8BlockScaledMMKernel,
     AiterInt8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.BlockScaledMMKernel import (  # noqa: E501
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.BlockScaledMMLinearKernel import (  # noqa: E501
     Fp8BlockMMScaledConfig,
     Fp8BlockScaledMMKernel,
 )

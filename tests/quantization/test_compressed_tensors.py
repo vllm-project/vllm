@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsWNA16,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     Fp8BlockScaledMMKernel,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (

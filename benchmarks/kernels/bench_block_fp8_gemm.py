@@ -8,7 +8,7 @@ os.environ["VLLM_USE_DEEP_GEMM"] = "0"
 
 import torch
 
-from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_block_scaled_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (

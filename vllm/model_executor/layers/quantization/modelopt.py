@@ -44,10 +44,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
-    init_fp8_block_scaled_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_block_scaled_linear_kernel,
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
