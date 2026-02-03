@@ -327,6 +327,10 @@ class OpenAIServingChat(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/chat/create
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
+
+        Args:
+            on_output: Optional synchronous callback for each RequestOutput.
+                Runs in the generation loop - keep it fast to avoid blocking.
         """
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):

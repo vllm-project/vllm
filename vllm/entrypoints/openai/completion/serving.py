@@ -134,6 +134,10 @@ class OpenAIServingCompletion(OpenAIServing):
         NOTE: Currently we do not support the following feature:
             - suffix (the language models we currently support do not support
             suffix)
+
+        Args:
+            on_output: Optional synchronous callback for each RequestOutput.
+                Runs in the generation loop - keep it fast to avoid blocking.
         """
         result = await self.render_completion_request(request)
         if isinstance(result, ErrorResponse):

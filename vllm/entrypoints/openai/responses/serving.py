@@ -353,6 +353,13 @@ class OpenAIServingResponses(OpenAIServing):
         | ResponsesResponse
         | ErrorResponse
     ):
+        """
+        Responses API for generating text responses.
+
+        Args:
+            on_output: Optional synchronous callback for each RequestOutput.
+                Runs in the generation loop - keep it fast to avoid blocking.
+        """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
