@@ -39,6 +39,7 @@ def get_test_models():
 @pytest.mark.parametrize("use_aot_compile", ["0", "1"])
 @pytest.mark.parametrize("use_bytecode_hook", [True, False])
 @pytest.mark.parametrize("evaluate_guards", [False, True])
+@pytest.mark.parametrize("autotune_batch_hint", [None, 256])
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_dynamic_shapes_compilation(
     monkeypatch,
@@ -47,6 +48,7 @@ def test_dynamic_shapes_compilation(
     use_aot_compile,
     use_bytecode_hook,
     evaluate_guards,
+    autotune_batch_hint,
 ):
     """Test that all dynamic shapes types compile successfully"""
     if use_bytecode_hook and shapes_type == DynamicShapesType.UNBACKED:
@@ -73,6 +75,7 @@ def test_dynamic_shapes_compilation(
             "dynamic_shapes_config": {
                 "type": shapes_type.value,
                 "evaluate_guards": evaluate_guards,
+                "autotune_batch_hint": autotune_batch_hint,
             },
         },
         max_model_len=1024,

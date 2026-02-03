@@ -331,17 +331,28 @@ def _support_torch_compile(
     def _mark_dynamic_inputs(
         mod: type[_T], ds_type: DynamicShapesType, *args: Any, **kwargs: Any
     ) -> None:
+        # Get autotune hint from config (only applies to dim 0 / batch dimension)
+        autotune_batch_hint = (
+            mod.compilation_config.dynamic_shapes_config.autotune_batch_hint
+        )
+
         def mark_dynamic(arg: torch.Tensor, dims: list[int]) -> None:
             if ds_type == DynamicShapesType.UNBACKED:
                 if is_torch_equal_or_newer("2.10.0"):
                     for dim in dims:
-                        torch._dynamo.decorators.mark_unbacked(
-                            arg, dim, hint_override=arg.size()[dim]
-                        )
+                        # Use autotune_batch_hint for dim 0 if set, else actual size
+                        hint = autotune_batch_hint if dim == 0 and autotune_batch_hint else arg.size()[dim]
+                        torch._dynamo.decorators.mark_unbacked(arg, dim, hint_override=hint)
                 else:
                     torch._dynamo.decorators.mark_unbacked(arg, dims)
             else:
-                torch._dynamo.mark_dynamic(arg, dims)
+                # BACKED shapes: pass hint_override if autotune_batch_hint is set for dim 0
+                if is_torch_equal_or_newer("2.10.0.dev") and autotune_batch_hint:
+                    for dim in dims:
+                        hint = autotune_batch_hint if dim == 0 else None
+                        torch._dynamo.mark_dynamic(arg, dim, hint_override=hint)
+                else:
+                    torch._dynamo.mark_dynamic(arg, dims)
 
         sig = inspect.signature(mod.__class__.forward)  # type: ignore[attr-defined]
         bound_args = sig.bind(mod, *args, **kwargs)
@@ -375,8 +386,9 @@ def _support_torch_compile(
                         dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
                         if is_torch_equal_or_newer("2.10.0"):
                             for dim in dims:
+                                hint = autotune_batch_hint if dim == 0 and autotune_batch_hint else arg.size()[dim]
                                 torch._dynamo.decorators.mark_unbacked(
-                                    arg, dim, hint_override=arg.size()[dim]
+                                    arg, dim, hint_override=hint
                                 )
                         else:
                             torch._dynamo.decorators.mark_unbacked(arg, dims)
