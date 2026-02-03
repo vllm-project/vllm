@@ -1025,7 +1025,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
         if self.block_quant:
             from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
-                flashinfer_trtllm_fused_moe_blockscale_fp8,  # noqa: E501, F401
+                flashinfer_trtllm_fused_moe_blockscale_fp8,
             )
 
             return flashinfer_trtllm_fused_moe_blockscale_fp8(
