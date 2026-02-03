@@ -7,8 +7,8 @@ import torch
 
 import vllm.config
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.compilation.post_cleanup import PostCleanupPass
+from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -95,7 +95,7 @@ def test_fuse_act_padding(
     )
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        from vllm.compilation.rocm_aiter_fusion import (
+        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
             RocmAiterTritonAddRMSNormPadFusionPass,
         )
 

@@ -5,12 +5,12 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.fusion import RMSNormQuantFusionPass
-from vllm.compilation.fx_utils import find_auto_fn
-from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.compilation.post_cleanup import PostCleanupPass
-from vllm.compilation.sequence_parallelism import SequenceParallelismPass
-from vllm.compilation.vllm_inductor_pass import VllmInductorPass
+from vllm.compilation.passes.fusion.fusion import RMSNormQuantFusionPass
+from vllm.compilation.passes.fusion.sequence_parallelism import SequenceParallelismPass
+from vllm.compilation.passes.fx_utils import find_auto_fn
+from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
+from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,

@@ -5,12 +5,16 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
-from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.compilation.fusion import RMSNormQuantFusionPass
-from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
-from vllm.compilation.noop_elimination import NoOpEliminationPass
-from vllm.compilation.post_cleanup import PostCleanupPass
+from vllm.compilation.passes.fusion.activation_quant_fusion import (
+    ActivationQuantFusionPass,
+)
+from vllm.compilation.passes.fusion.fusion import RMSNormQuantFusionPass
+from vllm.compilation.passes.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
+from vllm.compilation.passes.utility.fix_functionalization import (
+    FixFunctionalizationPass,
+)
+from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
     CompilationConfig,
     ModelConfig,

@@ -22,11 +22,6 @@ from torch._dispatch.python import enable_python_dispatcher
 from torch._logging._internal import trace_structured
 
 import vllm.envs as envs
-from vllm.compilation.inductor_pass import pass_context
-from vllm.compilation.partition_rules import (
-    inductor_partition_rule_context,
-    should_split,
-)
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import DynamicShapesType
 from vllm.config.utils import Range, hash_factors
@@ -43,8 +38,12 @@ from .compiler_interface import (
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
-from .inductor_pass import InductorPass
-from .pass_manager import PostGradPassManager
+from .partition_rules import (
+    inductor_partition_rule_context,
+    should_split,
+)
+from .passes.inductor_pass import InductorPass, pass_context
+from .passes.pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 

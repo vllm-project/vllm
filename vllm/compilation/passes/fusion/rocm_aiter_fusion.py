@@ -9,7 +9,6 @@ from torch._ops import OpOverload
 
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.activation_quant_fusion import ActivationQuantPattern
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -19,17 +18,18 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
+from ..activation_quant_fusion import ActivationQuantPattern
+from ..inductor_pass import enable_fake_mode
+from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .fusion import (
     FusedRMSQuantKey,
 )
-from .inductor_pass import enable_fake_mode
 from .matcher_utils import (
     MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
     MatcherRMSNorm,
     MatcherSiluAndMul,
 )
-from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
