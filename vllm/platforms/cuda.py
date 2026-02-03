@@ -180,6 +180,7 @@ class CudaPlatformBase(Platform):
             use_flashmla = False
             use_cutlass_mla = False
             use_flashinfer_mla = False
+            use_flashmla_sparse = False
             use_flashinfer_mla_sparse = False
 
             from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
@@ -189,16 +190,6 @@ class CudaPlatformBase(Platform):
                 hf_text_config = model_config.hf_text_config
                 qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
                 if (
-                    cls.is_device_capability_family(100)
-                    and use_sparse
-                    and qk_nope_head_dim == 128
-                ):
-                    # Blackwell + sparse => Use FlashInfer MLA Sparse
-                    use_flashinfer_mla_sparse = True
-                    vllm_config.attention_config.backend = (
-                        AttentionBackendEnum.FLASHINFER_MLA_SPARSE
-                    )
-                elif (
                     cls.is_device_capability_family(100)
                     and not use_sparse
                     and qk_nope_head_dim == 128
@@ -226,6 +217,7 @@ class CudaPlatformBase(Platform):
                 use_flashmla = backend == AttentionBackendEnum.FLASHMLA
                 use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
                 use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
+                use_flashmla_sparse = backend == AttentionBackendEnum.FLASHMLA_SPARSE
                 use_flashinfer_mla_sparse = (
                     backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE
                 )
@@ -254,22 +246,21 @@ class CudaPlatformBase(Platform):
                     "Forcing kv cache block size to 64 for FlashInferMLA backend."
                 )
 
-            if use_flashinfer_mla_sparse and cache_config.block_size != 64:
-                cache_config.block_size = 64
-                logger.info(
-                    "Forcing kv cache block size to 64 for FlashInferMLASparse backend."
-                )
+            if use_sparse:
+                if not (use_flashmla_sparse or use_flashinfer_mla_sparse):
+                    use_flashmla_sparse = True
 
-            # TODO(Chen): remove this hacky code
-            if (
-                use_sparse
-                and not use_flashinfer_mla_sparse
-                and cache_config.block_size != 64
-            ):
-                cache_config.block_size = 64
-                logger.info(
-                    "Forcing kv cache block size to 64 for FlashMLASparse backend."
-                )
+                if use_flashmla_sparse and cache_config.block_size != 64:
+                    cache_config.block_size = 64
+                    logger.info(
+                        "Forcing kv cache block size to 64 for FlashMLASparse backend."
+                    )
+                elif use_flashinfer_mla_sparse and cache_config.block_size != 64:
+                    cache_config.block_size = 64
+                    logger.info(
+                        "Forcing kv cache block size to 64 for FlashInferMLASparse "
+                        "backend."
+                    )
 
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
