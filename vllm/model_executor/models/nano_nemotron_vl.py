@@ -23,7 +23,11 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers import (
+    BatchFeature,
+    PretrainedConfig,
+    TensorType,
+)
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -44,7 +48,10 @@ from vllm.model_executor.models.internvl import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
-from vllm.model_executor.models.parakeet import ParakeetExtractor, ProjectedParakeet
+from vllm.model_executor.models.parakeet import (
+    ParakeetExtractor,
+    ProjectedParakeet,
+)
 from vllm.model_executor.models.radio import RadioModel, calc_seq_lens
 from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
@@ -93,6 +100,9 @@ logger = init_logger(__name__)
 Image.MAX_IMAGE_PIXELS = None  # Disable the limit entirely
 # Alternative: Set a specific higher limit
 # Image.MAX_IMAGE_PIXELS = 300000000  # ~300M pixels
+
+
+AUDIO_CONTEXT = "<so_embedding>"
 
 
 class NanoNemotronVLAudioFeatureInputs(TensorSchema):
@@ -1001,8 +1011,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         audio_index = 0
         for idx, part in enumerate(parts):
             if part == AUDIO_CONTEXT:
-                audio_repl = self.get_audio_repl(audios[audio_index])
-                parts[idx] = audio_repl.full
+                audio = audios[audio_index]
+                audio_len = len(audio)
+                num_tokens = extractor.audio_token_count(audio_len)
+                parts[idx] = AUDIO_CONTEXT * num_tokens
                 audio_index += 1
         text = ["".join(parts)]
         audio_inputs = extractor(
@@ -1235,20 +1247,6 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
     def audio_extractor(self) -> ParakeetExtractor | None:
         return self.get_hf_processor().audio_extractor
 
-    def get_data_parser(self):
-        target_sr = None
-        target_channels = None
-        if extractor := self.audio_extractor:
-            target_sr = extractor.sampling_rate
-            target_channels = 1
-
-        return MultiModalDataParser(
-            video_needs_metadata=True,
-            target_sr=target_sr,
-            target_channels=target_channels,
-            expected_hidden_size=self._get_expected_hidden_size(),
-        )
-
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
         audio_limit = {"audio": None} if self.audio_extractor is not None else {}
@@ -1383,6 +1381,18 @@ class NanoNemotronVLMultiModalProcessor(
 ):
     """MultiModalProcessor extended for video support"""
 
+    def _get_data_parser(self) -> MultiModalDataParser:
+        target_sr = None
+        target_channels = None
+        if extractor := self.info.audio_extractor:
+            target_sr = extractor.sampling_rate
+            target_channels = 1
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            target_sr=target_sr,
+            target_channels=target_channels,
+        )
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -1481,9 +1491,12 @@ class NanoNemotronVLMultiModalProcessor(
                 ),
             ]
 
-        def get_audio_replacement(item_idx: int):
+        def get_audio_replacement(item_idx: int, extractor: ParakeetExtractor):
             audios = mm_items.get_items("audio", AudioProcessorItems)
-            return hf_processor.get_audio_repl(audios.get(item_idx))
+            audio_len = audios.get_audio_length(item_idx)
+            num_tokens = extractor.audio_token_count(audio_len)
+            repl_full = AUDIO_CONTEXT * num_tokens
+            return PromptUpdateDetails.select_text(repl_full, AUDIO_CONTEXT)
 
         if self.info.audio_extractor is not None:
             prompt_repl = [
@@ -1491,7 +1504,9 @@ class NanoNemotronVLMultiModalProcessor(
                 PromptReplacement(
                     modality="audio",
                     target=AUDIO_CONTEXT,
-                    replacement=get_audio_replacement,
+                    replacement=lambda item_idx: get_audio_replacement(
+                        item_idx, self.info.audio_extractor
+                    ),
                 ),
             ]
 
@@ -1664,7 +1679,6 @@ class NemotronH_Nano_VL_V2(
         self.ps_version = config.ps_version
         self.image_tag_type = config.image_tag_type
         self.video_pruning_rate = multimodal_config.video_pruning_rate
-
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
@@ -1952,43 +1966,12 @@ class NemotronH_Nano_VL_V2(
         input_audio_features = audio_input.input_audio_features
         feature_attention_mask = audio_input.feature_attention_mask
         target_device = next(self.sound_encoder.parameters()).device
-
-        # When cross-request batching combines audio clips with different
-        # time dimensions, _reduce_data returns a list instead of a stacked
-        # tensor. Pad to the max time dim and stack; the attention mask
-        # already marks valid positions so zero-padding is safe.
-        if isinstance(input_audio_features, list):
-            feature_sizes = [f.shape[-2] for f in input_audio_features]
-            max_t = max(feature_sizes)
-            padded_feats = [
-                torch.nn.functional.pad(feat, (0, 0, 0, max_t - feat_size))
-                for feat, feat_size in zip(
-                    input_audio_features, feature_sizes, strict=True
-                )
-            ]
-            padded_masks = [
-                torch.nn.functional.pad(mask, (0, max_t - mask.shape[-1]))
-                for mask in feature_attention_mask
-            ]
-            input_audio_features = torch.stack(padded_feats)
-            feature_attention_mask = torch.stack(padded_masks)
-
         input_audio_features = input_audio_features.to(
             dtype=self.llm_dtype, device=target_device
         )
         feature_attention_mask = feature_attention_mask.to(device=target_device)
         sound_embeds = self.sound_encoder(input_audio_features, feature_attention_mask)
-
-        valid_input_lens = feature_attention_mask.sum(dim=1)
-        valid_output_lens = self.sound_encoder.encoder._get_subsampling_output_length(
-            valid_input_lens
-        )
-        truncated_embeds = []
-        for i in range(sound_embeds.shape[0]):
-            valid_len = valid_output_lens[i].item()
-            truncated_embeds.append(sound_embeds[i, :valid_len])
-
-        return tuple(truncated_embeds)
+        return tuple(sound_embeds.unbind(dim=0))
 
     def _create_final_video_embeddings(
         self,
