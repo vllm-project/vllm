@@ -945,17 +945,13 @@ class GptOssModel(nn.Module):
 
         # In MoE, we need to flatten the tensor parallel size across the data
         # parallel size when EP is disabled.
-        if use_ep:
-            tp_rank = get_tensor_model_parallel_rank()
-            tp_size = get_tensor_model_parallel_world_size()
-        else:
-            tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
-                tp_size=get_tensor_model_parallel_world_size(),
-                dp_size=get_dp_group().world_size,
-                dp_rank=get_dp_group().rank_in_group,
-                pcp_size=get_pcp_group().world_size,
-                pcp_rank=get_pcp_group().rank_in_group,
-            )
+        tp_size, tp_rank = FusedMoEParallelConfig.flatten_tp_across_dp_and_pcp(
+            tp_size=get_tensor_model_parallel_world_size(),
+            dp_size=get_dp_group().world_size,
+            dp_rank=get_dp_group().rank_in_group,
+            pcp_size=get_pcp_group().world_size,
+            pcp_rank=get_pcp_group().rank_in_group,
+        )
 
         intermediate_size = self.config.intermediate_size
         per_rank_intermediate_size = cdiv(intermediate_size, tp_size)
