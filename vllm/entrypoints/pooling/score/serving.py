@@ -27,6 +27,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponseData,
 )
 from vllm.entrypoints.pooling.score.utils import (
+    ScoreData,
     ScoreDataList,
     ScoreInputs,
     _cosine_similarity,
@@ -269,8 +270,8 @@ class ServingScores(OpenAIServing):
         request: RerankRequest | ScoreRequest,
         tokenizer: TokenizerLike,
         tokenization_kwargs: dict[str, Any],
-        data_1: ScoreDataList,
-        data_2: ScoreDataList,
+        data_1: ScoreData,
+        data_2: ScoreData,
     ) -> tuple[str, TokensPrompt]:
         model_config = self.model_config
         full_prompt, engine_prompt = get_score_prompt(
@@ -303,7 +304,7 @@ class ServingScores(OpenAIServing):
             else await self._get_trace_headers(raw_request.headers)
         )
 
-        data_1, data_2 = validate_score_input(
+        score_inputs_1, score_inputs_2 = validate_score_input(
             data_1,
             data_2,
             is_multimodal_model=self.is_multimodal_model,
@@ -311,8 +312,8 @@ class ServingScores(OpenAIServing):
         )
 
         return await self._score_func(
-            data_1=data_1,
-            data_2=data_2,
+            data_1=score_inputs_1,
+            data_2=score_inputs_2,
             request=request,
             request_id=request_id,
             lora_request=lora_request,
