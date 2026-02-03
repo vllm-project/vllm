@@ -321,6 +321,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             active_block_signature: str | None = None
             signature_emitted = False
             active_tool_use_id: str | None = None
+            # Map from tool call index to tool_use_id
+            tool_index_to_id: dict[int, str] = {}
 
             def stop_active_block():
                 nonlocal active_block_type, active_block_index, content_block_index
@@ -510,6 +512,8 @@ class AnthropicServingMessages(OpenAIServingChat):
                         if len(origin_chunk.choices[0].delta.tool_calls) > 0:
                             for tool_call in origin_chunk.choices[0].delta.tool_calls:
                                 if tool_call.id is not None:
+                                    # Update mapping for incremental updates
+                                    tool_index_to_id[tool_call.index] = tool_call.id
                                     # Only create new block if different tool call
                                     # AND has a name
                                     tool_name = (
@@ -532,10 +536,36 @@ class AnthropicServingMessages(OpenAIServingChat):
                                             )
                                         )
                                         yield start_event
+                                    # Handle initial arguments if present
                                     if (
                                         tool_call.function
                                         and tool_call.function.arguments
                                         and active_tool_use_id == tool_call.id
+                                    ):
+                                        chunk = AnthropicStreamEvent(
+                                            index=(
+                                                active_block_index
+                                                if active_block_index is not None
+                                                else content_block_index
+                                            ),
+                                            type="content_block_delta",
+                                            delta=AnthropicDelta(
+                                                type="input_json_delta",
+                                                partial_json=tool_call.function.arguments,
+                                            ),
+                                        )
+                                        data = chunk.model_dump_json(exclude_unset=True)
+                                        yield wrap_data_with_event(
+                                            data, "content_block_delta"
+                                        )
+                                else:
+                                    # Incremental update - use index to find tool_use_id
+                                    tool_use_id = tool_index_to_id.get(tool_call.index)
+                                    if (
+                                        tool_use_id is not None
+                                        and tool_call.function
+                                        and tool_call.function.arguments
+                                        and active_tool_use_id == tool_use_id
                                     ):
                                         chunk = AnthropicStreamEvent(
                                             index=(
