@@ -3666,7 +3666,7 @@ class GPUModelRunner(
         )
         if self.use_async_scheduling:
             pp = get_pp_group()
-            if pp.world_size > 1 and pp.is_last_rank:
+            if not self.broadcast_pp_output and pp.world_size > 1 and pp.is_last_rank:
                 self._pp_broadcast_prev_sampled_token_ids(
                     sampler_output.sampled_token_ids
                 )
