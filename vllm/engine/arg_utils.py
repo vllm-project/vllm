@@ -507,7 +507,7 @@ class EngineArgs:
     logits_processor_pattern: str | None = ModelConfig.logits_processor_pattern
 
     speculative_config: dict[str, Any] | None = None
-    acceptance_rate_threshold: float = SpeculativeConfig.acceptance_rate_threshold
+    acceptance_rate_threshold: float | None = None
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
