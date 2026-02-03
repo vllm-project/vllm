@@ -242,6 +242,7 @@ def fp8_mqa_logits(
     weights: torch.Tensor,
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
+    clean_logits: bool = False,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits for a single sequence without KV paging.
 
@@ -263,7 +264,7 @@ def fp8_mqa_logits(
     _lazy_init()
     if _fp8_mqa_logits_impl is None:
         return _missing()
-    return _fp8_mqa_logits_impl(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+    return _fp8_mqa_logits_impl(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits=clean_logits)
 
 
 def get_paged_mqa_logits_metadata(
@@ -295,6 +296,7 @@ def fp8_paged_mqa_logits(
     block_tables: torch.Tensor,
     schedule_metadata: torch.Tensor,
     max_model_len: int,
+    clean_logits: bool = False,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -312,6 +314,7 @@ def fp8_paged_mqa_logits(
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
+        clean_logits: Whether to clean the logits after computation.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -328,7 +331,7 @@ def fp8_paged_mqa_logits(
         block_tables,
         schedule_metadata,
         max_model_len,
-        clean_logits=True,
+        clean_logits=clean_logits,
     )
 
 
