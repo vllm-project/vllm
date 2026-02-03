@@ -622,7 +622,7 @@ class Gemma3nForConditionalGeneration(
         input_features = audio_input["input_features_padded"].squeeze(1)
         input_features_mask = audio_input["input_features_mask"].squeeze(1)
         audio_outputs, audio_mask = self.audio_tower(
-            input_features, ~input_features_mask
+            input_features, ~input_features_mask, return_dict=False
         )
         audio_features = self.embed_audio(inputs_embeds=audio_outputs)
 
