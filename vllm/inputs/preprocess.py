@@ -68,6 +68,24 @@ class InputPreprocessor:
     def get_tokenizer(self) -> TokenizerLike:
         return self.renderer.get_tokenizer()
 
+    def get_bos_token_id(self) -> int | None:
+        if self.tokenizer is None:
+            logger.warning_once(
+                "Using None for BOS token id because tokenizer is not initialized"
+            )
+            return None
+
+        return self.tokenizer.bos_token_id
+
+    def get_eos_token_id(self) -> int | None:
+        if self.tokenizer is None:
+            logger.warning_once(
+                "Using None for EOS token id because tokenizer is not initialized"
+            )
+            return None
+
+        return self.tokenizer.eos_token_id
+
     def get_decoder_start_token_id(self) -> int:
         """
         Obtain the decoder start token id employed by an encoder/decoder
@@ -76,13 +94,17 @@ class InputPreprocessor:
         dec_start_token_id = getattr(
             self.model_config.hf_config, "decoder_start_token_id", None
         )
+
         if dec_start_token_id is None:
             logger.warning_once(
                 "Falling back on <BOS> for decoder start token "
                 "id because decoder start token id is not "
                 "available."
             )
-            dec_start_token_id = self.get_tokenizer().bos_token_id
+            dec_start_token_id = self.get_bos_token_id()
+
+        if dec_start_token_id is None:
+            raise RuntimeError("Cannot find decoder start token id")
 
         return dec_start_token_id
 
