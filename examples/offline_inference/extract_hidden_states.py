@@ -21,7 +21,6 @@ llm = LLM(
             }
         },
     },
-    enforce_eager=True,
     kv_transfer_config={
         "kv_connector": "ExampleHiddenStatesConnector",
         "kv_role": "kv_producer",
@@ -31,7 +30,7 @@ llm = LLM(
     },
 )
 
-prompts = ["Generate a sentence with hidden states"]
+prompts = ["Generate a sentence with hidden states", "Write a python function"]
 sampling_params = SamplingParams(max_tokens=1)
 outputs = llm.generate(prompts, sampling_params)
 
