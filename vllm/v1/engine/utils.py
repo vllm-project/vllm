@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
 import msgspec

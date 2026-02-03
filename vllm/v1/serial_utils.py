@@ -286,6 +286,9 @@ class MsgpackEncoder:
 
         This works for both CUDA and CPU tensors.
         """
+        assert self.target_engine_index is not None, "Target engine index is not set"
+        assert self.tensor_queues is not None, "Tensor queues are not set"
+
         # Generate unique tensor ID (without request ID embedded)
         tensor_id = f"{id(self)}_{self._tensor_id_counter}"
         self._tensor_id_counter += 1
@@ -317,14 +320,16 @@ class MsgpackEncoder:
         return TensorIpcHandle(
             request_id=self._current_request_id,
             tensor_id=tensor_id,
-            shape=list(obj.shape),
+            shape=tuple(obj.shape),
             dtype=str(obj.dtype).removeprefix("torch."),
             device=str(obj.device),
         )
 
     def _encode_tensor(
         self, obj: torch.Tensor
-    ) -> tuple[str, tuple[int, ...], int | memoryview] | dict[str, Any]:
+    ) -> (
+        tuple[str, tuple[int, ...], int | memoryview] | dict[str, Any] | TensorIpcHandle
+    ):
         assert self.aux_buffers is not None
 
         # Check if we should use IPC for this tensor
@@ -527,6 +532,12 @@ class MsgpackDecoder:
         ):
             # Convert dict to TensorIpcHandle and decode it
             handle = TensorIpcHandle(**arr)
+            return self._decode_ipc_queue_tensor(handle)
+        # Check if this is a list/tuple with 5 elements (TensorIpcHandle)
+        # msgspec serializes NamedTuples as lists
+        if isinstance(arr, (list, tuple)) and len(arr) == 5:
+            # Convert list to TensorIpcHandle and decode it
+            handle = TensorIpcHandle(*arr)
             return self._decode_ipc_queue_tensor(handle)
 
         # Standard tensor decoding
