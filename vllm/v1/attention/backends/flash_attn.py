@@ -325,17 +325,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.aot_schedule:
-            # FA3 scheduler_metadata size: 1 + round_up(batch_size, 4) * 4
-            # The +1 is for the tile_count_semaphore (synchronization).
-            # The 4 slots per batch element (num_prepare_batch_vectors) are:
-            #   prepare_varlen + dynamic_split + sort_batches + head_swizzle
-            # See: https://github.com/vllm-project/flash-attention/blob/5824e6e/hopper/flash_api.cpp#L664-L671  # noqa: E501
-            max_batch_size = max(
-                vllm_config.scheduler_config.max_num_seqs,
-                self.max_cudagraph_size or 0,
-            )
+            # The scheduler_metadata size is computed as:
+            #   metadata_size = scheduler_needs_semaphore + b_rounded *
+            #   num_prepare_batch_vectors
+            # where b_rounded = round_up(batch_size, 4) and
+            # num_prepare_batch_vectors can be up to 4
+            # (use_prepare_varlen + use_dynamic_split + varlen_sort_batches
+            # + head_swizzle). We allocate for the worst case to avoid buffer
+            # overflows.
+            max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+            max_num_seqs_rounded = (max_num_seqs + 3) // 4 * 4
+            max_scheduler_metadata_size = 1 + max_num_seqs_rounded * 4
             self.scheduler_metadata = torch.zeros(
-                1 + round_up(max_batch_size, 4) * 4,
+                max_scheduler_metadata_size,
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -636,11 +638,19 @@ class FlashAttentionImpl(AttentionImpl):
         """
         Check if fused output quantization is supported.
 
-        For FlashAttention, we support fused output FP8 quantization on:
-        - FlashAttention 3
-        - Hopper GPUs (sm90+)
-        - FP8 static tensor quantization
-        - FP8 KV cache (required for FP8 computation)
+        For FlashAttention 3, fused FP8 output quantization is supported when:
+        - Running on Hopper GPUs (sm90+)
+        - Using FP8 static tensor quantization
+        - Model dtype is bfloat16
+        - NOT using FP8 KV cache
+
+        FA3 cannot write FP8 output directly when using FP8 KV cache.
+        FA3 requires:
+        - BF16/FP16 input → BF16/FP16 output (same dtype)
+        - FP8 input → BF16 output
+
+        Therefore, fused FP8 output quantization is only supported for FA3
+        with non-FP8 KV cache (BF16/FP16 inputs).
 
         Note: For DCP and cascade attention, quantization is applied after
         the attention merge step rather than being fused into the kernel.
@@ -660,8 +670,19 @@ class FlashAttentionImpl(AttentionImpl):
         if quant_key != kFp8StaticTensorSym:
             return False
 
-        # FP8 output requires FP8 computation (FP8 KV cache)
-        return self.kv_cache_dtype.startswith("fp8")
+        # FA3 with FP8 inputs requires bfloat16 output
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return False
+        if vllm_config.model_config.dtype != torch.bfloat16:
+            return False
+
+        # FA3 cannot write FP8 output directly. FA3 requires:
+        # - BF16/FP16 input → BF16/FP16 output (same dtype)
+        # - FP8 input → BF16 output
+        # Therefore, fused FP8 output quantization is not supported for FA3
+        # when using FP8 KV cache.
+        return not self.kv_cache_dtype.startswith("fp8")
 
     def forward(
         self,
