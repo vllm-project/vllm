@@ -170,6 +170,7 @@ class InternSdpaAttention(nn.Module):
         config: PretrainedConfig,
         *,
         num_dummy_heads: int = 0,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -219,6 +220,7 @@ class InternSdpaAttention(nn.Module):
             self.num_heads,
             self.head_dim,
             self.scale,
+            prefix=prefix,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -317,7 +319,11 @@ class InternS1VisionLayer(nn.Module):
         num_dummy_heads: int,
         prefix: str = "",
     ):
-        return InternSdpaAttention(config, num_dummy_heads=num_dummy_heads)
+        return InternSdpaAttention(
+            config,
+            num_dummy_heads=num_dummy_heads,
+            prefix=prefix,
+        )
 
     def forward(
         self,
