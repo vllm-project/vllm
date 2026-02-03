@@ -108,7 +108,7 @@ class _HfExamplesInfo:
 
     use_original_num_layers: bool = False
     """
-    If True, use the original number of layers from the model config 
+    If True, use the original number of layers from the model config
     instead of minimal layers for testing.
     """
 
@@ -494,6 +494,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Step3TextForCausalLM": _HfExamplesInfo("stepfun-ai/step3", trust_remote_code=True),
     "SolarForCausalLM": _HfExamplesInfo(
         "upstage/solar-pro-preview-instruct", trust_remote_code=True
+    ),
+    "SolarOpenForCausalLM": _HfExamplesInfo(
+        "upstage/Solar-Open-100B", min_transformers_version="4.57.1"
     ),
     "TeleChatForCausalLM": _HfExamplesInfo(
         "chuhac/TeleChat2-35B", trust_remote_code=True
