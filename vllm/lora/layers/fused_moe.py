@@ -56,7 +56,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         self._inject_lora_into_fused_moe()
-        self._one = torch.tensor([1], dtype=torch.int, device=self.device)
 
     def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
         normalized_config = {}
@@ -524,7 +523,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         assert isinstance(lora_b, list)
 
         self.reset_lora(index)
-        self.adapter_enabled[index : index + 1].copy_(self._one, non_blocking=True)
+        self.adapter_enabled[index].fill_(1)
 
         num_experts = self.w13_lora_a_stacked[0].shape[1]
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
@@ -700,7 +699,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         assert len(lora_a) == len(lora_b) == 2
 
         self.reset_lora(index)
-        self.adapter_enabled[index : index + 1].copy_(self._one, non_blocking=True)
+        self.adapter_enabled[index].fill_(1)
 
         w13_lora_a, w2_lora_a = lora_a
         w13_lora_b, w2_lora_b = lora_b

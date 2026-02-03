@@ -270,7 +270,11 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         """Load, register, and batch activate multiple adapters."""
         requested_ids = {r.lora_int_id for r in lora_requests}
         existing_ids = self.list_adapters()
-        new_requests = [r for r in lora_requests if r.lora_int_id not in existing_ids]
+        new_requests = [
+            r
+            for r in lora_requests
+            if (r.lora_int_id not in existing_ids) or r.load_inplace
+        ]
 
         # Touch existing requested adapters to protect them from eviction
         for lora_id in requested_ids & existing_ids:
@@ -289,6 +293,8 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
         # Load and register new adapters
         for lora_request in new_requests:
             lora = self._load_adapter(lora_request)
+            if lora_request.load_inplace:
+                self._adapter_manager.remove_adapter(lora.id)
             self._adapter_manager.add_adapter(lora)
 
         # Activate all

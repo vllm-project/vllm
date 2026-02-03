@@ -10,9 +10,4 @@ torchaudio==2.9.1
 # These must be updated alongside torch
 torchvision==0.24.1 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 # FlashInfer should be updated together with the Dockerfile
-<<<<<<< HEAD
 flashinfer-python==0.6.2
-=======
-flashinfer-python==0.6.1
-nvshmem4py-cu12 # Required for async LoRA loading with NVSHMEM
->>>>>>> 111f04d3b (Accuracy Tests for LoRA Async Loading)

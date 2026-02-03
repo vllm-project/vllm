@@ -5,7 +5,6 @@ import math
 from collections.abc import Callable
 from typing import TypeVar
 
-import nvshmem.core as nvshmem
 import regex as re
 import torch
 from torch import nn
@@ -44,6 +43,14 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
+
+if envs.VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA:
+    try:
+        import nvshmem.core as nvshmem
+    except ImportError as e:
+        raise ImportError(
+            "pip install nvshmem4py-cu12 # Required for async LoRA loading with NVSHMEM"
+        ) from e
 
 logger = init_logger(__name__)
 

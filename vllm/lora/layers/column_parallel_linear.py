@@ -206,7 +206,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         The main reason for overriding this function is to enhance  code
         maintainability.
         """
-
         self.lora_config = lora_config
 
         lora_a_output_size_per_partition = (

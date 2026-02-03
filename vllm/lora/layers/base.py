@@ -14,9 +14,15 @@ from vllm.utils.torch_utils import direct_register_custom_op
 if TYPE_CHECKING:
     from vllm.lora.punica_wrapper import PunicaWrapperBase
 
-import nvshmem.bindings as bindings
-from nvshmem.core import ComparisonType
-from nvshmem.core.interop.torch import tensor as nvshmem_tensor
+if envs.VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA:
+    try:
+        import nvshmem.bindings as bindings
+        from nvshmem.core import ComparisonType
+        from nvshmem.core.interop.torch import tensor as nvshmem_tensor
+    except ImportError as e:
+        raise ImportError(
+            "pip install nvshmem4py-cu12 # Required for async LoRA loading with NVSHMEM"
+        ) from e
 
 
 # NVSHMEM implementation
@@ -53,7 +59,7 @@ class BaseLayerWithLoRA(nn.Module):
         """Create flag tensor (uint64 for NVSHMEM signal compatibility)."""
         if envs.VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA:
             self.lora_ready = nvshmem_tensor(shape=(1,), dtype=torch.int64)
-            self.lora_ready.zero_()
+            self.lora_ready.fill_(1)
 
     def set_lora_flag(self, load_value) -> None:
         """Set flag value and ensure visibility across GPUs via NVSHMEM quiet."""
