@@ -259,7 +259,18 @@ class BlockPool:
             # align mode. We skip null blocks here.
             if blk.is_null:
                 continue
-            assert blk.block_hash is None
+            if blk.block_hash is not None:
+                # Block already cached (from prefix cache hit).
+                # Verify it has the correct hash for this position.
+                expected_hash = make_block_hash_with_group_id(
+                    new_block_hashes[i], kv_cache_group_id
+                )
+                assert blk.block_hash == expected_hash, (
+                    "Cached block has wrong hash: "
+                    f"{blk.block_hash!r} != {expected_hash!r}. "
+                    "This indicates the wrong block was assigned from prefix cache."
+                )
+                continue
             block_hash = new_block_hashes[i]
 
             # Update and added the full block to the cache.
@@ -398,9 +409,18 @@ class BlockPool:
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
-        self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        )
+
+        # Separate blocks into fresh (no hash) and cached (has hash).
+        # Fresh blocks go to front of queue (used first during allocation),
+        # cached blocks go to back (preserved longer for prefix cache hits).
+        freeable = [b for b in blocks_list if b.ref_cnt == 0 and not b.is_null]
+        fresh_blocks = [b for b in freeable if b.block_hash is None]
+        cached_blocks = [b for b in freeable if b.block_hash is not None]
+
+        if fresh_blocks:
+            self.free_block_queue.prepend_n(fresh_blocks)
+        if cached_blocks:
+            self.free_block_queue.append_n(cached_blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
