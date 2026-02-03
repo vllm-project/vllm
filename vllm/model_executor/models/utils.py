@@ -343,6 +343,26 @@ class AutoWeightsLoader:
         return autoloaded_weights
 
 
+def mark_mamba_gate_proj_loaded(
+    params_dict: Mapping[str, nn.Parameter],
+    loaded_params: set[str],
+) -> None:
+    """Mark Mamba gate_proj params as loaded when in_proj is loaded.
+
+    MambaMixer2 splits gate_proj out of in_proj, while legacy checkpoints
+    still store fused in_proj weights. When in_proj is loaded, we should
+    treat the corresponding gate_proj as loaded for strict weight checks.
+    """
+    gate_params: list[str] = []
+    for name in loaded_params:
+        if ".mixer.in_proj." not in name:
+            continue
+        gate_name = name.replace(".mixer.in_proj.", ".mixer.gate_proj.")
+        if gate_name in params_dict:
+            gate_params.append(gate_name)
+    loaded_params.update(gate_params)
+
+
 def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,

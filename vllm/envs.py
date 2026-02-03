@@ -225,13 +225,14 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
+    VLLM_DISABLE_MAMBA_MULTI_STREAM: bool = False
+    VLLM_MAMBA_GATE_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
-
 
 def get_default_cache_root():
     return os.getenv(
@@ -1189,6 +1190,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES", "1"))
     ),
+
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine
@@ -1555,6 +1557,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # TODO(alexm-redhat): Tune to be more dynamic based on GPU type
     "VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD": lambda: int(
         int(os.getenv("VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD", 256))
+    ),
+    # Disable multi-stream overlap for Mamba prefill/decode and gate.
+    "VLLM_DISABLE_MAMBA_MULTI_STREAM": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_MAMBA_MULTI_STREAM", "0"))
+    ),
+    # Limits when we run Mamba gate projection in a separate stream.
+    # For large token counts, overlap is often compute-bound and adds
+    # launch overhead without benefit. Tune per model/GPU.
+    "VLLM_MAMBA_GATE_STREAM_TOKEN_THRESHOLD": lambda: int(
+        int(os.getenv("VLLM_MAMBA_GATE_STREAM_TOKEN_THRESHOLD", 256))
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file

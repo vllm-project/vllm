@@ -47,7 +47,12 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsMambaPrefixCaching
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    mark_mamba_gate_proj_loaded,
+    maybe_prefix,
+)
 
 
 class Zamba2LoRA(nn.Module):
@@ -830,6 +835,7 @@ class Zamba2Model(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(chkpt_weight_name)
+        mark_mamba_gate_proj_loaded(params_dict, loaded_params)
         return loaded_params
 
 

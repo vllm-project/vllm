@@ -74,6 +74,7 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    mark_mamba_gate_proj_loaded,
     maybe_prefix,
     sequence_parallel_chunk,
 )
@@ -766,6 +767,7 @@ class NemotronHModel(nn.Module):
                     weight_loader(param, loaded_weight)
 
             loaded_params.add(name)
+        mark_mamba_gate_proj_loaded(params_dict, loaded_params)
         return loaded_params
 
 

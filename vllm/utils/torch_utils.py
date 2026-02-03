@@ -359,7 +359,6 @@ def set_random_seed(seed: int | None) -> None:
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
 
-
 def create_kv_caches_with_random_flash(
     num_blocks: int,
     block_size: int,
@@ -574,6 +573,8 @@ def current_stream() -> torch.cuda.Stream:
 # aux_stream() is currently used for:
 #   - MoE shared_expert overlap with router
 _aux_stream: torch.cuda.Stream | None = None
+_mamba_prefill_decode_stream: torch.cuda.Stream | None = None
+_mamba_gate_stream: torch.cuda.Stream | None = None
 
 
 def aux_stream() -> torch.cuda.Stream | None:
@@ -588,6 +589,53 @@ def aux_stream() -> torch.cuda.Stream | None:
         _aux_stream = torch.cuda.Stream()
 
     return _aux_stream
+
+
+def mamba_prefill_decode_stream() -> torch.cuda.Stream | None:
+    """Dedicated aux stream for Mamba prefill/decode overlap."""
+    global _mamba_prefill_decode_stream
+
+    from vllm.platforms import current_platform
+
+    if _mamba_prefill_decode_stream is None and current_platform.is_cuda_alike():
+        _mamba_prefill_decode_stream = torch.cuda.Stream()
+
+    return _mamba_prefill_decode_stream
+
+
+def mamba_gate_stream() -> torch.cuda.Stream | None:
+    """Dedicated aux stream for Mamba-2 gate projection overlap."""
+    global _mamba_gate_stream
+
+    from vllm.platforms import current_platform
+
+    if _mamba_gate_stream is None and current_platform.is_cuda_alike():
+        _mamba_gate_stream = torch.cuda.Stream()
+
+    return _mamba_gate_stream
+
+
+def maybe_execute_in_parallel(
+    main_fn: Callable[[], Any],
+    aux_fn: Callable[[], Any],
+    main_event: torch.cuda.Event,
+    aux_event: torch.cuda.Event,
+    aux_stream: torch.cuda.Stream | None = None,
+) -> tuple[Any, Any]:
+    """Run two callables, optionally overlapping on an aux CUDA stream."""
+    if aux_stream is None:
+        return main_fn(), aux_fn()
+
+    main_event.record()
+    main_result = main_fn()
+
+    with torch.cuda.stream(aux_stream):
+        aux_stream.wait_event(main_event)
+        aux_result = aux_fn()
+        aux_event.record()
+
+    aux_event.wait()
+    return main_result, aux_result
 
 
 @lru_cache(maxsize=8)

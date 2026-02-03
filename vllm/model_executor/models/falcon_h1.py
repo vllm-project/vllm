@@ -52,6 +52,7 @@ from .interfaces import (
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
+    mark_mamba_gate_proj_loaded,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -688,6 +689,7 @@ class FalconH1ForCausalLM(
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
+        mark_mamba_gate_proj_loaded(params_dict, loaded_params)
         if self.tie_word_embeddings:
             loaded_params.add("lm_head.weight")
         return loaded_params
