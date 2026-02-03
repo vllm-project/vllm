@@ -50,6 +50,7 @@ class ScoreMultiModalParam(TypedDict, total=False):
 
 # Raw input data with content key in ScoreMultiModalParam.
 ScoreInputs = str | ScoreMultiModalParam | list[str | ScoreMultiModalParam]
+ScoreInputsList = list[str | ScoreMultiModalParam]
 # Score data without content key.
 ScoreData = str | list[ScoreContentPartParam]
 ScoreDataList = list[str | list[ScoreContentPartParam]]
@@ -101,7 +102,7 @@ def _validate_score_input_lens(
 
 
 def _validate_mm_score_input(
-    data: list[ScoreInputs],
+    data: ScoreInputsList,
     is_multimodal_model: bool,
     architecture: str,
 ) -> ScoreDataList:
@@ -136,8 +137,8 @@ def validate_score_input(
 
 
 def parse_score_data(
-    data_1: ScoreDataList,
-    data_2: ScoreDataList,
+    data_1: ScoreData,
+    data_2: ScoreData,
     model_config: ModelConfig,
 ) -> tuple[str, str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
     mm_tracker = MultiModalItemTracker(model_config)
@@ -162,7 +163,7 @@ def parse_score_data(
 
 def _parse_score_content(
     role: str,
-    data: ScoreDataList,
+    data: ScoreData,
     mm_tracker: BaseMultiModalItemTracker,
 ) -> list[ConversationMessage]:
     parts: Iterable[ChatCompletionContentPartParam]
