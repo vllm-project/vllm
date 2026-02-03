@@ -144,8 +144,7 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
-        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
-        if self.use_harmony:
+        if self.renderer.uses_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
                 self.default_sampling_params["stop_token_ids"] = []
             self.default_sampling_params["stop_token_ids"].extend(
@@ -254,7 +253,7 @@ class OpenAIServingChat(OpenAIServing):
             tool_parsing_unavailable = (
                 tool_parser is None
                 and not isinstance(tokenizer, MistralTokenizer)
-                and not self.use_harmony
+                and not self.renderer.uses_harmony
             )
 
             # Validate tool_choice when tool parsing is required but unavailable
@@ -284,7 +283,7 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
 
-            if not self.use_harmony:
+            if not self.renderer.uses_harmony:
                 # Common case.
                 error_check_ret = self._validate_chat_template(
                     request_chat_template=request.chat_template,
@@ -640,7 +639,7 @@ class OpenAIServingChat(OpenAIServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
-        if self.use_harmony:
+        if self.renderer.uses_harmony:
             harmony_parsers = [
                 get_streamable_parser_for_assistant() for _ in range(num_choices)
             ]
@@ -836,7 +835,7 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         logprobs = None
 
-                    if self.use_harmony:
+                    if self.renderer.uses_harmony:
                         harmony_parser = harmony_parsers[i]
                         prev_recipient = harmony_parser.current_recipient
 
@@ -888,7 +887,7 @@ class OpenAIServingChat(OpenAIServing):
                         else:
                             current_token_ids = as_list(output.token_ids)
 
-                    if self.use_harmony:
+                    if self.renderer.uses_harmony:
                         delta_message, tools_streamed_flag = (
                             extract_harmony_streaming_delta(
                                 harmony_parser=harmony_parser,
@@ -1140,7 +1139,7 @@ class OpenAIServingChat(OpenAIServing):
                     # update the previous values for the next iteration
                     if (
                         tool_choice_auto or self.reasoning_parser
-                    ) and not self.use_harmony:
+                    ) and not self.renderer.uses_harmony:
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_texts[i] = current_text
@@ -1280,7 +1279,9 @@ class OpenAIServingChat(OpenAIServing):
                         if (
                             auto_tools_called
                             or (tools_streamed[i] and not tool_choice_function_name)
-                            or (self.use_harmony and harmony_tools_streamed[i])
+                            or (
+                                self.renderer.uses_harmony and harmony_tools_streamed[i]
+                            )
                         ):
                             finish_reason_ = "tool_calls"
                         else:
@@ -1437,7 +1438,7 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
-            if self.use_harmony:
+            if self.renderer.uses_harmony:
                 reasoning, content, _ = parse_chat_output(token_ids)
                 if not request.include_reasoning:
                     reasoning = None
@@ -1531,7 +1532,7 @@ class OpenAIServingChat(OpenAIServing):
             tool_call_class = (
                 MistralToolCall if isinstance(tokenizer, MistralTokenizer) else ToolCall
             )
-            if self.use_harmony:
+            if self.renderer.uses_harmony:
                 # Harmony models already have parsed content and tool_calls
                 # through parse_chat_output. Respect its output directly.
                 message = ChatMessage(

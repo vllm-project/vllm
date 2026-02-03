@@ -238,8 +238,7 @@ class OpenAIServingResponses(OpenAIServing):
                 "the store."
             )
 
-        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
-        if self.use_harmony:
+        if self.renderer.uses_harmony:
             logger.warning(
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
                 "and always enable tool use."
@@ -313,7 +312,7 @@ class OpenAIServingResponses(OpenAIServing):
     def _validate_create_responses_input(
         self, request: ResponsesRequest
     ) -> ErrorResponse | None:
-        if self.use_harmony and request.is_include_output_logprobs():
+        if self.renderer.uses_harmony and request.is_include_output_logprobs():
             return self.create_error_response(
                 err_type="invalid_request_error",
                 message="logprobs are not supported with gpt-oss models",
@@ -389,7 +388,7 @@ class OpenAIServingResponses(OpenAIServing):
             lora_request = self._maybe_get_adapters(request)
             model_name = self.models.model_name(lora_request)
 
-            if self.use_harmony:
+            if self.renderer.uses_harmony:
                 messages, engine_prompts = self._make_request_with_harmony(
                     request, prev_response
                 )
@@ -457,7 +456,7 @@ class OpenAIServingResponses(OpenAIServing):
                 )
 
                 context: ConversationContext
-                if self.use_harmony:
+                if self.renderer.uses_harmony:
                     if request.stream:
                         context = StreamingHarmonyContext(messages, available_tools)
                     else:
@@ -688,7 +687,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         input_messages: ResponseInputOutputMessage | None = None
         output_messages: ResponseInputOutputMessage | None = None
-        if self.use_harmony:
+        if self.renderer.uses_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
             if request.enable_response_messages:
@@ -961,7 +960,7 @@ class OpenAIServingResponses(OpenAIServing):
             tool_parser_cls=self.tool_parser,
         )
 
-        if content or (self.use_harmony and tool_calls):
+        if content or (self.renderer.uses_harmony and tool_calls):
             res_text_part = None
             if content:
                 res_text_part = ResponseOutputText(
@@ -2504,7 +2503,7 @@ class OpenAIServingResponses(OpenAIServing):
             return event
 
         async with AsyncExitStack() as exit_stack:
-            if self.use_harmony:
+            if self.renderer.uses_harmony:
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697
                 await self._initialize_tool_sessions(request, context, exit_stack)

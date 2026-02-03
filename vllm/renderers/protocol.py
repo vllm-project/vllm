@@ -38,6 +38,13 @@ class BaseRenderer(ABC):
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
+        # Check if this model uses Harmony encoding (GPT-OSS)
+        hf_config = getattr(config, "hf_config", None)
+        self.uses_harmony: bool = (
+            hf_config is not None
+            and getattr(hf_config, "model_type", None) == "gpt_oss"
+        )
+
     @property
     @abstractmethod
     def tokenizer(self) -> TokenizerLike | None:
