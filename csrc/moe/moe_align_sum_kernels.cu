@@ -373,14 +373,14 @@ __global__ void moe_lora_align_block_size_kernel(
     }
 
     // virtual expert id in [0, num_virtual_experts)
-    int32_t ve = lora * num_experts + expert;
+    int32_t virtual_expert = lora * num_experts + expert;
 
     // safety
-    if (ve < 0 || ve >= num_virtual_experts) continue;
+    if (virtual_expert < 0 || virtual_expert >= num_virtual_experts) continue;
 
     // Use linear indexing for shared_counts (simpler and supports large
     // num_virtual_experts)
-    atomicAdd(&shared_counts[ve], 1);
+    atomicAdd(&shared_counts[virtual_expert], 1);
   }
 
   __syncthreads();
@@ -448,10 +448,12 @@ __global__ void moe_lora_align_block_size_kernel(
   // =========================================================================
   // Fill expert_ids with stride loop for large num_virtual_experts
   // =========================================================================
-  for (int32_t ve = (int32_t)tid; ve < num_virtual_experts;
-       ve += (int32_t)blockDim.x) {
-    for (int32_t i = cumsum[ve]; i < cumsum[ve + 1]; i += block_size) {
-      expert_ids[i / block_size] = ve;
+  for (int32_t virtual_expert = (int32_t)tid;
+       virtual_expert < num_virtual_experts;
+       virtual_expert += (int32_t)blockDim.x) {
+    for (int32_t i = cumsum[virtual_expert]; i < cumsum[virtual_expert + 1];
+         i += block_size) {
+      expert_ids[i / block_size] = virtual_expert;
     }
   }
 
@@ -566,10 +568,10 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
     }
 
     // Compute virtual expert id
-    int32_t ve = lora * num_experts + expert;
-    if (ve < 0 || ve >= num_virtual_experts) continue;
+    int32_t virtual_expert = lora * num_experts + expert;
+    if (virtual_expert < 0 || virtual_expert >= num_virtual_experts) continue;
 
-    ++tokens_cnts[(tid + 1) * num_virtual_experts + ve];
+    ++tokens_cnts[(tid + 1) * num_virtual_experts + virtual_expert];
   }
 
   __syncthreads();
@@ -629,14 +631,15 @@ __global__ void moe_lora_align_block_size_small_batch_expert_kernel(
       if (expert < 0 || expert >= num_experts) continue;
     }
 
-    int32_t ve = lora * num_experts + expert;
-    if (ve < 0 || ve >= num_virtual_experts) continue;
+    int32_t virtual_expert = lora * num_experts + expert;
+    if (virtual_expert < 0 || virtual_expert >= num_virtual_experts) continue;
 
     int32_t rank_post_pad =
-        tokens_cnts[tid * num_virtual_experts + ve] + cumsum[ve];
+        tokens_cnts[tid * num_virtual_experts + virtual_expert] +
+        cumsum[virtual_expert];
 
     sorted_token_ids[rank_post_pad] = i;
-    ++tokens_cnts[tid * num_virtual_experts + ve];
+    ++tokens_cnts[tid * num_virtual_experts + virtual_expert];
   }
 }
 
@@ -831,10 +834,20 @@ void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
   int threads = 1024;
   threads = ((threads + WARP_SIZE - 1) / WARP_SIZE) * WARP_SIZE;
 
-  // No longer limited to 1024 - iterative BlockScan handles larger counts
-  // Add upper bound for sanity (shared memory limit)
-  TORCH_CHECK(num_virtual_experts < 16384,
-              "num_virtual_experts must be < 16384");
+  // num_virtual_experts = num_experts * max_loras
+  // Limited by device shared memory: shared_counts needs
+  // padded_num_virtual_experts * sizeof(int32_t) bytes
+  int device_max_shared_mem;
+  cudaDeviceGetAttribute(&device_max_shared_mem,
+                         cudaDevAttrMaxSharedMemoryPerBlockOptin,
+                         topk_ids.get_device());
+  int64_t max_virtual_experts =
+      device_max_shared_mem / static_cast<int64_t>(sizeof(int32_t));
+  TORCH_CHECK(padded_num_virtual_experts <= max_virtual_experts,
+              "num_virtual_experts (", num_virtual_experts, ", padded to ",
+              padded_num_virtual_experts, ") exceeds device limit of ",
+              max_virtual_experts, " (", device_max_shared_mem,
+              " bytes shared memory)");
 
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt).device(topk_ids.device());
@@ -890,15 +903,10 @@ void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
           size_t shared_mem_size =
               num_warps * experts_per_warp * sizeof(int32_t);
 
-          // Check shared memory limits for large num_virtual_experts
-          int device_max_shared_mem;
-          cudaDeviceGetAttribute(&device_max_shared_mem,
-                                 cudaDevAttrMaxSharedMemoryPerBlockOptin,
-                                 topk_ids.get_device());
-          TORCH_CHECK(shared_mem_size <= (size_t)device_max_shared_mem,
-                      "Required shared memory (", shared_mem_size,
-                      " bytes) exceeds device limit (", device_max_shared_mem,
-                      " bytes)");
+          // Opt-in for extended shared memory (required when > 48KB)
+          cudaFuncSetAttribute(align_kernel,
+                               cudaFuncAttributeMaxDynamicSharedMemorySize,
+                               shared_mem_size);
 
           // 2 blocks: [0]=count+align, [1]=init sorted_token_ids
           align_kernel<<<2, threads, shared_mem_size, stream>>>(

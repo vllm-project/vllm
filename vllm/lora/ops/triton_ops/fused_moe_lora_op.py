@@ -454,6 +454,8 @@ def _fused_moe_lora(
     num_experts = lora_a_stacked[0].shape[1]
     N = max_lora_rank
     M = topk_weights.shape[0]
+    # EM: total token slots after block alignment padding
+    # sorted_token_ids is a 1D tensor of size EM
     EM = sorted_token_ids.shape[0]
     K = qcurr_hidden_states.shape[1]
     num_tokens = M * top_k_num

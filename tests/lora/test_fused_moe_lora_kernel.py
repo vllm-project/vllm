@@ -27,6 +27,10 @@ def reset_device(reset_default_device):
     pass
 
 
+def round_up(x, base):
+    return ((x + base - 1) // base) * base
+
+
 def assign_loras_to_tokens(num_tokens: int, num_sequences: int, max_loras: int):
     """
     Split `num_tokens` into `num_sequences` sequences.
@@ -113,10 +117,6 @@ def sample_data(
     return topk_ids, topk_weights, token_lora_mapping
 
 
-def round_up(x, base):
-    return ((x + base - 1) // base) * base
-
-
 def use_fused_moe_lora_kernel(
     topk_ids,
     topk_weights,
@@ -148,7 +148,9 @@ def use_fused_moe_lora_kernel(
         dtype=torch.int32,
         device=topk_ids.device,
     )
-    num_tokens_post_pad = torch.empty((1,), dtype=torch.int32, device=topk_ids.device)
+    num_tokens_post_padded = torch.empty(
+        (1,), dtype=torch.int32, device=topk_ids.device
+    )
 
     adapter_enabled = torch.ones(
         (max_loras + 1,), dtype=torch.int32, device=topk_ids.device
@@ -165,7 +167,7 @@ def use_fused_moe_lora_kernel(
         block_size,
         sorted_token_ids,
         expert_ids,
-        num_tokens_post_pad,
+        num_tokens_post_padded,
         None,  # expert_map
     )
 
@@ -189,7 +191,7 @@ def use_fused_moe_lora_kernel(
         topk_weights,
         sorted_token_ids,
         expert_ids,
-        num_tokens_post_pad,
+        num_tokens_post_padded,
         max_lora_rank,
         top_k_num,
         adapter_enabled,
