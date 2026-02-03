@@ -23,7 +23,7 @@
 """Inference-only Qwen3-ASR model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -33,7 +33,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -125,6 +125,13 @@ class Qwen3ASRProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
+    def get_data_parser(self) -> MultiModalDataParser:
+        feature_extractor = self.get_feature_extractor()
+        return Qwen3ASRMultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
 
 class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -194,12 +201,6 @@ class Qwen3ASRMultiModalDataParser(MultiModalDataParser):
 class Qwen3ASRMultiModalProcessor(
     Qwen3OmniMoeThinkerMultiModalProcessor,
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return Qwen3ASRMultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate,
-        )
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -561,11 +562,11 @@ class Qwen3ASRForConditionalGeneration(
             )
 
         prompt_token_ids = tokenizer.encode(prompt)
-        prompt_dict = {
-            "prompt_token_ids": prompt_token_ids,
-            "multi_modal_data": {"audio": audio},
-        }
-        return cast(PromptType, prompt_dict)
+
+        return TokensPrompt(
+            prompt_token_ids=prompt_token_ids,
+            multi_modal_data={"audio": audio},
+        )
 
     @classmethod
     def post_process_output(cls, text: str) -> str:

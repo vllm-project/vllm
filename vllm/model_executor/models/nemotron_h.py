@@ -188,10 +188,29 @@ class NemotronHMoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+        if self.use_latent_moe:
+            self.fc1_latent_proj = ReplicatedLinear(
+                input_size=config.hidden_size,
+                output_size=self.moe_hidden_size,
+                bias=config.mlp_bias,
+                quant_config=quant_config,
+                disable_tp=self.is_sequence_parallel,
+                prefix=f"{prefix}.fc1_latent_proj",
+            )
+            self.fc2_latent_proj = ReplicatedLinear(
+                input_size=self.moe_hidden_size,
+                output_size=config.hidden_size,
+                bias=config.mlp_bias,
+                quant_config=quant_config,
+                disable_tp=self.is_sequence_parallel,
+                prefix=f"{prefix}.fc2_latent_proj",
+            )
+        else:
+            self.fc1_latent_proj = None
+            self.fc2_latent_proj = None
+
         self.experts = SharedFusedMoE(
-            # TODO: make it possible for shared experts to have
-            # different input in SharedFusedMoE
-            shared_experts=self.shared_experts if not self.use_latent_moe else None,
+            shared_experts=self.shared_experts,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=self.moe_hidden_size,
@@ -211,29 +230,8 @@ class NemotronHMoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             router_logits_dtype=router_logits_dtype,
+            routed_input_transform=self.fc1_latent_proj,
         )
-
-        if self.use_latent_moe:
-            self.fc1_latent_proj = ReplicatedLinear(
-                input_size=config.hidden_size,
-                output_size=self.moe_hidden_size,
-                bias=config.mlp_bias,
-                quant_config=quant_config,
-                disable_tp=self.is_sequence_parallel,
-                prefix=f"{prefix}.fc1_latent_proj",
-            )
-            self.fc2_latent_proj = ReplicatedLinear(
-                input_size=self.moe_hidden_size,
-                output_size=config.hidden_size,
-                bias=config.mlp_bias,
-                quant_config=quant_config,
-                disable_tp=self.is_sequence_parallel,
-                prefix=f"{prefix}.fc2_latent_proj",
-            )
-
-        else:
-            self.fc1_latent_proj = None
-            self.fc2_latent_proj = None
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -244,38 +242,28 @@ class NemotronHMoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
-        shared_output = None
-        if self.use_latent_moe:
-            if self.shared_experts is not None:
-                shared_output = self.shared_experts(hidden_states)
-            hidden_states, _ = self.fc1_latent_proj(hidden_states)
 
-        fused_moe_out = self.experts(
+        # SharedFusedMoE handles:
+        #   - shared experts (with original hidden_states)
+        #   - routed_input_transform (fc1_latent_proj) for latent MoE
+        #   - multistream parallelism between shared and routed experts
+        shared_output, final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-
-        if self.use_latent_moe:
-            _, final_hidden_states = fused_moe_out
-        else:
-            shared_output, final_hidden_states = fused_moe_out
 
         # Fix FP16 overflow
         # See DeepseekV2DecoderLayer for more details.
         if hidden_states.dtype != torch.float16:
             final_hidden_states *= self.routed_scaling_factor
         elif self.shared_experts is not None:
-            assert shared_output is not None
             shared_output *= 1.0 / self.routed_scaling_factor
 
-        # TODO: currently latent up_proj is done before all-reduce for simplicity.
-        #  if and when shared experts will be part of SharedFusedMoE,
-        #  we should do the up_proj after all-reduce,
-        #  to have the all-reduce in the smaller latent dimension.
+        # TODO: See SharedFusedMoE.apply_routed_input_transform
+        # for bandwidth optimization
         if self.use_latent_moe:
             final_hidden_states, _ = self.fc2_latent_proj(final_hidden_states)
 
         if self.shared_experts is not None:
-            assert shared_output is not None
             final_hidden_states += shared_output
 
         if self.is_sequence_parallel:
