@@ -328,7 +328,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
 
 class ModelOptFp8Config(ModelOptQuantConfigBase):
-    """Config class for ModelOpt FP8 (including MXFP8)."""
+    """Config class for ModelOpt FP8."""
 
     def __init__(
         self,
@@ -348,9 +348,6 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
                 quant_method,
             )
 
-        # Used by MXFP8
-        self.group_size: int | None = None
-
         # Select LinearMethod implementation based on quant_algo.
         if self.quant_method == "FP8":
             self.LinearMethodCls = ModelOptFp8LinearMethod
@@ -362,7 +359,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
             raise ValueError(
                 "Unsupported ModelOpt FP8 quant_algo for vLLM: "
                 f"{self.quant_method}. Supported: FP8 / "
-                "FP8_PER_CHANNEL_PER_TOKEN / FP8_PB_WO / MXFP8."
+                "FP8_PER_CHANNEL_PER_TOKEN / FP8_PB_WO."
             )
 
     def get_name(self) -> QuantizationMethods:
