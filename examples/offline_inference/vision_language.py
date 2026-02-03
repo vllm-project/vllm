@@ -270,6 +270,49 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
+    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+
+    assert modality == "image"
+
+    model_name = "deepseek-ai/DeepSeek-OCR-2"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        limit_mm_per_prompt={modality: 1},
+        logits_processors=[NGramPerReqLogitsProcessor],
+    )
+
+    # deepseek-ocr use plain prompt template
+    prompts = [f"<image>\n{question}" for question in questions]
+
+    # The following sampling params config is taken from
+    # the official Deepseek-OCR inference example.
+    # (IMPORTANT) Use the custom logits processor and avoid skipping
+    # special tokens for this model for the optimal OCR performance.
+    sampling_params = [
+        SamplingParams(
+            temperature=0.0,
+            max_tokens=8192,
+            # ngram logit processor args
+            extra_args=dict(
+                ngram_size=30,
+                window_size=90,
+                # whitelist: <td>, </td>
+                whitelist_token_ids={128821, 128822},
+            ),
+            skip_special_tokens=False,
+        )
+        for _ in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        sampling_params=sampling_params,
+    )
+
+
 # Dots-OCR
 def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -544,6 +587,42 @@ def run_glm4_5v_fp8(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt={modality: 1},
         enforce_eager=True,
         tensor_parallel_size=4,
+    )
+
+    if modality == "image":
+        placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+    elif modality == "video":
+        placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+
+    prompts = [
+        (
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            f"{placeholder}"
+            f"{question}<|assistant|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# GLM-OCR
+def run_glm_ocr(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "zai-org/GLM-OCR"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        mm_processor_kwargs={
+            "size": {"shortest_edge": 12544, "longest_edge": 47040000},
+            "fps": 1,
+        },
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
     )
 
     if modality == "image":
@@ -908,6 +987,31 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
         max_model_len=4096,
         limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Kimi-VL
+def run_kimi_k25(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "vision_chunk"
+
+    prompts = [
+        "<|im_user|>user<|media_begin|>image<|media_content|>"
+        f"<|media_pad|><|media_end|>{question}<|im_end|>"
+        "<|im_assistant|>assistant<|im_middle|>"
+        for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="moonshotai/Kimi-K2.5",
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+        tensor_parallel_size=4,
     )
 
     return ModelRequestData(
@@ -1351,6 +1455,37 @@ def run_nvlm_d(questions: list[str], modality: str) -> ModelRequestData:
     prompts = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# OpenPangu
+def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "FreedomIntelligence/openPangu-VL-7B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=4,
+        trust_remote_code=True,
+        enforce_eager=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "[unused19]"
+    elif modality == "video":
+        placeholder = "[unused32]"
+
+    prompts = [
+        (
+            f"<s>[unused9]系统：[unused10][unused9]用户：[unused18]{placeholder}[unused20]{question}[unused10][unused9]助手："
+        )
+        for question in questions
+    ]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -1889,6 +2024,32 @@ def run_step3(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# StepVL10B
+def run_step_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "stepfun-ai/Step3-VL-10B"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_batched_tokens=4096,
+        tensor_parallel_size=1,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+        reasoning_parser="deepseek_r1",
+    )
+
+    prompts = [
+        "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
+        f"<im_patch>{question} <|EOT|><|BOT|>assistant\n<think>\n"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # omni-research/Tarsier-7b
 def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1952,6 +2113,7 @@ model_example_map = {
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
     "deepseek_ocr": run_deepseek_ocr,
+    "deepseek_ocr2": run_deepseek_ocr2,
     "dots_ocr": run_dots_ocr,
     "eagle2_5": run_eagle2_5,
     "ernie45_vl": run_ernie45_vl,
@@ -1962,6 +2124,7 @@ model_example_map = {
     "glm4_1v": run_glm4_1v,
     "glm4_5v": run_glm4_5v,
     "glm4_5v_fp8": run_glm4_5v_fp8,
+    "glm_ocr": run_glm_ocr,
     "h2ovl_chat": run_h2ovl,
     "hunyuan_vl": run_hunyuan_vl,
     "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
@@ -1972,6 +2135,7 @@ model_example_map = {
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
+    "kimi_k25": run_kimi_k25,
     "lightonocr": run_lightonocr,
     "lfm2_vl": run_lfm2_vl,
     "llama4": run_llama4,
@@ -1988,6 +2152,7 @@ model_example_map = {
     "molmo2": run_molmo2,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
+    "openpangu_vl": run_openpangu_vl,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
     "paddleocr_vl": run_paddleocr_vl,
@@ -2006,6 +2171,7 @@ model_example_map = {
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
     "step3": run_step3,
+    "stepvl": run_step_vl,
     "tarsier": run_tarsier,
     "tarsier2": run_tarsier2,
 }
@@ -2013,6 +2179,7 @@ model_example_map = {
 
 MODELS_NEED_VIDEO_METADATA = [
     "glm4_1v",
+    "glm_ocr",
     "glm4_5v",
     "glm4_5v_fp8",
     "molmo2",
@@ -2053,6 +2220,19 @@ def get_multi_modal_input(args):
         return {
             "data": ([(video, metadata)] if needs_metadata else video),
             "questions": vid_questions,
+        }
+
+    if args.modality == "vision_chunk":
+        # Input vision chunks and question
+        image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
+        vision_chunk_questions = [
+            "What is the content of this image chunk?",
+            "Describe the content of this image chunk in detail.",
+        ]
+
+        return {
+            "data": {"type": "image", "image": image},
+            "questions": vision_chunk_questions,
         }
 
     msg = f"Modality {args.modality} is not supported."
@@ -2137,7 +2317,7 @@ def parse_args():
         "--modality",
         type=str,
         default="image",
-        choices=["image", "video"],
+        choices=["image", "video", "vision_chunk"],
         help="Modality of the input.",
     )
     parser.add_argument(
@@ -2214,7 +2394,7 @@ def main(args):
     req_data = model_example_map[model](questions, modality)
 
     # Disable other modalities to save memory
-    default_limits = {"image": 0, "video": 0, "audio": 0}
+    default_limits = {"image": 0, "video": 0, "audio": 0, "vision_chunk": 0}
     req_data.engine_args.limit_mm_per_prompt = default_limits | dict(
         req_data.engine_args.limit_mm_per_prompt or {}
     )

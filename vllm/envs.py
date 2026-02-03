@@ -87,20 +87,7 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
-    # Deprecated env variables for profiling, kept for backward compatibility
-    # See also vllm/config/profiler.py and `--profiler-config` argument
-    VLLM_TORCH_CUDA_PROFILE: str | None = None
-    VLLM_TORCH_PROFILER_DIR: str | None = None
-    VLLM_TORCH_PROFILER_RECORD_SHAPES: str | None = None
-    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: str | None = None
-    VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM: str | None = None
-    VLLM_TORCH_PROFILER_WITH_STACK: str | None = None
-    VLLM_TORCH_PROFILER_WITH_FLOPS: str | None = None
-    VLLM_TORCH_PROFILER_USE_GZIP: str | None = None
-    VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: str | None = None
-    VLLM_PROFILER_DELAY_ITERS: str | None = None
-    VLLM_PROFILER_MAX_ITERS: str | None = None
-    # End of deprecated env variables for profiling
+    VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
@@ -173,6 +160,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
+    VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
         "latency"
     )
@@ -183,15 +171,6 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
-    VLLM_ALL2ALL_BACKEND: Literal[
-        "naive",
-        "pplx",
-        "deepep_high_throughput",
-        "deepep_low_latency",
-        "mori",
-        "allgather_reducescatter",
-        "flashinfer_all2allv",
-    ] = "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
@@ -288,16 +267,11 @@ def use_aot_compile() -> bool:
     from vllm.model_executor.layers.batch_invariant import (
         vllm_is_batch_invariant,
     )
-    from vllm.platforms import current_platform
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = (
         "1"
-        if is_torch_equal_or_newer("2.10.0.dev")
-        and not disable_compile_cache()
-        # Disabling AOT_COMPILE for CPU
-        # See: https://github.com/vllm-project/vllm/issues/32033
-        and not current_platform.is_cpu()
+        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
         else "0"
     )
 
@@ -782,6 +756,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Backend for Video IO
     # - "opencv": Default backend that uses OpenCV stream buffered backend.
+    # - "identity": Returns raw video bytes for model processor to handle.
     #
     # Custom backend implementations can be registered
     # via `@VIDEO_LOADER_REGISTRY.register("my_custom_video_loader")` and
@@ -872,6 +847,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
     "VLLM_LORA_RESOLVER_CACHE_DIR": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_CACHE_DIR", None
+    ),
+    # A remote HF repo(s) containing one or more LoRA adapters, which
+    # may be downloaded and leveraged as needed. Only works if plugins
+    # are enabled and VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
+    # Values should be comma separated.
+    "VLLM_LORA_RESOLVER_HF_REPO_LIST": lambda: os.getenv(
+        "VLLM_LORA_RESOLVER_HF_REPO_LIST", None
     ),
     # Enables torch CUDA profiling if set to 1.
     # Deprecated, see profiler_config.
@@ -1236,17 +1218,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER", "0"))
     ),
-    # Allow use of FlashInfer MoE kernels for fused moe ops.
+    # Allow use of FlashInfer BF16 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP16": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))
     ),
-    # Allow use of FlashInfer MoE kernels for fused moe ops.
+    # Allow use of FlashInfer FP8 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))
     ),
-    # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
+    # Allow use of FlashInfer NVFP4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))
+    ),
+    # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
+    "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
+        int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
     ),
     # If set to 1, use the FlashInfer
     # MXFP8 (activation) x MXFP4 (weight) MoE backend.
@@ -1296,30 +1282,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
-    ),
-    # [DEPRECATED - will be removed in v0.15.0] all2all backend for vllm's
-    # expert parallel communication. Use --all2all-backend CLI argument instead.
-    # Available options:
-    # - "naive": naive all2all implementation using broadcasts
-    # - "allgather_reducescatter": all2all implementation based on allgather and
-    #  reducescatter
-    # - "pplx": use pplx kernels
-    # - "deepep_high_throughput", use deepep high-throughput kernels
-    # - "deepep_low_latency", use deepep low-latency kernels
-    # - "mori", use MoRI kernels
-    # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
-    "VLLM_ALL2ALL_BACKEND": env_with_choices(
-        "VLLM_ALL2ALL_BACKEND",
-        None,
-        [
-            "naive",
-            "pplx",
-            "deepep_high_throughput",
-            "deepep_low_latency",
-            "mori",
-            "allgather_reducescatter",
-            "flashinfer_all2allv",
-        ],
     ),
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
@@ -1676,6 +1638,7 @@ def disable_envs_cache() -> None:
     global __getattr__
     # If __getattr__ is wrapped by functions.cache, unwrap the caching layer.
     if _is_envs_cache_enabled():
+        assert hasattr(__getattr__, "__wrapped__")
         __getattr__ = __getattr__.__wrapped__
 
 
