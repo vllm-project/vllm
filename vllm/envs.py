@@ -88,20 +88,6 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
-    # Deprecated env variables for profiling, kept for backward compatibility
-    # See also vllm/config/profiler.py and `--profiler-config` argument
-    VLLM_TORCH_CUDA_PROFILE: str | None = None
-    VLLM_TORCH_PROFILER_DIR: str | None = None
-    VLLM_TORCH_PROFILER_RECORD_SHAPES: str | None = None
-    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: str | None = None
-    VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM: str | None = None
-    VLLM_TORCH_PROFILER_WITH_STACK: str | None = None
-    VLLM_TORCH_PROFILER_WITH_FLOPS: str | None = None
-    VLLM_TORCH_PROFILER_USE_GZIP: str | None = None
-    VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: str | None = None
-    VLLM_PROFILER_DELAY_ITERS: str | None = None
-    VLLM_PROFILER_MAX_ITERS: str | None = None
-    # End of deprecated env variables for profiling
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
