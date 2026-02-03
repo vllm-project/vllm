@@ -172,6 +172,7 @@ These endpoints are **only available when the environment variable `VLLM_SERVER_
 - `/server_info` - Get detailed server configuration
 - `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
 - `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
+- `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
 - `/sleep` - Put engine to sleep (causes denial of service)
 - `/wake_up` - Wake engine from sleep
 - `/is_sleeping` - Check if engine is sleeping
