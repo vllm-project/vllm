@@ -73,7 +73,7 @@ class MultiModalBudget:
             )
 
         mm_max_toks_per_item = {
-            modality: all_mm_max_toks_per_item[modality]
+            modality: all_mm_max_toks_per_item.get(modality, 0)
             for modality in active_modalities
         }
 
