@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import time
 from collections.abc import Mapping
 from typing import Any, Literal, cast
@@ -20,6 +19,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.budget import MultiModalBudget
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFeatureSpec,
@@ -29,13 +29,12 @@ from vllm.multimodal.parse import ModalityDataItems, MultiModalDataItems
 from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import RendererLike
+from vllm.renderers import BaseRenderer
 from vllm.sampling_params import _SAMPLING_EPS, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import (
@@ -60,30 +59,30 @@ class InputProcessor:
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ) -> None:
         self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
+        self.model_config = model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.scheduler_config = vllm_config.scheduler_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
+        self.observability_config = vllm_config.observability_config
 
-        self.generation_config_fields = self.model_config.try_get_generation_config()
+        self.generation_config_fields = model_config.try_get_generation_config()
 
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
-        self.mm_encoder_cache_size = None
+
+        self.mm_encoder_cache_size: int | None = None
         if (
-            self.mm_registry.supports_multimodal_inputs(self.model_config)
-            and not self.model_config.skip_tokenizer_init
+            mm_registry.supports_multimodal_inputs(model_config)
+            and not model_config.skip_tokenizer_init
         ):
-            max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
-                self.model_config
-            )
-            _, self.mm_encoder_cache_size = compute_mm_encoder_budget(
-                self.vllm_config.scheduler_config, max_tokens_by_modality
-            )
+            mm_budget = MultiModalBudget(vllm_config, mm_registry)
+            self.mm_encoder_cache_size = mm_budget.encoder_cache_size
+            mm_budget.reset_cache()  # Not used anymore
 
         self.input_preprocessor = InputPreprocessor(
-            self.model_config,
-            vllm_config.observability_config,
+            model_config,
+            self.observability_config,
             mm_registry,
             mm_processor_cache=self.mm_processor_cache,
         )
@@ -96,7 +95,7 @@ class InputProcessor:
         return self.input_preprocessor.get_tokenizer()
 
     @property
-    def renderer(self) -> RendererLike:
+    def renderer(self) -> BaseRenderer:
         return self.input_preprocessor.renderer
 
     def _validate_logprobs(
@@ -546,15 +545,7 @@ class InputProcessor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        num_threads = int(os.environ.get("OMP_NUM_THREADS", "1"))
-        if "OMP_NUM_THREADS" not in os.environ:
-            logger.debug_once(
-                "OMP_NUM_THREADS is not set; defaulting Torch threads to %d for "
-                "input preprocessing.",
-                num_threads,
-            )
-
-        with set_request_id(request_id), set_default_torch_num_threads(num_threads):
+        with set_request_id(request_id), set_default_torch_num_threads():
             processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
                 prompt,
                 tokenization_kwargs=tokenization_kwargs,
