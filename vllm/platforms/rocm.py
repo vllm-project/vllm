@@ -182,13 +182,21 @@ def flash_attn_triton_available() -> bool:
         from importlib.util import find_spec
 
         if find_spec("flash_attn") is None:
+            logger.info_once(
+                "flash_attn package not found. Flash Attention Triton "
+                "backend on RDNA not available."
+            )
             return False
         if find_spec("flash_attn.flash_attn_triton_amd") is None:
-            return False
-        if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") != "TRUE":
             logger.info_once(
-                "Set FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE to enable "
-                "Flash Attention Triton backend on RDNA."
+                "flash_attn.flash_attn_triton_amd module not found. "
+                "Flash Attention Triton backend on RDNA not available."
+            )
+            return False
+        if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") == "0":
+            logger.info_once(
+                "Flash Attention Triton backend on RDNA disabled via "
+                "FLASH_ATTENTION_TRITON_AMD_ENABLE=0."
             )
             return False
         return True
