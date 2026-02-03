@@ -1046,6 +1046,108 @@ def test_get_kv_cache_configs_multiple_workers():
         )
 
 
+@pytest.mark.parametrize(
+    ("auto_fit", "asymmetric_memory"),
+    [
+        (False, False),
+        (True, False),
+        (False, True),  # PP workers with different available memory
+    ],
+    ids=["normal", "auto_fit", "asymmetric_memory"],
+)
+def test_get_kv_cache_configs_pp_sharding(auto_fit, asymmetric_memory):
+    # PP with 2 workers, each holding different layers.
+    model_config = ModelConfig(max_model_len=512)
+    if auto_fit:
+        model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    ref_kv_cache_spec = new_kv_cache_spec()
+    pp_kv_cache_specs = [
+        {"layer1": ref_kv_cache_spec},
+        {"layer2": ref_kv_cache_spec},
+    ]
+
+    # 512 tokens / 16 block_size = 32 blocks + 1 extra = 33
+    expected_num_blocks = 33
+    avail_memory = ref_kv_cache_spec.page_size_bytes * expected_num_blocks
+
+    # With per-worker validation, each worker only needs memory for its own
+    # layers. Worker 2 having more memory shouldn't affect worker 1's config.
+    available_memory = (
+        [avail_memory, avail_memory * 2] if asymmetric_memory else [avail_memory] * 2
+    )
+
+    kv_cache_configs = get_kv_cache_configs(
+        vllm_config,
+        pp_kv_cache_specs,
+        available_memory,
+    )
+
+    assert kv_cache_configs == [
+        KVCacheConfig(
+            num_blocks=expected_num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=ref_kv_cache_spec.page_size_bytes * expected_num_blocks,
+                    shared_by=["layer1"],
+                ),
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(["layer1"], ref_kv_cache_spec)],
+        ),
+        KVCacheConfig(
+            num_blocks=expected_num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=ref_kv_cache_spec.page_size_bytes * expected_num_blocks,
+                    shared_by=["layer2"],
+                ),
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(["layer2"], ref_kv_cache_spec)],
+        ),
+    ]
+
+
+def test_project_kv_cache_groups_to_worker():
+    spec_a = new_kv_cache_spec()
+    spec_b = new_kv_cache_spec(num_kv_heads=4)
+
+    # Worker owns a subset of layers in a group.
+    global_groups = [
+        KVCacheGroupSpec(["layer1", "layer2", "layer3"], spec_a),
+    ]
+    worker_spec = {"layer1": spec_a, "layer2": spec_a}
+    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+        global_groups, worker_spec
+    )
+    assert len(projected) == 1
+    assert projected[0].layer_names == ["layer1", "layer2"]
+    assert projected[0].kv_cache_spec is spec_a
+
+    # Worker has no matching layers. Group should be dropped.
+    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+        global_groups, {"layer4": spec_a}
+    )
+    assert projected == []
+
+    # UniformTypeKVCacheSpecs should be narrowed to worker's layers.
+    uniform_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"layer1": spec_a, "layer2": spec_b, "layer3": spec_a},
+    )
+    global_groups_uniform = [
+        KVCacheGroupSpec(["layer1", "layer2", "layer3"], uniform_spec),
+    ]
+    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+        global_groups_uniform, {"layer1": spec_a, "layer3": spec_a}
+    )
+    assert len(projected) == 1
+    assert projected[0].layer_names == ["layer1", "layer3"]
+    proj_spec = projected[0].kv_cache_spec
+    assert isinstance(proj_spec, UniformTypeKVCacheSpecs)
+    assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
+
+
 def test_merge_kv_cache_spec():
     same_layer_specs = [
         new_kv_cache_spec(num_kv_heads=32),
