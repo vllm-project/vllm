@@ -355,11 +355,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: F401
+        from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
+            flashinfer_trtllm_fused_moe_bf16,
+        )
 
         assert self.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
 
-        return torch.ops.vllm.flashinfer_fused_moe_bf16(
+        return flashinfer_trtllm_fused_moe_bf16(
             routing_logits=router_logits,
             routing_bias=layer.e_score_correction_bias,
             hidden_states=x,

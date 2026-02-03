@@ -103,7 +103,9 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
 ) -> torch.Tensor:
     from flashinfer.fused_moe import RoutingMethodType
 
-    import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
+    from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
+        fi_trtllm_fp8_per_tensor_moe,
+    )
     from vllm.model_executor.models.llama4 import Llama4MoE
 
     # Added to the layer by: register_scales_for_trtllm_fp8_per_tensor_moe
@@ -126,7 +128,7 @@ def apply_fi_trtllm_fp8_per_tensor_moe(
             "Custom routing function is only supported for Llama4"
         )
 
-    return torch.ops.vllm.fi_trtllm_fp8_per_tensor_moe(
+    return fi_trtllm_fp8_per_tensor_moe(
         routing_logits=router_logits,
         routing_bias=routing_bias,
         hidden_states=hidden_states,

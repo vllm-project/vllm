@@ -1024,9 +1024,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         assert layer.activation == "silu"
 
         if self.block_quant:
-            import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
+            from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
+                flashinfer_trtllm_fused_moe_blockscale_fp8,  # noqa: E501, F401
+            )
 
-            return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
+            return flashinfer_trtllm_fused_moe_blockscale_fp8(
                 routing_logits=router_logits,
                 routing_bias=layer.e_score_correction_bias,
                 x=x,

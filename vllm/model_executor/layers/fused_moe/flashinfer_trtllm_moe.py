@@ -20,7 +20,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
 
 #
 # Methods used by the oracle for kernel selection.
@@ -179,7 +178,7 @@ def is_supported_config_trtllm_bf16(
     return True, None
 
 
-def flashinfer_fused_moe_blockscale_fp8(
+def flashinfer_trtllm_fused_moe_blockscale_fp8(
     routing_logits: torch.Tensor,
     routing_bias: torch.Tensor | None,
     x: torch.Tensor,
@@ -240,37 +239,6 @@ def flashinfer_fused_moe_blockscale_fp8(
     )
 
 
-def flashinfer_fused_moe_blockscale_fp8_fake(
-    routing_logits: torch.Tensor,
-    routing_bias: torch.Tensor | None,
-    x: torch.Tensor,
-    w13_weight: torch.Tensor,
-    w13_weight_scale_inv: torch.Tensor,
-    w2_weight: torch.Tensor,
-    w2_weight_scale_inv: torch.Tensor,
-    global_num_experts: int,
-    top_k: int,
-    num_expert_group: int,
-    topk_group: int,
-    intermediate_size: int,
-    expert_offset: int,
-    local_num_experts: int,
-    block_shape: list[int],
-    routing_method_type: int,
-    routed_scaling: float = 1.0,
-) -> torch.Tensor:
-    return torch.empty_like(x)
-
-
-# TODO(bnell): Does this really need to be a torch.op?
-direct_register_custom_op(
-    op_name="flashinfer_fused_moe_blockscale_fp8",
-    op_func=flashinfer_fused_moe_blockscale_fp8,
-    fake_impl=flashinfer_fused_moe_blockscale_fp8_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
-)
-
-
 def fi_trtllm_fp8_per_tensor_moe(
     routing_logits: torch.Tensor,
     routing_bias: torch.Tensor | None,
@@ -326,41 +294,7 @@ def fi_trtllm_fp8_per_tensor_moe(
     )
 
 
-def fi_trtllm_fp8_per_tensor_moe_fake(
-    routing_logits: torch.Tensor,
-    routing_bias: torch.Tensor | None,
-    hidden_states: torch.Tensor,
-    input_scale: torch.Tensor,
-    gemm1_weights: torch.Tensor,
-    gemm2_weights: torch.Tensor,
-    output1_scales_scalar: torch.Tensor,
-    output1_scales_gate_scalar: torch.Tensor,
-    output2_scales_scalar: torch.Tensor,
-    num_experts: int,
-    top_k: int,
-    num_expert_group: int | None,
-    topk_group: int | None,
-    intermediate_size: int,
-    local_expert_offset: int,
-    local_num_experts: int,
-    use_routing_scales_on_input: bool,
-    routing_method_type: int,
-    routed_scaling_factor: float = 1.0,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
-# TODO(bnell): Does this really need to be a torch.op?
-direct_register_custom_op(
-    op_name="fi_trtllm_fp8_per_tensor_moe",
-    op_func=fi_trtllm_fp8_per_tensor_moe,
-    mutates_args=["hidden_states"],
-    fake_impl=fi_trtllm_fp8_per_tensor_moe_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
-)
-
-
-def flashinfer_fused_moe_bf16(
+def flashinfer_trtllm_fused_moe_bf16(
     routing_logits: torch.Tensor,
     routing_bias: torch.Tensor | None,
     hidden_states: torch.Tensor,
@@ -394,30 +328,3 @@ def flashinfer_fused_moe_bf16(
         routing_method_type=routing_method_type,
         tune_max_num_tokens=tune_max_num_tokens,
     )
-
-
-def flashinfer_fused_moe_bf16_fake(
-    routing_logits: torch.Tensor,
-    routing_bias: torch.Tensor | None,
-    hidden_states: torch.Tensor,
-    gemm1_weights: torch.Tensor,
-    gemm2_weights: torch.Tensor,
-    num_experts: int,
-    top_k: int,
-    n_group: int | None,
-    topk_group: int | None,
-    intermediate_size: int,
-    local_expert_offset: int,
-    local_num_experts: int,
-    routing_method_type: int = RoutingMethodType.Renormalize,
-    tune_max_num_tokens: int = 8192,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
-direct_register_custom_op(
-    op_name="flashinfer_fused_moe_bf16",
-    op_func=flashinfer_fused_moe_bf16,
-    fake_impl=flashinfer_fused_moe_bf16_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
-)
