@@ -539,15 +539,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefill_k_c_normed = k_c_normed[num_decode_tokens:]
 
         # write the latent and rope to kv cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=self._k_scale,
-            )
+        self.impl.do_kv_cache_update(
+            k_c_normed,
+            k_pe,
+            kv_cache,
+            attn_metadata.slot_mapping.flatten(),
+            self.kv_cache_dtype,
+            self._k_scale,
+        )
 
         if fp8_attention:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
