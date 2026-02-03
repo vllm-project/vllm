@@ -213,8 +213,8 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("padded_a", [False, True])
-@pytest.mark.parametrize("padded_b", [False, True])
+@pytest.mark.parametrize("padded_a", [True, False])
+@pytest.mark.parametrize("padded_b", [True, False])
 @pytest.mark.parametrize("biased", [False, True])
 @pytest.mark.skipif(
     not (current_platform.is_rocm() and current_platform.supports_fp8()),
@@ -223,8 +223,9 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
 def test_rocm_wvsplitk_fp8_kernel(n, k, m, dtype, seed, padded_a, padded_b, biased):
     torch.manual_seed(seed)
 
-    A = torch.rand(n, k, device="cuda") - 0.5
-    B = torch.rand(m, k, device="cuda") - 0.5
+    xavier = math.sqrt(2 / k)  # normalize to avoid large deltas
+    A = (torch.rand(n, k, device="cuda") - 0.5) * xavier
+    B = (torch.rand(m, k, device="cuda") - 0.5) * xavier
 
     A, scale_a = ref_dynamic_per_tensor_fp8_quant(A)
     B, scale_b = ref_dynamic_per_tensor_fp8_quant(B)
