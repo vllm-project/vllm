@@ -17,6 +17,7 @@ from vllm.config import (
     ModelConfig,
     SchedulerConfig,
     VllmConfig,
+    set_current_vllm_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
@@ -392,7 +393,7 @@ def test_read_mode_loads_remote_block_ids(moriio_read_mode):
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
-def test_register_kv_caches(default_vllm_config, mock_parallel_groups):
+def test_register_kv_caches(mock_parallel_groups):
     """Test that MoRIIOConnector.register_kv_caches correctly registers kv caches."""
     ROLE = "kv_consumer"
     IP = get_ip()
@@ -404,89 +405,92 @@ def test_register_kv_caches(default_vllm_config, mock_parallel_groups):
 
     backend_cls = AiterFlashAttentionBackend
 
-    # Create test kv cache tensors using proper backend shape
-    kv_cache_shape = backend_cls.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
-    )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    kv_caches = {
-        "layer0": shared_tensor,
-        "layer1": unique_tensor,
-        "layer2": shared_tensor,
-    }
+    with set_current_vllm_config(vllm_config):
+        # Create test kv cache tensors using proper backend shape
+        kv_cache_shape = backend_cls.get_kv_cache_shape(
+            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+        )
+        shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        kv_caches = {
+            "layer0": shared_tensor,
+            "layer1": unique_tensor,
+            "layer2": shared_tensor,
+        }
 
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.threading.Event"
-        ),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.threading.Thread"
-        ),
-    ):
-        # Create connector
-        vllm_config.kv_transfer_config.kv_connector_extra_config.update(
-            {
-                "proxy_ip": "127.0.0.1",
-                "proxy_ping_port": 12345,
-                "http_port": 12346,
-            }
-        )
+        with (
+            patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.threading.Event"
+            ),
+            patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.threading.Thread"
+            ),
+        ):
+            # Create connector
+            vllm_config.kv_transfer_config.kv_connector_extra_config.update(
+                {
+                    "proxy_ip": "127.0.0.1",
+                    "proxy_ping_port": 12345,
+                    "http_port": 12346,
+                }
+            )
 
-        connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
-        connector.connector_worker = FakeMorIIOConnectorWorker(
-            vllm_config, connector.engine_id, hand_shake_latency=0
-        )
+            connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
+            connector.connector_worker = FakeMorIIOConnectorWorker(
+                vllm_config, connector.engine_id, hand_shake_latency=0
+            )
 
-        from mori.io import (
-            MemoryDesc,
-        )
+            from mori.io import (
+                MemoryDesc,
+            )
 
-        # Execute register_kv_caches
-        connector.register_kv_caches(kv_caches)
+            # Execute register_kv_caches
+            connector.register_kv_caches(kv_caches)
 
-        # Verify that the MemoryDesc stored in layer_name_to_local_kv_cache_metadata
-        assert (
-            shared_tensor.data_ptr()
-            == MemoryDesc.unpack(
-                connector.connector_worker.layer_name_to_local_kv_cache_metadata[
-                    "layer0"
-                ][0]
-            ).data
-        )
-        assert (
-            unique_tensor.data_ptr()
-            == MemoryDesc.unpack(
-                connector.connector_worker.layer_name_to_local_kv_cache_metadata[
-                    "layer1"
-                ][0]
-            ).data
-        )
-        assert (
-            shared_tensor.data_ptr()
-            == MemoryDesc.unpack(
-                connector.connector_worker.layer_name_to_local_kv_cache_metadata[
-                    "layer2"
-                ][0]
-            ).data
-        )
+            # Verify that the MemoryDesc stored in layer_name_to_local_kv_cache_metadata
+            assert (
+                shared_tensor.data_ptr()
+                == MemoryDesc.unpack(
+                    connector.connector_worker.layer_name_to_local_kv_cache_metadata[
+                        "layer0"
+                    ][0]
+                ).data
+            )
+            assert (
+                unique_tensor.data_ptr()
+                == MemoryDesc.unpack(
+                    connector.connector_worker.layer_name_to_local_kv_cache_metadata[
+                        "layer1"
+                    ][0]
+                ).data
+            )
+            assert (
+                shared_tensor.data_ptr()
+                == MemoryDesc.unpack(
+                    connector.connector_worker.layer_name_to_local_kv_cache_metadata[
+                        "layer2"
+                    ][0]
+                ).data
+            )
 
-        # Verify engine keys
-        expected_engine_key = f"{ROLE[3:]}:{IP}:{DEFAULT_PORT}:tp{TP_RANK}:dp{DP_RANK}"
-        assert (
-            MemoryDesc.unpack(
-                connector.connector_worker.layer_name_to_local_kv_cache_metadata[
-                    "layer0"
-                ][0]
-            ).engine_key
-            == expected_engine_key
-        )
+            # Verify engine keys
+            expected_engine_key = (
+                f"{ROLE[3:]}:{IP}:{DEFAULT_PORT}:tp{TP_RANK}:dp{DP_RANK}"
+            )
+            assert (
+                MemoryDesc.unpack(
+                    connector.connector_worker.layer_name_to_local_kv_cache_metadata[
+                        "layer0"
+                    ][0]
+                ).engine_key
+                == expected_engine_key
+            )
 
 
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
-def test_moriio_handshake_returns_metadata(default_vllm_config, mock_parallel_groups):
+def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     """MoRIIO handshake socket returns valid agent metadata over ZMQ."""
 
     ROLE = "kv_consumer"
@@ -495,51 +499,52 @@ def test_moriio_handshake_returns_metadata(default_vllm_config, mock_parallel_gr
 
     backend_cls = AiterFlashAttentionBackend
 
-    # Create test kv cache tensors using proper backend shape
-    kv_cache_shape = backend_cls.get_kv_cache_shape(
-        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
-    )
-    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-    kv_caches = {
-        "layer0": shared_tensor,
-        "layer1": unique_tensor,
-        "layer2": shared_tensor,
-    }
-
-    with (
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine.MoRIIOWrapper",
-            FakeMorIIOWrapper,
-        ),
-    ):
-        handshake_port = _find_free_port()
-        # Create connector
-        vllm_config.kv_transfer_config.kv_connector_extra_config.update(
-            {
-                "proxy_ip": "127.0.0.1",
-                "proxy_ping_port": 12345,
-                "http_port": 12346,
-                "handshake_port": handshake_port,
-            }
+    with set_current_vllm_config(vllm_config):
+        # Create test kv cache tensors using proper backend shape
+        kv_cache_shape = backend_cls.get_kv_cache_shape(
+            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
         )
-        connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
+        shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+        kv_caches = {
+            "layer0": shared_tensor,
+            "layer1": unique_tensor,
+            "layer2": shared_tensor,
+        }
 
-        # Execute register_kv_caches
-        connector.register_kv_caches(kv_caches)
-
-        # Connect to handshake socket and request metadata
-        path = make_zmq_path("tcp", "127.0.0.1", handshake_port)
-        with zmq_ctx(zmq.DEALER, path) as sock:
-            sock.send(MoRIIOConstants.GET_META_MSG)
-            received_frame = sock.recv_multipart()
-
-            if len(received_frame) != 2 or received_frame[0] != b"":
-                raise ValueError(f"Unexpected frame! {received_frame = }")
-
-            metadata_bytes = received_frame[1]
-            decoder = msgspec.msgpack.Decoder(MoRIIOAgentMetadata)
-            metadata = decoder.decode(metadata_bytes)
-            assert isinstance(metadata, MoRIIOAgentMetadata), (
-                "Decoded metadata is not MoRIIOAgentMetadata"
+        with (
+            patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine.MoRIIOWrapper",
+                FakeMorIIOWrapper,
+            ),
+        ):
+            handshake_port = _find_free_port()
+            # Create connector
+            vllm_config.kv_transfer_config.kv_connector_extra_config.update(
+                {
+                    "proxy_ip": "127.0.0.1",
+                    "proxy_ping_port": 12345,
+                    "http_port": 12346,
+                    "handshake_port": handshake_port,
+                }
             )
+            connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
+
+            # Execute register_kv_caches
+            connector.register_kv_caches(kv_caches)
+
+            # Connect to handshake socket and request metadata
+            path = make_zmq_path("tcp", "127.0.0.1", handshake_port)
+            with zmq_ctx(zmq.DEALER, path) as sock:
+                sock.send(MoRIIOConstants.GET_META_MSG)
+                received_frame = sock.recv_multipart()
+
+                if len(received_frame) != 2 or received_frame[0] != b"":
+                    raise ValueError(f"Unexpected frame! {received_frame = }")
+
+                metadata_bytes = received_frame[1]
+                decoder = msgspec.msgpack.Decoder(MoRIIOAgentMetadata)
+                metadata = decoder.decode(metadata_bytes)
+                assert isinstance(metadata, MoRIIOAgentMetadata), (
+                    "Decoded metadata is not MoRIIOAgentMetadata"
+                )
