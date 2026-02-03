@@ -120,6 +120,52 @@ def all_gather_test_worker(
 
 
 @ray.remote(num_gpus=1, max_calls=1)
+def all_gather_raw_test_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+):
+    """Test all_gather_raw returns correct shape (world_size, *input_shape)."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    device = torch.device(f"cuda:{rank}")
+    torch.cuda.set_device(device)
+    init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+    from vllm.distributed import get_tp_group
+
+    tp_group = get_tp_group()
+
+    # Test with different tensor shapes
+    for shape in [(8, 16), (4, 8, 16), (2, 4, 8, 16)]:
+        total_size = 1
+        for s in shape:
+            total_size *= s
+
+        # Each rank has different data
+        input_tensor = torch.arange(
+            total_size, dtype=torch.float32, device="cuda"
+        ).reshape(shape) * (rank + 1)
+
+        # Call _all_gather_raw
+        result = tp_group._all_gather_raw(input_tensor)
+
+        # Verify shape: (world_size, *input_shape)
+        expected_shape = (tp_size,) + tuple(shape)
+        assert result.shape == expected_shape, (
+            f"Shape mismatch: {result.shape} vs {expected_shape}"
+        )
+
+        # Verify values: result[r] should equal rank r's input
+        for r in range(tp_size):
+            expected_slice = torch.arange(
+                total_size, dtype=torch.float32, device="cuda"
+            ).reshape(shape) * (r + 1)
+            torch.testing.assert_close(result[r], expected_slice)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
 def broadcast_tensor_dict_test_worker(
     monkeypatch: pytest.MonkeyPatch,
     tp_size: int,
@@ -230,7 +276,12 @@ def send_recv_test_worker(
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize(
     "test_target",
-    [all_reduce_test_worker, all_gather_test_worker, broadcast_tensor_dict_test_worker],
+    [
+        all_reduce_test_worker,
+        all_gather_test_worker,
+        all_gather_raw_test_worker,
+        broadcast_tensor_dict_test_worker,
+    ],
 )
 def test_multi_process_tensor_parallel(
     monkeypatch: pytest.MonkeyPatch,
@@ -263,6 +314,7 @@ def test_multi_process_pipeline_parallel(
         send_recv_tensor_dict_test_worker,
         all_reduce_test_worker,
         all_gather_test_worker,
+        all_gather_raw_test_worker,
         broadcast_tensor_dict_test_worker,
     ],
 )
