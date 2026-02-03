@@ -40,7 +40,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.pooling.score.utils import (
-    list[ScoreData],
+    ScoreData,
     ScoreMultiModalParam,
     _cosine_similarity,
     compress_token_type_ids,
