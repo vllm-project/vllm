@@ -167,6 +167,7 @@ def _quantize_dequantize_fp8_ds_mla(
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.parametrize("block_size", [32, 64])
 def test_sparse_backend_decode_correctness(
     default_vllm_config,
     dist_init,
@@ -174,10 +175,17 @@ def test_sparse_backend_decode_correctness(
     batch_name,
     kv_cache_dtype,
     tensor_parallel_size,
+    block_size,
     workspace_init,
 ):
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
+
+    supported_block_sizes = backend_cls.get_supported_kernel_block_sizes()
+    if block_size not in supported_block_sizes:
+        pytest.skip(
+            f"{backend_cls.get_name()} does not support block_size={block_size}"
+        )
 
     if backend_cls == FlashMLASparseBackend:
         ok, reason = flashmla.is_flashmla_sparse_supported()
@@ -207,7 +215,6 @@ def test_sparse_backend_decode_correctness(
 
     max_seqlen = max(batch_spec.seq_lens)
     total_cache_tokens = sum(batch_spec.seq_lens)
-    block_size = 64
 
     # Note: We use TP=1 to avoid multi-GPU requirements in CI.
     # The test simulates head partitioning via mocked methods below.
