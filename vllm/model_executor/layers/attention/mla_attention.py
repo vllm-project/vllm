@@ -540,33 +540,31 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
 
         if is_sparse_impl:
-            has_decode = True
-            has_prefill = False
-            num_decode_tokens = q.size(0)
+            num_mqa_tokens = q.size(0)
+            num_mha_tokens = 0
         else:
             assert (
                 attn_metadata.num_decodes is not None
                 and attn_metadata.num_prefills is not None
                 and attn_metadata.num_decode_tokens is not None
             )
-            has_decode = attn_metadata.num_decodes > 0
-            has_prefill = attn_metadata.num_prefills > 0
-            num_decode_tokens = attn_metadata.num_decode_tokens
+            num_mqa_tokens = attn_metadata.num_decode_tokens
+            num_mha_tokens = q.size(0) - num_mqa_tokens
 
-        if has_prefill:
+        if num_mha_tokens > 0:
             self.impl.forward_mha(
-                q[num_decode_tokens:],
-                k_c_normed[num_decode_tokens:],
-                k_pe[num_decode_tokens:],
+                q[num_mqa_tokens:],
+                k_c_normed[num_mqa_tokens:],
+                k_pe[num_mqa_tokens:],
                 kv_cache,
                 attn_metadata,
                 self._k_scale,
-                output=output[num_decode_tokens:],
+                output=output[num_mqa_tokens:],
             )
 
-        if has_decode:
-            mqa_q = q[:num_decode_tokens]
-            mqa_output_slice = output[:num_decode_tokens]
+        if num_mqa_tokens > 0:
+            mqa_q = q[:num_mqa_tokens]
+            mqa_output_slice = output[:num_mqa_tokens]
 
             mqa_q_nope, mqa_q_pe = mqa_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
