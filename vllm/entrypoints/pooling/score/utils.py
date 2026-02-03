@@ -48,11 +48,11 @@ class ScoreMultiModalParam(TypedDict, total=False):
     """The multimodal contents"""
 
 
-# without content
-ScoreData = str | list[ScoreContentPartParam]
-# with content in ScoreMultiModalParam
+# Raw input data with content key in ScoreMultiModalParam.
 ScoreInputs = str | ScoreMultiModalParam | list[str | ScoreMultiModalParam]
-ScoreInputsList = list[str | ScoreMultiModalParam]
+# Score data without content key.
+ScoreData = str | list[ScoreContentPartParam]
+ScoreDataList = list[str | list[ScoreContentPartParam]]
 
 
 def _cosine_similarity(
@@ -101,7 +101,7 @@ def _validate_score_input_lens(
 
 
 def _validate_mm_score_input(
-    data: ScoreInputsList,
+    data: ScoreDataList,
     is_multimodal_model: bool,
     architecture: str,
 ) -> list[ScoreData]:
@@ -122,7 +122,7 @@ def validate_score_input(
     data_2: ScoreInputs,
     is_multimodal_model: bool,
     architecture: str,
-) -> tuple[list[ScoreData], list[ScoreData]]:
+) -> tuple[ScoreDataList, ScoreDataList]:
     if not isinstance(data_1, list):
         data_1 = [data_1]
 
@@ -136,8 +136,8 @@ def validate_score_input(
 
 
 def parse_score_data(
-    data_1: ScoreData,
-    data_2: ScoreData,
+    data_1: ScoreDataList,
+    data_2: ScoreDataList,
     model_config: ModelConfig,
 ) -> tuple[str, str, MultiModalDataDict | None, MultiModalUUIDDict | None]:
     mm_tracker = MultiModalItemTracker(model_config)
@@ -162,7 +162,7 @@ def parse_score_data(
 
 def _parse_score_content(
     role: str,
-    data: str | ScoreContentPartParam,
+    data: ScoreDataList,
     mm_tracker: BaseMultiModalItemTracker,
 ) -> list[ConversationMessage]:
     parts: Iterable[ChatCompletionContentPartParam]
@@ -233,8 +233,8 @@ def get_score_prompt(
     model_config: ModelConfig,
     tokenizer: TokenizerLike,
     tokenization_kwargs: dict[str, Any],
-    data_1: ScoreData,
-    data_2: ScoreData,
+    data_1: ScoreDataList,
+    data_2: ScoreDataList,
     score_template: str | None = None,
 ) -> tuple[str, TokensPrompt]:
     prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(

@@ -40,7 +40,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.pooling.score.utils import (
-    ScoreData,
+    ScoreDataList,
     ScoreMultiModalParam,
     _cosine_similarity,
     compress_token_type_ids,
@@ -1326,8 +1326,8 @@ class LLM:
 
     def _embedding_score(
         self,
-        data_1: list[ScoreData],
-        data_2: list[ScoreData],
+        data_1: ScoreDataList,
+        data_2: ScoreDataList,
         *,
         use_tqdm: bool | Callable[..., tqdm],
         pooling_params: PoolingParams | None,
@@ -1336,13 +1336,12 @@ class LLM:
     ) -> list[ScoringRequestOutput]:
         tokenizer = self.get_tokenizer()
 
-        input_texts = data_1 + data_2
-        for text in input_texts:
+        input_texts: list[str] = []
+        for text in data_1 + data_2:
             if not isinstance(text, str):
                 raise NotImplementedError(
                     "Embedding scores currently do not support multimodal input."
                 )
-        input_texts = cast(list[str], input_texts)
 
         encoded_output = self.encode(
             input_texts,
@@ -1370,8 +1369,8 @@ class LLM:
 
     def _cross_encoding_score(
         self,
-        data_1: list[ScoreData],
-        data_2: list[ScoreData],
+        data_1: ScoreDataList,
+        data_2: ScoreDataList,
         *,
         use_tqdm: bool | Callable[..., tqdm],
         pooling_params: PoolingParams | None,
