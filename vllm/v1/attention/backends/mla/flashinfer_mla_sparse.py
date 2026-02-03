@@ -70,8 +70,7 @@ class FlashInferMLASparseBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # FlashInfer MLA sparse requires block size 64
-        return [64]
+        return [32, 64]
 
     @staticmethod
     def get_name() -> str:

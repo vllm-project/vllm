@@ -255,7 +255,10 @@ class CudaPlatformBase(Platform):
                     logger.info(
                         "Forcing kv cache block size to 64 for FlashMLASparse backend."
                     )
-                elif use_flashinfer_mla_sparse and cache_config.block_size != 64:
+                elif use_flashinfer_mla_sparse and cache_config.block_size not in (
+                    32,
+                    64,
+                ):
                     cache_config.block_size = 64
                     logger.info(
                         "Forcing kv cache block size to 64 for FlashInferMLASparse "
