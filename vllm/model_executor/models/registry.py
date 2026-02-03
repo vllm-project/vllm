@@ -173,6 +173,10 @@ _EMBEDDING_MODELS = {
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
     "PrithviGeoSpatialMAE": ("prithvi_geospatial_mae", "PrithviGeoSpatialMAE"),
+    "VoyageQwen3BidirectionalEmbedModel": (
+        "voyage_qwen3_bidirectional_embed",
+        "VoyageQwen3BidirectionalEmbedModel",
+    ),
 }
 
 _CROSS_ENCODER_MODELS = {
