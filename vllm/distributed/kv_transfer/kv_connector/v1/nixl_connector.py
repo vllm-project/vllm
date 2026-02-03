@@ -314,6 +314,7 @@ class NixlConnector(KVConnectorBase_V1):
             return False
 
         extra_config = self.kv_transfer_config.kv_connector_extra_config
+        logger.info("XXX %s", extra_config)
         return (
             str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
             == "true"
@@ -331,7 +332,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
-
+        logger.info("XXX %s", self.kv_transfer_config.kv_connector_extra_config)
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: NixlConnectorScheduler | None = (
                 NixlConnectorScheduler(vllm_config, self.engine_id)
