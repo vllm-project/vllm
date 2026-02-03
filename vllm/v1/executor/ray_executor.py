@@ -304,7 +304,9 @@ class RayDistributedExecutor(Executor):
             )
 
         # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables = [{} for _ in worker_node_and_gpu_ids]
+        all_args_to_update_environment_variables: list[dict] = [
+            {} for _ in worker_node_and_gpu_ids
+        ]
 
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(

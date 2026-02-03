@@ -209,13 +209,16 @@ class Worker(WorkerBase):
                     f"be less than or equal to the number of visible devices "
                     f"({visible_device_count})."
                 )
-                
-            # In case of Ray, the visible device env vars will be set by the ray core. So device_index should always be set to 0, in mp mode, the device_index should be set to the local_rank so it can index into the visible devices.
+
+            # In case of Ray, the visible device env vars will be set by the
+            # ray core. So device_index should always be set to 0, in mp mode,
+            # the device_index should be set to the local_rank so it can index
+            # into the visible devices.
             if parallel_config.distributed_executor_backend == "ray":
                 device_index = 0
             else:
                 device_index = self.local_rank
-                
+
             self.device = torch.device(f"cuda:{device_index}")
             current_platform.set_device(self.device)
 
