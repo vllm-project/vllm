@@ -29,7 +29,6 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
-    set_current_vllm_config,
     update_config,
 )
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
@@ -2471,11 +2470,8 @@ class GPUModelRunner(
                     if original_num_imgs != -1:
                         curr_group_outputs = curr_group_outputs[:original_num_imgs]
                 else:
-                    with (
-                        set_current_vllm_config(self.vllm_config),
-                        self.timed_encoder_operation(
-                            should_time, mm_lora_refs, current_item_idx, num_items
-                        ),
+                    with self.timed_encoder_operation(
+                        should_time, mm_lora_refs, current_item_idx, num_items
                     ):
                         mm_kwargs_group["mm_cudagraph_manager"] = mm_mgr
                         curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)

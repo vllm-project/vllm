@@ -662,16 +662,17 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 device=self.device,
                 dtype=self.dtype,
             )
-            self._persistent_rotary_pos_emb_cos_buffer = torch.empty(
-                (max_compile_size, head_dim // 2),
-                device=self.device,
-                dtype=torch.bfloat16,
-            )
-            self._persistent_rotary_pos_emb_sin_buffer = torch.empty(
-                (max_compile_size, head_dim // 2),
-                device=self.device,
-                dtype=torch.bfloat16,
-            )
+            (
+                self._persistent_rotary_pos_emb_cos_buffer,
+                self._persistent_rotary_pos_emb_sin_buffer,
+            ) = [
+                torch.empty(
+                    (max_compile_size, head_dim // 2),
+                    device=self.device,
+                    dtype=torch.bfloat16,
+                )
+                for _ in range(2)
+            ]
 
     @property
     def dtype(self) -> torch.dtype:
@@ -803,6 +804,17 @@ class Qwen2_5_VisionTransformer(nn.Module):
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
         return inv
 
+    def _use_piecewise_cudagraph(self) -> bool:
+        if self._persistent_hidden_states_buffer is None:
+            return False
+        if not is_forward_context_available():
+            return False
+        fwd_ctx = get_forward_context()
+        return (
+            fwd_ctx is not None
+            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+        )
+
     def forward(
         self,
         x: torch.Tensor,
@@ -816,14 +828,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
         cu_seqlens: list = []
 
-        fwd_ctx = None
-        if is_forward_context_available():
-            fwd_ctx = get_forward_context()
-        if (
-            self._persistent_hidden_states_buffer is not None
-            and fwd_ctx
-            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
-        ):
+        is_cudagraph_mode = self._use_piecewise_cudagraph()
+
+        if is_cudagraph_mode:
             hidden_states = self._persistent_hidden_states_buffer[:seq_len]
             hidden_states.copy_(x, non_blocking=True)
         else:
@@ -886,12 +893,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(
             device=self.device, non_blocking=True
         )
-        if (
-            self._persistent_rotary_pos_emb_sin_buffer is not None
-            and self._persistent_rotary_pos_emb_cos_buffer is not None
-            and fwd_ctx
-            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
-        ):
+        if is_cudagraph_mode:
             rotary_pos_emb_sin = self._persistent_rotary_pos_emb_sin_buffer[
                 :seq_len
             ].copy_(rotary_pos_emb_sin)
@@ -911,11 +913,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         hidden_states = hidden_states.reshape(seq_len, -1)
         hidden_states = hidden_states.unsqueeze(1)
 
-        if (
-            self._persistent_hidden_states_buffer is not None
-            and fwd_ctx
-            and fwd_ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
-        ):
+        if is_cudagraph_mode:
             # The above operations will produce temporary new tensors.
             # That is not friendly to cudagraphs,
             # so we need to copy them back to the persistent buffer
