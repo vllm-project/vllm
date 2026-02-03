@@ -118,9 +118,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         # MLA Specific Arguments
         **mla_args,
     ) -> None:
-        q_pad_num_heads = MAX_HEADS
-        if mla_args.get("q_pad_num_heads") is not None:
-            q_pad_num_heads = mla_args.get("q_pad_num_heads")
+        q_pad_num_heads = mla_args.get("q_pad_num_heads", MAX_HEADS)
         super().__init__(
             num_heads,
             head_size,
