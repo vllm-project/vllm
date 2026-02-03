@@ -59,14 +59,20 @@ class ObjectStorageModel:
                 existing_handler = signal.getsignal(sig)
                 signal.signal(sig, self._close_by_signal(existing_handler))
 
+        # base hash
+        base_hash = hashlib.sha256(str(url).encode()).hexdigest()[:8]
+        # include parent and current pid so concurrent workers get unique dirs
+        parent_pid = os.getppid()
+        my_pid = os.getpid()
+        
         dir_name = os.path.join(
             get_cache_dir(),
             "model_streamer",
-            hashlib.sha256(str(url).encode()).hexdigest()[:8],
+            f"{base_hash}-{parent_pid}-{my_pid}",
         )
         if os.path.exists(dir_name):
             shutil.rmtree(dir_name)
-        os.makedirs(dir_name, exist_ok=True)
+        os.makedirs(dir_name)
         self.dir = dir_name
         logger.debug("Init object storage, model cache path is: %s", dir_name)
 
