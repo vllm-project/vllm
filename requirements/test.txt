@@ -330,7 +330,7 @@ httpx==0.27.2
     #   huggingface-hub
     #   perceptron
     #   schemathesis
-huggingface-hub==1.3.5
+huggingface-hub==1.3.7
     # via
     #   accelerate
     #   datasets
