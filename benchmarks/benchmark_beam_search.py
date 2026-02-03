@@ -72,11 +72,13 @@ def get_requests_from_dataset(args, tokenizer):
         SonnetDataset,
     )
 
+    seed = getattr(args, "seed", 0) or 0
+
     if args.dataset_name == "random" or args.dataset_path is None:
         # Use random dataset
         dataset = RandomDataset(
             dataset_path=None,
-            random_seed=args.seed,
+            random_seed=seed,
         )
         requests = dataset.sample(
             tokenizer=tokenizer,
@@ -89,7 +91,7 @@ def get_requests_from_dataset(args, tokenizer):
     elif args.dataset_name == "sharegpt":
         dataset = ShareGPTDataset(
             dataset_path=args.dataset_path,
-            random_seed=args.seed,
+            random_seed=seed,
         )
         requests = dataset.sample(
             tokenizer=tokenizer,
@@ -99,7 +101,7 @@ def get_requests_from_dataset(args, tokenizer):
     elif args.dataset_name == "sonnet":
         dataset = SonnetDataset(
             dataset_path=args.dataset_path,
-            random_seed=args.seed,
+            random_seed=seed,
         )
         requests = dataset.sample(
             tokenizer=tokenizer,
@@ -183,12 +185,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=8,
         help="Number of prompts to use from dataset (default: 8).",
     )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=0,
-        help="Random seed for reproducibility (default: 0).",
-    )
+    # Note: --seed is already defined in EngineArgs.add_cli_args()
 
     # Input/output configuration
     parser.add_argument(
@@ -408,9 +405,10 @@ def main(args: argparse.Namespace) -> None:
     # Lazy import to avoid importing LLM when not needed
     from vllm import LLM
 
-    # Set random seed
-    random.seed(args.seed)
-    np.random.seed(args.seed)
+    # Set random seed (use seed from EngineArgs if available)
+    seed = getattr(args, "seed", 0) or 0
+    random.seed(seed)
+    np.random.seed(seed)
 
     engine_args = EngineArgs.from_cli_args(args)
 
