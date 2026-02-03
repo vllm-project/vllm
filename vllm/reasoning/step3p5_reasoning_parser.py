@@ -39,24 +39,18 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         # whether it is immediately before </think>.
         self._pending_reasoning_newline = False
 
-        # Used to delay the reasoning end detection.
-        # This is necessary to remove the newline appears immediately after </think>,
-        # which may cause the end detection to be delayed by one round.
-        self.end_offset = 1
-
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        if self.end_token_id in input_ids and self.end_offset > 0:
-            self.end_offset -= 1
-            return False
-        return self.end_offset < 1
+        # Stateless gating: reasoning ends only after </think> and at least
+        # one token appears after the last </think> in the same sequence.
+        for idx in range(len(input_ids) - 1, -1, -1):
+            if input_ids[idx] == self.end_token_id:
+                return idx < len(input_ids) - 1
+        return False
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
-        if self.end_token_id in input_ids and self.end_offset > 0:
-            self.end_offset -= 1
-            return False
-        return self.end_offset < 1
+        return self.is_reasoning_end(input_ids)
 
     def extract_reasoning(
         self,
@@ -136,9 +130,6 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
 
         # Content: handle the newline immediately after </think>.
         if content_to_output is not None:
-            # No need to get into parser again to remove newline after </think>.
-            self.end_offset -= 1
-
             # If we have content, reasoning must have ended.
             self._pending_reasoning_newline = False
 
