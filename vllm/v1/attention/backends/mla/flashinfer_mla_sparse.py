@@ -351,18 +351,11 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         For sparse mode:
         - topk_indices contains logical indices per token [num_tokens, topk]
         - These are converted to physical cache slots using the block table
-        - The resulting indices are passed as block_tables with shape
-          [num_reqs, q_len_per_request, sparse_mla_top_k]
-
-        Each token is treated independently, so there is no distinction between
-        decode and prefill phases.
         """
         if isinstance(q, tuple):
             q = torch.cat(q, dim=-1)
 
         num_actual_toks = q.shape[0]
-        num_reqs = attn_metadata.num_reqs
-        q_len = num_actual_toks // num_reqs
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
@@ -383,14 +376,17 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         if self.bmm2_scale is None:
             self.bmm2_scale = layer._v_scale_float
 
-        q_reshaped = q.view(num_reqs, q_len, q.shape[-2], q.shape[-1])
-        indices_reshaped = topk_indices_physical.view(num_reqs, q_len, -1)
+        q_reshaped = q.view(num_actual_toks, 1, q.shape[-2], q.shape[-1])
+        indices_reshaped = topk_indices_physical.view(num_actual_toks, 1, -1)
+        seq_lens_per_token = attn_metadata.seq_lens[
+            attn_metadata.req_id_per_token[:num_actual_toks]
+        ]
 
         o = self._call_kernel(
             q_reshaped,
             kv_c_and_k_pe_cache,
             indices_reshaped,
-            attn_metadata.seq_lens,
+            seq_lens_per_token,
             attn_metadata.max_seq_len,
             attn_metadata.topk_tokens,
         )
