@@ -543,7 +543,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             k_c_normed,
             k_pe,
             kv_cache,
-            attn_metadata.slot_mapping.flatten(),
+            attn_metadata.slot_mapping,
             self.kv_cache_dtype,
             self._k_scale,
         )
