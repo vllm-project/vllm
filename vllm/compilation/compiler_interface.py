@@ -3,6 +3,7 @@
 import contextlib
 import copy
 import os
+import tempfile
 from collections.abc import Callable
 from contextlib import ExitStack
 from typing import Any, Literal
@@ -274,8 +275,22 @@ class InductorStandaloneAdaptor(CompilerInterface):
         path = os.path.join(self.cache_dir, key)
 
         if is_compile_cache_enabled(compiler_config):
-            compiled_graph.save(path=path, format=self.save_format)
-            compilation_counter.num_compiled_artifacts_saved += 1
+            # Use atomic write to avoid race condition when multiple
+            # processes compile the same model concurrently (issue #31199).
+            # Write to a temporary file first, then atomically rename.
+            cache_dir = os.path.dirname(path)
+            temp_path = None
+            try:
+                fd, temp_path = tempfile.mkstemp(dir=cache_dir, prefix=".tmp_compile_")
+                os.close(fd)
+                compiled_graph.save(path=temp_path, format=self.save_format)
+                os.replace(temp_path, path)  # Atomic on POSIX
+                compilation_counter.num_compiled_artifacts_saved += 1
+            except Exception:
+                if temp_path is not None and os.path.exists(temp_path):
+                    with contextlib.suppress(OSError):
+                        os.remove(temp_path)
+                raise
         return compiled_graph, (key, path)
 
     def load(
