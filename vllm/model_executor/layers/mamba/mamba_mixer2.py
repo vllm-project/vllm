@@ -443,7 +443,8 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=-1,
         )
 
-        compilation_config = get_current_vllm_config().compilation_config
+        vllm_config = get_current_vllm_config()
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -454,11 +455,7 @@ class MambaMixer2(MambaBase, CustomOp):
         self.cache_config = cache_config
         self.prefix = prefix
 
-        # TODO smor- this is called before set_vllm config is called, could be a bug
-        # reproduced by set --max-num-batched-tokens, the changes won't appear here
-        vllm_config = get_current_vllm_config()
         speculative_config = vllm_config.speculative_config
-
         self.num_spec = (
             speculative_config.num_speculative_tokens
             if speculative_config is not None
