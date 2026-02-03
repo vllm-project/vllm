@@ -927,6 +927,26 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             for item in videos:
                 video_array, metadata = item
 
+                # Validate that frame count is a multiple of temporal_patch_size.
+                # Qwen2VL/Qwen3VL use temporal_patch_size=2, so frames must come
+                # in pairs for the 3D patch embedding to work correctly.
+                # When do_sample_frames=False (pre-processed video), the user is
+                # responsible for ensuring proper frame alignment, similar to
+                # how qwen-vl-utils handles it with round_by_factor/FRAME_FACTOR.
+                hf_config = self.info.get_hf_config()
+                temporal_patch_size = hf_config.vision_config.temporal_patch_size
+                if temporal_patch_size > 1:
+                    num_frames = video_array.shape[0]
+                    if num_frames % temporal_patch_size != 0:
+                        raise ValueError(
+                            f"Video frame count ({num_frames}) must be a multiple "
+                            f"of temporal_patch_size ({temporal_patch_size}). "
+                            f"When using pre-processed video (do_sample_frames=False), "
+                            f"ensure the frame count is properly aligned. "
+                            f"Consider using qwen-vl-utils smart_nframes() or "
+                            f"round_by_factor() to sample the correct number of frames."
+                        )
+
                 # NOTE: @JJJYmmm new attr metadata.frames_indices indicates
                 # the sampled frames indices of pre-sampled videos, which is
                 # used to calculate the timestamps. Make sure that
