@@ -110,16 +110,15 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
                     fused = torch.cat([parts[p] for p in parts_to_fuse], dim=0)
                     out_w[out_name_template.format(layer_idx)] = fused
                 elif parts:
-                    missing = sorted(
-                        [p for p in parts_to_fuse if p not in parts])
+                    missing = sorted([p for p in parts_to_fuse if p not in parts])
                     raise ValueError(
                         f"Layer {layer_idx} is missing {part_type} parts: {missing}"
                     )
 
-        _fuse_parts(qkv_buf, ("q", "k", "v"),
-                    "layers.{}.self_attn.qkv_proj.weight", "QKV")
-        _fuse_parts(mlp_buf, ("gate", "up"),
-                    "layers.{}.mlp.gate_up_proj.weight", "MLP")
+        _fuse_parts(
+            qkv_buf, ("q", "k", "v"), "layers.{}.self_attn.qkv_proj.weight", "QKV"
+        )
+        _fuse_parts(mlp_buf, ("gate", "up"), "layers.{}.mlp.gate_up_proj.weight", "MLP")
 
         # Load weights directly into model parameters
         # bypass parent's stacked_params_mapping
