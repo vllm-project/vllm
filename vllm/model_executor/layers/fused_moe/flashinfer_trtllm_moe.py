@@ -72,8 +72,10 @@ def _supports_routing_method(
         # NOTE(dbari): as above, potentially allow others here.
         return routing_method in [
             RoutingMethodType.Llama4,
-            RoutingMethodType.Renormalize,
-            RoutingMethodType.RenormalizeNaive,
+            # NOTE(mgoin): Disabled to investigate accuracy issues.
+            # See https://github.com/vllm-project/vllm/issues/33532
+            # RoutingMethodType.Renormalize,
+            # RoutingMethodType.RenormalizeNaive,
         ]
     else:
         raise ValueError("Unsupported quantization scheme.")
