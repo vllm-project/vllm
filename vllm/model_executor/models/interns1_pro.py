@@ -479,7 +479,7 @@ class InternS1ProMoeLLMModel(Qwen3MoeLLMModel):
 
 class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super(Qwen3MoeForCausalLM, self).__init__()
+        super().__init__()
         self.config = vllm_config.model_config.hf_config.text_config
         self.quant_config = vllm_config.quant_config
         self.model = InternS1ProMoeLLMModel(
@@ -575,7 +575,7 @@ class InternS1ProForConditionalGeneration(
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super(Qwen3VLForConditionalGeneration, self).__init__()
+        super().__init__()
         config: PretrainedConfig = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
