@@ -1501,10 +1501,21 @@ def create_fp8_scale_parameter(
         assert block_size is not None
         block_n, block_k = block_size[0], block_size[1]
         output_size_per_partition = sum(output_partition_sizes)
+
+        # Determine shapes per size to deal with non-divisble cases
+        out_blocks = sum(
+            (output_size_i + block_n - 1) // block_n
+            for output_size_i in output_partition_sizes
+        )
+
+        in_blocks = sum(
+            (input_size_i + block_k - 1) // block_k
+            for input_size_i in [input_size_per_partition]
+        )
+
         scale = parameter_type(
             data=torch.empty(
-                (output_size_per_partition + block_n - 1) // block_n,
-                (input_size_per_partition + block_k - 1) // block_k,
+                (out_blocks, in_blocks),
                 dtype=torch.float32,
             ),
             input_dim=1,
