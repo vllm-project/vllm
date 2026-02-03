@@ -549,15 +549,6 @@ class ParallelConfig:
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
-        # Set all2all_backend from env var if not specified, with deprecation warning
-        if envs.is_set("VLLM_ALL2ALL_BACKEND"):
-            logger.warning_once(
-                "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
-                "will be removed in v0.15.0. Please use the "
-                "--all2all-backend command-line argument instead."
-            )
-            self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
-
         # Continue with the rest of the initialization
         self.world_size = (
             self.pipeline_parallel_size
