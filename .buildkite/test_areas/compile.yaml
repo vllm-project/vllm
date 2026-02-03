@@ -5,7 +5,6 @@ steps:
 - label: Sequence Parallel Tests (2 GPUs)
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/"
-  device: h100
   num_devices: 2
   source_file_dependencies:
   - vllm/model_executor/layers/
