@@ -1258,10 +1258,14 @@ class Scheduler(SchedulerInterface):
                 # skip failed or rescheduled requests from KV load failure
                 continue
             request = self.requests.get(req_id)
-            if request is None:
+            if request is None or request.is_finished():
                 # The request is already finished. This can happen if the
                 # request is aborted while the model is executing it (e.g.,
-                # in pipeline parallelism).
+                # in pipeline parallelism or in async scheduling).
+                # NOTE(Kuntai): When delay_free_blocks=True (for async KV
+                # cache transfer in KV connector), the aborted request will not
+                # be set to None (in order to finish async KV transfer).
+                # In this case, we use is_finished() to check.
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
