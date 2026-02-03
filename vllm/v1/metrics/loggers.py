@@ -970,6 +970,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         if type == "cache_config":
             name = "vllm:cache_config_info"
             documentation = "Information of the LLMEngine CacheConfig"
+        elif type == "device_config":
+            name = "vllm:device_config_info"
+            documentation = "Information of the LLMEngine DeviceConfig"
         assert name is not None, f"Unknown metrics info type {type}"
 
         # Info type metrics are syntactic sugar for a gauge permanently set to 1
@@ -1149,6 +1152,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
+        self.log_metrics_info("device_config", self.vllm_config.device_config)
 
 
 PromMetric: TypeAlias = Gauge | Counter | Histogram

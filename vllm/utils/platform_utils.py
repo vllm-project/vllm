@@ -33,10 +33,13 @@ def cuda_get_device_properties(
     device, names: Sequence[str], init_cuda=False
 ) -> tuple[Any, ...]:
     """Get specified CUDA device property values without initializing CUDA in
-    the current process."""
+    the current process.
+
+    If a property name is missing, returns None for that property.
+    """
     if init_cuda or cuda_is_initialized():
         props = torch.cuda.get_device_properties(device)
-        return tuple(getattr(props, name) for name in names)
+        return tuple(getattr(props, name, None) for name in names)
 
     # Run in subprocess to avoid initializing CUDA as a side effect.
     mp_ctx = multiprocessing.get_context("fork")
