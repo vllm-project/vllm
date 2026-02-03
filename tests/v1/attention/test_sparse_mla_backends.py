@@ -5,7 +5,6 @@
 import math
 from types import MethodType, SimpleNamespace
 
-import numpy as np
 import pytest
 import torch
 
@@ -211,7 +210,7 @@ def test_sparse_backend_decode_correctness(
     qk_rope_head_dim = 64
     v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
-    topk_tokens = 2048
+    topk_tokens = 128
 
     max_seqlen = max(batch_spec.seq_lens)
     total_cache_tokens = sum(batch_spec.seq_lens)
@@ -265,11 +264,45 @@ def test_sparse_backend_decode_correctness(
     seq_lens = batch_spec.seq_lens
     query_lens = batch_spec.query_lens
 
+    # Pre-compute positions and sparse indices for all tokens.
+    # We need these BEFORE computing the reference to use sparse attention masks.
+    total_query_tokens = sum(query_lens)
+    positions = []
+    for i in range(batch_spec.batch_size):
+        s_len = seq_lens[i]
+        q_len = query_lens[i]
+        ctx_len = s_len - q_len
+        for q_idx in range(q_len):
+            positions.append(ctx_len + q_idx)
+
+    # Create sparse indices with UNIQUE per-token offsets to catch bugs where
+    # the kernel uses wrong indices for some tokens (e.g., due to incorrect
+    # tensor shapes like [1, num_tokens, ...] instead of [num_tokens, 1, ...]).
+    base_indices = torch.arange(topk_tokens, device=device, dtype=torch.int32)
+    sparse_indices = torch.empty(
+        total_query_tokens, topk_tokens, dtype=torch.int32, device=device
+    )
+    for tok_idx in range(total_query_tokens):
+        max_valid_idx = positions[tok_idx]
+        offset = tok_idx * 7  # Prime number for varied offsets
+        if max_valid_idx > 0:
+            tok_indices = (base_indices + offset) % (max_valid_idx + 1)
+        else:
+            tok_indices = torch.zeros_like(base_indices)
+        # Mask out indices beyond topk (though with small topk this won't apply)
+        tok_indices = torch.where(
+            base_indices < topk_tokens,
+            tok_indices,
+            torch.full_like(tok_indices, -1),
+        )
+        sparse_indices[tok_idx] = tok_indices
+
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
     kv_c_contexts, k_pe_contexts = [], []
     reference_outputs = []
 
     kv_cache_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+    global_token_idx = 0
 
     for i in range(batch_spec.batch_size):
         s_len = seq_lens[i]
@@ -302,24 +335,37 @@ def test_sparse_backend_decode_correctness(
         q_mqa = torch.cat([ql_nope, q_pe], dim=-1)
 
         k_mqa = torch.cat([kv_c_full, k_pe_full.squeeze(1)], dim=-1)
-        k_mqa = k_mqa.unsqueeze(1).expand(-1, num_heads, -1)
-        v_mqa = kv_c_full.unsqueeze(1).expand(-1, num_heads, -1)
+        v_mqa = kv_c_full
 
-        attn_mask = torch.ones(q_len, s_len, dtype=torch.bool, device=device)
-        causal_mask = torch.tril(torch.ones(q_len, q_len, device=device))
-        attn_mask[:, ctx_len:] = causal_mask
+        # Compute sparse SDPA reference per query token using its sparse indices
+        for q_idx in range(q_len):
+            tok_sparse_idx = sparse_indices[global_token_idx]
+            valid_mask = tok_sparse_idx >= 0
+            valid_indices = tok_sparse_idx[valid_mask].long()
 
-        q_sdpa_in = q_mqa.unsqueeze(0).transpose(1, 2)
-        k_sdpa_in = k_mqa.unsqueeze(0).transpose(1, 2)
-        v_sdpa_in = v_mqa.unsqueeze(0).transpose(1, 2)
+            q_tok = q_mqa[q_idx : q_idx + 1]  # [1, num_heads, head_dim]
+            k_sparse = k_mqa[valid_indices]  # [num_valid, head_dim]
+            v_sparse = v_mqa[valid_indices]  # [num_valid, kv_lora_rank]
 
-        sdpa_out = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in, k_sdpa_in, v_sdpa_in, attn_mask=attn_mask, scale=scale
-        )
-        sdpa_out = sdpa_out.transpose(1, 2).squeeze(0)
+            k_sparse = k_sparse.unsqueeze(1).expand(-1, num_heads, -1)
+            v_sparse = v_sparse.unsqueeze(1).expand(-1, num_heads, -1)
 
-        sdpa_out = torch.einsum("qnl,lnv->qnv", sdpa_out, W_UV)
-        reference_outputs.append(sdpa_out.flatten(start_dim=-2))
+            # SDPA: [1, num_heads, 1, head_dim] x [1, num_heads, num_valid, head_dim]
+            q_sdpa_in = q_tok.unsqueeze(0).transpose(1, 2)
+            k_sdpa_in = k_sparse.unsqueeze(0).transpose(1, 2)
+            v_sdpa_in = v_sparse.unsqueeze(0).transpose(1, 2)
+
+            sdpa_out = torch.nn.functional.scaled_dot_product_attention(
+                q_sdpa_in, k_sdpa_in, v_sdpa_in, scale=scale
+            )
+            sdpa_out = sdpa_out.transpose(1, 2).squeeze(
+                0
+            )  # [1, num_heads, kv_lora_rank]
+
+            sdpa_out = torch.einsum("qnl,lnv->qnv", sdpa_out, W_UV)
+            reference_outputs.append(sdpa_out.flatten(start_dim=-2))
+
+            global_token_idx += 1
 
         all_q_vllm.append(q_c)
         all_kv_c_vllm.append(kv_c_full[ctx_len:])
@@ -362,28 +408,8 @@ def test_sparse_backend_decode_correctness(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata
     )
 
-    starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
-    seg_lengths = np.diff(starts)
-    positions = np.arange(starts[-1], dtype=np.int32) - np.repeat(
-        starts[:-1], seg_lengths
-    )
-    seq_lengths = np.asarray(common_attn_metadata.seq_lens.cpu(), dtype=np.int32)
-    prefix_lengths = seq_lengths - seg_lengths
-    positions += np.repeat(prefix_lengths, seg_lengths)
-
-    pos_gpu = torch.as_tensor(positions, device=device, dtype=torch.int32)
-    topk = metadata.topk_tokens
-    debug_indices = torch.arange(topk, device=device, dtype=torch.int32).unsqueeze(0)
-    token_positions = pos_gpu.unsqueeze(1)
-    causal_mask = debug_indices <= token_positions
-    debug_indices = torch.where(
-        causal_mask, debug_indices, torch.full_like(debug_indices, -1)
-    )
-
-    # Sparse backends read top-k indices from the indexer-provided
-    # buffer, so emulate that contract with a simple namespace mock.
-    debug_indices = debug_indices.expand(metadata.num_actual_tokens, -1).clone()
-    mock_indexer = SimpleNamespace(topk_indices_buffer=debug_indices)
+    # Use the pre-computed sparse_indices for the mock indexer
+    mock_indexer = SimpleNamespace(topk_indices_buffer=sparse_indices)
 
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
     kv_b_proj_weight = kv_b_proj_weight.view(
