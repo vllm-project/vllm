@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
 
 import torch
-from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
+from typing_extensions import NotRequired, TypedDict, TypeVar
 
 from vllm.sampling_params import SamplingParams
 
@@ -77,6 +77,9 @@ class EmbedsPrompt(_CommonKeys):
     prompt_embeds: torch.Tensor
     """The embeddings of the prompt."""
 
+    prompt: NotRequired[str]
+    """The prompt text corresponding to the token embeddings, if available."""
+
 
 class DataPrompt(_CommonKeys):
     """Represents generic inputs handled by IO processor plugins."""
@@ -111,22 +114,6 @@ where the decoder-prompt is not specified explicitly, or
 more than one prompt, i.e. 
 [`ExplicitEncoderDecoderPrompt`][vllm.inputs.data.ExplicitEncoderDecoderPrompt]
 """
-
-
-def is_tokens_prompt(prompt: SingletonPrompt) -> TypeIs[TokensPrompt]:
-    return (
-        isinstance(prompt, dict)
-        and "prompt_token_ids" in prompt
-        and "prompt_embeds" not in prompt
-    )
-
-
-def is_embeds_prompt(prompt: SingletonPrompt) -> TypeIs[EmbedsPrompt]:
-    return (
-        isinstance(prompt, dict)
-        and "prompt_token_ids" not in prompt
-        and "prompt_embeds" in prompt
-    )
 
 
 _T1_co = TypeVar(
