@@ -26,6 +26,7 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -158,12 +159,12 @@ class MultiHeadedAttentionSANM(nn.Module):
         # We assume d_v always equals d_k
         self.d_k = n_feat // n_head
         self.h = n_head
-        self.out_proj = ColumnParallelLinear(
+        self.out_proj = ReplicatedLinear(
             input_size=n_feat,
             output_size=n_feat,
             bias=True,
         )
-        self.linear_q_k_v = ColumnParallelLinear(
+        self.linear_q_k_v = ReplicatedLinear(
             input_size=in_feat,
             output_size=n_feat * 3,
             bias=True,
@@ -204,6 +205,7 @@ class MultiHeadedAttentionSANM(nn.Module):
 
     def forward_qkv(self, x: torch.Tensor):
         b, t, d = x.size()
+
         q_k_v, _ = self.linear_q_k_v(x)
         q, k, v = torch.split(q_k_v, int(self.h * self.d_k), dim=-1)
         q_h = torch.reshape(q, (b, t, self.h, self.d_k)).transpose(
@@ -318,7 +320,6 @@ class SenseVoiceEncoderSmall(nn.Module):
     ):
         super().__init__()
         self._output_size = output_size
-
         self.embed = SinusoidalPositionEncoder()
 
         self.normalize_before = normalize_before
