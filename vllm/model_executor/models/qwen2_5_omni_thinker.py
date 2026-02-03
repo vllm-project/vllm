@@ -240,29 +240,6 @@ class Qwen2_5OmniThinkerProcessingInfo(
         """Return target audio channels for Qwen2.5 Omni models (mono)."""
         return 1
 
-    def get_mm_max_tokens_per_item(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> Mapping[str, int]:
-        max_image_tokens = self.get_max_image_tokens()
-        max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
-
-        # Compute max audio tokens from feature extractor config
-        feature_extractor = self.get_feature_extractor()
-        max_audio_seconds = min(feature_extractor.chunk_length, 30)
-        max_audio_samples = max_audio_seconds * feature_extractor.sampling_rate
-        max_feature_length = max_audio_samples // feature_extractor.hop_length
-        _, max_audio_tokens = _get_feat_extract_output_lengths(
-            torch.tensor([max_feature_length])
-        )
-
-        return {
-            "audio": max_audio_tokens.item(),
-            "image": max_image_tokens,
-            "video": max_video_tokens,
-        }
-
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
 
