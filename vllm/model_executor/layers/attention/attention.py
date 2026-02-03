@@ -9,7 +9,11 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
@@ -422,11 +426,19 @@ class Attention(nn.Module, AttentionLayerBase):
                 key = key.view(-1, self.num_kv_heads, self.head_size)
             if value is not None:
                 value = value.view(-1, self.num_kv_heads, self.head_size_v)
+            kv_update_layer_name = self.layer_name
+            if (
+                not self.attn_backend.forward_includes_kv_cache_update
+                and is_forward_context_available()
+                and get_forward_context().all_kv_cache_update_layers is not None
+            ):
+                kv_update_layer_name = "from_forward_context"
+
             if self.use_direct_call:
                 kv_cache_dummy_dep = None
                 if not self.attn_backend.forward_includes_kv_cache_update:
                     kv_cache_dummy_dep = unified_kv_cache_update(
-                        key, value, self.layer_name
+                        key, value, kv_update_layer_name
                     )
                 unified_attention_with_output(
                     query,
@@ -443,7 +455,7 @@ class Attention(nn.Module, AttentionLayerBase):
                     key is not None or value is not None
                 ):
                     kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-                        key, value, self.layer_name
+                        key, value, kv_update_layer_name
                     )
                 torch.ops.vllm.unified_attention_with_output(
                     query,
@@ -629,6 +641,18 @@ def unified_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     forward_context = get_forward_context()
+    if layer_name == "from_forward_context":
+        all_kv_cache_update_layers = forward_context.all_kv_cache_update_layers
+        assert all_kv_cache_update_layers is not None
+        kv_cache_update_index = forward_context.kv_cache_update_index
+        if kv_cache_update_index >= len(all_kv_cache_update_layers):
+            raise AssertionError(
+                "We expected the number of KV cache update layers in "
+                "`all_kv_cache_update_layers` to be equal to the number of "
+                "unified_kv_cache_update calls."
+            )
+        layer_name = all_kv_cache_update_layers[kv_cache_update_index]
+        forward_context.kv_cache_update_index += 1
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
 
