@@ -25,7 +25,7 @@ from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -262,11 +262,14 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         )
         res = tokenizer.mistral.encode_chat_completion(request)
         dummy_tokens = res.tokens
-        # whixtral tokenizer adds padding to the audio
-        # so we need to update the audio arrays
-        dummy_mm_data["audio"] = [a.audio_array for a in res.audios]
 
-        return ProcessorInputs(prompt=dummy_tokens, mm_data=dummy_mm_data)
+        dummy_mm_inputs = self.info.parse_mm_data(
+            # whixtral tokenizer adds padding to the audio
+            # so we need to update the audio arrays
+            {**dummy_mm_data, "audio": [a.audio_array for a in res.audios]},
+        )
+
+        return ProcessorInputs(prompt=dummy_tokens, mm_items=dummy_mm_inputs)
 
 
 class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]):
@@ -485,10 +488,13 @@ class VoxtralForConditionalGeneration(
         )
 
         tokenized = tokenizer.instruct.encode_transcription(req)
-        audio = (tokenized.audios[0].audio_array, stt_config.sample_rate)
-        prompts_dict = {"multi_modal_data": {"audio": audio}}
-        prompts_dict["prompt_token_ids"] = tokenized.tokens
-        return cast(PromptType, prompts_dict)
+
+        return TokensPrompt(
+            prompt_token_ids=tokenized.tokens,
+            multi_modal_data={
+                "audio": (tokenized.audios[0].audio_array, stt_config.sample_rate)
+            },
+        )
 
     @classmethod
     def get_num_audio_tokens(
@@ -776,7 +782,19 @@ class VoxtralEncoderModel(nn.Module):
         magnitudes = stft[..., :-1].abs() ** 2
         mel_spec = self.mel_filters.T @ magnitudes
         log_spec = torch.clamp(mel_spec, min=1e-10).log10()
-        log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+
+        if global_log_mel_max := self.config.global_log_mel_max:
+            if not isinstance(global_log_mel_max, float):
+                raise TypeError(f"{global_log_mel_max=} needs to be of type float.")
+            log_spec_max = torch.tensor(
+                global_log_mel_max,
+                device=log_spec.device,
+                dtype=log_spec.dtype,
+            )
+        else:
+            log_spec_max = log_spec.max()
+
+        log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
         log_spec = (log_spec + 4.0) / 4.0
         return log_spec.to(input_dtype)
 

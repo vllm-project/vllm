@@ -30,7 +30,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 def _supports_current_device() -> bool:
     """Supports only Blackwell-family GPUs."""
     p = current_platform
-    # Add check flashinfer trtllm is available
     return p.is_cuda() and p.is_device_capability_family(100)
 
 
@@ -73,8 +72,10 @@ def _supports_routing_method(
         # NOTE(dbari): as above, potentially allow others here.
         return routing_method in [
             RoutingMethodType.Llama4,
-            RoutingMethodType.Renormalize,
-            RoutingMethodType.RenormalizeNaive,
+            # NOTE(mgoin): Disabled to investigate accuracy issues.
+            # See https://github.com/vllm-project/vllm/issues/33532
+            # RoutingMethodType.Renormalize,
+            # RoutingMethodType.RenormalizeNaive,
         ]
     else:
         raise ValueError("Unsupported quantization scheme.")

@@ -73,19 +73,12 @@ def _ranks_kernel(
 
 
 def compute_token_logprobs(
-    logits: torch.Tensor,
-    token_ids: torch.Tensor,
+    logits: torch.Tensor, token_ids: torch.Tensor
 ) -> torch.Tensor:
-    batch_size = logits.shape[0]
-    vocab_size = logits.shape[1]
+    batch_size, vocab_size = logits.shape
     token_ids = token_ids.to(torch.int64)
     num_logprobs = token_ids.shape[1]
-    logprobs = torch.empty(
-        batch_size,
-        num_logprobs,
-        dtype=torch.float32,
-        device=logits.device,
-    )
+    logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
     _topk_log_softmax_kernel[(batch_size,)](
         logprobs,
         logits,
@@ -107,23 +100,16 @@ def compute_topk_logprobs(
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
-    if num_logprobs == 0:
-        logprob_token_ids = sampled_token_ids.unsqueeze(-1)
-    else:
+    logprob_token_ids = sampled_token_ids.unsqueeze(-1)
+    if num_logprobs > 0:
         topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
-        logprob_token_ids = torch.cat(
-            (sampled_token_ids.unsqueeze(-1), topk_indices), dim=1
-        )
+        logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
 
     # NOTE(woosuk): Here, to save GPU memory, we do not materialize the full
     # logprobs tensor. Instead, we only compute and return the logprobs of
     # the topk + 1 tokens.
     logprobs = compute_token_logprobs(logits, logprob_token_ids)
-    token_ranks = torch.empty(
-        batch_size,
-        dtype=torch.int64,
-        device=logits.device,
-    )
+    token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
     _ranks_kernel[(batch_size,)](
         token_ranks,
         logits,
