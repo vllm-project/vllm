@@ -731,7 +731,7 @@ def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
 
 # Intern-S1-Pro
 def run_interns1_pro(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "internlm-private/InternS1_1_1T_A22_1217"
+    model_name = "internlm/Intern-S1-Pro"
 
     engine_args = EngineArgs(
         model=model_name,
