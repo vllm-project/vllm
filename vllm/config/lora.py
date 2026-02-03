@@ -59,6 +59,13 @@ class LoRAConfig:
     of multimodal models will be enabled. This is an experimental feature and 
     currently only supports some MM models such as the Qwen VL series. The default 
     is False."""
+    specialize_active_lora: bool = False
+    """Whether to construct lora kernel grid by the number of active LoRA adapters.
+    When set to True, separate cuda graphs will be captured for different counts
+    of active LoRAs (powers of 2 up to max_loras), which can improve performance
+    for variable LoRA usage patterns at the cost of increased startup time and
+    memory usage. Only takes effect when cudagraph_specialize_lora is True.
+    """
 
     def compile_factors(self) -> CompileFactors:
         """
