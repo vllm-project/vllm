@@ -178,6 +178,16 @@ class ManualGCController:
         3. Not in hot loops (once per engine step, not per token)
         4. GPU is executing - GC hidden behind compute time
 
+    Generation 2 Heuristic (CPython-inspired):
+        To avoid expensive gen2 collections when unnecessary, we track
+        the number of objects promoted to gen2 since the last gen2 collection.
+        Gen2 collection is only triggered when:
+        - Standard threshold conditions are met, AND
+        - Enough new objects have been added to gen2 (>25% growth)
+
+        This mimics CPython's long_lived_pending optimization from gcmodule.c.
+        See: https://github.com/python/cpython/blob/v3.11.0/Modules/gcmodule.c#L1416-L1454
+
     Rate Limiting:
         - Minimum interval between GC calls (default: 10ms)
         - Respects Python's allocation thresholds (700, 10, 10)
@@ -187,7 +197,6 @@ class ManualGCController:
         - Off by default (opt-in via VLLM_MANUAL_GC_CONTROL=1)
         - Leak guard: forces collection if allocations exceed 10x threshold
         - Lightweight telemetry: count, total time, max time, per-generation stats
-        - Can be disabled at runtime if issues detected
 
     Topologies Tested:
         - Single GPU (sync scheduling)
@@ -196,14 +205,13 @@ class ManualGCController:
         - Multiprocessing executor (VLLM_ENABLE_V1_MULTIPROCESSING=1)
 
     Usage:
+        # Automatically enabled via environment variable:
+        # VLLM_MANUAL_GC_CONTROL=1
+
+        # Programmatic access (for telemetry):
         controller = ManualGCController.get_instance()
-        controller.enable()  # Disables automatic GC
-
-        # At sync points (e.g., before blocking on future.result()):
-        controller.maybe_collect()
-
-        # Get telemetry:
-        stats = controller.get_stats()
+        if controller is not None:
+            stats = controller.get_stats()
     """
 
     _instance: "ManualGCController | None" = None
@@ -217,13 +225,21 @@ class ManualGCController:
     # Minimum interval between GC calls in seconds (rate limiting)
     MIN_GC_INTERVAL_S = 0.010  # 10ms
 
+    # Gen2 heuristic: only collect gen2 if objects in gen2 grew by this ratio
+    # since last gen2 collection. Mimics CPython's long_lived_pending check.
+    GEN2_GROWTH_RATIO = 0.25
+
     def __init__(self) -> None:
-        self._enabled = False
+        # Store original thresholds for potential restore
         self._original_thresholds: tuple[int, int, int] = gc.get_threshold()
 
         # Track generation collection counts for threshold logic
         self._gc0_count_since_gc1 = 0
         self._gc1_count_since_gc2 = 0
+
+        # Gen2 heuristic: track object count at last gen2 collection
+        # This mimics CPython's long_lived_total / long_lived_pending
+        self._gen2_object_count_at_last_gc: int = 0
 
         # Rate limiting: track last GC time
         self._last_gc_time_ns: int = 0
@@ -234,6 +250,7 @@ class ManualGCController:
         self._objects_collected = 0
         self._max_gc_time_ms = 0.0
         self._skipped_due_to_rate_limit = 0
+        self._gen2_skipped_by_heuristic = 0
 
         # Per-generation telemetry
         self._gen_invocations = [0, 0, 0]  # gen0, gen1, gen2
@@ -243,58 +260,38 @@ class ManualGCController:
         # Use configured or default thresholds
         self._thresholds = self.DEFAULT_THRESHOLDS
 
-    @classmethod
-    def get_instance(cls) -> "ManualGCController":
-        """Get singleton instance of ManualGCController."""
-        if cls._instance is None:
-            cls._instance = ManualGCController()
-        return cls._instance
-
-    def enable(self) -> None:
-        """
-        Enable manual GC control by disabling automatic GC.
-        Should be called once during engine initialization.
-        """
-        if self._enabled:
-            return
-
-        # Store original thresholds for potential restore
-        self._original_thresholds = gc.get_threshold()
-
-        # Disable automatic GC
+        # Disable automatic GC immediately upon creation
         gc.disable()
-        self._enabled = True
         self._last_gc_time_ns = time.monotonic_ns()
+
+        # Initialize gen2 baseline
+        self._gen2_object_count_at_last_gc = len(gc.get_objects(generation=2))
 
         logger.info(
             "Manual GC control enabled. Automatic GC disabled. "
-            "Thresholds: %s, Leak guard: %dx, Min interval: %.0fms",
+            "Thresholds: %s, Leak guard: %dx, Min interval: %.0fms, "
+            "Gen2 growth ratio: %.0f%%",
             self._thresholds,
             self.LEAK_GUARD_MULTIPLIER,
             self.MIN_GC_INTERVAL_S * 1000,
+            self.GEN2_GROWTH_RATIO * 100,
         )
 
-    def disable(self) -> None:
+    @classmethod
+    def get_instance(cls) -> "ManualGCController | None":
         """
-        Disable manual GC control and restore automatic GC.
+        Get singleton instance of ManualGCController.
+
+        Returns None if manual GC control is not enabled.
         """
-        if not self._enabled:
-            return
+        return cls._instance
 
-        gc.enable()
-        gc.set_threshold(*self._original_thresholds)
-        self._enabled = False
-
-        logger.info(
-            "Manual GC control disabled. Automatic GC restored. "
-            "Final stats: invocations=%d, total_time=%.2fms, "
-            "max_time=%.2fms, objects_collected=%d, rate_limited=%d",
-            self._gc_invocations,
-            self._total_gc_time_ms,
-            self._max_gc_time_ms,
-            self._objects_collected,
-            self._skipped_due_to_rate_limit,
-        )
+    @classmethod
+    def _create_instance(cls) -> "ManualGCController":
+        """Internal: Create and store the singleton instance."""
+        if cls._instance is None:
+            cls._instance = ManualGCController()
+        return cls._instance
 
     def maybe_collect(self) -> int:
         """
@@ -306,15 +303,21 @@ class ManualGCController:
         Rate limiting prevents GC thrashing - calls within MIN_GC_INTERVAL_S
         of the last GC are skipped (unless leak guard triggers).
 
+        Generation selection follows Python's generational GC algorithm:
+        - gc.get_count()[0] = allocations - deallocations since last gen0 GC
+        - This matches CPython's automatic GC threshold behavior
+
+        Gen2 heuristic (CPython-inspired):
+        - Skip gen2 collection if not enough new objects were promoted
+        - This avoids expensive full collections when unnecessary
+
         Returns:
             Number of objects collected (0 if no collection performed).
         """
-        if not self._enabled:
-            return 0
-
         current_time_ns = time.monotonic_ns()
 
-        # Get current GC counts to estimate allocations
+        # Get current GC counts (allocations - deallocations since last GC)
+        # This matches CPython's automatic GC threshold logic
         counts = gc.get_count()
         gen0_count = counts[0]
 
@@ -328,6 +331,7 @@ class ManualGCController:
             collected = self._do_collect(2)
             self._gc0_count_since_gc1 = 0
             self._gc1_count_since_gc2 = 0
+            self._gen2_object_count_at_last_gc = len(gc.get_objects(generation=2))
             return collected
 
         # Rate limiting check
@@ -348,7 +352,28 @@ class ManualGCController:
             highest_gen = 1
             pending_gc1_count = self._gc1_count_since_gc2 + 1
             if pending_gc1_count >= self._thresholds[2]:
-                highest_gen = 2
+                # Apply gen2 heuristic: skip if not enough new objects
+                # in oldest generation (mimics CPython's long_lived_pending)
+                current_gen2_count = len(gc.get_objects(generation=2))
+                growth = current_gen2_count - self._gen2_object_count_at_last_gc
+                threshold = int(
+                    self._gen2_object_count_at_last_gc * self.GEN2_GROWTH_RATIO
+                )
+
+                if growth > threshold:
+                    highest_gen = 2
+                else:
+                    # Skip gen2, but still do gen1
+                    self._gen2_skipped_by_heuristic += 1
+                    if envs.VLLM_GC_DEBUG:
+                        logger.debug(
+                            "Skipping gen2 collection: growth=%d <= threshold=%d "
+                            "(current=%d, baseline=%d)",
+                            growth,
+                            threshold,
+                            current_gen2_count,
+                            self._gen2_object_count_at_last_gc,
+                        )
 
         total_collected = self._do_collect(highest_gen)
 
@@ -360,6 +385,8 @@ class ManualGCController:
         else:
             self._gc0_count_since_gc1 = 0
             self._gc1_count_since_gc2 = 0
+            # Update gen2 baseline after full collection
+            self._gen2_object_count_at_last_gc = len(gc.get_objects(generation=2))
 
         return total_collected
 
@@ -373,11 +400,10 @@ class ManualGCController:
         Returns:
             Number of objects collected.
         """
-        if not self._enabled:
-            # Even if not enabled, allow forced collection
-            return gc.collect(generation)
-
-        return self._do_collect(generation)
+        collected = self._do_collect(generation)
+        if generation == 2:
+            self._gen2_object_count_at_last_gc = len(gc.get_objects(generation=2))
+        return collected
 
     def _do_collect(self, generation: int) -> int:
         """Perform GC collection with timing and telemetry."""
@@ -418,7 +444,6 @@ class ManualGCController:
         or metrics export.
         """
         return {
-            "enabled": self._enabled,
             # Global stats
             "gc_invocations": self._gc_invocations,
             "total_gc_time_ms": round(self._total_gc_time_ms, 2),
@@ -431,6 +456,7 @@ class ManualGCController:
             ),
             "objects_collected": self._objects_collected,
             "skipped_rate_limited": self._skipped_due_to_rate_limit,
+            "gen2_skipped_by_heuristic": self._gen2_skipped_by_heuristic,
             # Per-generation stats
             "gen0_invocations": self._gen_invocations[0],
             "gen1_invocations": self._gen_invocations[1],
@@ -442,12 +468,10 @@ class ManualGCController:
 
     def log_stats(self) -> None:
         """Log current GC telemetry at INFO level."""
-        if not self._enabled:
-            return
         stats = self.get_stats()
         logger.info(
             "Manual GC stats: invocations=%d, total=%.2fms, max=%.2fms, "
-            "avg=%.2fms, collected=%d, rate_limited=%d | "
+            "avg=%.2fms, collected=%d, rate_limited=%d, gen2_skipped=%d | "
             "gen0=%d/%.1fms, gen1=%d/%.1fms, gen2=%d/%.1fms",
             stats["gc_invocations"],
             stats["total_gc_time_ms"],
@@ -455,6 +479,7 @@ class ManualGCController:
             stats["avg_gc_time_ms"],
             stats["objects_collected"],
             stats["skipped_rate_limited"],
+            stats["gen2_skipped_by_heuristic"],
             stats["gen0_invocations"],
             stats["gen0_time_ms"],
             stats["gen1_invocations"],
@@ -463,23 +488,20 @@ class ManualGCController:
             stats["gen2_time_ms"],
         )
 
-    @property
-    def is_enabled(self) -> bool:
-        return self._enabled
 
-
-def maybe_enable_manual_gc_control() -> ManualGCController | None:
+def maybe_enable_manual_gc_control() -> None:
     """
     Enable manual GC control if VLLM_MANUAL_GC_CONTROL is set.
 
-    Returns:
-        ManualGCController instance if enabled, None otherwise.
+    When enabled, this:
+    1. Creates the ManualGCController singleton
+    2. Disables Python's automatic GC
+    3. GC is then triggered manually at controlled sync points
+
+    This function is idempotent - calling it multiple times is safe.
     """
     if envs.VLLM_MANUAL_GC_CONTROL:
-        controller = ManualGCController.get_instance()
-        controller.enable()
-        return controller
-    return None
+        ManualGCController._create_instance()
 
 
 def gc_collect_on_sync() -> int:
@@ -512,6 +534,6 @@ def gc_collect_on_sync() -> int:
         or thresholds not met).
     """
     controller = ManualGCController.get_instance()
-    if controller.is_enabled:
+    if controller is not None:
         return controller.maybe_collect()
     return 0

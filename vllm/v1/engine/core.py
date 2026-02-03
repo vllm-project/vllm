@@ -215,11 +215,11 @@ class EngineCore:
         freeze_gc_heap()
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
-        # Enable manual GC control if configured.
+        # Enable manual GC control if configured (VLLM_MANUAL_GC_CONTROL=1).
         # This disables automatic GC and triggers collection at controlled
         # points (during CUDA stream sync) to avoid stop-the-world pauses
         # during GPU kernel execution.
-        self._gc_controller = maybe_enable_manual_gc_control()
+        maybe_enable_manual_gc_control()
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
