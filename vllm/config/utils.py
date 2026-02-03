@@ -93,8 +93,8 @@ def get_field(cls: ConfigType, name: str) -> Field:
             default = default.default
 
     if default is MISSING and default_factory is MISSING:
-        raise ValueError(
-            f"{cls.__name__}.{name} must have a default value or default factory."
+        logger.warning_once(
+            "%s.%s has no default or default factory.", cls.__name__, name
         )
     return field(default=default, default_factory=default_factory, init=init)
 
