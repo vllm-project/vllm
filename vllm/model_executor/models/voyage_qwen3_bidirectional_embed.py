@@ -104,21 +104,22 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
             # Other layer weights: output with stripped prefix
             out_w[f"layers.{layer_idx}.{suffix}"] = tensor
 
-        for layer_idx, parts in qkv_buf.items():
-            if "q" in parts and "k" in parts and "v" in parts:
-                fused = torch.cat([parts["q"], parts["k"], parts["v"]], dim=0)
-                out_w[f"layers.{layer_idx}.self_attn.qkv_proj.weight"] = fused
-            elif parts:
-                missing = sorted([p for p in ("q", "k", "v") if p not in parts])
-                raise ValueError(f"Layer {layer_idx} is missing QKV parts: {missing}")
-        # Fuse gate/up -> gate_up_proj
-        for layer_idx, parts in mlp_buf.items():
-            if "gate" in parts and "up" in parts:
-                fused = torch.cat([parts["gate"], parts["up"]], dim=0)
-                out_w[f"layers.{layer_idx}.mlp.gate_up_proj.weight"] = fused
-            elif parts:
-                missing = sorted([p for p in ("gate", "up") if p not in parts])
-                raise ValueError(f"Layer {layer_idx} is missing MLP parts: {missing}")
+        def _fuse_parts(buffer, parts_to_fuse, out_name_template, part_type):
+            for layer_idx, parts in buffer.items():
+                if all(p in parts for p in parts_to_fuse):
+                    fused = torch.cat([parts[p] for p in parts_to_fuse], dim=0)
+                    out_w[out_name_template.format(layer_idx)] = fused
+                elif parts:
+                    missing = sorted(
+                        [p for p in parts_to_fuse if p not in parts])
+                    raise ValueError(
+                        f"Layer {layer_idx} is missing {part_type} parts: {missing}"
+                    )
+
+        _fuse_parts(qkv_buf, ("q", "k", "v"),
+                    "layers.{}.self_attn.qkv_proj.weight", "QKV")
+        _fuse_parts(mlp_buf, ("gate", "up"),
+                    "layers.{}.mlp.gate_up_proj.weight", "MLP")
 
         # Load weights directly into model parameters
         # bypass parent's stacked_params_mapping
