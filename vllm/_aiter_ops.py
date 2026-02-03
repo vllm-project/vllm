@@ -840,11 +840,11 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
     is_neox: bool,
     flash_layout: bool,
     apply_scale: bool = True,
-    offs: torch.Tensor = None,
-    q_out: torch.Tensor = None,
-    k_out: torch.Tensor = None,
+    offs: torch.Tensor | None = None,
+    q_out: torch.Tensor | None = None,
+    k_out: torch.Tensor | None = None,
     output_zeros: bool = True,
-    zeros_out: torch.Tensor = None,
+    zeros_out: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
     from aiter.ops.triton import qk_rope_reshape_and_cache
 

@@ -80,7 +80,10 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, positions: torch.Tensor
-    ):
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Create copies so inplace ops do not modify the original tensors
+        q = q.clone()
+        k = k.clone()
         q, k = self.rotary_emb(positions, q, k)
 
         # Instead of a full forward pass, match only the KV cache update op here

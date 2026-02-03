@@ -529,7 +529,7 @@ class RopeReshapeKVCachePattern:
         num_heads: int,
         num_kv_heads: int,
         is_neox: bool,
-        prefix: str = "",
+        prefix: str = "model.layers.0.self_attn.attn",
     ) -> None:
         self.head_dim = head_dim
         self.num_heads = num_heads
@@ -575,10 +575,21 @@ class RopeReshapeKVCachePattern:
             k = k.view(-1, self.num_kv_heads, self.head_dim)
             v = v.view(-1, self.num_kv_heads, self.head_dim)
             dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
-            return q, k, v, dummy
+            return dummy, q, k, v
 
-        def replacement():
-            raise NotImplementedError
+        def replacement(
+            q: torch.Tensor,
+            k: torch.Tensor,
+            v: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
+            q = q.view(-1, self.num_heads, self.head_dim)
+            k = k.view(-1, self.num_kv_heads, self.head_dim)
+            v = v.view(-1, self.num_kv_heads, self.head_dim)
+            dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
+            return dummy, q, k, v
 
         # NOTE: use view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities
@@ -612,10 +623,10 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
         # List of tuples of (head_dim, num_heads, num_kv_heads)
         PATTERNS = [
             (64, 64, 8),  # gpt-oss 20b, 120b
-            (128, 64, 8),  # llama 3.3 70B
-            (128, 128, 8),  # llama 3.1 405B
-            (128, 32, 8),  # mixtral 8x7b
-            (128, 48, 8),  # mixtral 8x22b
+            # (128, 64, 8),  # llama 3.3 70B
+            # (128, 128, 8),  # llama 3.1 405B
+            # (128, 32, 8),  # mixtral 8x7b
+            # (128, 48, 8),  # mixtral 8x22b
             # Qwen also supports qk_norm_rope fusion; figure out which one to use
             # (128, 64, 4),  # qwen 235b-a22b
             # (128, 32, 4),  # qwen 30b-a3b
@@ -623,7 +634,7 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
 
         # Register patterns for common model configurations
         for head_dim, num_heads, num_kv_heads in PATTERNS:
-            for is_neox in [True, False]:
+            for is_neox in [True]:  # [True, False]:
                 RopeReshapeKVCachePattern(
                     head_dim=head_dim,
                     num_heads=num_heads,
@@ -637,7 +648,12 @@ class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)
+        # TODO (Rohan138): Remove before merging!
         graph.print_tabular()
+        from torch.fx.passes.graph_drawer import FxGraphDrawer
+        gm = graph.owning_module
+        drawer = FxGraphDrawer(gm, "rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass")
+        drawer.get_dot_graph().write_svg("/home/ropotdar/Desktop/rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass.svg")
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(self, RopeReshapeKVCachePattern)
