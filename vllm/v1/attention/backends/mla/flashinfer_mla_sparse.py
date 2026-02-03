@@ -163,6 +163,7 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     # Sparse-specific
     block_size: int = 64
     topk_tokens: int = 2048
+    topk_tokens_tensor: torch.Tensor | None = None
 
 
 class FlashInferMLASparseMetadataBuilder(
@@ -192,6 +193,9 @@ class FlashInferMLASparseMetadataBuilder(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=device,
+        )
+        self.topk_tokens_tensor = torch.tensor(
+            [self.topk_tokens], dtype=torch.int32, device=device
         )
 
     def build(
@@ -229,6 +233,7 @@ class FlashInferMLASparseMetadataBuilder(
             seq_lens=cm.seq_lens,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            topk_tokens_tensor=self.topk_tokens_tensor,
         )
 
 
@@ -346,12 +351,6 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         attn_metadata: FlashInferMLASparseMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Forward pass with sparse attention.
-
-        For sparse mode:
-        - topk_indices contains logical indices per token [num_tokens, topk]
-        - These are converted to physical cache slots using the block table
-        """
         if isinstance(q, tuple):
             q = torch.cat(q, dim=-1)
 
@@ -376,18 +375,15 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         if self.bmm2_scale is None:
             self.bmm2_scale = layer._v_scale_float
 
-        q_reshaped = q.view(num_actual_toks, 1, q.shape[-2], q.shape[-1])
-        indices_reshaped = topk_indices_physical.view(num_actual_toks, 1, -1)
-        seq_lens_per_token = attn_metadata.seq_lens[
-            attn_metadata.req_id_per_token[:num_actual_toks]
-        ]
+        q_reshaped = q.view(1, num_actual_toks, q.shape[-2], q.shape[-1])
+        indices_reshaped = topk_indices_physical.view(1, num_actual_toks, -1)
 
         o = self._call_kernel(
             q_reshaped,
             kv_c_and_k_pe_cache,
             indices_reshaped,
-            seq_lens_per_token,
-            attn_metadata.max_seq_len,
+            attn_metadata.topk_tokens_tensor,
+            attn_metadata.topk_tokens,
             attn_metadata.topk_tokens,
         )
         return o.view(-1, o.shape[-2], o.shape[-1]), None
