@@ -6,9 +6,12 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
 from vllm.platforms import current_platform
 
-from .BlockScaledMMLinearKernel import Fp8BlockScaledMMKernel
+from .BlockScaledMMLinearKernel import Fp8BlockMMScaledConfig, Fp8BlockScaledMMKernel
 from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
@@ -142,6 +145,19 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
             "Only supported on ROCm platform \
                 with aiter package installed.",
         )
+
+    @classmethod
+    def can_implement(cls, config: Fp8BlockMMScaledConfig):
+        act_quant_desc = config.activation_quant_key.scale
+        if (
+            act_quant_desc.group_shape != GroupShape(1, 12)
+            and not act_quant_desc.static
+        ):
+            return (
+                False,
+                "Only duynamic per token group activation"
+                "quantization with group shape=(1,12) supported",
+            )
 
     @classmethod
     def ordered_fallback_kernels(cls):
