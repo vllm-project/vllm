@@ -27,8 +27,6 @@ class ModelFusionInfo(NamedTuple):
     model_name: str
     matches: Callable[[int], Matches]
     """Given number of hidden layers, produces the matches object"""
-    # default_num_layers: int
-    # """The default number of layers for this model"""
     model_kwargs: dict[str, Any] = {}
     hf_overrides: Callable[[int], dict] = lambda n: {"num_hidden_layers": n}
 
