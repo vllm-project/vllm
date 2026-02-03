@@ -36,8 +36,7 @@ def _rpc_receive_handle(feat_key: str, handle_data: Any) -> str:
         feat_key (str): Feature key for the cached data (corresponds to mm_hash).
         handle_data (Any): Data to be stored in the cache (encoder cache tensor).
     """
-    if (_LOCAL_CONNECTOR is not None and 
-        hasattr(_LOCAL_CONNECTOR, 'handle_caches')):
+    if (_LOCAL_CONNECTOR is not None and hasattr(_LOCAL_CONNECTOR, 'handle_caches')):
         _LOCAL_CONNECTOR.handle_caches[feat_key] = handle_data
         logger.debug("RPC received and cached key: %s", feat_key)
         return "ACK"
@@ -68,7 +67,7 @@ class SHMConnectorMetadata(ECConnectorMetadata):
 
 class SHMConnector(ECConnectorBase):
     # NOTE: This is An implementation of the EC connector using Shared Memory (SHM).
-    # It transfers the EC cache between processes (Producer/Consumer) 
+    # It transfers the EC cache between processes (Producer/Consumer)
     # by sharing memory handles.
 
     def __init__(self, vllm_config: "VllmConfig", role: ECConnectorRole):
@@ -94,9 +93,7 @@ class SHMConnector(ECConnectorBase):
         self.ec_ip = transfer_config.ec_ip
         self.listen_ports = ec_extra_config.get("listen_ports", None)
         if not self.listen_ports:
-            raise ValueError(
-                "Must have 'listen_ports' in ec_connector_extra_config."
-                )
+            raise ValueError("Must have 'listen_ports' in ec_connector_extra_config.")
         self.max_workers = ec_extra_config.get("max_workers", 16)
 
         engine_id = ec_extra_config.get("engine_id", 0)
@@ -121,9 +118,7 @@ class SHMConnector(ECConnectorBase):
             self.is_producer_node = True
         else:
             self.rpc_rank = (
-                producer_size + 
-                engine_id * consumer_single_size + 
-                vllm_local_rank
+                producer_size + engine_id * consumer_single_size + vllm_local_rank
             )
             self.is_producer_node = False
         self.rpc_name = f"worker_{self.rpc_rank}"
@@ -131,20 +126,19 @@ class SHMConnector(ECConnectorBase):
 
         if not rpc.api._is_current_rpc_agent_set():
             options = rpc.TensorPipeRpcBackendOptions(
-                init_method=f"tcp://{self.ec_ip}:{master_port}",
-                rpc_timeout=30.0
+                init_method=f"tcp://{self.ec_ip}:{master_port}", rpc_timeout=30.0
             )
-            rpc.init_rpc(self.rpc_name, rank=self.rpc_rank,
-                         world_size=self.rpc_world_size, rpc_backend_options=options)
+            rpc.init_rpc(
+                self.rpc_name,
+                rank=self.rpc_rank,
+                world_size=self.rpc_world_size,
+                rpc_backend_options=options
+            )
 
         if transfer_config.ec_role == "ec_producer":
-            self.send_queue = queue.Queue()
+            self.send_queue: queue.Queue[tuple[str, torch.Tensor]] = queue.Queue()
             self.consumer_names = [
-                f"worker_{i}"
-                for i in range(
-                    producer_size,
-                    self.rpc_world_size
-                )
+                f"worker_{i}" for i in range(producer_size, self.rpc_world_size)
             ]
             self.thread_executor = ThreadPoolExecutor(max_workers=self.max_workers)
             self.thread_executor.submit(self.producer_run)
@@ -162,10 +156,10 @@ class SHMConnector(ECConnectorBase):
                 futs = []
                 for worker_name in self.consumer_names:
                     fut = rpc.rpc_async(
-                        to=worker_name, 
-                        func=_rpc_receive_handle, 
+                        to=worker_name,
+                        func=_rpc_receive_handle,
                         args=(feat_key, shared_handle),
-                        timeout=20.0
+                        timeout=20.0,
                     )
                     futs.append((worker_name, fut))
 
@@ -176,12 +170,17 @@ class SHMConnector(ECConnectorBase):
                         if result != "ACK":
                             logger.warning(
                                 "Worker %s did not ACK %s, got: %s",
-                                worker_name, feat_key, result)
+                                worker_name,
+                                feat_key,
+                                result,
+                            )
                             all_received = False
                     except Exception as e:
                         logger.error(
                             "Critical: Worker %s failed to receive %s. Error: %s",
-                            worker_name, feat_key, e
+                            worker_name,
+                            feat_key,
+                            e,
                         )
                         all_received = False
 
@@ -189,12 +188,13 @@ class SHMConnector(ECConnectorBase):
                     self._generate_filename_debug(feat_key)
                     logger.info(
                         "Broadcast Success: %s received by all %d workers.",
-                        feat_key, len(self.consumer_names)
+                        feat_key,
+                        len(self.consumer_names),
                     )
                 else:
                     logger.error(
                         "Broadcast Incomplete: %s might be missing on some workers.",
-                        feat_key
+                        feat_key,
                     )
 
                 self.send_queue.task_done()
@@ -233,7 +233,11 @@ class SHMConnector(ECConnectorBase):
             if mm_data.mm_hash in encoder_cache:
                 continue
             try:
-                func, args = self.handle_caches.get(mm_data.mm_hash)
+                item = self.handle_caches.get(mm_data.mm_hash)
+                if item is None:
+                    logger.warning("Cache miss for hash %s", mm_data.mm_hash)
+                    continue
+                func, args = item
                 list_args = list(args)
                 list_args[6] = get_world_group().local_rank
                 encoder_cache[mm_data.mm_hash] = func(*list_args)
