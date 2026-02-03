@@ -221,11 +221,6 @@ class WorkerWrapperBase:
         envs_list: list[dict[str, str]],
     ) -> None:
         envs = envs_list[self.rpc_rank]
-        key = "CUDA_VISIBLE_DEVICES"
-        if key in envs and key in os.environ:
-            # overwriting CUDA_VISIBLE_DEVICES is desired behavior
-            # suppress the warning in `update_environment_variables`
-            del os.environ[key]
         update_environment_variables(envs)
 
     def init_worker(self, all_kwargs: list[dict[str, Any]]) -> None:

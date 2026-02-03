@@ -69,6 +69,7 @@ class RayDistributedExecutor(Executor):
         "VLLM_HOST_PORT",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
+        "HIP_VISIBLE_DEVICES",
     }
 
     # These non-vLLM env vars are copied from the driver to workers
@@ -303,14 +304,7 @@ class RayDistributedExecutor(Executor):
             )
 
         # Set environment variables for the driver and workers.
-        all_args_to_update_environment_variables = [
-            {
-                current_platform.device_control_env_var: ",".join(
-                    map(str, node_gpus[node_id])
-                ),
-            }
-            for (node_id, _) in worker_node_and_gpu_ids
-        ]
+        all_args_to_update_environment_variables = [{} for _ in worker_node_and_gpu_ids]
 
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
