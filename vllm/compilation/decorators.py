@@ -341,12 +341,19 @@ def _support_torch_compile(
                 if is_torch_equal_or_newer("2.10.0"):
                     for dim in dims:
                         # Use autotune_batch_hint for dim 0 if set, else actual size
-                        hint = autotune_batch_hint if dim == 0 and autotune_batch_hint else arg.size()[dim]
-                        torch._dynamo.decorators.mark_unbacked(arg, dim, hint_override=hint)
+                        hint = (
+                            autotune_batch_hint
+                            if dim == 0 and autotune_batch_hint
+                            else arg.size()[dim]
+                        )
+                        torch._dynamo.decorators.mark_unbacked(
+                            arg, dim, hint_override=hint
+                        )
                 else:
                     torch._dynamo.decorators.mark_unbacked(arg, dims)
             else:
-                # BACKED shapes: pass hint_override if autotune_batch_hint is set for dim 0
+                # BACKED shapes: pass hint_override if autotune_batch_hint
+                # is set for dim 0
                 if is_torch_equal_or_newer("2.10.0.dev") and autotune_batch_hint:
                     for dim in dims:
                         hint = autotune_batch_hint if dim == 0 else None
@@ -386,7 +393,11 @@ def _support_torch_compile(
                         dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
                         if is_torch_equal_or_newer("2.10.0"):
                             for dim in dims:
-                                hint = autotune_batch_hint if dim == 0 and autotune_batch_hint else arg.size()[dim]
+                                hint = (
+                                    autotune_batch_hint
+                                    if dim == 0 and autotune_batch_hint
+                                    else arg.size()[dim]
+                                )
                                 torch._dynamo.decorators.mark_unbacked(
                                     arg, dim, hint_override=hint
                                 )
