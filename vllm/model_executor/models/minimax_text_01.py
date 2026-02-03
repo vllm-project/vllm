@@ -162,7 +162,6 @@ class MiniMaxText01MoE(nn.Module):
             quant_config=self.quant_config,
             tp_size=self.tp_size,
             prefix=f"{prefix}.experts",
-            router_logits_dtype=torch.float32,
         )
         return
 
