@@ -193,10 +193,11 @@ def flash_attn_triton_available() -> bool:
                 "Flash Attention Triton backend on RDNA not available."
             )
             return False
-        if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") == "0":
+        if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") != "TRUE":
             logger.info_once(
-                "Flash Attention Triton backend on RDNA disabled via "
-                "FLASH_ATTENTION_TRITON_AMD_ENABLE=0."
+                "Set FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE to enable "
+                "Flash Attention Triton backend on RDNA for improved "
+                "performance."
             )
             return False
         return True
