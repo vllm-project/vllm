@@ -73,25 +73,41 @@ class ServingScores(OpenAIServing):
         request_id: str,
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
+        max_tokens_per_doc: int | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         model_config = self.model_config
         tokenizer = self.renderer.get_tokenizer()
 
-        encode_async = make_async(
-            tokenizer.encode,
-            executor=self._tokenizer_executor,
-        )
-
         input_texts = data_1 + data_2
 
+        tokenize_async = make_async(
+            tokenizer.__call__, executor=self._tokenizer_executor
+        )
+
         tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
+
+        # Create separate kwargs for documents if max_tokens_per_doc is set
+        if max_tokens_per_doc is not None:
+            doc_tokenization_kwargs = tokenization_kwargs.copy()
+            doc_tokenization_kwargs["truncation"] = True
+            # Account for special tokens (e.g., [CLS], [SEP]) in max_length
+            # so that max_tokens_per_doc refers to actual content tokens
+            num_special = tokenizer.num_special_tokens_to_add()
+            doc_tokenization_kwargs["max_length"] = max_tokens_per_doc + num_special
+        else:
+            doc_tokenization_kwargs = tokenization_kwargs
+
+        # Tokenize queries with base kwargs, documents with doc kwargs
         tokenized_prompts = await asyncio.gather(
-            *(encode_async(t, **tokenization_kwargs) for t in input_texts)
+            *(tokenize_async(t, **tokenization_kwargs) for t in data_1),
+            *(tokenize_async(t, **doc_tokenization_kwargs) for t in data_2),
         )
 
         engine_prompts: list[TokensPrompt] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
-            text_token_prompt = self._validate_input(request, tok_result, input_text)
+            text_token_prompt = self._validate_input(
+                request, tok_result["input_ids"], input_text
+            )
 
             engine_prompts.append(
                 TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
@@ -164,6 +180,7 @@ class ServingScores(OpenAIServing):
         tokenization_kwargs: dict[str, Any],
         data_1: str | ScoreContentPartParam,
         data_2: str | ScoreContentPartParam,
+        max_tokens_per_doc: int | None = None,
     ) -> tuple[str, TokensPrompt]:
         model_config = self.model_config
 
@@ -174,6 +191,7 @@ class ServingScores(OpenAIServing):
             tokenizer=tokenizer,
             tokenization_kwargs=tokenization_kwargs,
             score_template=self.score_template,
+            max_tokens_per_doc=max_tokens_per_doc,
         )
         self._validate_input(request, engine_prompt["prompt_token_ids"], full_prompt)
         if request.mm_processor_kwargs is not None:
@@ -189,6 +207,7 @@ class ServingScores(OpenAIServing):
         request_id: str,
         lora_request: LoRARequest | None | None = None,
         trace_headers: Mapping[str, str] | None = None,
+        max_tokens_per_doc: int | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         model_config = self.model_config
         tokenizer = self.renderer.get_tokenizer()
@@ -219,6 +238,7 @@ class ServingScores(OpenAIServing):
                     tokenization_kwargs=tok_kwargs,
                     data_1=t1,
                     data_2=t2,
+                    max_tokens_per_doc=max_tokens_per_doc,
                 )
                 for t1, t2 in input_pairs
             )
@@ -287,6 +307,17 @@ class ServingScores(OpenAIServing):
         raw_request: Request | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         lora_request = self._maybe_get_adapters(request)
+        max_tokens_per_doc = getattr(request, "max_tokens_per_doc", None)
+
+        # Validate max_tokens_per_doc
+        if max_tokens_per_doc is not None:
+            if max_tokens_per_doc <= 0:
+                raise ValueError("max_tokens_per_doc must be a positive integer")
+            if max_tokens_per_doc >= self.max_model_len:
+                raise ValueError(
+                    f"max_tokens_per_doc ({max_tokens_per_doc}) must be less "
+                    f"than max_model_len ({self.max_model_len})."
+                )
 
         trace_headers = (
             None
@@ -321,6 +352,7 @@ class ServingScores(OpenAIServing):
                 request_id=request_id,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
+                max_tokens_per_doc=max_tokens_per_doc,
             )
 
         else:
@@ -331,6 +363,7 @@ class ServingScores(OpenAIServing):
                 request_id=request_id,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
+                max_tokens_per_doc=max_tokens_per_doc,
             )
 
     async def create_score(

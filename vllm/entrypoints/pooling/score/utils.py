@@ -46,6 +46,43 @@ class ScoreMultiModalParam(TypedDict, total=False):
     """The multimodal contents"""
 
 
+def _get_num_special_tokens_for_pair(tokenizer: TokenizerLike) -> int:
+    """Get number of special tokens added for a text pair encoding.
+
+    This handles different tokenizer types by trying the HuggingFace method
+    first and falling back to computing dynamically if needed.
+    """
+    # Try HuggingFace method with pair=True
+    # Use getattr to bypass type checker since TokenizerLike protocol
+    # doesn't define the 'pair' parameter that HuggingFace tokenizers have
+    method = getattr(tokenizer, "num_special_tokens_to_add", None)
+    if method is not None:
+        try:
+            return method(pair=True)
+        except TypeError:
+            pass  # pair parameter not supported
+
+    # Fallback: compute by tokenizing empty strings
+    empty_encoding = tokenizer("", text_pair="", add_special_tokens=True)
+    return len(empty_encoding["input_ids"])
+
+
+def _truncate_text_to_tokens(
+    text: str,
+    tokenizer: TokenizerLike,
+    max_tokens: int,
+) -> str:
+    """Truncate text to a maximum number of tokens.
+
+    This is used as a fallback for cases where we can't use the tokenizer's
+    built-in truncation (e.g., template-based models).
+    """
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    if len(token_ids) <= max_tokens:
+        return text
+    return tokenizer.decode(token_ids[:max_tokens])
+
+
 def _cosine_similarity(
     tokenizer: TokenizerLike,
     embed_1: list[PoolingRequestOutput],
@@ -187,6 +224,7 @@ def get_score_prompt(
     data_1: str | ScoreContentPartParam,
     data_2: str | ScoreContentPartParam,
     score_template: str | None = None,
+    max_tokens_per_doc: int | None = None,
 ) -> tuple[str, TokensPrompt]:
     prompt_1, prompt_2, mm_data, mm_uuids = parse_score_data(
         data_1,
@@ -198,20 +236,57 @@ def get_score_prompt(
     model = get_model_cls(model_config)
 
     def default_tokenizer_encode():
+        nonlocal prompt_2
+        # Make a copy to avoid mutating the original
+        local_kwargs = tokenization_kwargs.copy()
+
         if supports_score_template(model):
+            # Template case - need to truncate text first (can't use only_second)
+            if max_tokens_per_doc is not None and isinstance(prompt_2, str):
+                prompt_2 = _truncate_text_to_tokens(
+                    prompt_2, tokenizer, max_tokens_per_doc
+                )
             full_prompt = _apply_model_score_template(model_config, prompt_1, prompt_2)
-            prompt_inputs = tokenizer(full_prompt, **tokenization_kwargs)
+            prompt_inputs = tokenizer(full_prompt, **local_kwargs)
         else:
             if model_config.use_sep_token:
-                # cross_encoder models defaults to using separating token.
+                # Cross-encoder case - use tokenizer's built-in truncation
+                if max_tokens_per_doc is not None and isinstance(prompt_2, str):
+                    # Calculate max_length to limit doc tokens
+                    query_tokens = tokenizer.encode(prompt_1, add_special_tokens=False)
+                    num_special = _get_num_special_tokens_for_pair(tokenizer)
+                    doc_limit_max_length = (
+                        len(query_tokens) + max_tokens_per_doc + num_special
+                    )
+
+                    # If truncate_prompt_tokens is also set, use the smaller
+                    existing_max_length = local_kwargs.get("max_length")
+                    if existing_max_length is not None:
+                        effective_max_length = min(
+                            doc_limit_max_length, existing_max_length
+                        )
+                    else:
+                        effective_max_length = doc_limit_max_length
+
+                    local_kwargs["truncation"] = "only_second"
+                    local_kwargs["max_length"] = effective_max_length
+
                 prompt_inputs = tokenizer(
-                    text=prompt_1, text_pair=prompt_2, **tokenization_kwargs
+                    text=prompt_1, text_pair=prompt_2, **local_kwargs
                 )
                 full_prompt = tokenizer.decode(prompt_inputs["input_ids"])
             else:
-                # `llm as reranker` defaults to not using separating token.
-                full_prompt = prompt_1 + prompt_2
-                prompt_inputs = tokenizer(text=full_prompt, **tokenization_kwargs)
+                # `llm as reranker` - build tokens directly for efficiency
+                if max_tokens_per_doc is not None and isinstance(prompt_2, str):
+                    query_ids = tokenizer.encode(prompt_1, add_special_tokens=False)
+                    doc_ids = tokenizer.encode(prompt_2, add_special_tokens=False)
+                    doc_ids = doc_ids[:max_tokens_per_doc]
+                    input_ids = query_ids + doc_ids
+                    full_prompt = tokenizer.decode(input_ids)
+                    prompt_inputs = {"input_ids": input_ids}
+                else:
+                    full_prompt = prompt_1 + prompt_2
+                    prompt_inputs = tokenizer(text=full_prompt, **local_kwargs)
         return full_prompt, prompt_inputs
 
     # FIXME: For now, we only apply a template when one is explicitly provided.
@@ -225,6 +300,11 @@ def get_score_prompt(
         # If that fails because there is no such template,
         # fall back to the default implementation.
         try:
+            # Template case - truncate text first if needed
+            if max_tokens_per_doc is not None and isinstance(prompt_2, str):
+                prompt_2 = _truncate_text_to_tokens(
+                    prompt_2, tokenizer, max_tokens_per_doc
+                )
             full_prompt = safe_apply_chat_template(
                 model_config,
                 tokenizer,

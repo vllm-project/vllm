@@ -88,6 +88,16 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
     top_n: int = Field(default_factory=lambda: 0)
 
     # --8<-- [start:rerank-extra-params]
+    max_tokens_per_doc: int | None = Field(
+        default=None,
+        description=(
+            "Maximum number of tokens per document. Documents longer than "
+            "this will be truncated to this length. If not specified, no "
+            "document-level truncation is applied (only truncate_prompt_tokens "
+            "applies to the combined query+document). This parameter is useful "
+            "for limiting document length independently of the query."
+        ),
+    )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
