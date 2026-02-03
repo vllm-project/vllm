@@ -307,11 +307,13 @@ class NixlConnector(KVConnectorBase_V1):
             "FLASH_ATTN",
             "FLASHINFER",
         ):
+            logger.info("XXX AA")
             return False
 
         # For now there is no benefit to run cross layers when backend
         # does not support on HND
         if get_kv_cache_layout() != "HND":
+            logger.info("XXX HERE")
             return False
 
         extra_config = self.kv_transfer_config.kv_connector_extra_config
