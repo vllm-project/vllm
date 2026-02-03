@@ -46,7 +46,7 @@ def _is_blackwell_class(device_capability: DeviceCapability) -> bool:
 
     Blackwell architecture includes:
     - SM100/SM101: B100, B200 (major=10)
-    - SM120/SM121: GB10 DGX Spark, Thor (major=12)
+    - SM120/SM121: GB10 DGX Spark (major=12)
 
     Note: SM11x may be used by future Blackwell variants.
     """
@@ -181,7 +181,7 @@ class CudaPlatformBase(Platform):
 
         Blackwell architecture includes:
         - SM100/SM101: B100, B200 (major=10)
-        - SM120/SM121: GB10 DGX Spark, Thor (major=12)
+        - SM120/SM121: GB10 DGX Spark (major=12)
 
         Note: SM11x may be used by future Blackwell variants.
         """
