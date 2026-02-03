@@ -16,8 +16,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 logger = init_logger(__name__)
 
 # Constants for dynamic k adjustment
-MAX_SPEC_TOKENS = 10
-MIN_SPEC_TOKENS = 2
+MIN_SPEC_TOKENS = 0
 ACCEPTANCE_HISTORY_LEN = 10
 ACCEPTANCE_RATE_HYSTERESIS = 0.05
 MIN_HISTORY_FOR_ADJUSTMENT = 3
@@ -57,6 +56,13 @@ class DynamicProposer(EagleProposer):
 
         self.acceptance_rate_threshold = (
             vllm_config.speculative_config.acceptance_rate_threshold
+        )
+        
+        # Upper bound is determined by the user configuration
+        self.max_spec_tokens = self.num_speculative_tokens
+        # Ensure initial tokens do not exceed the configured max
+        self._initial_spec_tokens = max(
+            MIN_SPEC_TOKENS, min(self.num_speculative_tokens, self.max_spec_tokens)
         )
 
         logger.info("DynamicProposer initialized for adaptive k.")
@@ -153,7 +159,7 @@ class DynamicProposer(EagleProposer):
 
             new_k = state.num_spec_tokens
             if avg_acceptance_rate >= upper_bound:
-                new_k = min(state.num_spec_tokens + 1, MAX_SPEC_TOKENS)
+                new_k = min(state.num_spec_tokens + 1, self.max_spec_tokens)
             elif avg_acceptance_rate <= lower_bound:
                 new_k = max(state.num_spec_tokens - 1, MIN_SPEC_TOKENS)
 
