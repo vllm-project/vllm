@@ -43,7 +43,12 @@ run_tests() {
 }
 
 # Run tests
-run_tests "default backend" ""
+if [[ -n "${ROCM_ATTN:-}" ]]; then
+  echo "ROCM_ATTN is set, running with --attention-backend ROCM_ATTN"
+  run_tests "ROCM_ATTN backend" "--attention-backend ROCM_ATTN"
+else
+  run_tests "default backend" ""
+fi
 
 # Check if FLASHINFER is set (non-empty)
 if [[ -n "${FLASHINFER:-}" ]]; then

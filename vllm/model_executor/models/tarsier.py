@@ -19,7 +19,7 @@ from transformers.models.llava import LlavaProcessor
 from transformers.processing_utils import ProcessingKwargs, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -351,7 +351,6 @@ def _build_tarsier_hf_processor(
 def init_vision_tower_for_tarsier(
     hf_config: TarsierHfConfig,  # Use the Tarsier specific config protocol
     quant_config: QuantizationConfig | None,
-    multimodal_config: MultiModalConfig | None,
     *,
     require_post_norm: bool | None = None,
     prefix: str = "",
@@ -378,7 +377,6 @@ def init_vision_tower_for_tarsier(
         return CLIPVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_to_init,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -387,7 +385,6 @@ def init_vision_tower_for_tarsier(
         return SiglipVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers_to_init,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -420,41 +417,44 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
         config: TarsierHfConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config  # Storing the Tarsier-specific HF config
-        self.vision_tower = init_vision_tower_for_tarsier(
-            config,
-            quant_config=quant_config,
-            multimodal_config=multimodal_config,
-            require_post_norm=False,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
-        projector_bias = getattr(config, "multimodal_projector_bias", True)
 
-        self.multi_modal_projector = TarsierMultiModalProjector(
-            vision_hidden_size=config.vision_config.hidden_size,
-            text_hidden_size=config.text_config.hidden_size,
-            projector_hidden_act=config.projector_hidden_act,
-            multimodal_projector_bias=projector_bias,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"),
-        )
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,  # Use text_config from Tarsier's main config
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-        self.register_buffer(
-            "image_newline_idx_tensor",
-            torch.tensor([config.image_newline_idx], dtype=torch.long),
-            persistent=False,
-        )
-        self.register_buffer(
-            "image_new_idx_tensor",
-            torch.tensor([config.image_new_idx], dtype=torch.long),
-            persistent=False,
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = init_vision_tower_for_tarsier(
+                config,
+                quant_config=quant_config,
+                require_post_norm=False,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            projector_bias = getattr(config, "multimodal_projector_bias", True)
+
+            self.multi_modal_projector = TarsierMultiModalProjector(
+                vision_hidden_size=config.vision_config.hidden_size,
+                text_hidden_size=config.text_config.hidden_size,
+                projector_hidden_act=config.projector_hidden_act,
+                multimodal_projector_bias=projector_bias,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
+            )
+            self.register_buffer(
+                "image_newline_idx_tensor",
+                torch.tensor([config.image_newline_idx], dtype=torch.long),
+                persistent=False,
+            )
+            self.register_buffer(
+                "image_new_idx_tensor",
+                torch.tensor([config.image_new_idx], dtype=torch.long),
+                persistent=False,
+            )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                # Use text_config from Tarsier's main config
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -547,7 +547,6 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         self,
         inputs: TarsierImagePixelInputs,
     ) -> torch.Tensor | tuple[torch.Tensor, ...]:
-        assert self.vision_tower is not None
         pixel_values = inputs["pixel_values"]
         image_features_selected = self._image_pixels_to_features(
             self.vision_tower, pixel_values
@@ -575,11 +574,8 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
                     "Incorrect type of image_embeds. "
                     f"Got type: {type(projected_features)}. "
                 )
-        assert self.vision_tower is not None
-        return self._process_image_pixels(image_input)
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
+        return self._process_image_pixels(image_input)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -589,7 +585,7 @@ class TarsierForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
