@@ -1,17 +1,17 @@
+# vllm/model_executor/models/voyage_qwen3_bidirectional_embed.py
+
 from __future__ import annotations
 
 import re
 from collections import defaultdict
-from typing import Set, Tuple
 from collections.abc import Iterable
-
 import torch
 import torch.nn as nn
 
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3 import Qwen3Model
 
-WeightItem = Tuple[str, torch.Tensor]
+WeightItem = tuple[str, torch.Tensor]
 
 _LAYER_RE = re.compile(r"^model\.layers\.(\d+)\.(.+)$")
 
@@ -63,7 +63,7 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
         out = super().forward(*args, **kwargs)
         return self.linear(out)
 
-    def load_weights(self, weights: Iterable[WeightItem]) -> Set[str]:
+    def load_weights(self, weights: Iterable[WeightItem]) -> set[str]:
         """Remap, fuse, and load weights directly (bypass parent's stacked_params_mapping)."""
         out_w: dict[str, torch.Tensor] = {}
         qkv_buf: dict[int, dict[str, torch.Tensor]] = defaultdict(dict)
@@ -74,7 +74,7 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
             if not m:
                 # Non-layer weights: strip "model." prefix if present
                 new_name = (
-                    name[len("model.") :] if name.startswith("model.") else name
+                    name[len("model."):] if name.startswith("model.") else name
                 )
                 out_w[new_name] = tensor
                 continue
@@ -104,21 +104,25 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
             # Other layer weights: output with stripped prefix
             out_w[f"layers.{layer_idx}.{suffix}"] = tensor
 
-        # Fuse Q/K/V -> qkv_proj
         for layer_idx, parts in qkv_buf.items():
             if "q" in parts and "k" in parts and "v" in parts:
                 fused = torch.cat([parts["q"], parts["k"], parts["v"]], dim=0)
                 out_w[f"layers.{layer_idx}.self_attn.qkv_proj.weight"] = fused
-
+            elif parts:
+                missing = sorted([p for p in ("q", "k", "v") if p not in parts])
+                raise ValueError(f"Layer {layer_idx} is missing QKV parts: {missing}")
         # Fuse gate/up -> gate_up_proj
         for layer_idx, parts in mlp_buf.items():
             if "gate" in parts and "up" in parts:
                 fused = torch.cat([parts["gate"], parts["up"]], dim=0)
                 out_w[f"layers.{layer_idx}.mlp.gate_up_proj.weight"] = fused
+            elif parts:
+                missing = sorted([p for p in ("gate", "up") if p not in parts])
+                raise ValueError(f"Layer {layer_idx} is missing MLP parts: {missing}")
 
         # Load weights directly into model parameters (bypass parent's stacked_params_mapping)
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
 
         for name, loaded_weight in out_w.items():
             if name not in params_dict:
