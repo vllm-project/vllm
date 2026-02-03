@@ -17,6 +17,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -110,10 +111,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "TritonMLA V1 with FP8 KV cache not yet supported"
             )
 
-        # Pre-compute sm_count to avoid recomputing it. Use device 0 as a proxy
-        # (assumes all devices are similar)
-        properties = torch.cuda.get_device_properties(torch.device("cuda:0"))
-        self._sm_count = properties.multi_processor_count
+        self._sm_count = get_cu_count()
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
