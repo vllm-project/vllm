@@ -66,8 +66,6 @@ class FlashInferMLASparseBackend(AttentionBackend):
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
-        "fp8",
-        "fp8_e4m3",
     ]
 
     @staticmethod
@@ -171,6 +169,9 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     block_table: torch.Tensor
     req_id_per_token: torch.Tensor
 
+    # Sequence lengths for all requests (context + query)
+    seq_lens: torch.Tensor
+
     # Sparse-specific
     block_size: int = 64
     topk_tokens: int = 2048
@@ -268,6 +269,7 @@ class FlashInferMLASparseMetadataBuilder(
             slot_mapping=cm.slot_mapping,
             block_table=cm.block_table_tensor,
             req_id_per_token=req_id_per_token_tensor,
+            seq_lens=cm.seq_lens,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
             decode=decode_metadata,
@@ -332,12 +334,58 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
                 "FlashInferMLASparseImpl"
             )
 
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+        self.kv_cache_dtype = kv_cache_dtype
+
+        # MLA-specific dimensions
+        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
+        self.qk_nope_head_dim: int = mla_args["qk_nope_head_dim"]
+        self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+
         assert indexer is not None, "Indexer required for sparse MLA"
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
 
         self._workspace_buffer: torch.Tensor | None = None
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
+
+    def _call_kernel(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_seq_len: int,
+        topk_tokens: int,
+    ) -> torch.Tensor:
+        """Call the FlashInfer sparse MLA kernel for a batch with uniform q_len.
+
+        Args:
+            q: Query tensor of shape (batch_size, q_len, num_heads, head_dim)
+            kv_c_and_k_pe_cache: KV cache tensor
+            topk_indices: Physical indices of shape (batch_size, q_len, topk)
+            seq_lens: Sequence lengths tensor of shape (batch_size,)
+            max_seq_len: Maximum sequence length
+            topk_tokens: Number of top-k tokens for sparse attention
+        """
+        o = trtllm_batch_decode_with_kv_cache_mla(
+            query=q,
+            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
+            workspace_buffer=self._workspace_buffer,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            kv_lora_rank=self.kv_lora_rank,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            block_tables=topk_indices,
+            seq_lens=seq_lens,
+            max_seq_len=max_seq_len,
+            bmm1_scale=self.bmm1_scale,
+            bmm2_scale=self.bmm2_scale,
+            sparse_mla_top_k=topk_tokens,
+        )
+        return o
 
     def forward_mqa(
         self,
@@ -353,6 +401,9 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         - These are converted to physical cache slots using the block table
         - The resulting indices are passed as block_tables with shape
           [batch_size, q_len_per_request, sparse_mla_top_k]
+
+        Mixed batches (decode + prefill) are handled by processing each group
+        separately, as the kernel requires uniform query lengths within a batch.
         """
         # Concatenate q if it's a tuple (ql_nope, q_pe)
         if isinstance(q, tuple):
@@ -365,7 +416,6 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
         # Convert per-request topk indices to global cache slots
-        # topk_indices: (num_decode_tokens, topk) -> physical cache slots
         topk_indices_physical = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,
@@ -373,10 +423,6 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             BLOCK_SIZE=attn_metadata.block_size,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
         )
-
-        # Reshape topk_indices: (num_decode_tokens, topk)
-        #                    -> (num_decodes, q_len, topk)
-        topk_indices_physical = topk_indices_physical.view(num_decodes, q_len, -1)
 
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace_buffer(q.device)
@@ -386,27 +432,100 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         if self.bmm2_scale is None:
             self.bmm2_scale = layer._v_scale_float
 
-        # Call FlashInfer with sparse_mla_top_k
-        # For sparse mode:
-        # - block_tables shape is [batch_size, q_len_per_request, sparse_mla_top_k]
-        # - This contains the physical cache slot indices to attend to
-        o = trtllm_batch_decode_with_kv_cache_mla(
-            query=q,
-            kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=topk_indices_physical,  # Sparse indices as block table
-            seq_lens=attn_metadata.decode.seq_lens,
-            max_seq_len=attn_metadata.max_seq_len,
-            bmm1_scale=self.bmm1_scale,
-            bmm2_scale=self.bmm2_scale,
-            sparse_mla_top_k=attn_metadata.topk_tokens,
-        )
+        num_decodes = attn_metadata.num_decodes
+        num_prefills = attn_metadata.num_prefills
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
 
-        # Reshape output: (num_decodes, q_len, num_heads, head_dim_v)
-        #              -> (num_decode_tokens, num_heads, head_dim_v)
-        o = o.view(-1, o.shape[-2], o.shape[-1])
+        # Handle pure decode case (most common, optimized path)
+        if num_prefills == 0 and num_decodes > 0:
+            assert attn_metadata.decode is not None
+            decode_q_len = num_decode_tokens // num_decodes
 
-        return o, None
+            q_reshaped = q.view(num_decodes, decode_q_len, q.shape[-2], q.shape[-1])
+            indices_reshaped = topk_indices_physical.view(num_decodes, decode_q_len, -1)
+
+            o = self._call_kernel(
+                q_reshaped,
+                kv_c_and_k_pe_cache,
+                indices_reshaped,
+                attn_metadata.decode.seq_lens,
+                attn_metadata.max_seq_len,
+                attn_metadata.topk_tokens,
+            )
+            return o.view(-1, o.shape[-2], o.shape[-1]), None
+
+        # Handle pure prefill case
+        if num_decodes == 0 and num_prefills > 0:
+            prefill_q_len = num_prefill_tokens // num_prefills
+
+            q_reshaped = q.view(num_prefills, prefill_q_len, q.shape[-2], q.shape[-1])
+            indices_reshaped = topk_indices_physical.view(
+                num_prefills, prefill_q_len, -1
+            )
+
+            o = self._call_kernel(
+                q_reshaped,
+                kv_c_and_k_pe_cache,
+                indices_reshaped,
+                attn_metadata.seq_lens,
+                attn_metadata.max_seq_len,
+                attn_metadata.topk_tokens,
+            )
+            return o.view(-1, o.shape[-2], o.shape[-1]), None
+
+        # Handle mixed batch: process decode and prefill separately
+        # Output tensor to hold results
+        output = q.new_empty(num_actual_toks, self.num_heads, self.kv_lora_rank)
+
+        # Process decode tokens
+        if num_decode_tokens > 0:
+            assert attn_metadata.decode is not None
+            decode_q_len = num_decode_tokens // num_decodes
+
+            decode_q = q[:num_decode_tokens].view(
+                num_decodes, decode_q_len, q.shape[-2], q.shape[-1]
+            )
+            decode_indices = topk_indices_physical[:num_decode_tokens].view(
+                num_decodes, decode_q_len, -1
+            )
+
+            decode_out = self._call_kernel(
+                decode_q,
+                kv_c_and_k_pe_cache,
+                decode_indices,
+                attn_metadata.decode.seq_lens,
+                attn_metadata.max_seq_len,
+                attn_metadata.topk_tokens,
+            )
+            output[:num_decode_tokens] = decode_out.view(
+                num_decode_tokens, decode_out.shape[-2], decode_out.shape[-1]
+            )
+
+        # Process prefill tokens
+        if num_prefill_tokens > 0:
+            prefill_q_len = num_prefill_tokens // num_prefills
+
+            prefill_q = q[num_decode_tokens:].view(
+                num_prefills, prefill_q_len, q.shape[-2], q.shape[-1]
+            )
+            prefill_indices = topk_indices_physical[num_decode_tokens:].view(
+                num_prefills, prefill_q_len, -1
+            )
+
+            # Get seq_lens for prefill requests (they come after decode requests)
+            prefill_seq_lens = attn_metadata.seq_lens[num_decodes:]
+
+            prefill_out = self._call_kernel(
+                prefill_q,
+                kv_c_and_k_pe_cache,
+                prefill_indices,
+                prefill_seq_lens,
+                attn_metadata.max_seq_len,
+                attn_metadata.topk_tokens,
+            )
+            output[num_decode_tokens:] = prefill_out.view(
+                num_prefill_tokens, prefill_out.shape[-2], prefill_out.shape[-1]
+            )
+
+        return output, None
