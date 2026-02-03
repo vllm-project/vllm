@@ -34,7 +34,7 @@ class AnthropicUsage(BaseModel):
 class AnthropicContentBlock(BaseModel):
     """Content block in message"""
 
-    type: Literal["text", "image", "tool_use", "tool_result"]
+    type: Literal["text", "image", "tool_use", "tool_result", "thinking"]
     text: str | None = None
     # For image content
     source: dict[str, Any] | None = None
@@ -44,6 +44,9 @@ class AnthropicContentBlock(BaseModel):
     input: dict[str, Any] | None = None
     content: str | list[dict[str, Any]] | None = None
     is_error: bool | None = None
+    # For thinking content
+    thinking: str | None = None
+    signature: str | None = None
 
 
 class AnthropicMessage(BaseModel):
@@ -111,14 +114,16 @@ class AnthropicMessagesRequest(BaseModel):
 class AnthropicDelta(BaseModel):
     """Delta for streaming responses"""
 
-    type: Literal["text_delta", "input_json_delta"] | None = None
+    type: Literal["text_delta", "input_json_delta", "thinking_delta",
+                  "signature_delta"] | None = None
     text: str | None = None
+    thinking: str | None = None
     partial_json: str | None = None
+    signature: str | None = None
 
     # Message delta
-    stop_reason: (
-        Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"] | None
-    ) = None
+    stop_reason: (Literal["end_turn", "max_tokens", "stop_sequence",
+                          "tool_use"] | None) = None
     stop_sequence: str | None = None
 
 
