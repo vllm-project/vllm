@@ -68,9 +68,9 @@ def run_rebalance_experts(
 
     # Wait for the main thread's all-reduce and clone to complete before
     # accessing the global_expert_load_window tensor.
-    assert model_state.workload_ready_event is not None
-    model_state.workload_ready_event.wait()
-    model_state.workload_ready_event = None
+    assert model_state.window_ready_event is not None
+    model_state.window_ready_event.wait()
+    model_state.window_ready_event = None
 
     # Move the global expert load window to CPU for computation.
     global_expert_load_window = eplb_stats.global_expert_load_window.cpu()
@@ -152,7 +152,7 @@ async def transfer_run_periodically(
                         assert model_state.new_physical_to_logical_map is not None
 
                         # Wait for the main thread to finish consuming the buffer
-                        # before overwriting it
+                        # before initiating an EPLB transfer on another layer.
                         if model_state.buffer_consumed_event is not None:
                             cuda_stream.wait_event(model_state.buffer_consumed_event)
                             model_state.buffer_consumed_event = None

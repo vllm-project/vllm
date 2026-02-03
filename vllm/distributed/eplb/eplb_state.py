@@ -185,7 +185,7 @@ class EplbModelState:
     CUDA event recorded after the main thread finishes consuming the buffer.
     The async worker waits on this before writing to the buffer again.
     """
-    workload_ready_event: torch.cuda.Event | None
+    window_ready_event: torch.cuda.Event | None
     """
     CUDA event recorded after all-reduce and clone on the main thread.
     The async worker waits on this before accessing global_expert_load_window.
@@ -546,7 +546,7 @@ class EplbState:
             buffer_lock=threading.Lock(),
             buffer_ready_event=None,
             buffer_consumed_event=None,
-            workload_ready_event=None,
+            window_ready_event=None,
             ep_buffer_ready=0,
             layer_to_transfer=0,
             rebalanced=False,
@@ -900,8 +900,9 @@ class EplbState:
                     )
             else:
                 eplb_model_state.eplb_stats = EplbStats(
-                    # We copy the tensor to snapshot the workload on the main
-                    # thread to be used on the async thread.
+                    # We copy the tensor to snapshot the global_expert_load_window
+                    # on the main thread so that async worker can access it safely
+                    # while the main thread is running.
                     global_expert_load_window=global_expert_load_window.clone(),
                     num_replicas=num_replicas,
                     num_groups=num_groups,
@@ -912,7 +913,7 @@ class EplbState:
                 # that load stats data is ready
                 sync_event = torch.cuda.Event()
                 sync_event.record()
-                eplb_model_state.workload_ready_event = sync_event
+                eplb_model_state.window_ready_event = sync_event
 
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
@@ -948,8 +949,8 @@ class EplbState:
 
         target_device = model_state.physical_to_logical_map.device
         new_physical = model_state.new_physical_to_logical_map
-        # In order to avoid race condition with async eplb worker,
-        # we need to copy blocking in case of updated EP size.
+        # If the number of physical experts has changed, then the new map needs to
+        # be copied synchronously to avoid a race condition with the async worker
         if model_state.physical_to_logical_map.shape[1] != new_physical.shape[1]:
             model_state.physical_to_logical_map = new_physical.to(target_device)
         else:
@@ -1042,7 +1043,7 @@ class EplbState:
                 ep_rank=ep_group.rank(),
             )
             # Record event after consuming buffer to signal async thread
-            # that it's safe to overwrite the buffer
+            # that it's safe to overwrite the intermediate buffer
             consumed_event = torch.cuda.Event()
             consumed_event.record()
             model_state.buffer_consumed_event = consumed_event
