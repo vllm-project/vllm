@@ -1,10 +1,11 @@
-# vllm/model_executor/models/voyage_qwen3_bidirectional_embed.py
-
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import re
 from collections import defaultdict
 from collections.abc import Iterable
+
 import torch
 import torch.nn as nn
 
@@ -46,11 +47,11 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
         )
 
         # Patch get_kv_cache_spec to return None for encoder-only attention
-        # This bypasses the "assert self.attn_type == AttentionType.DECODER" in vLLM 0.14.x
         self._patch_kv_cache_spec()
 
     def _patch_kv_cache_spec(self):
-        """Patch get_kv_cache_spec to return None for encoder-only layers (no KV cache needed)."""
+        """Patch get_kv_cache_spec to return None
+        for encoder-only layers (no KV cache needed)."""
         for layer in getattr(self, "layers", []):
             if not hasattr(layer, "self_attn"):
                 continue
@@ -64,7 +65,8 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
         return self.linear(out)
 
     def load_weights(self, weights: Iterable[WeightItem]) -> set[str]:
-        """Remap, fuse, and load weights directly (bypass parent's stacked_params_mapping)."""
+        """Remap, fuse, and load weights directly
+        (bypass parent's stacked_params_mapping)."""
         out_w: dict[str, torch.Tensor] = {}
         qkv_buf: dict[int, dict[str, torch.Tensor]] = defaultdict(dict)
         mlp_buf: dict[int, dict[str, torch.Tensor]] = defaultdict(dict)
@@ -73,9 +75,7 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
             m = _LAYER_RE.match(name)
             if not m:
                 # Non-layer weights: strip "model." prefix if present
-                new_name = (
-                    name[len("model."):] if name.startswith("model.") else name
-                )
+                new_name = name[len("model.") :] if name.startswith("model.") else name
                 out_w[new_name] = tensor
                 continue
 
@@ -120,7 +120,8 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
                 missing = sorted([p for p in ("gate", "up") if p not in parts])
                 raise ValueError(f"Layer {layer_idx} is missing MLP parts: {missing}")
 
-        # Load weights directly into model parameters (bypass parent's stacked_params_mapping)
+        # Load weights directly into model parameters
+        # bypass parent's stacked_params_mapping
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
@@ -128,9 +129,7 @@ class VoyageQwen3BidirectionalEmbedModel(Qwen3Model):
             if name not in params_dict:
                 continue
             param = params_dict[name]
-            weight_loader = getattr(
-                param, "weight_loader", default_weight_loader
-            )
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
