@@ -52,6 +52,7 @@ class ScoreMultiModalParam(TypedDict, total=False):
 ScoreData = str | list[ScoreContentPartParam]
 # with content in ScoreMultiModalParam
 ScoreInputs = str | ScoreMultiModalParam | list[str | ScoreMultiModalParam]
+ScoreInputsList = list[str | ScoreMultiModalParam]
 
 
 def _cosine_similarity(
@@ -100,7 +101,7 @@ def _validate_score_input_lens(
 
 
 def _validate_mm_score_input(
-    data: list[ScoreInputs],
+    data: ScoreInputsList,
     is_multimodal_model: bool,
     architecture: str,
 ) -> list[ScoreData]:
