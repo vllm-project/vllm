@@ -2,76 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa
 # type: ignore
-import threading
-from collections.abc import Iterable
-from concurrent import futures
-from typing import Callable, Generator, Literal
-
-import grpc
 import pytest
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
-    ExportTraceServiceResponse,
-)
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2_grpc import (
-    TraceServiceServicer,
-    add_TraceServiceServicer_to_server,
-)
-from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
 from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_TRACES_INSECURE
 
 from vllm import LLM, SamplingParams
 from vllm.tracing import SpanAttributes
 
-FAKE_TRACE_SERVER_ADDRESS = "localhost:4317"
-
-FieldName = Literal[
-    "bool_value", "string_value", "int_value", "double_value", "array_value"
-]
-
-
-def decode_value(value: AnyValue):
-    field_decoders: dict[FieldName, Callable] = {
-        "bool_value": (lambda v: v.bool_value),
-        "string_value": (lambda v: v.string_value),
-        "int_value": (lambda v: v.int_value),
-        "double_value": (lambda v: v.double_value),
-        "array_value": (
-            lambda v: [decode_value(item) for item in v.array_value.values]
-        ),
-    }
-    for field, decoder in field_decoders.items():
-        if value.HasField(field):
-            return decoder(value)
-    raise ValueError(f"Couldn't decode value: {value}")
-
-
-def decode_attributes(attributes: Iterable[KeyValue]):
-    return {kv.key: decode_value(kv.value) for kv in attributes}
-
-
-class FakeTraceService(TraceServiceServicer):
-    def __init__(self):
-        self.request = None
-        self.evt = threading.Event()
-
-    def Export(self, request, context):
-        self.request = request
-        self.evt.set()
-        return ExportTraceServiceResponse()
-
-
-@pytest.fixture
-def trace_service() -> Generator[FakeTraceService, None, None]:
-    """Fixture to set up a fake gRPC trace service"""
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
-    service = FakeTraceService()
-    add_TraceServiceServicer_to_server(service, server)
-    server.add_insecure_port(FAKE_TRACE_SERVER_ADDRESS)
-    server.start()
-
-    yield service
-
-    server.stop(None)
+# Import shared fixtures from the tracing conftest
+from tests.tracing.conftest import (  # noqa: F401
+    FAKE_TRACE_SERVER_ADDRESS,
+    FakeTraceService,
+    decode_attributes,
+)
 
 
 def test_traces(
