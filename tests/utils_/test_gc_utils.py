@@ -37,10 +37,11 @@ These benchmarks should be run via maintainer/CI perf runs with:
 
 See docs/performance_testing.md for GPU benchmark procedures.
 """
+
+import gc
 from dataclasses import dataclass
 from typing import Any
 
-import gc
 import pytest
 
 from vllm.utils.gc_utils import (
@@ -49,7 +50,6 @@ from vllm.utils.gc_utils import (
     _compute_detailed_type,
     _compute_top_gc_collected_objects,
     gc_collect_on_sync,
-    maybe_enable_manual_gc_control,
 )
 
 
@@ -202,9 +202,7 @@ def test_manual_gc_collects_highest_generation(
     controller._thresholds = (1, 1, 1)
     # Set gen2 baseline to 0 so any objects would trigger gen2
     controller._gen2_object_count_at_last_gc = 0
-    monkeypatch.setattr(
-        "vllm.utils.gc_utils.time.monotonic_ns", lambda: 2_000_000_000
-    )
+    monkeypatch.setattr("vllm.utils.gc_utils.time.monotonic_ns", lambda: 2_000_000_000)
     controller._last_gc_time_ns = 0
 
     # First call should do gen0 (counters at 0)
@@ -251,9 +249,7 @@ def test_manual_gc_gen2_heuristic_skips(
     controller._gc0_count_since_gc1 = 1  # Ready for gen1
     controller._gc1_count_since_gc2 = 1  # Ready for gen2
 
-    monkeypatch.setattr(
-        "vllm.utils.gc_utils.time.monotonic_ns", lambda: 2_000_000_000
-    )
+    monkeypatch.setattr("vllm.utils.gc_utils.time.monotonic_ns", lambda: 2_000_000_000)
     controller._last_gc_time_ns = 0
 
     # Should skip gen2 (no growth) and do gen1 instead
@@ -289,9 +285,7 @@ def test_manual_gc_gen2_heuristic_collects(
     controller._gc0_count_since_gc1 = 1  # Ready for gen1
     controller._gc1_count_since_gc2 = 1  # Ready for gen2
 
-    monkeypatch.setattr(
-        "vllm.utils.gc_utils.time.monotonic_ns", lambda: 2_000_000_000
-    )
+    monkeypatch.setattr("vllm.utils.gc_utils.time.monotonic_ns", lambda: 2_000_000_000)
     controller._last_gc_time_ns = 0
 
     # Should do gen2 (50% growth > 25% threshold)
