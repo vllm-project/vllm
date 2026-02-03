@@ -11,25 +11,25 @@ from vllm.utils.flashinfer import (
     should_use_flashinfer_for_blockscale_fp8_gemm,
 )
 
-from .BlockScaledMMKernel import Fp8BlockMMScaledConfig, Fp8BlockScaledMMKernel
-from .cutlass import CutlassBlockScaledMMKernel
-from .deep_gemm import DeepGemmBlockScaledMMKernel
-from .flashinfer import FlashInferDeepGEMMDynamicBlockScaledKernel
-from .triton import TritonBlockScaledMMKernel
+from .BlockScaledMMLinearKernel import Fp8BlockMMScaledConfig, Fp8BlockScaledMMKernel
+from .cutlass import CutlassFp8BlockScaledMMKernel
+from .deep_gemm import DeepGemmFp8BlockScaledMMKernel
+from .flashinfer import FlashInferFp8DeepGEMMDynamicBlockScaledKernel
+from .triton import TritonFp8BlockScaledMMKernel
 
 
-class CudaBlockScaledMMKernel(Fp8BlockScaledMMKernel):
+class CudaFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
     def __init__(self, config: Fp8BlockMMScaledConfig) -> None:
         self.flashinfer_deepgemm_kernel: (
-            FlashInferDeepGEMMDynamicBlockScaledKernel | None
+            FlashInferFp8DeepGEMMDynamicBlockScaledKernel | None
         ) = None
-        if FlashInferDeepGEMMDynamicBlockScaledKernel.is_supported()[0]:
+        if FlashInferFp8DeepGEMMDynamicBlockScaledKernel.is_supported()[0]:
             self.flashinfer_deepgemm_kernel = (
-                FlashInferDeepGEMMDynamicBlockScaledKernel(config)
+                FlashInferFp8DeepGEMMDynamicBlockScaledKernel(config)
             )
-        self.deepgemm_kernel: DeepGemmBlockScaledMMKernel | None = None
-        if DeepGemmBlockScaledMMKernel.is_supported()[0]:
-            self.deepgemm_kernel = DeepGemmBlockScaledMMKernel(config)
+        self.deepgemm_kernel: DeepGemmFp8BlockScaledMMKernel | None = None
+        if DeepGemmFp8BlockScaledMMKernel.is_supported()[0]:
+            self.deepgemm_kernel = DeepGemmFp8BlockScaledMMKernel(config)
         self.default_fallback_kernel: Fp8BlockScaledMMKernel | None = None
         for kernel in self.ordered_fallback_kernels():
             if kernel.is_supported()[0]:
@@ -41,8 +41,8 @@ class CudaBlockScaledMMKernel(Fp8BlockScaledMMKernel):
             self.deepgemm_kernel.process_weights_after_loading(layer)
 
     @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
-        return [CutlassBlockScaledMMKernel, TritonBlockScaledMMKernel]
+    def ordered_fallback_kernels(cls):
+        return [CutlassFp8BlockScaledMMKernel, TritonFp8BlockScaledMMKernel]
 
     @classmethod
     def is_supported(cls, compute_capability=None):

@@ -11,15 +11,19 @@ from vllm.model_executor.layers.quantization.kernels.base import (
     MMLinearKernel,
     MMLinearLayerConfig,
 )
-from vllm.model_executor.layers.quantization.kernels.block_scaled_mm import (
-    Fp8BlockScaledMMKernel,
-    init_fp8_block_scaled_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
+    AiterFp8BlockScaledMMKernel,
     AiterInt8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.BlockScaledMMKernel import (  # noqa: E501
+    Fp8BlockMMScaledConfig,
+    Fp8BlockScaledMMKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
     CPUInt8ScaledMMLinearKernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.cuda import (
+    CudaFp8BlockScaledMMKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassFP8ScaledMMLinearKernel,
@@ -83,12 +87,19 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
 }
 
 
+_PLATFORM_FP8_BLOCK_PRIORITIES: dict[PlatformEnum, type[Fp8BlockScaledMMKernel]] = {
+    PlatformEnum.CUDA: CudaFp8BlockScaledMMKernel,
+    PlatformEnum.ROCM: AiterFp8BlockScaledMMKernel,
+}
+
 _KernelT = TypeVar("_KernelT", bound=MMLinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
 def is_supported_and_can_implement_kernel(
-    kernel: type[_KernelT], config: _KernelConfigT, compute_capability: int | None
+    kernel: type[_KernelT],
+    config: _KernelConfigT,
+    compute_capability: int | None = None,
 ) -> tuple[bool, str]:
     # TODO: Fetch `VLLM_DISABLED_KERNELS` from vllm.envs instead.
     if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "").split(","):
@@ -111,6 +122,53 @@ def is_supported_and_can_implement_kernel(
         )
 
     return True, ""
+
+
+def init_fp8_block_scaled_linear_kernel(
+    activation_quant_key: QuantKey,
+    weight_quant_key: QuantKey,
+    out_dtype: torch.dtype,
+    module_name: str | None = None,
+) -> Fp8BlockScaledMMKernel:
+    config = Fp8BlockMMScaledConfig(
+        activation_quant_key=activation_quant_key,
+        weight_quant_key=weight_quant_key,
+        out_dtype=out_dtype,
+    )
+
+    platform_enum = current_platform._enum
+
+    # Check if the current platform has a priority kernel implementation
+    if platform_enum in _PLATFORM_FP8_BLOCK_PRIORITIES:
+        prioritized_kernel = _PLATFORM_FP8_BLOCK_PRIORITIES[platform_enum]
+        can_dispatch, reason = is_supported_and_can_implement_kernel(
+            prioritized_kernel,
+            config,
+        )
+        if can_dispatch:
+            module_prefix = f"[{module_name}] " if module_name else ""
+            logger.info_once(
+                f"{module_prefix} Selected kernel: {prioritized_kernel.__name__}"
+            )
+            return prioritized_kernel(config)
+        else:
+            logger.warning_once(f"{reason}")
+
+            fall_back_kernels = prioritized_kernel.ordered_fallback_kernels()
+            for kernel in fall_back_kernels:
+                can_dispatch, _ = is_supported_and_can_implement_kernel(kernel, config)
+                if can_dispatch:
+                    module_prefix = f"[{module_name}] " if module_name else ""
+                    logger.info_once(
+                        f"{module_prefix}Selected kernel: {kernel.__name__} (fallback)"
+                    )
+                    return kernel(config)
+
+            raise ValueError("None of the exsiting quantization kernel can be selected")
+
+    raise ValueError(
+        f"{current_platform} platform is not supported for any scaled mm kernel"
+    )
 
 
 def choose_scaled_mm_linear_kernel(

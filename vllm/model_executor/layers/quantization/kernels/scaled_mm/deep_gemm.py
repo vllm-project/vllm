@@ -15,9 +15,9 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from ...utils.fp8_utils import deepgemm_post_process_fp8_weight_block
-from .BlockScaledMMKernel import Fp8BlockMMScaledConfig, Fp8BlockScaledMMKernel
-from .cutlass import CutlassBlockScaledMMKernel
-from .triton import TritonBlockScaledMMKernel
+from .BlockScaledMMLinearKernel import Fp8BlockMMScaledConfig, Fp8BlockScaledMMKernel
+from .cutlass import CutlassFp8BlockScaledMMKernel
+from .triton import TritonFp8BlockScaledMMKernel
 
 
 def _fp8_gemm_nt_op(
@@ -55,7 +55,7 @@ direct_register_custom_op(
 )
 
 
-class DeepGemmBlockScaledMMKernel(Fp8BlockScaledMMKernel):
+class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
     def __init__(self, config: Fp8BlockMMScaledConfig):
         super().__init__(config)
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
@@ -68,8 +68,8 @@ class DeepGemmBlockScaledMMKernel(Fp8BlockScaledMMKernel):
         )
 
     @classmethod
-    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
-        return [CutlassBlockScaledMMKernel, TritonBlockScaledMMKernel]
+    def ordered_fallback_kernels(cls):
+        return [CutlassFp8BlockScaledMMKernel, TritonFp8BlockScaledMMKernel]
 
     @classmethod
     def is_supported(cls, compute_capability=None):
