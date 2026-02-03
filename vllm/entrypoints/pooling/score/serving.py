@@ -90,6 +90,7 @@ class ServingScores(OpenAIServing):
                 raise NotImplementedError(
                     "Embedding scores currently do not support multimodal input."
                 )
+            input_texts.append(text)
 
         model_config = self.model_config
         tokenizer = self.renderer.get_tokenizer()
