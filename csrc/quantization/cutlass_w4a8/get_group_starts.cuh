@@ -41,8 +41,9 @@ __global__ void get_group_gemm_starts(
       b_group_scales_base + (expert_id * scale_k * n);
 }
 
-#define __CALL_GET_STARTS_KERNEL_PACKED(TENSOR_C_TYPE, C_TYPE)           \
-  else if (out_tensors.dtype() == TENSOR_C_TYPE) {                       \
+#define __CALL_GET_STARTS_KERNEL_FP8(TENSOR_C_TYPE, C_TYPE)              \
+  else if (a_tensors.dtype() == torch::kFloat8_e4m3fn &&                 \
+           out_tensors.dtype() == TENSOR_C_TYPE) {                       \
     get_group_gemm_starts<cutlass::float_e4m3_t, int32_t, C_TYPE, float, \
                           cutlass::Array<cutlass::float_e4m3_t, 8>>      \
         <<<1, num_experts, 0, stream>>>(                                 \
@@ -136,10 +137,10 @@ void run_get_group_gemm_starts(
 
   if (false) {
   }
+  __CALL_GET_STARTS_KERNEL_FP8(torch::kBFloat16, cutlass::bfloat16_t)
+  __CALL_GET_STARTS_KERNEL_FP8(torch::kFloat16, half)
   __CALL_GET_STARTS_KERNEL(torch::kBFloat16, cutlass::bfloat16_t)
   __CALL_GET_STARTS_KERNEL(torch::kFloat16, half)
-  __CALL_GET_STARTS_KERNEL_PACKED(torch::kBFloat16, cutlass::bfloat16_t)
-  __CALL_GET_STARTS_KERNEL_PACKED(torch::kFloat16, half)
   else {
     TORCH_CHECK(false, "Invalid output type (must be float16 or bfloat16)");
   }

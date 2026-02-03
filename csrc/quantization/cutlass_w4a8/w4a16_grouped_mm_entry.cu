@@ -195,8 +195,6 @@ struct W4A16GroupedGemmKernel {
                               a_tensors, b_tensors, out_tensors, std::nullopt,
                               std::nullopt, b_group_scales, b_group_size);
 
-    cudaDeviceSynchronize();
-
     // construct args
     using Args = typename GemmShuffled::Arguments;
     using MainloopArguments = typename GemmKernelShuffled::MainloopArguments;

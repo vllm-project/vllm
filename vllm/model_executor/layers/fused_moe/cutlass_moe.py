@@ -1525,8 +1525,6 @@ def cutlass_moe_w4a16_bf16(
     - s_strides2 (torch.Tensor): strides for the group-wise scales for the second gemm.
         Shape: [num_experts, 2]
         dtype: torch.int64
-    - per_act_token (Optional[bool]): Whether the scale is per-token or
-                                      per-tensor.
     - activation (str): The activation function to use.
     - expert_map (Optional[torch.Tensor]): In the case of Expert parallel,
         every Rank is responsible for a subset of experts. expert_map is a
