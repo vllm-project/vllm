@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
@@ -103,14 +103,22 @@ class EagleSpeculator:
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_descriptor = BatchDescriptor(
+            num_tokens=num_tokens,
+            num_reqs=None,
+            uniform=False,
+            has_lora=False,
+        )
         with set_forward_context(
             attn_metadata,
             self.vllm_config,
             num_tokens=num_tokens,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
+            batch_descriptor=batch_descriptor,
         ):
             ret_hidden_states = self.model(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
@@ -127,9 +135,11 @@ class EagleSpeculator:
     def generate_draft(
         self,
         num_reqs: int,
+        num_tokens_padded: int,
         attn_metadata: dict[str, Any],
         slot_mappings: dict[str, torch.Tensor],
         num_tokens_across_dp: torch.Tensor | None,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
         pos = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -137,8 +147,14 @@ class EagleSpeculator:
         for step in range(1, self.num_speculative_steps):
             # Run the eagle model.
             last_hidden_states, hidden_states = self.run_model(
-                num_reqs, attn_metadata, slot_mappings, num_tokens_across_dp
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
             )
+            last_hidden_states = last_hidden_states[:num_reqs]
+            hidden_states = hidden_states[:num_reqs]
             logits = self.model.compute_logits(last_hidden_states)
 
             # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
@@ -283,12 +299,18 @@ class EagleSpeculator:
         )
 
         cudagraph_size = self.cudagraph_manager.get_cudagraph_size(num_reqs)
-        if cudagraph_size is not None:
-            # Run CUDA graph.
+        cudagraph_mode = (
+            self.cudagraph_manager.cudagraph_mode
+            if cudagraph_size is not None
+            else CUDAGraphMode.NONE
+        )
+        if cudagraph_mode == CUDAGraphMode.FULL:
+            # Run full CUDA graph.
             self.cudagraph_manager.run(cudagraph_size)
             return self.draft_tokens[:num_reqs]
 
-        # Run eager mode.
+        # Run eager or piecewise CUDA graph.
+        num_tokens_padded = cudagraph_size if cudagraph_size is not None else num_reqs
         query_start_loc_cpu = torch.arange(
             num_reqs + 1, dtype=torch.int32, device="cpu"
         )
@@ -311,8 +333,13 @@ class EagleSpeculator:
             slot_mappings, self.kv_cache_config
         )
         self.generate_draft(
-            num_reqs, attn_metadata, slot_mappings_by_layer, num_tokens_across_dp=None
-        )  # FIXME
+            num_reqs,
+            num_tokens_padded,
+            attn_metadata,
+            slot_mappings_by_layer,
+            num_tokens_across_dp=None,  # FIXME
+            cudagraph_runtime_mode=cudagraph_mode,
+        )
         return self.draft_tokens[:num_reqs]
 
 
