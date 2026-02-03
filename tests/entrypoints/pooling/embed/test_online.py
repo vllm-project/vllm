@@ -17,16 +17,14 @@ from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.embed.protocol import EmbeddingResponse
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
-from vllm.platforms import current_platform
-from vllm.tokenizers import get_tokenizer
-from vllm.utils.serial_utils import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
-    ENDIANNESS,
+from vllm.entrypoints.pooling.utils import (
     MetadataItem,
-    binary2tensor,
     build_metadata_items,
     decode_pooling_output,
 )
+from vllm.platforms import current_platform
+from vllm.tokenizers import get_tokenizer
+from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
@@ -535,7 +533,7 @@ async def test_base64_embed_dtype_and_endianness(
     )
     float_data = [d.embedding for d in responses_float.data]
 
-    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_base64 = requests.post(
                 server.url_for("/v1/embeddings"),
@@ -574,7 +572,7 @@ async def test_bytes_embed_dtype_and_endianness(
     )
     float_data = [d.embedding for d in responses_float.data]
 
-    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_bytes = requests.post(
                 server.url_for("/v1/embeddings"),
@@ -618,7 +616,7 @@ async def test_bytes_only_embed_dtype_and_endianness(
     float_data = [d.embedding for d in responses_float.data]
     embedding_size = len(float_data[0])
 
-    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_bytes = requests.post(
                 server.url_for("/v1/embeddings"),

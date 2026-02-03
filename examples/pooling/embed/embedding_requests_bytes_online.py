@@ -12,13 +12,12 @@ import json
 import requests
 import torch
 
-from vllm.utils.serial_utils import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
-    ENDIANNESS,
+from vllm.entrypoints.pooling.utils import (
     MetadataItem,
     build_metadata_items,
     decode_pooling_output,
 )
+from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS
 
 
 def post_http_request(prompt: dict, api_url: str) -> requests.Response:
@@ -51,7 +50,7 @@ def main(args):
 
     # The OpenAI client does not support the bytes encoding_format.
     # The OpenAI client does not support the embed_dtype and endianness parameters.
-    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             prompt = {
                 "model": model,
@@ -74,7 +73,7 @@ def main(args):
     # The vllm server always sorts the returned embeddings in the order of input. So
     # returning metadata is not necessary. You can set encoding_format to bytes_only
     # to let the server not return metadata.
-    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             prompt = {
                 "model": model,

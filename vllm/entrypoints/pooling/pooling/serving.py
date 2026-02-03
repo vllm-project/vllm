@@ -4,8 +4,9 @@
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, Sequence
-from typing import Any, Final, cast
+from collections.abc import AsyncGenerator, Callable, Sequence
+from functools import partial
+from typing import Any, Final, Literal, cast
 
 import jinja2
 from fastapi import Request
@@ -27,17 +28,16 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingResponse,
     PoolingResponseData,
 )
+from vllm.entrypoints.pooling.utils import (
+    encode_pooling_bytes,
+    encode_pooling_output_base64,
+    encode_pooling_output_float,
+)
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import PoolingTask, SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
-from vllm.utils.serial_utils import (
-    EmbedDType,
-    EncodingFormat,
-    Endianness,
-    encode_pooling_bytes,
-    encode_pooling_output,
-)
+from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 
 logger = init_logger(__name__)
 
@@ -256,6 +256,89 @@ class OpenAIServingPooling(OpenAIServing):
 
         return response
 
+    def request_output_to_pooling_json_response(
+        self,
+        final_res_batch: list[PoolingRequestOutput],
+        request_id: str,
+        created_time: int,
+        model_name: str,
+        encoding_format: Literal["float", "base64"],
+        embed_dtype: EmbedDType,
+        endianness: Endianness,
+    ) -> PoolingResponse:
+        encode_fn = cast(
+            Callable[[PoolingRequestOutput], list[float] | str],
+            (
+                encode_pooling_output_float
+                if encoding_format == "float"
+                else partial(
+                    encode_pooling_output_base64,
+                    embed_dtype=embed_dtype,
+                    endianness=endianness,
+                )
+            ),
+        )
+
+        items: list[PoolingResponseData] = []
+        num_prompt_tokens = 0
+
+        for idx, final_res in enumerate(final_res_batch):
+            item = PoolingResponseData(
+                index=idx,
+                data=encode_fn(final_res),
+            )
+            prompt_token_ids = final_res.prompt_token_ids
+
+            items.append(item)
+            num_prompt_tokens += len(prompt_token_ids)
+
+        usage = UsageInfo(
+            prompt_tokens=num_prompt_tokens,
+            total_tokens=num_prompt_tokens,
+        )
+
+        return PoolingResponse(
+            id=request_id,
+            created=created_time,
+            model=model_name,
+            data=items,
+            usage=usage,
+        )
+
+    def request_output_to_pooling_bytes_response(
+        self,
+        final_res_batch: list[PoolingRequestOutput],
+        request_id: str,
+        created_time: int,
+        model_name: str,
+        encoding_format: Literal["bytes", "bytes_only"],
+        embed_dtype: EmbedDType,
+        endianness: Endianness,
+    ) -> PoolingBytesResponse:
+        content, items, usage = encode_pooling_bytes(
+            pooling_outputs=final_res_batch,
+            embed_dtype=embed_dtype,
+            endianness=endianness,
+        )
+
+        headers = (
+            None
+            if encoding_format == "bytes_only"
+            else {
+                "metadata": json.dumps(
+                    {
+                        "id": request_id,
+                        "created": created_time,
+                        "model": model_name,
+                        "data": items,
+                        "usage": usage,
+                    }
+                )
+            }
+        )
+
+        return PoolingBytesResponse(content=content, headers=headers)
+
     def request_output_to_pooling_response(
         self,
         final_res_batch: list[PoolingRequestOutput],
@@ -266,69 +349,26 @@ class OpenAIServingPooling(OpenAIServing):
         embed_dtype: EmbedDType,
         endianness: Endianness,
     ) -> PoolingResponse | PoolingBytesResponse:
-        def encode_float_base64():
-            items: list[PoolingResponseData] = []
-            num_prompt_tokens = 0
-
-            for idx, final_res in enumerate(final_res_batch):
-                item = PoolingResponseData(
-                    index=idx,
-                    data=encode_pooling_output(
-                        final_res,
-                        encoding_format=encoding_format,
-                        embed_dtype=embed_dtype,
-                        endianness=endianness,
-                    ),
-                )
-                prompt_token_ids = final_res.prompt_token_ids
-
-                items.append(item)
-                num_prompt_tokens += len(prompt_token_ids)
-
-            usage = UsageInfo(
-                prompt_tokens=num_prompt_tokens,
-                total_tokens=num_prompt_tokens,
-            )
-
-            return PoolingResponse(
-                id=request_id,
-                created=created_time,
-                model=model_name,
-                data=items,
-                usage=usage,
-            )
-
-        def encode_bytes(bytes_only: bool) -> PoolingBytesResponse:
-            content, items, usage = encode_pooling_bytes(
-                pooling_outputs=final_res_batch,
-                embed_dtype=embed_dtype,
-                endianness=endianness,
-            )
-
-            headers = (
-                None
-                if bytes_only
-                else {
-                    "metadata": json.dumps(
-                        {
-                            "id": request_id,
-                            "created": created_time,
-                            "model": model_name,
-                            "data": items,
-                            "usage": usage,
-                        }
-                    )
-                }
-            )
-
-            return PoolingBytesResponse(
-                content=content,
-                headers=headers,
-            )
-
         if encoding_format == "float" or encoding_format == "base64":
-            return encode_float_base64()
-        elif encoding_format == "bytes" or encoding_format == "bytes_only":
-            return encode_bytes(bytes_only=encoding_format == "bytes_only")
-        else:
-            assert_never(encoding_format)
+            return self.request_output_to_pooling_json_response(
+                final_res_batch,
+                request_id,
+                created_time,
+                model_name,
+                encoding_format,
+                embed_dtype,
+                endianness,
+            )
+
+        if encoding_format == "bytes" or encoding_format == "bytes_only":
+            return self.request_output_to_pooling_bytes_response(
+                final_res_batch,
+                request_id,
+                created_time,
+                model_name,
+                encoding_format,
+                embed_dtype,
+                endianness,
+            )
+
+        assert_never(encoding_format)
