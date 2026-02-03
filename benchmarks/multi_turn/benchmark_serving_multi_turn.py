@@ -366,7 +366,7 @@ def get_token_count(tokenizer: AutoTokenizer, text: str) -> int:
 
 
 def get_messages_token_count(
-    tokenizer: AutoTokenizer, messages: list[dict[str, str]]
+    tokenizer: AutoTokenizer, messages: list[dict[str, str | int]]
 ) -> int:
     # RFC: Use apply_chat_template for accurate fallback token counting
     # This includes special tokens, role markers, and separators
