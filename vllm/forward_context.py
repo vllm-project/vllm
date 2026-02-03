@@ -247,12 +247,9 @@ class AFDMetadata:
     afd_tokens_lens: list[int]  # padded lengths for tensor slicing
     num_of_stages: int
 
-    input_ids_list: list[torch.Tensor] = field(default_factory=list)
-    positions_list: list[torch.Tensor] = field(default_factory=list)
-    inputs_embeds_list: list[torch.Tensor] = field(default_factory=list)
-    intermediate_tensors_list: list[IntermediateTensors] = field(default_factory=list)
-    attn_metadata_list: list[AttentionMetadata] = field(default_factory=list)
-    dp_metadata_list: list[DPMetadata] = field(default_factory=list)
+    def clone(self) -> "AFDMetadata":
+        import copy
+        return copy.copy(self)
 
 
 @dataclass

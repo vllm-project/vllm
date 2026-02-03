@@ -316,6 +316,9 @@ class UBatchWrapper:
         # converting None to {}), or a list of dicts (one per ubatch)
         has_slot_mapping = slot_mapping and isinstance(slot_mapping, list)
         for i, ubatch_slice in enumerate(ubatch_slices):
+            afd_metadata_clone = afd_metadata.clone()
+            afd_metadata_clone.afd_stage_idx = i
+            logger.info(f"jcz _make_ubatch_metadata afd_metadata_clone.afd_stage_idx:{afd_metadata_clone.afd_stage_idx}")
             forward_contexts.append(
                 create_forward_context(
                     attn_metadata[i] if attn_metadata is not None else None,
@@ -323,8 +326,12 @@ class UBatchWrapper:
                     dp_metadata=dp_metadata[i],
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
+<<<<<<< HEAD
                     slot_mapping=slot_mapping[i] if has_slot_mapping else None,
                     afd_metadata=afd_metadata,
+=======
+                    afd_metadata=afd_metadata_clone,
+>>>>>>> efbc0d799 (forward use ubatch multithread)
                 )
             )
 
@@ -363,62 +370,6 @@ class UBatchWrapper:
             )
 
         return ubatch_metadata
-
-    def _make_afd_ubatch_metadata(
-        self,
-        ubatch_slices,
-        attn_metadata,
-        input_ids,
-        positions,
-        inputs_embeds,
-        intermediate_tensors,
-        dp_metadata,
-        afd_metadata,
-    ) -> AFDMetadata:
-        if ubatch_slices is None:
-            afd_metadata.input_ids_list.append(input_ids)
-            afd_metadata.positions_list.append(positions)
-            afd_metadata.inputs_embeds_list.append(inputs_embeds)
-            afd_metadata.intermediate_tensors_list.append(intermediate_tensors)
-            afd_metadata.attn_metadata_list.append(attn_metadata)
-            afd_metadata.dp_metadata_list.append(dp_metadata)
-        else:
-            for i, ubatch_slice in enumerate(ubatch_slices):
-                (
-                    sliced_input_ids,
-                    sliced_positions,
-                    sliced_inputs_embeds,
-                    sliced_intermediate_tensors,
-                ) = self._slice_model_inputs(
-                    ubatch_slice.token_slice,
-                    input_ids,
-                    positions,
-                    inputs_embeds,
-                    intermediate_tensors,
-                )
-
-                dp_size = self.vllm_config.parallel_config.data_parallel_size
-                ubatch_num_tokens_across_dp = torch.tensor(
-                    [ubatch_slice.num_tokens] * dp_size, device="cpu", dtype=torch.int32
-                )
-                ubatch_dp_metadata = DPMetadata.make(
-                    self.vllm_config.parallel_config,
-                    ubatch_slice.num_tokens,
-                    ubatch_num_tokens_across_dp,
-                )
-
-                afd_metadata.input_ids_list.append(sliced_input_ids)
-                afd_metadata.positions_list.append(sliced_positions)
-                afd_metadata.inputs_embeds_list.append(sliced_inputs_embeds)
-                afd_metadata.intermediate_tensors_list.append(
-                    sliced_intermediate_tensors
-                )
-                afd_metadata.attn_metadata_list.append(
-                    attn_metadata[i] if attn_metadata is not None else None
-                )
-                afd_metadata.dp_metadata_list.append(ubatch_dp_metadata)
-
-        return afd_metadata
 
     def _slice_model_inputs(
         self,
@@ -462,24 +413,6 @@ class UBatchWrapper:
         compute_stream = torch.cuda.current_stream()
 
         dp_metadata = forward_context.dp_metadata
-
-        if self.vllm_config.afd_config:
-            afd_metadata = self._make_afd_ubatch_metadata(
-                ubatch_slices=ubatch_slices,
-                attn_metadata=attn_metadata,
-                input_ids=input_ids,
-                positions=positions,
-                inputs_embeds=inputs_embeds,
-                intermediate_tensors=intermediate_tensors,
-                dp_metadata=dp_metadata,
-                afd_metadata=afd_metadata,
-            )
-            forward_context.afd_metadata = afd_metadata
-            if cudagraph_runtime_mode is CUDAGraphMode.NONE:
-                return self.runnable(*args, **kwargs)
-            else:
-                assert self.cudagraph_wrapper is not None
-                return self.cudagraph_wrapper(*args, **kwargs)
 
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:

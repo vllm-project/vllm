@@ -1150,10 +1150,10 @@ class DeepseekV2Model(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             afd_connector = afd_metadata.afd_connector
-            afd_metadata.afd_stage_idx = dbo_current_ubatch_id()
+            logger.info(f"jcz forward_with_afd layer_idx:{layer.layer_idx} afd_metadata.afd_stage_idx:{afd_metadata.afd_stage_idx}")
 
             if layer.layer_idx > 0:
-                hidden_states = afd_connector.recv_ffn_output(ubatch_idx=dbo_current_ubatch_id())
+                hidden_states = afd_connector.recv_ffn_output(ubatch_idx=afd_metadata.afd_stage_idx)
 
             current_hidden, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
@@ -1167,12 +1167,12 @@ class DeepseekV2Model(nn.Module):
                 num_of_stages=afd_metadata.num_of_stages,
                 afd_tokens_lens=afd_metadata.afd_tokens_lens,
             )
-            afd_connector.send_attn_output(current_hidden, metadata, ubatch_idx=dbo_current_ubatch_id())
+            afd_connector.send_attn_output(current_hidden, metadata, ubatch_idx=afd_metadata.afd_stage_idx)
 
             if dbo_enabled():
                 dbo_yield()
 
-        hidden_states = afd_connector.recv_ffn_output(ubatch_idx=dbo_current_ubatch_id())
+        hidden_states = afd_connector.recv_ffn_output(ubatch_idx=afd_metadata.afd_stage_idx)
 
         return hidden_states, residual
 
@@ -1282,7 +1282,10 @@ class DeepseekV2Model(nn.Module):
         afd_metadata = forward_ctx.afd_metadata if forward_ctx is not None else None
 
         if afd_metadata != None:
-            hidden_states, residual = self.forward_with_afd_v2(
+            # hidden_states, residual = self.forward_with_afd_v2(
+            #     hidden_states, residual, positions, afd_metadata, llama_4_scaling
+            # )
+            hidden_states, residual = self.forward_with_afd(
                 hidden_states, residual, positions, afd_metadata, llama_4_scaling
             )
         else:
