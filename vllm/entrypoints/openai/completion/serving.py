@@ -32,6 +32,7 @@ from vllm.entrypoints.openai.engine.serving import (
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.preprocess import preprocess_completion
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import EmbedsPrompt, TokensPrompt
@@ -109,7 +110,9 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         try:
-            engine_prompts = await self._preprocess_completion(
+            engine_prompts = await preprocess_completion(
+                self.renderer,
+                self.model_config,
                 request,
                 prompt_input=request.prompt,
                 prompt_embeds=request.prompt_embeds,

@@ -27,6 +27,7 @@ from vllm.entrypoints.pooling.pooling.protocol import (
     PoolingResponse,
     PoolingResponseData,
 )
+from vllm.entrypoints.preprocess import preprocess_chat, preprocess_completion
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import PoolingTask, SupportedTask
@@ -122,7 +123,9 @@ class OpenAIServingPooling(OpenAIServing):
                 if error_check_ret is not None:
                     return error_check_ret
 
-                _, engine_prompts = await self._preprocess_chat(
+                _, engine_prompts = await preprocess_chat(
+                    self.renderer,
+                    self.model_config,
                     request,
                     request.messages,
                     default_template=self.chat_template,
@@ -130,7 +133,9 @@ class OpenAIServingPooling(OpenAIServing):
                     default_template_kwargs=None,
                 )
             elif isinstance(request, PoolingCompletionRequest):
-                engine_prompts = await self._preprocess_completion(
+                engine_prompts = await preprocess_completion(
+                    self.renderer,
+                    self.model_config,
                     request,
                     prompt_input=request.input,
                     prompt_embeds=None,

@@ -66,6 +66,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
+from vllm.entrypoints.preprocess import preprocess_chat
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import EmbedsPrompt, TokensPrompt
 from vllm.logger import init_logger
@@ -190,12 +191,14 @@ class OpenAIServingChat(OpenAIServing):
                 max_completion_tokens=1,
             )
 
-            # Call _preprocess_chat to trigger template compilation
+            # Call preprocess_chat to trigger template compilation
             # This forces:
             # 1. Chat template content format detection
             # 2. Jinja2 template compilation
             # 3. Tokenizer initialization for chat
-            await self._preprocess_chat(
+            await preprocess_chat(
+                self.renderer,
+                self.model_config,
                 dummy_request,
                 dummy_request.messages,
                 default_template=self.chat_template,
@@ -292,22 +295,21 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if error_check_ret is not None:
                     return error_check_ret
-
-                conversation, engine_prompts = await self._preprocess_chat(
-                    request,
-                    request.messages,
-                    default_template=self.chat_template,
-                    default_template_content_format=self.chat_template_content_format,
-                    default_template_kwargs=self.default_chat_template_kwargs,
-                    tool_dicts=tool_dicts,
-                    tool_parser=tool_parser,
-                )
             else:
-                # For GPT-OSS.
-                should_include_tools = tool_dicts is not None
-                conversation, engine_prompts = self._make_request_with_harmony(
-                    request, should_include_tools
-                )
+                # For GPT-OSS - serialize tool calls before processing
+                maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
+
+            conversation, engine_prompts = await preprocess_chat(
+                self.renderer,
+                self.model_config,
+                request,
+                request.messages,
+                default_template=self.chat_template,
+                default_template_content_format=self.chat_template_content_format,
+                default_template_kwargs=self.default_chat_template_kwargs,
+                tool_dicts=tool_dicts,
+                tool_parser=tool_parser,
+            )
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(e)

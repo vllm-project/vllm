@@ -22,6 +22,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingResponse,
     EmbeddingResponseData,
 )
+from vllm.entrypoints.preprocess import preprocess_chat, preprocess_completion
 from vllm.inputs.data import EmbedsPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
@@ -92,7 +93,9 @@ class OpenAIServingEmbedding(OpenAIServing):
                 if error_check_ret is not None:
                     return error_check_ret
 
-                _, ctx.engine_prompts = await self._preprocess_chat(
+                _, ctx.engine_prompts = await preprocess_chat(
+                    self.renderer,
+                    self.model_config,
                     ctx.request,
                     ctx.request.messages,
                     default_template=self.chat_template,
@@ -100,7 +103,9 @@ class OpenAIServingEmbedding(OpenAIServing):
                     default_template_kwargs=None,
                 )
             elif isinstance(ctx.request, EmbeddingCompletionRequest):
-                ctx.engine_prompts = await self._preprocess_completion(
+                ctx.engine_prompts = await preprocess_completion(
+                    self.renderer,
+                    self.model_config,
                     ctx.request,
                     prompt_input=ctx.request.input,
                     prompt_embeds=None,

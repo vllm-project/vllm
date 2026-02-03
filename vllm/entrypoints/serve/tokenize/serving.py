@@ -12,6 +12,7 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.preprocess import preprocess_chat, preprocess_completion
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -78,7 +79,9 @@ class OpenAIServingTokenization(OpenAIServing):
                 if error_check_ret is not None:
                     return error_check_ret
 
-                _, engine_prompts = await self._preprocess_chat(
+                _, engine_prompts = await preprocess_chat(
+                    self.renderer,
+                    self.model_config,
                     request,
                     request.messages,
                     default_template=self.chat_template,
@@ -87,7 +90,9 @@ class OpenAIServingTokenization(OpenAIServing):
                     tool_dicts=tool_dicts,
                 )
             else:
-                engine_prompts = await self._preprocess_completion(
+                engine_prompts = await preprocess_completion(
+                    self.renderer,
+                    self.model_config,
                     request,
                     prompt_input=request.prompt,
                     prompt_embeds=None,

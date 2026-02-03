@@ -20,6 +20,7 @@ from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationRequest,
     ClassificationResponse,
 )
+from vllm.entrypoints.preprocess import preprocess_chat, preprocess_completion
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput
 from vllm.pooling_params import PoolingParams
@@ -75,7 +76,9 @@ class ServingClassification(OpenAIServing):
                 if error_check_ret:
                     return error_check_ret
 
-                _, ctx.engine_prompts = await self._preprocess_chat(
+                _, ctx.engine_prompts = await preprocess_chat(
+                    self.renderer,
+                    self.model_config,
                     ctx.request,
                     ctx.request.messages,
                     default_template=self.chat_template,
@@ -83,7 +86,9 @@ class ServingClassification(OpenAIServing):
                     default_template_kwargs=None,
                 )
             elif isinstance(ctx.request, ClassificationCompletionRequest):
-                ctx.engine_prompts = await self._preprocess_completion(
+                ctx.engine_prompts = await preprocess_completion(
+                    self.renderer,
+                    self.model_config,
                     ctx.request,
                     prompt_input=ctx.request.input,
                     prompt_embeds=None,

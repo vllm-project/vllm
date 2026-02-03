@@ -8,7 +8,7 @@ import traceback
 from collections.abc import AsyncGenerator, Callable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
 import numpy as np
 from fastapi import Request
@@ -20,12 +20,9 @@ from starlette.datastructures import Headers
 
 import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
-    ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
-    ConversationMessage,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -87,6 +84,7 @@ from vllm.entrypoints.pooling.score.protocol import (
     ScoreResponse,
     ScoreTextRequest,
 )
+from vllm.entrypoints.preprocess import preprocess_chat
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest, GenerateResponse
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -108,7 +106,7 @@ from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import TokenizeParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
@@ -133,21 +131,6 @@ class GenerationError(Exception):
 
 
 logger = init_logger(__name__)
-
-
-class RendererRequest(Protocol):
-    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
-        raise NotImplementedError
-
-
-class RendererChatRequest(RendererRequest, Protocol):
-    def build_chat_params(
-        self,
-        default_template: str | None,
-        default_template_content_format: ChatTemplateContentFormatOption,
-    ) -> ChatParams:
-        raise NotImplementedError
-
 
 CompletionLikeRequest: TypeAlias = (
     CompletionRequest
@@ -999,88 +982,6 @@ class OpenAIServing:
         # Apply server defaults first, then request kwargs override.
         return default_chat_template_kwargs | request_chat_template_kwargs
 
-    async def _preprocess_completion(
-        self,
-        request: RendererRequest,
-        prompt_input: str | list[str] | list[int] | list[list[int]] | None,
-        prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[TokensPrompt | EmbedsPrompt]:
-        renderer = self.renderer
-        tok_params = request.build_tok_params(self.model_config)
-
-        in_prompts = await renderer.render_completions_async(
-            prompt_input, prompt_embeds
-        )
-        engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
-
-        extra_items = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-        for prompt in engine_prompts:
-            prompt.update(extra_items)  # type: ignore
-
-        return engine_prompts
-
-    async def _preprocess_chat(
-        self,
-        request: RendererChatRequest,
-        messages: list[ChatCompletionMessageParam],
-        default_template: str | None,
-        default_template_content_format: ChatTemplateContentFormatOption,
-        default_template_kwargs: dict[str, Any] | None,
-        tool_dicts: list[dict[str, Any]] | None = None,
-        tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[TokensPrompt | EmbedsPrompt]]:
-        from vllm.tokenizers.mistral import MistralTokenizer
-
-        renderer = self.renderer
-
-        default_template_kwargs = merge_kwargs(
-            default_template_kwargs,
-            dict(
-                tools=tool_dicts,
-                tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
-            ),
-        )
-
-        tok_params = request.build_tok_params(self.model_config)
-        chat_params = request.build_chat_params(
-            default_template, default_template_content_format
-        ).with_defaults(default_template_kwargs)
-
-        conversation, prompt = await renderer.render_messages_async(
-            messages, chat_params
-        )
-        engine_prompt = await renderer.tokenize_prompt_async(prompt, tok_params)
-
-        extra_items = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-        engine_prompt.update(extra_items)  # type: ignore
-
-        # tool parsing is done only if a tool_parser has been set and if
-        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
-        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
-        if tool_parser is not None:
-            tool_choice = getattr(request, "tool_choice", "none")
-            if tool_choice != "none":
-                if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
-                    msg = (
-                        "Tool usage is only supported for Chat Completions API "
-                        "or Responses API requests."
-                    )
-                    raise NotImplementedError(msg)
-
-                # TODO: Update adjust_request to accept ResponsesRequest
-                tokenizer = renderer.get_tokenizer()
-                request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
-
-        return conversation, [engine_prompt]
-
     async def _render_next_turn(
         self,
         request: ResponsesRequest,
@@ -1094,7 +995,9 @@ class OpenAIServing:
             request_input=messages,
         )
 
-        _, engine_prompts = await self._preprocess_chat(
+        _, engine_prompts = await preprocess_chat(
+            self.renderer,
+            self.model_config,
             request,
             new_messages,
             default_template=chat_template,

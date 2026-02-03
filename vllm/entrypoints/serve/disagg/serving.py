@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.preprocess import preprocess_completion
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     GenerateResponse,
@@ -101,7 +102,9 @@ class ServingTokens(OpenAIServing):
 
         # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
         # completed
-        engine_prompts = await self._preprocess_completion(
+        engine_prompts = await preprocess_completion(
+            self.renderer,
+            self.model_config,
             request,
             prompt_input=request.token_ids,
             prompt_embeds=None,

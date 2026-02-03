@@ -25,6 +25,12 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_developer_message,
+    get_system_message,
+    parse_chat_inputs_to_harmony_messages,
+    render_for_completion,
+)
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
@@ -633,6 +639,90 @@ class HfRenderer(BaseRenderer):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
+        # Use Harmony encoding for GPT-OSS models
+        if self.uses_harmony:
+            return self._render_messages_harmony(messages, params)
+
+        return self._render_messages_template(messages, params)
+
+    def _render_messages_harmony(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], TokensPrompt]:
+        """Render messages using Harmony encoding for GPT-OSS models."""
+        from openai_harmony import Message as OpenAIHarmonyMessage
+
+        harmony_messages: list[OpenAIHarmonyMessage] = []
+
+        # Extract params from chat_template_kwargs
+        kwargs = params.chat_template_kwargs
+        reasoning_effort = kwargs.get("reasoning_effort")
+        tools = kwargs.get("tools")
+
+        # For Responses API continued conversations, system/developer messages
+        # are already in the message history, so skip adding them.
+        # For Chat Completion API (always new conversation) or Responses API
+        # new conversation, add system/developer messages.
+        add_system_message = kwargs.get("add_harmony_system_message")
+        if add_system_message is None:
+            # Chat Completion API - always add (no prev_response concept)
+            add_system_message = True
+
+        if add_system_message:
+            # For Responses API: use pre-computed values from
+            # _build_harmony_template_kwargs.
+            # For Chat Completion API: these will be None (no built-in tools)
+            model_identity = kwargs.get("model_identity")
+            browser_description = kwargs.get("browser_description")
+            python_description = kwargs.get("python_description")
+            container_description = kwargs.get("container_description")
+            instructions = kwargs.get("instructions")
+
+            # with_custom_tools: from kwargs if set, otherwise derive from tools
+            with_custom_tools = kwargs.get("with_custom_tools")
+            if with_custom_tools is None:
+                with_custom_tools = tools is not None
+
+            # Add system message
+            sys_msg = get_system_message(
+                model_identity=model_identity,
+                reasoning_effort=reasoning_effort,
+                browser_description=browser_description,
+                python_description=python_description,
+                container_description=container_description,
+                instructions=instructions,
+                with_custom_tools=with_custom_tools,
+            )
+            harmony_messages.append(sys_msg)
+
+            # Add developer message with tools
+            if tools and with_custom_tools:
+                dev_msg = get_developer_message(instructions=instructions, tools=tools)
+                harmony_messages.append(dev_msg)
+
+        # Add user messages
+        harmony_messages.extend(parse_chat_inputs_to_harmony_messages(messages))
+
+        # Render prompt token ids
+        prompt_token_ids = render_for_completion(harmony_messages)
+        prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+
+        # Build conversation for response (simplified for harmony)
+        conversation: list[ConversationMessage] = [
+            {"role": msg.get("role", "user"), "content": msg.get("content", "")}
+            for msg in messages
+            if isinstance(msg, dict)
+        ]
+
+        return conversation, prompt
+
+    def _render_messages_template(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
+        """Render messages using standard chat template."""
         model_config = self.config
         tokenizer = self.get_tokenizer()
 
@@ -687,6 +777,18 @@ class HfRenderer(BaseRenderer):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
+        # Use Harmony encoding for GPT-OSS models
+        if self.uses_harmony:
+            return self._render_messages_harmony(messages, params)
+
+        return await self._render_messages_template_async(messages, params)
+
+    async def _render_messages_template_async(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        params: ChatParams,
+    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
+        """Render messages using standard chat template (async)."""
         model_config = self.config
         tokenizer = self.get_tokenizer()
 
