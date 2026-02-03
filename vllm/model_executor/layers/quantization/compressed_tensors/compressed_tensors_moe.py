@@ -3,6 +3,7 @@
 
 import enum
 from enum import Enum
+from typing import Literal
 
 import torch
 from compressed_tensors import CompressionFormat
@@ -179,6 +180,15 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     f" and bits: {weight_quant.num_bits}",
                 )
 
+            # check if VLLM_USE_FLASHINFER_MOE_INT4 is set
+            if CompressedTensorsWNA16MarlinMoEMethod.use_flashinfer_mxint4_moe(
+                weight_quant
+            ):
+                return CompressedTensorsWNA16MarlinMoEMethod(
+                    weight_quant, input_quant, layer.moe_config, backend="Flashinfer"
+                )
+
+            # otherwise, select WNA16 backend according to VLLM_WNA16_MOE_BACKEND
             backend_ = envs.VLLM_WNA16_MOE_BACKEND
             if backend_ == "cutlass":  # cutlass has most strict limitations
                 if (
@@ -200,7 +210,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 ):
                     logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
                     return CompressedTensorsWNA16MarlinMoEMethod(
-                        weight_quant, input_quant, layer.moe_config
+                        weight_quant, input_quant, layer.moe_config, backend="Marlin"
                     )
                 else:
                     backend_ = "triton"
@@ -251,10 +261,9 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             return CompressedTensorsW4A8Int8MoEMethod(
                 weight_quant, input_quant, layer.moe_config
             )
-        else:
-            raise RuntimeError(
-                f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}"
-            )
+        raise RuntimeError(
+            f"Unsupported FusedMoe scheme: {weight_quant}, {input_quant}"
+        )
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
@@ -1249,12 +1258,21 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
 
 class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
+    @staticmethod
+    def use_flashinfer_mxint4_moe(weight_quant: QuantizationArgs) -> bool:
+        return (
+            is_flashinfer_mxint4_moe_available()
+            and weight_quant.group_size == 32
+            and weight_quant.num_bits == 4
+        )
+
     def __init__(
         self,
         weight_quant: QuantizationArgs,
         input_quant: QuantizationArgs | None,
         moe: FusedMoEConfig,
         layer_name: str | None = None,
+        backend: Literal["Marlin", "Flashinfer"] = "Marlin",
     ):
         super().__init__(moe)
         self.weight_quant = weight_quant
@@ -1272,14 +1290,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
 
         self.marlin_input_dtype = get_marlin_input_dtype(layer_name)
-        self.use_flashinfer_mxint4_moe = (
-            is_flashinfer_mxint4_moe_available()
-            and self.group_size == 32
-            and weight_quant.num_bits == 4
-        )
-        self.kernel_backend = (
-            "Flashinfer" if self.use_flashinfer_mxint4_moe else "Marlin"
-        )
+        self.kernel_backend = backend
         logger.info_once(
             f"Using {self.kernel_backend} backend for WNA16 MoE "
             f"(group_size={self.group_size}, num_bits={self.num_bits})",
