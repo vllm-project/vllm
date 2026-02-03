@@ -11,7 +11,6 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
-from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader
 
 from .inputs import (
@@ -26,8 +25,6 @@ if TYPE_CHECKING:
     import torch.types
 else:
     torch = LazyLoader("torch", globals(), "torch")
-
-logger = init_logger(__name__)
 
 
 def __getattr__(name: str):

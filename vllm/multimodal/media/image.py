@@ -77,17 +77,8 @@ class ImageMediaIO(MediaIO[Image.Image]):
         self,
         media: Image.Image,
         *,
-        image_format: str | None = None,
+        image_format: str = "PNG",
     ) -> str:
-        if image_format is None:
-            logger.warning_once(
-                "The default format of `ImageMediaIO.encode_base64` will be changed "
-                'from "JPEG" to "PNG" in v0.15 to avoid lossy compression. '
-                "To continue using the old default, "
-                'pass `format="JPEG"` explicitly to silence this warning.'
-            )
-            image_format = "JPEG"
-
         image = media
 
         with BytesIO() as buffer:
