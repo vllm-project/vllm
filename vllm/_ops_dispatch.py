@@ -16,10 +16,11 @@ The cpu-build-dispatcher branch builds two separate .so files:
 At runtime, only ONE extension is loaded based on CPU detection.
 This dispatcher routes calls to whichever extension is available.
 """
-
-import torch
+import warnings
 from functools import lru_cache
 from typing import Any, Optional
+
+import torch
 
 
 @lru_cache(maxsize=1)
@@ -43,8 +44,7 @@ def _detect_cpu_extension() -> str:
     if hasattr(torch.ops, '_C') and hasattr(torch.ops._C, 'silu_and_mul'):
         return "_C"
 
-    # FIXME: warn here?
-    # No CPU extension loaded
+    warnings.warn("No CPU extension available", stacklevel=2)
     return ""
 
 
