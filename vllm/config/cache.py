@@ -107,6 +107,9 @@ class CacheConfig:
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
     checkpoint if available. Otherwise, the scales will default to 1.0."""
+    skip_sliding_window_fp8: bool = False
+    """Skip FP8 KV cache quantization for sliding window attention layers.
+    These layers will use the model's default dtype instead."""
     cpu_kvcache_space_bytes: int | None = None
     """(CPU backend only) CPU key-value cache space."""
     mamba_page_size_padded: int | None = None

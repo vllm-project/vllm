@@ -223,6 +223,14 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
             calculate_kv_scales = cache_config.calculate_kv_scales
+            # Skip FP8 for sliding window layers if flag is set
+            if (
+                sliding_window is not None
+                and cache_config.skip_sliding_window_fp8
+                and kv_cache_dtype.startswith("fp8")
+            ):
+                kv_cache_dtype = "auto"
+                calculate_kv_scales = False
         else:
             kv_cache_dtype = "auto"
             block_size = 16
