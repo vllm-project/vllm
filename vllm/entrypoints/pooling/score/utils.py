@@ -86,8 +86,8 @@ def _cosine_similarity(
 
 
 def _validate_score_input_lens(
-    data_1: list[ScoreData],
-    data_2: list[ScoreData],
+    data_1: ScoreDataList,
+    data_2: ScoreDataList,
 ):
     len_1 = len(data_1)
     len_2 = len(data_2)
@@ -101,11 +101,11 @@ def _validate_score_input_lens(
 
 
 def _validate_mm_score_input(
-    data: ScoreDataList,
+    data: list[ScoreInputs],
     is_multimodal_model: bool,
     architecture: str,
-) -> list[ScoreData]:
-    out: list[ScoreData] = []
+) -> ScoreDataList:
+    out: ScoreDataList = []
     for d in data:
         if isinstance(d, str):
             out.append(d)
