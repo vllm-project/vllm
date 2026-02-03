@@ -86,7 +86,9 @@ class SHMConnector(ECConnectorBase):
             logger.debug(transfer_config)
             logger.debug("Shared storage path is %s", self._storage_path)
         else:
-            raise ValueError("ec_transfer_config must be set for ECConnectorBase")
+            raise ValueError(
+                "ec_transfer_config must be set for ECConnectorBase",
+            )
 
         if role == ECConnectorRole.SCHEDULER:
             return
@@ -213,10 +215,9 @@ class SHMConnector(ECConnectorBase):
                 except queue.Empty:
                     continue
                 except Exception as e:
-                    logger.error(
+                    logger.exception(
                         "Single task process failed, continue next: %s",
                         e,
-                        exc_info=True,
                     )
                     if "item" in locals():
                         self.send_queue.task_done()
@@ -280,7 +281,7 @@ class SHMConnector(ECConnectorBase):
                 logger.debug("recv tensor for hash %s", mm_data.mm_hash)
             except Exception as e:
                 logger.error(
-                    "Failed to reconstruct tensor for %s despite handle existence, error code: %s",
+                    "Failed to reconstruct tensor for %s, error code: %s",
                     mm_data.mm_hash,
                     str(e),
                 )
