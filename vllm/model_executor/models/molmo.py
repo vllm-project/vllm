@@ -231,7 +231,11 @@ class MultiHeadDotProductAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
         self.attn = MMEncoderAttention(
-            self.num_heads, self.head_dim, self.scale, num_kv_heads=self.num_kv_heads
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            num_kv_heads=self.num_kv_heads,
+            prefix=prefix,
         )
 
     def forward(
