@@ -302,22 +302,18 @@ class NixlConnector(KVConnectorBase_V1):
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         backend = get_current_attn_backend(self._vllm_config)
-        logger.info("XXX %s %s", backend.get_name(), backend().get_name())
         if backend.get_name() not in (
             "FLASH_ATTN",
             "FLASHINFER",
         ):
-            logger.info("XXX AA")
             return False
 
         # For now there is no benefit to run cross layers when backend
         # does not support on HND
         if get_kv_cache_layout() != "HND":
-            logger.info("XXX HERE")
             return False
 
         extra_config = self.kv_transfer_config.kv_connector_extra_config
-        logger.info("XXX %s", extra_config)
         return (
             str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
             == "true"
@@ -335,7 +331,6 @@ class NixlConnector(KVConnectorBase_V1):
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
-        logger.info("XXX %s", self.kv_transfer_config.kv_connector_extra_config)
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: NixlConnectorScheduler | None = (
                 NixlConnectorScheduler(vllm_config, self.engine_id)
