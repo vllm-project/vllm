@@ -122,7 +122,7 @@ from vllm.inputs.parse import get_prompt_len
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
-from vllm.outputs import CompletionOutput
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -347,6 +347,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesRequest,
         raw_request: Request | None = None,
+        on_output: Callable[[RequestOutput], None] | None = None,
     ) -> (
         AsyncGenerator[StreamingResponsesResponse, None]
         | ResponsesResponse
@@ -503,6 +504,7 @@ class OpenAIServingResponses(OpenAIServing):
                     lora_request=lora_request,
                     priority=request.priority,
                     trace_headers=trace_headers,
+                    on_output=on_output,
                 )
                 generators.append(generator)
         except ValueError as e:

@@ -4,7 +4,7 @@
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from collections.abc import Sequence as GenericSequence
 from typing import Any, Final
 
@@ -319,6 +319,7 @@ class OpenAIServingChat(OpenAIServing):
         self,
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
+        on_output: Callable[[RequestOutput], None] | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
         """
         Chat Completion API similar to OpenAI's API.
@@ -457,6 +458,7 @@ class OpenAIServingChat(OpenAIServing):
                 conversation,
                 tokenizer,
                 request_metadata,
+                on_output=on_output,
             )
 
         try:
@@ -468,6 +470,7 @@ class OpenAIServingChat(OpenAIServing):
                 conversation,
                 tokenizer,
                 request_metadata,
+                on_output=on_output,
             )
         except GenerationError as e:
             return self._convert_generation_error_to_response(e)
@@ -627,6 +630,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
+        on_output: Callable[[RequestOutput], None] | None = None,
     ) -> AsyncGenerator[str, None]:
         from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -728,6 +732,8 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             async for res in result_generator:
+                if on_output is not None:
+                    on_output(res)
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
@@ -1394,6 +1400,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
+        on_output: Callable[[RequestOutput], None] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -1402,6 +1409,8 @@ class OpenAIServingChat(OpenAIServing):
 
         try:
             async for res in result_generator:
+                if on_output is not None:
+                    on_output(res)
                 final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")

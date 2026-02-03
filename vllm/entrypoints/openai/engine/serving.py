@@ -1115,6 +1115,7 @@ class OpenAIServing:
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
+        on_output: Callable[[RequestOutput], None] | None = None,
     ):
         prompt_text = engine_prompt.get("prompt")
 
@@ -1154,6 +1155,8 @@ class OpenAIServing:
             )
 
             async for res in generator:
+                if on_output is not None:
+                    on_output(res)
                 context.append_output(res)
                 # NOTE(woosuk): The stop condition is handled by the engine.
                 yield context
