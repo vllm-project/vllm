@@ -154,10 +154,6 @@ class Request:
         # The number of times this request has been preempted by the scheduler.
         self.num_preemptions = 0
 
-        # Number of tokens queried and found in the external prefix cache
-        self.connector_prefix_cache_queries = 0
-        self.connector_prefix_cache_hits = 0
-
         self.block_hashes: list[BlockHash] = []
         self.get_hash_new_full_blocks: Callable[[], list[BlockHash]] | None = None
         if block_hasher is not None:

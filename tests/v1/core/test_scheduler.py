@@ -1300,7 +1300,10 @@ def test_external_prefix_cache_metrics(is_async: bool, local_cache_hits: bool):
         assert local_stats.queries == NUM_TOKENS * NUM_REQUESTS
         assert local_stats.hits == NUM_LOCAL_HITS * NUM_REQUESTS
 
-    external_stats = ecos[0].scheduler_stats.connector_prefix_cache_stats
+    if initial_ecos:
+        external_stats = initial_ecos[0].scheduler_stats.connector_prefix_cache_stats
+    else:
+        external_stats = ecos[0].scheduler_stats.connector_prefix_cache_stats
     assert external_stats is not None
 
     assert external_stats.queries == (NUM_TOKENS - NUM_LOCAL_HITS) * NUM_REQUESTS

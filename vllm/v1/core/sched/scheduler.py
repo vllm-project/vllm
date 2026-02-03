@@ -110,7 +110,7 @@ class Scheduler(SchedulerInterface):
         # will have a corresponding KVConnector with Role=WORKER.
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
-        self.connector_prefix_cache_reset = False
+        self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
         if self.vllm_config.kv_transfer_config is not None:
             assert not self.is_encoder_decoder, (
@@ -121,6 +121,8 @@ class Scheduler(SchedulerInterface):
                 role=KVConnectorRole.SCHEDULER,
                 kv_cache_config=self.kv_cache_config,
             )
+            if self.log_stats:
+                self.connector_prefix_cache_stats = PrefixCacheStats()
             kv_load_failure_policy = (
                 self.vllm_config.kv_transfer_config.kv_load_failure_policy
             )
@@ -582,6 +584,7 @@ class Scheduler(SchedulerInterface):
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
+                connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -608,11 +611,10 @@ class Scheduler(SchedulerInterface):
 
                         num_external_computed_tokens = ext_tokens
 
-                        # Save the stats to be recorded once KV loaded and allocated
-                        request.connector_prefix_cache_queries = (
+                        connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
                         )
-                        request.connector_prefix_cache_hits = ext_tokens
+                        connector_prefix_cache_hits = num_external_computed_tokens
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (
@@ -729,6 +731,15 @@ class Scheduler(SchedulerInterface):
                         self.kv_cache_manager.get_blocks(request_id),
                         num_external_computed_tokens,
                     )
+                    if (
+                        self.connector_prefix_cache_stats is not None
+                        and connector_prefix_cache_queries != 0
+                    ):
+                        self.connector_prefix_cache_stats.record(
+                            num_tokens=connector_prefix_cache_queries,
+                            num_hits=connector_prefix_cache_hits,
+                            preempted=request.num_preemptions > 0,
+                        )
 
                 # Request was already popped from self.waiting
                 # unless it was re-added above due to new_blocks being None.
@@ -1238,7 +1249,6 @@ class Scheduler(SchedulerInterface):
             kv_stats = self.connector.get_kv_connector_stats()
             if kv_stats:
                 kv_connector_stats = kv_connector_stats.aggregate(kv_stats)
-        connector_prefix_cache_stats = PrefixCacheStats() if self.log_stats else None
 
         failed_kv_load_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
@@ -1360,20 +1370,6 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-
-            # Record external connector prefix cache stats
-            if (
-                connector_prefix_cache_stats
-                and request.connector_prefix_cache_queries > 0
-            ):
-                connector_prefix_cache_stats.record(
-                    num_tokens=request.connector_prefix_cache_queries,
-                    num_hits=request.connector_prefix_cache_hits,
-                    preempted=request.num_preemptions > 0,
-                )
-                request.connector_prefix_cache_queries = 0
-                request.connector_prefix_cache_hits = 0
-
             if (
                 new_token_ids
                 or pooler_output is not None
@@ -1469,11 +1465,7 @@ class Scheduler(SchedulerInterface):
 
         if (
             stats := self.make_stats(
-                spec_decoding_stats,
-                kv_connector_stats,
-                connector_prefix_cache_stats,
-                cudagraph_stats,
-                perf_stats,
+                spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -1786,7 +1778,8 @@ class Scheduler(SchedulerInterface):
             return False
 
         if self.log_stats:
-            self.connector_prefix_cache_reset = True
+            assert self.connector_prefix_cache_stats is not None
+            self.connector_prefix_cache_stats.reset = True
 
         return True
 
@@ -1802,7 +1795,6 @@ class Scheduler(SchedulerInterface):
         self,
         spec_decoding_stats: SpecDecodingStats | None = None,
         kv_connector_stats: KVConnectorStats | None = None,
-        connector_prefix_cache_stats: PrefixCacheStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
     ) -> SchedulerStats | None:
@@ -1810,9 +1802,10 @@ class Scheduler(SchedulerInterface):
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
-        if connector_prefix_cache_stats and self.connector_prefix_cache_reset:
-            connector_prefix_cache_stats.reset = True
-            self.connector_prefix_cache_reset = False
+        connector_prefix_cache_stats: PrefixCacheStats | None = None
+        if self.connector_prefix_cache_stats is not None:
+            connector_prefix_cache_stats = self.connector_prefix_cache_stats
+            self.connector_prefix_cache_stats = PrefixCacheStats()
         eviction_events = (
             self.kv_metrics_collector.drain_events()
             if self.kv_metrics_collector is not None
@@ -2070,8 +2063,6 @@ class Scheduler(SchedulerInterface):
                     req_num_computed_tokens - request.num_computed_tokens
                 )
                 total_affected_tokens += num_affected_tokens
-                if request.connector_prefix_cache_hits:
-                    request.connector_prefix_cache_hits -= num_affected_tokens
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])
