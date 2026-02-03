@@ -795,17 +795,25 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # Process decode requests
         if has_decode:
-            # Prepare SSM parameters (shared by all decode paths)
-            n_groups = self.n_groups // self.tp_size
-            A_d = (
-                self.A[:, None, ...][:, :, None]
-                .expand(-1, self.head_dim, self.ssm_state_size)
-                .to(dtype=torch.float32)
-            )
-            dt_bias_expanded = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
-            D_d = self.D[:, None, ...].expand(-1, self.head_dim)
+            if is_mamba_cache_all:
+                decode_state_indices_tensor_input = decode_state_indices_tensor.gather(
+                    1, block_idx_last_computed_token_d.unsqueeze(1)
+                ).squeeze(1)
+                decode_state_indices_tensor_output = decode_state_indices_tensor.gather(
+                    1, block_idx_last_scheduled_token_d.unsqueeze(1)
+                ).squeeze(1)
+                # for decode:
+                #   block_idx_first_scheduled_token_d ==
+                #       block_idx_last_scheduled_token_d
+                # at block boundaries:
+                #   block_idx_first_scheduled_token_d >
+                #       block_idx_last_computed_token_d
+            else:
+                # Without caching, read and write in-place to the same blocks:
+                decode_state_indices_tensor_input = decode_state_indices_tensor
+                decode_state_indices_tensor_output = decode_state_indices_tensor
 
-            # 2a. Convolution with spec decode support
+            # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
                 hidden_states_B_C_d,
                 conv_state,
@@ -816,15 +824,22 @@ class MambaMixer2(MambaBase, CustomOp):
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=decode_query_start_loc,
                 max_query_len=decode_state_indices_tensor.size(-1),
-                validate_data=True,
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
                 hidden_states_B_C_d
             )
 
-            # 3a. SSM with spec decode support
+            # 3. State Space Model sequence transformation
+            n_groups = self.n_groups // self.tp_size
+            A_d = (
+                self.A[:, None, ...][:, :, None]
+                .expand(-1, self.head_dim, self.ssm_state_size)
+                .to(dtype=torch.float32)
+            )
             dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
+            dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
+            D_d = self.D[:, None, ...].expand(-1, self.head_dim)
             B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
             C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
             hidden_states_d = hidden_states_d.view(
@@ -832,6 +847,10 @@ class MambaMixer2(MambaBase, CustomOp):
             )
 
             assert preallocated_ssm_out_d is not None
+            # - the hidden is reshaped into (bs, num_heads, head_dim)
+            # - mamba_cache_params.ssm_state's slots will be selected
+            #   using decode_state_indices_tensor
+            # NOTE: final output is an in-place update of out tensor
             selective_state_update(
                 ssm_state,
                 hidden_states_d,
@@ -841,9 +860,10 @@ class MambaMixer2(MambaBase, CustomOp):
                 C_d,
                 D_d,
                 z=None,
-                dt_bias=dt_bias_expanded,
+                dt_bias=dt_bias,
                 dt_softplus=True,
-                state_batch_indices=decode_state_indices_tensor,
+                state_batch_indices=decode_state_indices_tensor_input,
+                dst_state_batch_indices=decode_state_indices_tensor_output,
                 out=preallocated_ssm_out_d.view(num_decode_tokens, -1, self.head_dim),
                 num_accepted_tokens=num_accepted_tokens,
                 cu_seqlens=decode_query_start_loc,
