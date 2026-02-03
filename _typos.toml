@@ -1,0 +1,207 @@
+# _typos.toml
+#
+# TEMPORARY TYPO DEBT LEDGER
+# -------------------------
+# This file explicitly lists ALL tokens that typos should ignore.
+# It includes:
+#   - Domain-specific identifiers (correct-by-design)
+#   - Known real misspellings (temporary, to be fixed later)
+#
+# Delete entries gradually as typos are cleaned up.
+
+[default.extend-words]
+
+# ==========================================================
+# Domain / Technical Tokens (INTENTIONAL)
+# ==========================================================
+
+# Intel / CPU / SST / PCT
+CLOS = "CLOS"
+CLOS0 = "CLOS0"
+CLOS1 = "CLOS1"
+CLOS2 = "CLOS2"
+CLOS3 = "CLOS3"
+PCT = "PCT"
+SST = "SST"
+
+# Tensor / shape conventions
+thw = "thw"
+THW = "THW"
+
+# Quantization formats
+ue8m0 = "ue8m0"
+UE8M0 = "UE8M0"
+
+# CUDA / CUTLASS thread naming
+Thr = "Thr"
+thr = "thr"
+
+# CUDA / kernel terminology
+subtile = "subtile"
+Optin = "Optin"
+
+# Common ML / math identifiers
+arange = "arange"     # np.arange / torch.arange / tl.arange
+dout = "dout"         # gradient of output
+
+
+# ==========================================================
+# Real Typos (TEMPORARY – FIX LATER)
+# ==========================================================
+
+# ---- Common programming misspellings ----
+ouput = "ouput"                   # output
+dafault = "dafault"               # default
+defalut = "defalut"               # default
+hiden = "hiden"                   # hidden
+Chnage = "Chnage"                 # Change
+serializeable = "serializeable"   # serializable
+sheduler = "sheduler"             # scheduler
+featrues = "featrues"             # features
+
+# ---- English spelling errors ----
+requsts = "requsts"               # requests
+indicies = "indicies"             # indices
+offests = "offests"               # offsets
+interlave = "interlave"           # interleave
+Calcultion = "Calcultion"         # Calculation
+assertation = "assertation"       # assertion
+seperable = "seperable"           # separable
+contigous = "contigous"           # contiguous
+decending = "decending"           # descending
+compiliation = "compiliation"     # compilation
+processer = "processer"           # processor
+cummulative = "cummulative"       # cumulative
+suppported = "suppported"         # supported
+miliseconds = "miliseconds"       # milliseconds
+placehoder = "placehoder"         # placeholder
+placholder = "placholder"         # placeholder
+plugable = "plugable"             # pluggable
+specifed = "specifed"             # specified
+speciied = "speciied"             # specified
+informations = "informations"     # information
+splitted = "splitted"
+stauts = "stauts"
+chech = "chech"
+availble = "availble"
+beseige = "beseige"
+Stirr = "Stirr"
+cancell = "cancell"
+squence = "squence"
+ser = "ser"
+setp = "setp"
+somthing = "somthing"
+loca = "loca"
+nd = "nd"
+indx = "indx"
+datas = "datas"
+divisble = "divisble"
+eles = "eles"
+correspondance = "correspondance"
+accpeted = "accpeted"
+embeddding = "embeddding"
+ede = "ede"
+tupe = "tupe"
+Defination = "Defination"
+ot = "ot"
+auxilary = "auxilary"
+rounter = "rounter"
+tranfering = "tranfering"
+Neice = "Neice"
+analysisto = "analysisto"
+Iniitalize = "Iniitalize"
+attetion = "attetion"
+uniquness = "uniquness"
+NOO = "NOO"
+dimention = "dimention"
+defult = "defult"
+lifecyle = "lifecyle"
+sur = "sur"
+varaiables = "varaiables"
+accurracy = "accurracy"
+hanshakes = "hanshakes"
+flexiblity = "flexiblity"
+examinate = "examinate"
+HSA = "HSA"
+explict = "explict"
+Intialize = "Intialize"
+poped = "poped"
+triger = "triger"
+nin = "nin"
+ather = "ather"
+ect = "ect"
+SIZ = "SIZ"
+exepected = "exepected"
+interm = "interm"
+cyle = "cyle"
+enocder = "enocder"
+outputing = "outputing"
+exsistence = "exsistence"
+mimick = "mimick"
+availiable = "availiable"
+Goin = "Goin"
+martix = "martix"
+offest = "offest"
+goups = "goups"
+lenth = "lenth"
+commmon = "commmon"
+Wraper = "Wraper"
+dynamc = "dynamc"
+implictly = "implictly"
+compatibile = "compatibile"
+ouptut = "ouptut"
+appy = "appy"
+breat = "breat"
+Sur = "Sur"
+fter = "fter"
+deocde = "deocde"
+querys = "querys"
+Mor = "Mor"
+thinkg = "thinkg"
+iy = "iy"
+fo = "fo"
+Pn = "Pn"
+ba = "ba"
+exsist = "exsist"
+signture = "signture"
+entirly = "entirly"
+repete = "repete"
+impelementations = "impelementations"
+numer = "numer"
+fromat = "fromat"
+paramaters = "paramaters"
+uncorrect = "uncorrect"
+UNIDRECTIONAL = "UNIDRECTIONAL"
+Perpare = "Perpare"
+unsed = "unsed"
+targetting = "targetting"
+tranpose = "tranpose"
+Overide = "Overide"
+vidoe = "vidoe"
+enalbe = "enalbe"
+Warpper = "Warpper"
+tme = "tme"
+Ein = "Ein"
+seperator = "seperator"
+ove = "ove"
+suport = "suport"
+# ---- Throughput / through variants (case + typo variants) ----
+TRHOUGHT = "TRHOUGHT"             # THROUGH / THROUGHT / THROUGHPUT
+TRHOUGHPUT = "TRHOUGHPUT"         # THROUGHPUT
+TRHOUGHTPUT = "TRHOUGHTPUT"       # THROUGHPUT
+throught = "throught"             # through
+throuhgput = "throuhgput"         # throughput
+troughput = "troughput"           # throughput
+
+# ---- Short ambiguous tokens ----
+ue = "ue"                         # use (but valid in ue8m0)
+UE = "UE"                         # USE
+
+[files]
+extend-exclude = [
+  "vllm/entrypoints/serve/instrumentator/static/",
+  "tests/models/fixtures/*.json",
+  "benchmarks/*.txt",
+  "tests/prompts/*.txt",
+]
+
