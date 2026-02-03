@@ -77,9 +77,9 @@ class MultiModalBudget:
         # have their own entry in the returned dict. We filter to only include
         # modalities that have independent placeholder tokens.
         mm_max_toks_per_item = {
-            modality: all_mm_max_toks_per_item[modality]
+            modality: toks_per_item
             for modality in active_modalities
-            if modality in all_mm_max_toks_per_item
+            if (toks_per_item := all_mm_max_toks_per_item.get(modality)) is not None
         }
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
