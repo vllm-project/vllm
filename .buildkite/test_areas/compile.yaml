@@ -174,11 +174,11 @@ steps:
     - tests/compile/fusions_e2e/
   commands:
     - nvidia-smi
-    # Run just llama3 (fp8 & bf16) for all config combinations
+    # Run just llama3 (fp4 & fp8 & bf16) for all config combinations
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "llama-3"
 
 - label: Fusion E2E TP2 AsyncTP Quick (H100)
-  timeout_in_minutes: 15 # ~18 mins
+  timeout_in_minutes: 15
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
