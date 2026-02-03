@@ -72,9 +72,14 @@ class MultiModalBudget:
                 mm_counts=dict.fromkeys(active_modalities, 1),
             )
 
+        # Some models (e.g., Qwen3Omni with use_audio_in_video=True) share
+        # placeholders between modalities, so not all active modalities will
+        # have their own entry in the returned dict. We filter to only include
+        # modalities that have independent placeholder tokens.
         mm_max_toks_per_item = {
             modality: all_mm_max_toks_per_item[modality]
             for modality in active_modalities
+            if modality in all_mm_max_toks_per_item
         }
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
