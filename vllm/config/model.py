@@ -875,7 +875,6 @@ class ModelConfig:
             overrides = [
                 "gptq_marlin",
                 "awq_marlin",
-                "ipex",
                 "inc",
                 "moe_wna16",
                 "modelopt",
