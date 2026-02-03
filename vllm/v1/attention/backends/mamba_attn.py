@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import abc
-import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, ClassVar, TypeVar
 
 import torch
@@ -73,8 +72,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     reorder_batch_threshold: int = 1
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
-    # TODO(ben): reimplement this, at least for when speculative decoding is disabled.
-    supports_update_block_table: bool = False
+    # Will be disabled if speculative decoding is used
+    supports_update_block_table: bool = True
 
     def __init__(
         self,
@@ -111,14 +110,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 self.vllm_config.model_config.max_model_len,
                 self.kv_cache_spec.block_size,
             )
-            self.prefill_state_indices_tensor = torch.empty(
-                (
-                    self.decode_cudagraph_max_bs,
-                    max_num_blocks,
-                ),
-                dtype=torch.int32,
-                device=device,
-            )
             # Speculative decoding not supported with prefix caching,
             # so keep shape consistent with prefill buffer
             self.decode_state_indices_tensor = torch.empty(
@@ -140,11 +131,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=device,
             )
         else:
-            self.prefill_state_indices_tensor = torch.empty(
-                (self.decode_cudagraph_max_bs,),
-                dtype=torch.int32,
-                device=device,
-            )
             self.decode_state_indices_tensor = torch.empty(
                 (self.decode_cudagraph_max_bs, 1 + self.num_spec_tokens),
                 dtype=torch.int32,
@@ -165,7 +151,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 device=device,
             )
 
-        self._init_reorder_batch_threshold(1, True)
+        self._init_reorder_batch_threshold(1, self.use_spec_decode)
+        if self.use_spec_decode:
+            self.supports_update_block_table = False
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -277,7 +265,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
 
             # Return a tensor of shape (#requests, #max blocks)
-            _state_indices_tensor = common_attn_metadata.block_table_tensor
+            state_indices_tensor = common_attn_metadata.block_table_tensor
             # Additional cache-related varaiables:
             mamba_block_size = self.kv_cache_spec.block_size
             (
@@ -288,18 +276,18 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 common_attn_metadata, mamba_block_size
             )
         else:
-            _state_indices_tensor = mamba_get_block_table_tensor(
+            state_indices_tensor = mamba_get_block_table_tensor(
                 common_attn_metadata.block_table_tensor,
                 common_attn_metadata.seq_lens,
                 self.kv_cache_spec,
                 self.vllm_config.cache_config.mamba_cache_mode,
             )
 
-        if _state_indices_tensor.dim() == 1:
-            _state_indices_tensor = _state_indices_tensor.unsqueeze(-1)
+        if state_indices_tensor.dim() == 1:
+            state_indices_tensor = state_indices_tensor.unsqueeze(-1)
 
         decode_state_indices_tensor, prefill_state_indices_tensor = torch.split(
-            _state_indices_tensor.contiguous(),
+            state_indices_tensor,
             [num_decodes, num_prefills],
             dim=0,
         )
@@ -347,56 +335,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
                     num_reqs - num_prefills : num_reqs
                 ]
-        elif (
-            num_decodes <= self.decode_cudagraph_max_bs
-            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
-            # Note: num_actual_tokens is already padded by the model runner for graphs
-            assert num_decode_tokens == common_attn_metadata.num_actual_tokens
-            self.decode_state_indices_tensor[:num_decodes].copy_(
-                decode_state_indices_tensor, non_blocking=True
-            )
-            decode_state_indices_tensor = self.decode_state_indices_tensor[
-                :num_decode_tokens
-            ]
-            decode_state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
-            if self.use_spec_decode:
-                assert query_start_loc_d is not None
-                assert num_accepted_tokens is not None
-                self.decode_query_start_loc[: num_decodes + 1].copy_(
-                    query_start_loc_d, non_blocking=True
-                )
-                query_start_loc_d = self.decode_query_start_loc[
-                    : num_decode_tokens + 1
-                ]  # TODO(ben): is this too large?
-                query_start_loc_d[num_decodes + 1 :] = query_start_loc_d[
-                    num_decodes
-                ]  # pad with last value
-                self.decode_num_accepted_tokens[:num_decodes].copy_(
-                    num_accepted_tokens, non_blocking=True
-                )
-                num_accepted_tokens = self.decode_num_accepted_tokens[
-                    :num_decode_tokens
-                ]
-                num_accepted_tokens[num_decodes:] = 1  # pad with 1st slot index
-
-            if self.vllm_config.cache_config.mamba_cache_mode == "all":
-                self.block_idx_last_scheduled_token[:num_decodes].copy_(
-                    block_idx_last_scheduled_token, non_blocking=True
-                )
-                block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                    :num_decode_tokens
-                ]
-
-                self.block_idx_last_computed_token[:num_decodes].copy_(
-                    block_idx_last_computed_token, non_blocking=True
-                )
-                block_idx_last_computed_token = self.block_idx_last_computed_token[
-                    :num_decode_tokens
-                ]
-
-        return self.metadata_cls(
+        metadata = self.metadata_cls(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
@@ -418,35 +358,122 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
 
+        return self._update_metadata_for_cudagraph_capture(metadata)
+
+    def _update_metadata_for_cudagraph_capture(
+        self,
+        metadata: M,
+    ) -> M:
+        """
+        Update the metadata for cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with Mamba.
+        """
+        decode_state_indices_tensor = metadata.decode_state_indices_tensor
+        query_start_loc_d = metadata.query_start_loc_d
+        num_accepted_tokens = metadata.num_accepted_tokens
+        block_idx_last_scheduled_token = metadata.block_idx_last_scheduled_token
+        block_idx_last_computed_token = metadata.block_idx_last_computed_token
+        if (
+            metadata.num_prefills == 0
+            and metadata.num_decodes <= self.decode_cudagraph_max_bs
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            self.decode_state_indices_tensor[: metadata.num_decodes].copy_(
+                decode_state_indices_tensor, non_blocking=True
+            )
+            decode_state_indices_tensor = self.decode_state_indices_tensor[
+                : metadata.num_decode_tokens
+            ]
+            decode_state_indices_tensor[metadata.num_decodes :] = PAD_SLOT_ID
+
+            if self.use_spec_decode:
+                assert query_start_loc_d is not None
+                assert num_accepted_tokens is not None
+                self.decode_query_start_loc[: metadata.num_decodes + 1].copy_(
+                    query_start_loc_d, non_blocking=True
+                )
+                query_start_loc_d = self.decode_query_start_loc[
+                    : metadata.num_decode_tokens + 1
+                ]  # TODO(ben): is this too large? How to handle padding here?
+                query_start_loc_d[metadata.num_decodes + 1 :] = query_start_loc_d[
+                    metadata.num_decodes
+                ]  # pad with last value
+                self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
+                    num_accepted_tokens, non_blocking=True
+                )
+                num_accepted_tokens = self.decode_num_accepted_tokens[
+                    : metadata.num_decode_tokens
+                ]
+                num_accepted_tokens[metadata.num_decodes :] = (
+                    1  # pad with 1st slot index
+                )
+
+            if self.vllm_config.cache_config.mamba_cache_mode == "all":
+                assert block_idx_last_scheduled_token is not None
+                assert block_idx_last_computed_token is not None
+                self.block_idx_last_scheduled_token[: metadata.num_decodes].copy_(
+                    block_idx_last_scheduled_token, non_blocking=True
+                )
+                block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
+                    : metadata.num_decode_tokens
+                ]
+
+                self.block_idx_last_computed_token[: metadata.num_decodes].copy_(
+                    block_idx_last_computed_token, non_blocking=True
+                )
+                block_idx_last_computed_token = self.block_idx_last_computed_token[
+                    : metadata.num_decode_tokens
+                ]
+
+        return replace(
+            metadata,
+            decode_state_indices_tensor=decode_state_indices_tensor,
+            query_start_loc_d=query_start_loc_d,
+            num_accepted_tokens=num_accepted_tokens,
+            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+            block_idx_last_computed_token=block_idx_last_computed_token,
+        )
+
     def update_block_table(
         self,
         metadata: M,
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> M:
-        raise NotImplementedError("Temporarily disabled for debugging.")
-        new_metadata = copy.copy(metadata)
-        state_indices_t = mamba_get_block_table_tensor(
+        state_indices_tensor = mamba_get_block_table_tensor(
             blk_table,
             metadata.seq_lens,
             self.kv_cache_spec,
             self.vllm_config.cache_config.mamba_cache_mode,
         )
-        if self.vllm_config.cache_config.mamba_cache_mode in ("none", "align"):
-            # Only needs the block that saves the running state
-            state_indices_t = state_indices_t[:, 0]
+        if state_indices_tensor.dim() == 1:
+            state_indices_tensor = state_indices_tensor.unsqueeze(-1)
 
-        num_reqs = blk_table.shape[0]
+        assert (
+            metadata.num_prefills + metadata.num_decodes
+            == state_indices_tensor.shape[0]
+        ), (
+            "Mismatch in number of requests when updating block table."
+            f" Expected {metadata.num_prefills + metadata.num_decodes}, "
+            f"got {state_indices_tensor.shape[0]}."
+        )
 
-        # For CUDA graphs, copy to persistent buffer
-        if (
-            metadata.num_prefills == 0
-            and num_reqs <= self.decode_cudagraph_max_bs
-            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
-            persistent_state_indices_t = self.state_indices_tensor[:num_reqs]
-            persistent_state_indices_t.copy_(state_indices_t, non_blocking=True)
-            state_indices_t = persistent_state_indices_t
+        decode_state_indices_tensor, prefill_state_indices_tensor = torch.split(
+            state_indices_tensor,
+            [metadata.num_decodes, metadata.num_prefills],
+            dim=0,
+        )
+        decode_state_indices_tensor = decode_state_indices_tensor[
+            :, : 1 + self.num_spec_tokens
+        ]  # shape: [num_decodes, 1 + num_spec]
+        prefill_state_indices_tensor = prefill_state_indices_tensor[
+            :, 0
+        ]  # shape: [num_prefills,]
 
-        new_metadata.state_indices_tensor = state_indices_t
-        return new_metadata
+        new_metadata = replace(
+            metadata,
+            decode_state_indices_tensor=decode_state_indices_tensor,
+            prefill_state_indices_tensor=prefill_state_indices_tensor,
+        )
+
+        return self._update_metadata_for_cudagraph_capture(new_metadata)
