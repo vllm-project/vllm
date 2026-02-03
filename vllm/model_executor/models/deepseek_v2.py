@@ -1153,7 +1153,7 @@ class DeepseekV2Model(nn.Module):
             afd_metadata.afd_stage_idx = dbo_current_ubatch_id()
 
             if layer.layer_idx > 0:
-                hidden_states = afd_connector.recv_ffn_output()
+                hidden_states = afd_connector.recv_ffn_output(ubatch_idx=dbo_current_ubatch_id())
 
             current_hidden, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
@@ -1167,12 +1167,12 @@ class DeepseekV2Model(nn.Module):
                 num_of_stages=afd_metadata.num_of_stages,
                 afd_tokens_lens=afd_metadata.afd_tokens_lens,
             )
-            afd_connector.send_attn_output(current_hidden, metadata)
+            afd_connector.send_attn_output(current_hidden, metadata, ubatch_idx=dbo_current_ubatch_id())
 
             if dbo_enabled():
                 dbo_yield()
 
-        hidden_states = afd_connector.recv_ffn_output()
+        hidden_states = afd_connector.recv_ffn_output(ubatch_idx=dbo_current_ubatch_id())
 
         return hidden_states, residual
 
@@ -1210,7 +1210,7 @@ class DeepseekV2Model(nn.Module):
                 residual = ubatch_residual[stage_i]
 
                 if layer.layer_idx > 0:
-                    hidden_states = afd_connector.recv_ffn_output()
+                    hidden_states = afd_connector.recv_ffn_output(ubatch_idx=stage_i)
                 else:
                     hidden_states = ubatch_hidden_states[stage_i]
 
@@ -1231,11 +1231,11 @@ class DeepseekV2Model(nn.Module):
                     num_of_stages=afd_metadata.num_of_stages,
                     afd_tokens_lens=afd_metadata.afd_tokens_lens,
                 )
-                afd_connector.send_attn_output(hidden_states, metadata)
+                afd_connector.send_attn_output(hidden_states, metadata, ubatch_idx=stage_i)
 
         # Recv last layer FFN output.
         for stage_i in range(afd_metadata.num_of_stages):
-            ubatch_hidden_states[stage_i] = afd_connector.recv_ffn_output()
+            ubatch_hidden_states[stage_i] = afd_connector.recv_ffn_output(ubatch_idx=stage_i)
 
         # Re-assemble the batch
         hidden_states = torch.cat(ubatch_hidden_states, dim=0)
