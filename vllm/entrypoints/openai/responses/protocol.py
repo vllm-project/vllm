@@ -230,6 +230,11 @@ class ResponsesRequest(OpenAIBaseModel):
     # this cannot be used in conjunction with previous_response_id
     # TODO: consider supporting non harmony messages as well
     previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
+
+    structured_outputs: StructuredOutputsParams | None = Field(
+        default=None,
+        description="Additional kwargs for structured outputs",
+    )
     # --8<-- [end:responses-extra-params]
 
     def build_chat_params(
@@ -300,14 +305,17 @@ class ResponsesRequest(OpenAIBaseModel):
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
-        structured_outputs = None
-        if self.text is not None and self.text.format is not None:
+        if (
+            self.structured_outputs is None
+            and self.text is not None
+            and self.text.format is not None
+        ):
             response_format = self.text.format
             if (
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None
             ):
-                structured_outputs = StructuredOutputsParams(
+                self.structured_outputs = StructuredOutputsParams(
                     json=response_format.schema_
                 )
             elif response_format.type == "json_object":
@@ -324,7 +332,7 @@ class ResponsesRequest(OpenAIBaseModel):
             output_kind=(
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),
-            structured_outputs=structured_outputs,
+            structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,
