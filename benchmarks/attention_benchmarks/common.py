@@ -21,7 +21,7 @@ from rich.table import Table
 class MockHfConfig:
     """Mock HuggingFace config that satisfies vLLM's requirements."""
 
-    def __init__(self, mla_dims: dict):
+    def __init__(self, mla_dims: dict, index_topk: int | None = None):
         self.num_attention_heads = mla_dims["num_q_heads"]
         self.num_key_value_heads = mla_dims["num_kv_heads"]
         self.hidden_size = mla_dims["head_dim"] * mla_dims["num_q_heads"]
@@ -32,6 +32,8 @@ class MockHfConfig:
         self.qk_rope_head_dim = mla_dims["qk_rope_head_dim"]
         self.v_head_dim = mla_dims["v_head_dim"]
         self.qk_head_dim = mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"]
+        if index_topk is not None:
+            self.index_topk = index_topk
 
     def get_text_config(self):
         return self
@@ -80,6 +82,38 @@ class MockKVBProj:
             dtype=x.dtype,
         )
         return (result,)  # Return as tuple to match ColumnParallelLinear API
+
+
+class MockIndexer:
+    """Mock Indexer for sparse MLA backends.
+
+    Provides topk_indices_buffer that sparse MLA backends use to determine
+    which KV cache slots to attend to for each token.
+    """
+
+    def __init__(
+        self,
+        max_num_tokens: int,
+        topk_tokens: int,
+        device: torch.device,
+    ):
+        self.topk_tokens = topk_tokens
+        self.topk_indices_buffer = torch.zeros(
+            (max_num_tokens, topk_tokens),
+            dtype=torch.int32,
+            device=device,
+        )
+
+    def fill_random_indices(self, num_tokens: int, max_kv_len: int):
+        """Fill topk_indices_buffer with random valid indices for benchmarking."""
+        indices = torch.randint(
+            0,
+            max_kv_len,
+            (num_tokens, self.topk_tokens),
+            dtype=torch.int32,
+            device=self.topk_indices_buffer.device,
+        )
+        self.topk_indices_buffer[:num_tokens] = indices
 
 
 class MockLayer(AttentionLayerBase):
