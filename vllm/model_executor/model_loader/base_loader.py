@@ -14,8 +14,8 @@ from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading,
 )
 from vllm.platforms import current_platform
-from vllm.utils.mem_utils import format_gib
 from vllm.tracing import instrument
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)

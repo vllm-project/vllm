@@ -502,6 +502,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
         self.extra_traceback = False
 
+    @instrument(span_name="Inductor compilation")
     def run(self, *args: Any) -> Any:
         # maybe instead just assert inputs are fake?
         fake_args = [
@@ -728,17 +729,6 @@ class VllmBackend:
 
         return standalone_compile_artifacts, sym_shape_indices_map, returns_tuple_map
 
-    @instrument(span_name="Inductor compilation")
-    def _run_inductor_compilation(
-        self,
-        submod_names_to_compile: list[str],
-        fake_inputs,
-    ) -> None:
-        """Run the Inductor compilation phase with fake/symbolic inputs."""
-        PiecewiseCompileInterpreter(
-            self.split_gm, submod_names_to_compile, self.vllm_config, self
-        ).run(*fake_inputs)
-
     def configure_post_pass(self) -> None:
         self.pass_manager.configure(self.vllm_config)
 
@@ -941,11 +931,12 @@ class VllmBackend:
         # Record Dynamo time in tracing if available
         if is_tracing_available():
             tracer = trace.get_tracer(__name__)
-            with tracer.start_as_current_span(
+            span = tracer.start_span(
                 "Dynamo bytecode transform",
                 start_time=int(torch_compile_start_time * 1e9),
-            ) as span:
-                span.set_attribute("dynamo.time_seconds", dynamo_time)
+            )
+            span.set_attribute("dynamo.time_seconds", dynamo_time)
+            span.end(end_time=int(time.time() * 1e9))
 
         # we control the compilation process, each instance can only be
         # called once
@@ -1001,7 +992,9 @@ class VllmBackend:
 
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
-        self._run_inductor_compilation(submod_names_to_compile, fake_args)
+        PiecewiseCompileInterpreter(
+            self.split_gm, submod_names_to_compile, self.vllm_config, self
+        ).run(*fake_args)
 
         from torch._guards import detect_fake_mode
 
