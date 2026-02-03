@@ -304,7 +304,7 @@ class ServingScores(OpenAIServing):
             else await self._get_trace_headers(raw_request.headers)
         )
 
-        score_inputs_1, score_inputs_2 = validate_score_input(
+        score_data_1, score_data_2 = validate_score_input(
             data_1,
             data_2,
             is_multimodal_model=self.is_multimodal_model,
@@ -312,8 +312,8 @@ class ServingScores(OpenAIServing):
         )
 
         return await self._score_func(
-            data_1=score_inputs_1,
-            data_2=score_inputs_2,
+            data_1=score_data_1,
+            data_2=score_data_2,
             request=request,
             request_id=request_id,
             lora_request=lora_request,
