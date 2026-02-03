@@ -346,6 +346,12 @@ class Scheduler(SchedulerInterface):
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
+        # Inter-prefill budget: limits prefill tokens across separate requests.
+        # This ensures we don't schedule too many prefill tokens from different
+        # requests in the same batch. A value of 0 disables this limit.
+        inter_prefill_budget = self.scheduler_config.inter_prefill_budget
+        prefill_budget_used = 0
+        num_prefill_requests_scheduled = 0
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
@@ -389,6 +395,22 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(
                 num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
             )
+
+            # Check if this is a prefill request (still computing prompt tokens).
+            is_prefill = request.num_computed_tokens < request.num_prompt_tokens
+            if (
+                is_prefill
+                and inter_prefill_budget > 0
+                and num_prefill_requests_scheduled > 0
+            ):
+                # Apply inter_prefill_budget: limit tokens for additional prefill
+                # requests in the same batch.
+                remaining_inter_prefill = inter_prefill_budget - prefill_budget_used
+                if remaining_inter_prefill <= 0:
+                    # Inter-prefill budget exhausted, skip this prefill request.
+                    req_index += 1
+                    continue
+                num_new_tokens = min(num_new_tokens, remaining_inter_prefill)
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -490,6 +512,11 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
+
+            # Track prefill budget usage.
+            if is_prefill:
+                prefill_budget_used += num_new_tokens
+                num_prefill_requests_scheduled += 1
 
             # Speculative decode related.
             if request.spec_token_ids:
@@ -672,6 +699,19 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
+
+                    # Apply inter_prefill_budget: limit tokens for additional
+                    # prefill requests in the same batch.
+                    if inter_prefill_budget > 0 and num_prefill_requests_scheduled > 0:
+                        remaining_inter_prefill = (
+                            inter_prefill_budget - prefill_budget_used
+                        )
+                        if remaining_inter_prefill <= 0:
+                            # Inter-prefill budget exhausted, stop scheduling
+                            # new prefill requests.
+                            break
+                        num_new_tokens = min(num_new_tokens, remaining_inter_prefill)
+
                     assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
@@ -792,6 +832,9 @@ class Scheduler(SchedulerInterface):
                 )
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
+                # Track prefill budget usage (all waiting requests are prefill).
+                prefill_budget_used += num_new_tokens
+                num_prefill_requests_scheduled += 1
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.

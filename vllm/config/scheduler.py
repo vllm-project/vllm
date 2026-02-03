@@ -80,6 +80,14 @@ class SchedulerConfig:
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens."""
 
+    inter_prefill_budget: int = 0
+    """Maximum number of prefill tokens that can be scheduled from separate
+    requests in the same batch. When set to a positive value, after scheduling
+    prefill tokens for one request, subsequent prefill requests in the same
+    batch will be limited to the remaining budget. For example, if set to 2048,
+    and a request with 2000 prefill tokens is scheduled first, the next prefill
+    request can only schedule up to 48 tokens. Set to 0 to disable this limit."""
+
     enable_chunked_prefill: bool = True
     """If True, prefill requests can be chunked based
     on the remaining `max_num_batched_tokens`.
