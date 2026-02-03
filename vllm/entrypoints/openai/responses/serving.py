@@ -123,6 +123,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
+from vllm.parser import ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -219,10 +220,11 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Set up the unified parser - either a unified parser or fall back to
         # separate parsers accessed through the parser interface
-        self.parser = self._get_parser(
+        self.parser = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
+            model_name=self.model_config.model,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage

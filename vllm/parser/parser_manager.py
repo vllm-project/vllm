@@ -14,6 +14,8 @@ from vllm.utils.import_utils import import_from_path
 
 if TYPE_CHECKING:
     from vllm.parser.abstract_parser import Parser
+    from vllm.reasoning import ReasoningParser
+    from vllm.tool_parsers import ToolParser
 
 logger = init_logger(__name__)
 
@@ -31,7 +33,7 @@ class ParserManager:
     lazy_parsers: dict[str, tuple[str, str]] = {}  # name -> (module_path, class_name)
 
     @classmethod
-    def get_parser(cls, name: str) -> type[Parser]:
+    def get_parser_internal(cls, name: str) -> type[Parser]:
         """
         Retrieve a registered or lazily registered Parser class.
 
@@ -183,3 +185,124 @@ class ParserManager:
             logger.exception(
                 "Failed to load module '%s' from %s.", module_name, plugin_path
             )
+
+    @classmethod
+    def get_tool_parser(
+        cls,
+        tool_parser_name: str | None = None,
+        enable_auto_tools: bool = False,
+        model_name: str | None = None,
+    ) -> type[ToolParser] | None:
+        """Get the tool parser based on the name."""
+        from vllm.tool_parsers import ToolParserManager
+
+        parser: type[ToolParser] | None = None
+        if not enable_auto_tools or tool_parser_name is None:
+            return parser
+        logger.info('"auto" tool choice has been enabled.')
+
+        try:
+            if (
+                tool_parser_name == "pythonic"
+                and model_name
+                and model_name.startswith("meta-llama/Llama-3.2")
+            ):
+                logger.warning(
+                    "Llama3.2 models may struggle to emit valid pythonic tool calls"
+                )
+            parser = ToolParserManager.get_tool_parser(tool_parser_name)
+        except Exception as e:
+            raise TypeError(
+                "Error: --enable-auto-tool-choice requires "
+                f"tool_parser:'{tool_parser_name}' which has not "
+                "been registered"
+            ) from e
+        return parser
+
+    @classmethod
+    def get_reasoning_parser(
+        cls,
+        reasoning_parser_name: str | None,
+    ) -> type[ReasoningParser] | None:
+        """Get the reasoning parser based on the name."""
+        from vllm.reasoning import ReasoningParserManager
+
+        parser: type[ReasoningParser] | None = None
+        if not reasoning_parser_name:
+            return None
+        try:
+            parser = ReasoningParserManager.get_reasoning_parser(reasoning_parser_name)
+            assert parser is not None
+        except Exception as e:
+            raise TypeError(f"{reasoning_parser_name=} has not been registered") from e
+        return parser
+
+    @classmethod
+    def get_parser(
+        cls,
+        tool_parser_name: str | None = None,
+        reasoning_parser_name: str | None = None,
+        enable_auto_tools: bool = False,
+        model_name: str | None = None,
+    ) -> type[Parser] | None:
+        """
+        Get a unified Parser that handles both reasoning and tool parsing.
+
+        This method checks if a unified Parser exists that can handle both
+        reasoning extraction and tool call parsing. If no unified parser
+        exists, it creates a DelegatingParser that wraps the individual
+        reasoning and tool parsers.
+
+        Args:
+            tool_parser_name: The name of the tool parser.
+            reasoning_parser_name: The name of the reasoning parser.
+            enable_auto_tools: Whether auto tool choice is enabled.
+            model_name: The model name for parser-specific warnings.
+
+        Returns:
+            A Parser class, or None if neither parser is specified.
+        """
+        from vllm.parser.abstract_parser import _WrappedParser
+
+        if not tool_parser_name and not reasoning_parser_name:
+            return None
+
+        # Strategy 1: If both names match, check for a unified parser with that name
+        if tool_parser_name and tool_parser_name == reasoning_parser_name:
+            try:
+                parser = cls.get_parser_internal(tool_parser_name)
+                logger.info(
+                    "Using unified parser '%s' for both reasoning and tool parsing.",
+                    tool_parser_name,
+                )
+                return parser
+            except KeyError:
+                pass  # No unified parser with this name
+
+        # Strategy 2: Check for parser with either name
+        for name in [tool_parser_name, reasoning_parser_name]:
+            if name:
+                try:
+                    parser = cls.get_parser(name)
+                    logger.info(
+                        "Using unified parser '%s' for both reasoning and tool parsing.",
+                        name,
+                    )
+                    return parser
+                except KeyError:
+                    pass
+
+        # Strategy 3: Create a DelegatingParser with the individual parser classes
+        reasoning_parser_cls = cls.get_reasoning_parser(reasoning_parser_name)
+        tool_parser_cls = cls.get_tool_parser(
+            tool_parser_name, enable_auto_tools, model_name
+        )
+
+        if reasoning_parser_cls is None and tool_parser_cls is None:
+            return None
+
+        # Set the class-level attributes on the imported _WrappedParser
+        _WrappedParser.reasoning_parser_cls = reasoning_parser_cls
+        _WrappedParser.tool_parser_cls = tool_parser_cls
+
+        return _WrappedParser

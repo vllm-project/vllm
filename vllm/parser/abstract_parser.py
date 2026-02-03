@@ -46,7 +46,7 @@ class Parser:
     reasoning_parser_cls: type[ReasoningParser] | None = None
     tool_parser_cls: type[ToolParser] | None = None
 
-    def __init__(self, tokenizer: TokenizerLike):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         """
         Initialize the Parser.
 
