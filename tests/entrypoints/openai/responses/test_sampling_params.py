@@ -4,8 +4,17 @@
 """Unit tests for ResponsesRequest.to_sampling_params() parameter mapping."""
 
 import pytest
+import torch
+from openai.types.responses.response_format_text_json_schema_config import (
+    ResponseFormatTextJSONSchemaConfig,
+)
+from pydantic import ValidationError
 
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
+    ResponseTextConfig,
+)
+from vllm.sampling_params import StructuredOutputsParams
 
 
 class TestResponsesRequestSamplingParams:
@@ -76,9 +85,6 @@ class TestResponsesRequestSamplingParams:
 
     def test_seed_bounds_validation(self):
         """Test that seed values outside torch.long bounds are rejected."""
-        import torch
-        from pydantic import ValidationError
-
         # Test seed below minimum
         with pytest.raises(ValidationError) as exc_info:
             ResponsesRequest(
@@ -114,8 +120,6 @@ class TestResponsesRequestSamplingParams:
 
     def test_structured_outputs_passed_through(self):
         """Test that structured_outputs field is passed to SamplingParams."""
-        from vllm.sampling_params import StructuredOutputsParams
-
         structured_outputs = StructuredOutputsParams(grammar="root ::= 'hello'")
         request = ResponsesRequest(
             model="test-model",
@@ -130,13 +134,6 @@ class TestResponsesRequestSamplingParams:
 
     def test_structured_outputs_and_json_schema_conflict(self):
         """Test that specifying both structured_outputs and json_schema raises."""
-        from openai.types.responses.response_format_text_json_schema_config import (
-            ResponseFormatTextJSONSchemaConfig,
-        )
-
-        from vllm.entrypoints.openai.responses.protocol import ResponseTextConfig
-        from vllm.sampling_params import StructuredOutputsParams
-
         structured_outputs = StructuredOutputsParams(grammar="root ::= 'hello'")
         text_config = ResponseTextConfig()
         text_config.format = ResponseFormatTextJSONSchemaConfig(
