@@ -19,6 +19,31 @@ from .triton import TritonFp8BlockScaledMMKernel
 
 
 class CudaFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
+    """
+    Dynamic kernel selector for FP8 block-scaled matrix multiplication on CUDA devices.
+
+    This class acts as a dispatcher that selects the optimal kernel implementation
+    at runtime based on input characteristics and device capabilities. It does not
+    contain its own CUDA kernel implementation.
+
+    Kernel Selection Strategy:
+    1. **FlashInfer DeepGEMM** (highest priority):
+       - Selected when both FlashInfer and DeepGEMM conditions are met
+       - Optimized for specific input/weight configurations
+
+    2. **DeepGEMM**:
+       - Selected when DeepGEMM conditions are met but FlashInfer is not applicable
+       - Falls back if FlashInfer is unavailable
+
+    3. **Fallback kernels** (lowest priority):
+       - CUTLASS (preferred) or Triton kernel
+       - Used when neither FlashInfer nor DeepGEMM conditions are satisfied
+       - Selection depends on device compute capability and support
+
+    The kernel selection happens dynamically in `apply_weights()` based on runtime
+    conditions such as output dtype, input shape, and weight properties.
+    """
+
     def __init__(self, config: Fp8BlockMMScaledConfig) -> None:
         self.flashinfer_deepgemm_kernel: (
             FlashInferFp8DeepGEMMDynamicBlockScaledKernel | None
