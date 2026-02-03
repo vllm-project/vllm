@@ -9,7 +9,7 @@ from tests.compile.backend import LazyInitPass, TestBackend
 from tests.utils import flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.compilation.passes.fusion.fusion_attn import ATTN_OP, AttnFusionPass
+from vllm.compilation.passes.fusion.attn_quant_fusion import ATTN_OP, AttnFusionPass
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass

@@ -25,8 +25,8 @@ from vllm.utils.math_utils import round_up
 from ..fx_utils import is_func
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 from .matcher_utils import MatcherQuantFP8
+from .rms_quant_fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 
 logger = init_logger(__name__)
 P = ParamSpec("P")

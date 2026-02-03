@@ -8,12 +8,12 @@ import torch
 import vllm.config
 import vllm.plugins
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
-from vllm.compilation.passes.fusion.fusion import (
+from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
+from vllm.compilation.passes.fusion.rms_quant_fusion import (
     FUSED_OPS,
     FusedRMSQuantKey,
     RMSNormQuantFusionPass,
 )
-from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass

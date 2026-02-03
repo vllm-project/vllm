@@ -82,17 +82,13 @@ INDUCTOR_GRAPH_PARTITION = [
 ]
 
 FUSION_LOG_PATTERNS: dict[str, re.Pattern] = {
-    "rms_quant_fusion": re.compile(
-        r"\[(?:compilation/)?fusion.py:\d+] Replaced (\d+) patterns"
-    ),
-    "act_quant_fusion": re.compile(
-        r"activation_quant_fusion.py:\d+] Replaced (\d+) patterns"
-    ),
+    "rms_quant_fusion": re.compile(r"rms_quant_fusion.py:\d+] Replaced (\d+) patterns"),
+    "act_quant_fusion": re.compile(r"act_quant_fusion.py:\d+] Replaced (\d+) patterns"),
     "norm_rope_fusion": re.compile(
         r"qk_norm_rope_fusion.py:\d+] Fused QK Norm\+RoPE on (\d+) sites"
     ),
     "attn_quant_fusion": re.compile(
-        r"fusion_attn.py:\d+] Fused quant onto (\d+) attention nodes"
+        r"attn_quant_fusion.py:\d+] Fused quant onto (\d+) attention nodes"
     ),
     "ar_rms_fusion": re.compile(r"collective_fusion.py:\d+] Replaced (\d+) patterns"),
     "sequence_parallel": re.compile(

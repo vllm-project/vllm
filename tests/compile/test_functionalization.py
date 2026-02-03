@@ -5,10 +5,10 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.passes.fusion.activation_quant_fusion import (
+from vllm.compilation.passes.fusion.act_quant_fusion import (
     ActivationQuantFusionPass,
 )
-from vllm.compilation.passes.fusion.fusion import RMSNormQuantFusionPass
+from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
 from vllm.compilation.passes.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.passes.utility.fix_functionalization import (
     FixFunctionalizationPass,

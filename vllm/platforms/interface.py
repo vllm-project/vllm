@@ -186,7 +186,7 @@ class Platform:
         Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
         """
-        return "vllm.compilation.pass_manager.PostGradPassManager"
+        return "vllm.compilation.passes.pass_manager.PostGradPassManager"
 
     @classmethod
     def get_compile_backend(cls) -> str:

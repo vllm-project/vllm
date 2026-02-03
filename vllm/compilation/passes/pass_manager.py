@@ -24,10 +24,10 @@ if rocm_aiter_ops.is_enabled():
     )
 
 if current_platform.is_cuda_alike():
-    from .fusion.activation_quant_fusion import ActivationQuantFusionPass
-    from .fusion.fusion import RMSNormQuantFusionPass
-    from .fusion.fusion_attn import AttnFusionPass
+    from .fusion.act_quant_fusion import ActivationQuantFusionPass
+    from .fusion.attn_quant_fusion import AttnFusionPass
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
+    from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.sequence_parallelism import SequenceParallelismPass
 
 if current_platform.is_cuda():

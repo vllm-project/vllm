@@ -5,7 +5,7 @@ import pytest
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.passes.fusion.fusion import RMSNormQuantFusionPass
+from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
 from vllm.compilation.passes.fusion.sequence_parallelism import SequenceParallelismPass
 from vllm.compilation.passes.fx_utils import find_auto_fn
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass

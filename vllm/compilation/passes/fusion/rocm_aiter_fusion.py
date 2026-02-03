@@ -21,14 +21,14 @@ from vllm.platforms import current_platform
 from ..activation_quant_fusion import ActivationQuantPattern
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .fusion import (
-    FusedRMSQuantKey,
-)
 from .matcher_utils import (
     MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
     MatcherRMSNorm,
     MatcherSiluAndMul,
+)
+from .rms_quant_fusion import (
+    FusedRMSQuantKey,
 )
 
 logger = init_logger(__name__)
