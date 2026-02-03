@@ -126,8 +126,6 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        # async scheduling + speculative decoding
-        self.num_spec_token_placeholders = 0
         # Used in forced preemption (reset_prefix_cache) with async scheduling.
         self.discard_latest_async_tokens = False
 
@@ -220,11 +218,7 @@ class Request:
 
     @property
     def num_tokens_with_spec(self) -> int:
-        return (
-            len(self._all_token_ids)
-            + len(self.spec_token_ids)
-            + self.num_spec_token_placeholders
-        )
+        return len(self._all_token_ids) + len(self.spec_token_ids)
 
     @property
     def num_output_tokens(self) -> int:
