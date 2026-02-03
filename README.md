@@ -101,3 +101,5 @@ If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs
 ## Media Kit
 
 - If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit)
+
+- [AgentMarket](https://agentmarket.cloud) - B2A marketplace for AI agents. Real energy data (28M+ records). Free API.
