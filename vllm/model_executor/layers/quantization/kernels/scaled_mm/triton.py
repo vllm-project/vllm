@@ -347,7 +347,7 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
         return True, None
 
     @classmethod
-    def ordered_fallback_kernels(cls):
+    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
         return [cls]
 
     def apply_block_scaled_mm(

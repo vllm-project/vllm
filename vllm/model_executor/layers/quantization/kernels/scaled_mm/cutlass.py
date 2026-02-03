@@ -195,7 +195,7 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
             )
 
     @classmethod
-    def ordered_fallback_kernels(cls):
+    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
         return [TritonFp8BlockScaledMMKernel]
 
     def apply_block_scaled_mm(

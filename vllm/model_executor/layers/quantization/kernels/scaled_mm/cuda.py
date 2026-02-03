@@ -41,7 +41,7 @@ class CudaFp8BlockScaledMMKernel(Fp8BlockScaledMMKernel):
             self.deepgemm_kernel.process_weights_after_loading(layer)
 
     @classmethod
-    def ordered_fallback_kernels(cls):
+    def ordered_fallback_kernels(cls) -> list[type["Fp8BlockScaledMMKernel"]]:
         return [CutlassFp8BlockScaledMMKernel, TritonFp8BlockScaledMMKernel]
 
     @classmethod
