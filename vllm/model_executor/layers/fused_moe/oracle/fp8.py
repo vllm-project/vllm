@@ -18,7 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
-    is_supported_config_trtllm,
+    is_supported_config_trtllm_fp8,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -213,7 +213,7 @@ def select_fp8_moe_backend(
 
             if fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 backend = Fp8MoeBackend.FLASHINFER_TRTLLM
-                supported, reason = is_supported_config_trtllm(
+                supported, reason = is_supported_config_trtllm_fp8(
                     config, weight_key, activation_key, activation_format
                 )
                 if supported:
@@ -240,7 +240,7 @@ def select_fp8_moe_backend(
             ]:
                 if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
                     k_cls = None
-                    supported, reason = is_supported_config_trtllm(
+                    supported, reason = is_supported_config_trtllm_fp8(
                         config,
                         weight_key,
                         activation_key,
@@ -309,7 +309,7 @@ def select_fp8_moe_backend(
     for backend in AVAILABLE_BACKENDS:
         if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
             k_cls = None
-            supported, reason = is_supported_config_trtllm(
+            supported, reason = is_supported_config_trtllm_fp8(
                 config,
                 weight_key,
                 activation_key,
@@ -482,7 +482,7 @@ def make_fp8_moe_kernel(
     )
     assert prepare_finalize is not None
 
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
