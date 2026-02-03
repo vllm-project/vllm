@@ -159,7 +159,10 @@ class Worker(WorkerBase):
             self.model_runner.init_fp8_kv_scales()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
-        if self.vllm_config.model_config.enable_sleep_mode:
+        if (
+            self.vllm_config.model_config.enable_sleep_mode
+            or self.vllm_config.model_config.enable_cumem_allocator
+        ):
             from vllm.device_allocator.cumem import CuMemAllocator
 
             allocator = CuMemAllocator.get_instance()
@@ -405,13 +408,7 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        if self.vllm_config.model_config.enable_sleep_mode:
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            allocator = CuMemAllocator.get_instance()
-            with allocator.use_memory_pool(tag="kv_cache"):
-                self.model_runner.initialize_kv_cache(kv_cache_config)
-        else:
+        with self._maybe_get_memory_pool_context(tag="kv_cache"):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def compile_or_warm_up_model(self) -> None:
