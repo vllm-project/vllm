@@ -584,7 +584,6 @@ class MambaMixer2(MambaBase, CustomOp):
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         has_prefill = num_prefills > 0
         has_decode = num_decodes > 0
-        # Include spec decode tokens in total count
         num_actual_tokens = num_prefill_tokens + num_decode_tokens
 
         # Split along token dimension
