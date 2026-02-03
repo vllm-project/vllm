@@ -22,6 +22,9 @@ from vllm.distributed import (
 )
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -40,7 +43,6 @@ from .mk_objects import (
     TestMoEQuantConfig,
     expert_info,
     make_fused_experts,
-    make_prepare_finalize,
     prepare_finalize_info,
 )
 from .parallel_utils import ProcessGroupInfo
@@ -148,10 +150,7 @@ class Config:
             "VLLM_USE_DEEP_GEMM": str(int(self.needs_deep_gemm())),
         }
 
-        backend = self.all2all_backend()
-        vllm_config.parallel_config.all2all_backend = backend
-        if backend is not None:
-            env_dict.update({"VLLM_ALL2ALL_BACKEND": backend})
+        vllm_config.parallel_config.all2all_backend = self.all2all_backend()
 
         if self.fused_moe_chunk_size is not None:
             env_dict.update(
@@ -603,10 +602,12 @@ def make_modular_kernel(
         routing_method=RoutingMethodType.DeepSeekV3,
     )
 
-    # make modular kernel
-    prepare_finalize = make_prepare_finalize(
-        config.prepare_finalize_type, config.all2all_backend(), moe, quant_config
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe,
+        quant_config=quant_config,
+        allow_new_interface=True,
     )
+    assert prepare_finalize is not None
 
     fused_experts = make_fused_experts(
         config.fused_experts_type,
