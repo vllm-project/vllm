@@ -88,6 +88,8 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
             self.num_layers = self.model_config.hf_config.text_config.num_hidden_layers
         else:
             self.num_layers = self.model_config.hf_config.num_hidden_layers
+        
+        self._execute_model_count = 0
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -136,7 +138,14 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
         # for layer_idx in range(self.first_k_dense_replace,self.num_layers):
         for layer_idx in range(0, self.num_layers):
             for ubatch_idx in range(num_ubatches):
+                print(f"jcz deepseekv2 count:{self._execute_model_count} "
+                      f"begin layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
+                # TODO(jcz): jump attn graph capture is ffn is enforce eager. Need to remove this after.
+                if self._execute_model_count == 3:
+                    continue
                 hidden_states, recv_metadata = self.connector.recv_attn_output(ubatch_idx=ubatch_idx)
+                print(f"jcz deepseekv2 count:{self._execute_model_count} "
+                    f"end layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
                 dp_metadata = dp_metadata_list.get(
                     recv_metadata.stage_idx, None
                 )
@@ -165,8 +174,12 @@ class GPUFFNModelRunner(LoRAModelRunnerMixin):
                             hidden_states, layer_idx
                         )
 
-                recv_metadata.recv_handle_list = None
-                self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
+                recv_metadata.recv_handle_list = None 
+                print(f"jcz deepseekv2 3 layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
+                # self.connector.send_ffn_output(rank_ffn_output, recv_metadata)
+                print(f"jcz deepseekv2 4 layer.layer_idx:{layer_idx} stage_idx:{ubatch_idx}", flush=True)
+        logger.info(f"jcz ffn_forward end")
+        self._execute_model_count += 1
         return rank_ffn_output
     
     @torch.inference_mode()
