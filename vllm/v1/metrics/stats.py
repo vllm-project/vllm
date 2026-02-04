@@ -245,7 +245,7 @@ class FinishedRequestStats:
 
     The timing field uses its type to encode how far the
     request progressed before finishing:
-    - None: rejected before scheduling (e.g., cache_threshold)
+    - None: rejected before scheduling (e.g., client abort before scheduling)
     - ScheduledTiming: scheduled but no tokens generated (abort/error during prefill)
     - CompletedTiming: generated at least one token (normal completion)
     """
