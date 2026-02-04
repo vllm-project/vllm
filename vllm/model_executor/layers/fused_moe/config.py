@@ -135,7 +135,7 @@ class RoutingMethodType(IntEnum):
             )
         if scoring_func == "softmax":
             return (
-                RoutingMethodType.RenormalizeNaive
+                RoutingMethodType.Renormalize
                 if renormalize
                 else RoutingMethodType.Default
             )
