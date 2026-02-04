@@ -1247,16 +1247,14 @@ def _decompose_all_gather(match: Match, *args, **kwargs) -> None:
 
     # Only decompose for CUDA tensors (other communicators don't have raw op)
     x_node = node.args[0]
-    if "val" in x_node.meta:
-        if x_node.meta["val"].device.type != "cuda":
-            return
+    if "val" not in x_node.meta or x_node.meta["val"].device.type != "cuda":
+        return
 
     # Normalize args to get named parameters
     normalized = normalize_function(
         node.target, node.args, node.kwargs, normalize_to_only_use_kwargs=True
     )
     if normalized is None:
-        logger.warning("Failed to normalize all_gather args")
         return
 
     _, norm_kwargs = normalized
@@ -1264,7 +1262,7 @@ def _decompose_all_gather(match: Match, *args, **kwargs) -> None:
     world_size = norm_kwargs["world_size"]
     group_name = norm_kwargs["group_name"]
 
-    # Skip decomposition for dim=0 (already native format)
+    # Skip decomposition for dim=0 (no clone required)
     if dim == 0:
         return
 
