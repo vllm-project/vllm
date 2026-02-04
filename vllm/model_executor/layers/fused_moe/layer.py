@@ -218,62 +218,6 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
     )
 
 
-def maybe_roundup_hidden_size(
-    hidden_size: int,
-    act_dtype: torch.dtype,
-    moe_parallel_config: FusedMoEParallelConfig,
-    model_type: str | None,
-    is_mxfp4_quant: bool,
-    is_lora_enabled: bool,
-) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
-    if necessary.
-
-    Args:
-        hidden_size: Layer hidden-size
-        act_dtype: Data type of the layer activations.
-        moe_parallel_config: Fused MoE parallelization strategy configuration.
-        is_lora_enabled: True if the engine is enabled with LoRA. This
-            is used in the case of mxfp4 quantization in selecting the
-            MxFP4Backend.
-
-    Return:
-        Rounded up hidden_size if rounding up is required based on the configs.
-        Original hidden size otherwise.
-    """
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_roundup_layer_hidden_size,
-    )
-
-    hidden_size = maybe_roundup_layer_hidden_size(
-        hidden_size, act_dtype, moe_parallel_config
-    )
-
-    # we are padding globally so EP buffer allocation works
-    if model_type is not None and model_type == "gpt_oss" and is_mxfp4_quant:
-        from vllm.model_executor.layers.quantization.mxfp4 import (
-            Mxfp4Backend,
-            get_mxfp4_backend,
-        )
-
-        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
-        if (
-            current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-        ):
-            hidden_size = round_up(hidden_size, 128)
-        elif (
-            current_platform.is_rocm()
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-        ):
-            hidden_size = round_up(hidden_size, 256)
-        return hidden_size
-
-    return hidden_size
-
-
 # --8<-- [start:fused_moe]
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
@@ -538,23 +482,10 @@ class FusedMoE(CustomOp):
             else None
         )
 
-        # Determine is_mxfp4_quant by inspecting quant_config directly.
-        # This is used for proper hidden_size rounding before moe_config creation.
-        self.is_mxfp4_quant = (
-            quant_config.is_mxfp4_quant(prefix, self)
-            if quant_config is not None
-            else False
-        )
-
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
-        hidden_size = maybe_roundup_hidden_size(
-            hidden_size,
-            moe_in_dtype,
-            self.moe_parallel_config,
-            self.model_type,
-            self.is_mxfp4_quant,
-            is_lora_enabled=self.vllm_config.lora_config is not None,
+        hidden_size = self.maybe_roundup_hidden_size(
+            hidden_size, moe_in_dtype, quant_config, prefix
         )
         self.hidden_size = hidden_size
 
@@ -641,6 +572,69 @@ class FusedMoE(CustomOp):
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
+
+    def maybe_roundup_hidden_size(
+        self,
+        hidden_size: int,
+        act_dtype: torch.dtype,
+        quant_config: "QuantizationConfig | None",
+        prefix: str,
+    ) -> int:
+        """
+        Given layer hidden size and MoE configurations, round up hidden_size
+        if necessary.
+
+        Args:
+            hidden_size: Layer hidden-size
+            act_dtype: Data type of the layer activations.
+            quant_config: Quantization configuration.
+            prefix: Prefix for the module path.
+
+        Return:
+            Rounded up hidden_size if rounding up is required based on the configs.
+            Original hidden size otherwise.
+        """
+        from vllm.model_executor.layers.fused_moe.all2all_utils import (
+            maybe_roundup_layer_hidden_size,
+        )
+
+        hidden_size = maybe_roundup_layer_hidden_size(
+            hidden_size, act_dtype, self.moe_parallel_config
+        )
+
+        # Determine if mxfp4 quantization is used
+        is_mxfp4_quant = (
+            quant_config.is_mxfp4_quant(prefix, self)
+            if quant_config is not None
+            else False
+        )
+
+        # we are padding globally so EP buffer allocation works
+        if (
+            self.model_type is not None
+            and self.model_type == "gpt_oss"
+            and is_mxfp4_quant
+        ):
+            from vllm.model_executor.layers.quantization.mxfp4 import (
+                Mxfp4Backend,
+                get_mxfp4_backend,
+            )
+
+            is_lora_enabled = self.vllm_config.lora_config is not None
+            current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
+            if (
+                current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+            ):
+                hidden_size = round_up(hidden_size, 128)
+            elif (
+                current_platform.is_rocm()
+                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+                or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
+            ):
+                hidden_size = round_up(hidden_size, 256)
+
+        return hidden_size
 
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
