@@ -785,7 +785,6 @@ def assert_draft_model_correctness(args: ArgsTest):
             "max_model_len": args.max_model_len,
             "enforce_eager": args.enforce_eager,
             "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
-            "max_num_seqs": 100,  # limit cudagraph capture runtime
             "parallel_drafting": args.parallel_drafting,
         },
         max_num_seqs=100,  # limit cudagraph capture runtime
