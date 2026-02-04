@@ -322,17 +322,11 @@ class DelegatingParser(Parser):
         reasoning, content = self.extract_reasoning(model_output, request)
 
         # Then parse tool calls from the content
-        tool_calls_result = self._parse_tool_calls(
+        tool_calls, content = self._parse_tool_calls(
             request=request,
             content=content,
             enable_auto_tools=enable_auto_tools,
         )
-
-        # Update content if tool calls were extracted
-        if tool_calls_result is not None:
-            tool_calls, content = tool_calls_result
-        else:
-            tool_calls = None
 
         # Build output items
         outputs: list[ResponseOutputItem] = []
@@ -367,9 +361,12 @@ class DelegatingParser(Parser):
             )
             outputs.append(message_item)
 
-        # Add tool call items
         if tool_calls:
-            for idx, tool_call in enumerate(tool_calls):
+            # We use a simple counter for history_tool_call_count because
+            # we don't track the history of tool calls in the Responses API yet.
+            # This means that the tool call index will start from 0 for each
+            # request.
+            for history_tool_call_cnt, tool_call in enumerate(tool_calls):
                 tool_call_item = ResponseFunctionToolCall(
                     id=f"fc_{random_uuid()}",
                     call_id=tool_call.id
@@ -377,7 +374,7 @@ class DelegatingParser(Parser):
                     else make_tool_call_id(
                         id_type=tool_call_id_type,
                         func_name=tool_call.name,
-                        idx=idx,
+                        idx=history_tool_call_cnt,
                     ),
                     type="function_call",
                     status="completed",
@@ -393,55 +390,48 @@ class DelegatingParser(Parser):
         request: ResponsesRequest,
         content: str | None,
         enable_auto_tools: bool,
-    ) -> tuple[list[FunctionCall], str | None] | None:
+    ) -> tuple[list[FunctionCall], str | None]:
         """
+        TODO(qandrew): merge _parse_tool_calls_from_content
+        for ChatCompletions into this function
         Parse tool calls from content based on request tool_choice settings.
 
         Returns:
             A tuple of (function_calls, remaining_content) if tool calls
-            were parsed, or None if no tool calls.
+            were parsed
         """
         function_calls: list[FunctionCall] = []
 
         if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
             # Forced Function Call (Responses API style)
-            if content is None:
-                return None
+            assert content is not None
             function_calls.append(
                 FunctionCall(name=request.tool_choice.name, arguments=content)
             )
-            return function_calls, None
+            return function_calls, None  # Clear content since tool is called.
 
         if request.tool_choice and isinstance(
             request.tool_choice, ChatCompletionNamedToolChoiceParam
         ):
             # Forced Function Call (Chat Completion API style)
-            if content is None:
-                return None
+            assert content is not None
             function_calls.append(
                 FunctionCall(name=request.tool_choice.function.name, arguments=content)
             )
-            return function_calls, None
+            return function_calls, None  # Clear content since tool is called.
 
         if request.tool_choice == "required":
             # Required tool calls - parse JSON
-            if content is None:
-                return None
-            try:
-                tool_calls_data = TypeAdapter(list[FunctionDefinition]).validate_json(
-                    content
+            assert content is not None
+            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
+            function_calls.extend(
+                FunctionCall(
+                    name=tool_call.name,
+                    arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
                 )
-                function_calls.extend(
-                    FunctionCall(
-                        name=tool_call.name,
-                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
-                    )
-                    for tool_call in tool_calls_data
-                )
-                return function_calls, None
-            except Exception:
-                logger.warning("Failed to parse required tool calls from content")
-                return None
+                for tool_call in tool_calls
+            )
+            return function_calls, None  # Clear content since tool is called.
 
         if (
             self._tool_parser is not None
@@ -468,7 +458,7 @@ class DelegatingParser(Parser):
                 return function_calls, remaining_content
 
         # No tool calls
-        return None
+        return [], content
 
     def extract_reasoning_streaming(
         self,
