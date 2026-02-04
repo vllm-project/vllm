@@ -121,17 +121,12 @@ class SingleTypeKVCacheManager(ABC):
             0,
         )
 
-        # Among the `new_computed_blocks`, the first `num_skipped_blocks` worth
-        # of blocks are skipped; `num_req_blocks` of those may already be in
-        # `req_to_blocks`, so only skip the remainder from `new_computed_blocks`.
-        num_skipped_new_computed_blocks = max(0, num_skipped_blocks - num_req_blocks)
-
         # If a computed block is an eviction candidate (in the free queue and
         # ref_cnt == 0), it will be removed from the free queue when touched by
         # the allocated request, so we must count it in the free-capacity check.
-        num_evictable_blocks = self._get_num_evictable_blocks(
-            new_computed_blocks[num_skipped_new_computed_blocks:]
-        )
+        # Note (Chen): Overestimate a bit here as
+        # new_computed_blocks[:num_skipped_blocks] will be freed.
+        num_evictable_blocks = self._get_num_evictable_blocks(new_computed_blocks)
         return num_new_blocks + num_evictable_blocks
 
     def allocate_new_computed_blocks(
@@ -174,19 +169,12 @@ class SingleTypeKVCacheManager(ABC):
         if num_skipped_blocks > 0:
             # It is possible that all new computed blocks are skipped when
             # num_skipped_blocks > len(new_computed_blocks).
+            self.block_pool.free_blocks(new_computed_blocks[:num_skipped_blocks])
             new_computed_blocks = new_computed_blocks[num_skipped_blocks:]
             # Some external computed tokens may be skipped too.
             num_external_computed_tokens = min(
                 num_total_computed_tokens - num_skipped_tokens,
                 num_external_computed_tokens,
-            )
-
-        # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching:
-            self.block_pool.touch(new_computed_blocks)
-        else:
-            assert not any(new_computed_blocks), (
-                "Computed blocks should be empty when prefix caching is disabled"
             )
 
         # Skip blocks are padded with null blocks.
