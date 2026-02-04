@@ -71,6 +71,7 @@ from vllm.inputs.data import EmbedsPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.parser import ParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import (
@@ -131,13 +132,15 @@ class OpenAIServingChat(OpenAIServing):
         self.logits_processors = self.model_config.logits_processors
 
         # set up reasoning parser
-        self.reasoning_parser = self._get_reasoning_parser(
+        self.reasoning_parser = ParserManager.get_reasoning_parser(
             reasoning_parser_name=reasoning_parser
         )
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
-        self.tool_parser = self._get_tool_parser(
-            tool_parser_name=tool_parser, enable_auto_tools=enable_auto_tools
+        self.tool_parser = ParserManager.get_tool_parser(
+            tool_parser_name=tool_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=self.model_config.model,
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
