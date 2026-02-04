@@ -13,7 +13,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.parser.harmony_utils import parse_output_into_messages
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    parse_output_into_messages,
+    sanitize_harmony_tool_name,
+    strip_harmony_control_tokens,
+)
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
     ToolParser,
@@ -71,24 +75,28 @@ class OpenAIToolParser(ToolParser):
                         ToolCall(
                             type="function",
                             function=FunctionCall(
-                                name=msg.recipient.split("functions.")[1],
+                                name=sanitize_harmony_tool_name(
+                                    msg.recipient.split("functions.", 1)[1]
+                                ),
                                 arguments=tool_args,
                             ),
                         )
                     )
                 elif msg.channel == "final":
-                    final_content = msg_text
+                    final_content = strip_harmony_control_tokens(msg_text)
                 elif msg.channel == "commentary" and not msg.recipient:
-                    commentary_content = msg_text
+                    commentary_content = strip_harmony_control_tokens(msg_text)
 
         # Extract partial content from the parser state if the generation was truncated
         if parser.current_content:
             if parser.current_channel == "final":
-                final_content = parser.current_content
+                final_content = strip_harmony_control_tokens(parser.current_content)
             elif (
                 parser.current_channel == "commentary" and not parser.current_recipient
             ):
-                commentary_content = parser.current_content
+                commentary_content = strip_harmony_control_tokens(
+                    parser.current_content
+                )
 
         return ExtractedToolCallInformation(
             tools_called=len(tool_calls) > 0,

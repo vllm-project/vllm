@@ -6,6 +6,7 @@ import json
 from collections.abc import Iterable, Sequence
 from typing import Literal
 
+import regex as re
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputItem,
@@ -67,6 +68,30 @@ MCP_BUILTIN_TOOLS: set[str] = {
     "code_interpreter",
     "container",
 }
+
+_HARMONY_CONTROL_TOKEN_RE = re.compile(r"<\|[^>]*?\|>")
+_INVALID_TOOL_NAME = "__invalid_tool__"
+
+
+def sanitize_harmony_tool_name(name: str | None) -> str:
+    if not name:
+        return ""
+    cleaned = name.strip()
+    if "<|" not in cleaned:
+        return cleaned
+    prefix = cleaned.split("<|", 1)[0].strip()
+    if prefix:
+        return prefix
+    cleaned = _HARMONY_CONTROL_TOKEN_RE.sub("", cleaned).strip()
+    return cleaned or _INVALID_TOOL_NAME
+
+
+def strip_harmony_control_tokens(text: str | None) -> str | None:
+    if text is None:
+        return None
+    if "<|" not in text:
+        return text
+    return _HARMONY_CONTROL_TOKEN_RE.sub("", text)
 
 
 def has_custom_tools(tool_types: set[str]) -> bool:
@@ -220,7 +245,8 @@ def parse_response_input(
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")
-        msg = msg.with_recipient(f"functions.{response_msg['name']}")
+        tool_name = sanitize_harmony_tool_name(response_msg.get("name"))
+        msg = msg.with_recipient(f"functions.{tool_name}")
         msg = msg.with_content_type("json")
     else:
         raise ValueError(f"Unknown input type: {response_msg['type']}")
@@ -238,9 +264,8 @@ def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
     # Collect tool id to name mappings for tool response recipient values
     for chat_msg in chat_msgs:
         for tool_call in chat_msg.get("tool_calls", []):
-            tool_id_names[tool_call.get("id")] = tool_call.get("function", {}).get(
-                "name"
-            )
+            raw_name = tool_call.get("function", {}).get("name")
+            tool_id_names[tool_call.get("id")] = sanitize_harmony_tool_name(raw_name)
 
     for chat_msg in chat_msgs:
         msgs.extend(parse_chat_input_to_harmony_message(chat_msg, tool_id_names))
@@ -329,7 +354,7 @@ def parse_chat_input_to_harmony_message(
 
         for call in tool_calls:
             func = call.get("function", {})
-            name = func.get("name", "")
+            name = sanitize_harmony_tool_name(func.get("name"))
             arguments = func.get("arguments", "") or ""
             msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
             msg = msg.with_channel("commentary")
@@ -344,7 +369,7 @@ def parse_chat_input_to_harmony_message(
     # Tool role message (tool output)
     if role == "tool":
         tool_call_id = chat_msg.get("tool_call_id", "")
-        name = tool_id_names.get(tool_call_id, "")
+        name = sanitize_harmony_tool_name(tool_id_names.get(tool_call_id, ""))
         content = chat_msg.get("content", "") or ""
         content = flatten_chat_text_content(content)
 
@@ -406,7 +431,7 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
         msgs: list[Message] = []
         for call in tool_calls:
             func = call.get("function", {})
-            name = func.get("name", "")
+            name = sanitize_harmony_tool_name(func.get("name"))
             arguments = func.get("arguments", "") or ""
             msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
             msg = msg.with_channel("commentary")
@@ -417,7 +442,7 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
 
     # Tool role message (tool output)
     if role == "tool":
-        name = chat_msg.get("name", "")
+        name = sanitize_harmony_tool_name(chat_msg.get("name"))
         content = chat_msg.get("content", "") or ""
         content = flatten_chat_text_content(content)
 
@@ -526,7 +551,7 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
 
 def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
     """Parse function calls into function tool call items."""
-    function_name = recipient.split(".")[-1]
+    function_name = sanitize_harmony_tool_name(recipient.split(".")[-1])
     output_items = []
     for content in message.content:
         random_id = random_uuid()
@@ -550,7 +575,10 @@ def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
             summary=[],
             type="reasoning",
             content=[
-                ResponseReasoningTextContent(text=content.text, type="reasoning_text")
+                ResponseReasoningTextContent(
+                    text=strip_harmony_control_tokens(content.text),
+                    type="reasoning_text",
+                )
             ],
             status=None,
         )
@@ -563,7 +591,7 @@ def _parse_final_message(message: Message) -> ResponseOutputItem:
     contents = []
     for content in message.content:
         output_text = ResponseOutputText(
-            text=content.text,
+            text=strip_harmony_control_tokens(content.text),
             annotations=[],  # TODO
             type="output_text",
             logprobs=None,  # TODO
@@ -677,13 +705,14 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
 
     if current_recipient and parser.current_channel in ("commentary", "analysis"):
         if current_recipient.startswith("functions."):
+            function_name = sanitize_harmony_tool_name(current_recipient.split(".")[-1])
             rid = random_uuid()
             return [
                 ResponseFunctionToolCall(
                     arguments=parser.current_content,
                     call_id=f"call_{rid}",
                     type="function_call",
-                    name=current_recipient.split(".")[-1],
+                    name=function_name,
                     id=f"fc_{rid}",
                     status="in_progress",
                 )
@@ -716,7 +745,8 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
                 type="reasoning",
                 content=[
                     ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
+                        text=strip_harmony_control_tokens(parser.current_content),
+                        type="reasoning_text",
                     )
                 ],
                 status=None,
@@ -731,7 +761,8 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
                 type="reasoning",
                 content=[
                     ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
+                        text=strip_harmony_control_tokens(parser.current_content),
+                        type="reasoning_text",
                     )
                 ],
                 status=None,
@@ -740,7 +771,7 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
 
     if parser.current_channel == "final":
         output_text = ResponseOutputText(
-            text=parser.current_content,
+            text=strip_harmony_control_tokens(parser.current_content),
             annotations=[],  # TODO
             type="output_text",
             logprobs=None,  # TODO
@@ -810,6 +841,8 @@ def parse_chat_output(
     final_content: str | None = "\n".join(final_texts)
 
     # Return None instead of empty string since existing callers check for None
+    reasoning = strip_harmony_control_tokens(reasoning)
+    final_content = strip_harmony_control_tokens(final_content)
     reasoning = reasoning or None
     final_content = final_content or None
 

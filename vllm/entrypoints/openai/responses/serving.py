@@ -88,6 +88,8 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_remaining_state,
     parse_response_input,
     render_for_completion,
+    sanitize_harmony_tool_name,
+    strip_harmony_control_tokens,
 )
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
@@ -1638,7 +1640,9 @@ class OpenAIServingResponses(OpenAIServing):
         state: HarmonyStreamingState,
     ) -> list[StreamingResponsesResponse]:
         """Emit events when a function call completes."""
-        function_name = previous_item.recipient[len("functions.") :]
+        function_name = sanitize_harmony_tool_name(
+            previous_item.recipient[len("functions.") :]
+        )
         events = []
         events.append(
             ResponseFunctionCallArgumentsDoneEvent(
@@ -1721,8 +1725,9 @@ class OpenAIServingResponses(OpenAIServing):
         state: HarmonyStreamingState,
     ) -> list[StreamingResponsesResponse]:
         """Emit events when a reasoning (analysis) item completes."""
+        sanitized_text = strip_harmony_control_tokens(previous_item.content[0].text)
         content = ResponseReasoningTextContent(
-            text=previous_item.content[0].text,
+            text=sanitized_text,
             type="reasoning_text",
         )
         reasoning_item = ResponseReasoningItem(
@@ -1740,7 +1745,7 @@ class OpenAIServingResponses(OpenAIServing):
                 sequence_number=-1,
                 output_index=state.current_output_index,
                 content_index=state.current_content_index,
-                text=previous_item.content[0].text,
+                text=sanitized_text,
             )
         )
         events.append(
@@ -1769,9 +1774,10 @@ class OpenAIServingResponses(OpenAIServing):
         state: HarmonyStreamingState,
     ) -> list[StreamingResponsesResponse]:
         """Emit events when a final text output item completes."""
+        sanitized_text = strip_harmony_control_tokens(previous_item.content[0].text)
         text_content = ResponseOutputText(
             type="output_text",
-            text=previous_item.content[0].text,
+            text=sanitized_text,
             annotations=[],
         )
         events = []
@@ -1781,7 +1787,7 @@ class OpenAIServingResponses(OpenAIServing):
                 sequence_number=-1,
                 output_index=state.current_output_index,
                 content_index=state.current_content_index,
-                text=previous_item.content[0].text,
+                text=sanitized_text,
                 logprobs=[],
                 item_id=state.current_item_id,
             )
@@ -1881,7 +1887,7 @@ class OpenAIServingResponses(OpenAIServing):
                 content_index=state.current_content_index,
                 output_index=state.current_output_index,
                 item_id=state.current_item_id,
-                delta=ctx.last_content_delta,
+                delta=strip_harmony_control_tokens(ctx.last_content_delta),
                 # TODO, use logprobs from ctx.last_request_output
                 logprobs=[],
             )
@@ -1931,7 +1937,7 @@ class OpenAIServingResponses(OpenAIServing):
                 item_id=state.current_item_id,
                 output_index=state.current_output_index,
                 content_index=state.current_content_index,
-                delta=ctx.last_content_delta,
+                delta=strip_harmony_control_tokens(ctx.last_content_delta),
                 sequence_number=-1,
             )
         )
@@ -2412,7 +2418,9 @@ class OpenAIServingResponses(OpenAIServing):
         events = []
         if state.is_first_function_call_delta is False:
             state.is_first_function_call_delta = True
-            fc_name = ctx.parser.current_recipient[len("functions.") :]
+            fc_name = sanitize_harmony_tool_name(
+                ctx.parser.current_recipient[len("functions.") :]
+            )
             state.current_item_id = f"fc_{random_uuid()}"
             tool_call_item = ResponseFunctionToolCall(
                 name=fc_name,
