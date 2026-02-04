@@ -160,39 +160,44 @@ async def call_debug_endpoint(
     return all_success
 
 
-def build_context_prompt(context_len: int) -> str:
-    """Build context prompt for prefix cache warmup.
+def build_prompts(
+    context_len: int, input_len: int, mode: str
+) -> tuple[str | None, str]:
+    """Build context and benchmark prompts for a parameter combination.
 
-    This prompt will be used to populate the prefix cache before benchmarking.
-    """
-    # "hello " is roughly 1-2 tokens depending on tokenizer
-    num_words = context_len // 2
-    return "hello " * max(1, num_words)
+    Returns (context_prompt, benchmark_prompt) where:
+    - context_prompt: Used for prefix cache warmup (None if context_len <= 0)
+    - benchmark_prompt: Used for the actual benchmark run
 
-
-def build_benchmark_prompt(context_len: int, input_len: int, mode: str) -> str:
-    """Build benchmark prompt that shares prefix with context prompt.
-
-    For prefill mode: total = context_len + input_len tokens.
-        The first context_len tokens match the warmup prompt (prefix cache hit).
+    For prefill mode:
+        context_prompt = context_len tokens ("hello " repeated)
+        benchmark_prompt = context_len + input_len tokens
+        The first context_len tokens match context_prompt (prefix cache hit).
         We measure prefill of the remaining input_len new tokens.
 
-    For decode mode: total = context_len tokens (same as warmup).
-        Entire prompt hits prefix cache.
+    For decode mode:
+        context_prompt = context_len tokens
+        benchmark_prompt = same as context_prompt (full prefix cache hit)
         We measure only decode iterations (no prefill work).
     """
-    # Build context portion (same as warmup prompt for prefix cache hit)
+    # Build context portion ("hello " is roughly 1-2 tokens per word)
     context_words = context_len // 2
-    context_part = "hello " * max(1, context_words)
+    context_part = "hello " * max(1, context_words) if context_len > 0 else ""
 
+    # Context prompt for prefix cache warmup
+    context_prompt = context_part if context_len > 0 else None
+
+    # Build benchmark prompt
     if mode == "prefill":
         # Add new input tokens after context (these will be prefilled)
         input_words = input_len // 2
-        input_part = "world " * max(1, input_words)  # Different pattern for clarity
-        return context_part + input_part
+        input_part = "world " * max(1, input_words)
+        benchmark_prompt = context_part + input_part
     else:
         # Decode: same as context (full prefix cache hit, no prefill)
-        return context_part
+        benchmark_prompt = context_part
+
+    return context_prompt, benchmark_prompt
 
 
 def count_tokens(response_data: dict) -> tuple[int, int]:
@@ -263,19 +268,18 @@ async def run_prefix_cache_warmup(
     session: aiohttp.ClientSession,
     rotator: EndpointRotator,
     model: str,
-    context_len: int,
+    context_prompt: str | None,
     batch_size: int,
 ) -> None:
     """Populate prefix cache with context tokens before benchmarking.
 
-    Sends batch_size requests with context_len tokens to populate the
+    Sends batch_size requests with context_prompt to populate the
     prefix cache. The benchmark requests will share this prefix.
     """
-    if context_len <= 0:
+    if context_prompt is None:
         return
 
-    context_prompt = build_context_prompt(context_len)
-    logger.info("Populating prefix cache with %d context tokens...", context_len)
+    logger.info("Populating prefix cache...")
 
     # Send warmup requests to all endpoints (round-robin)
     tasks = []
@@ -312,8 +316,7 @@ async def run_single_iteration(
     session: aiohttp.ClientSession,
     config: BenchmarkConfig,
     rotator: EndpointRotator,
-    context_len: int,
-    input_len: int,
+    benchmark_prompt: str,
     batch_size: int,
 ) -> tuple[float, int, int]:
     """Run one iteration: sleep → queue requests → wake → measure."""
@@ -325,11 +328,10 @@ async def run_single_iteration(
     # We use asyncio.ensure_future to actually start the requests immediately,
     # not just create coroutines. The requests will be sent to the server
     # and queue there while scheduling is paused.
+    max_tokens = 1 if config.mode == "prefill" else config.iterations
     tasks = []
     for _ in range(batch_size):
         endpoint = rotator.next()
-        prompt = build_benchmark_prompt(context_len, input_len, config.mode)
-        max_tokens = 1 if config.mode == "prefill" else config.iterations
 
         # ensure_future schedules the coroutine immediately
         task = asyncio.ensure_future(
@@ -337,7 +339,7 @@ async def run_single_iteration(
                 f"{endpoint}/v1/completions",
                 json={
                     "model": config.model,
-                    "prompt": prompt,
+                    "prompt": benchmark_prompt,
                     "max_tokens": max_tokens,
                     "stream": False,
                 },
@@ -448,6 +450,11 @@ async def run_benchmark(
         trace_prefixes: list[str] = []
 
         for ctx_len, in_len, batch_size in param_combos:
+            # Build all prompts for this parameter combination
+            context_prompt, benchmark_prompt = build_prompts(
+                ctx_len, in_len, config.mode
+            )
+
             logger.info(
                 "Running: mode=%s, ctx=%d, input=%d, batch=%d, output_tokens=%d",
                 config.mode,
@@ -460,20 +467,20 @@ async def run_benchmark(
             # Prefix cache warmup: populate KV cache before profiling
             # This is NOT profiled - we only profile the actual benchmark
             await run_prefix_cache_warmup(
-                session, rotator, config.model, ctx_len, batch_size
+                session, rotator, config.model, context_prompt, batch_size
             )
 
             # Start profiling for this param combo (after prefix cache warmup)
-            prefix = None
+            trace_prefix = None
             if config.profile:
-                prefix = f"{config.mode}_ctx{ctx_len}_in{in_len}_bs{batch_size}"
+                trace_prefix = f"{config.mode}_ctx{ctx_len}_in{in_len}_bs{batch_size}"
                 started = await call_debug_endpoint(
-                    session, rotator, "/debug/profile/start", {"prefix": prefix}
+                    session, rotator, "/debug/profile/start", {"prefix": trace_prefix}
                 )
                 if started:
-                    trace_prefixes.append(prefix)
+                    trace_prefixes.append(trace_prefix)
                 else:
-                    logger.warning("Failed to start profiling for %s", prefix)
+                    logger.warning("Failed to start profiling for %s", trace_prefix)
 
             (
                 elapsed_ms,
@@ -483,13 +490,12 @@ async def run_benchmark(
                 session,
                 config,
                 rotator,
-                ctx_len,
-                in_len,
+                benchmark_prompt,
                 batch_size,
             )
 
             # Stop profiling for this param combo
-            if config.profile and prefix:
+            if config.profile and trace_prefix:
                 await call_debug_endpoint(session, rotator, "/debug/profile/stop")
 
             total_tokens = prompt_tokens + completion_tokens
