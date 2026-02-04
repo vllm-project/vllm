@@ -91,7 +91,7 @@ def create_cross_attention_backend(
                 - common_attn_metadata.query_start_loc_cpu[:-1]
             )
             # Any computed tokens indicated decode step>1 (no chunked prefill)
-            is_decode = seq_lens_cpu >= query_lens_cpu
+            is_decode = seq_lens_cpu > query_lens_cpu
             if torch.any(is_decode):
                 # CrossAttn KV cache has already been populated on first decoder step,
                 # skip slot_mapping calculation for requests that do not need
