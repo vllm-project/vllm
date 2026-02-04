@@ -344,7 +344,7 @@ def initialize_ray_cluster(
                 available_gpus,
                 parallel_config.world_size,
             )
-
+    
     if ray.is_initialized():
         logger.info("Ray is already initialized. Skipping Ray initialization.")
     elif current_platform.is_rocm() or current_platform.is_xpu():

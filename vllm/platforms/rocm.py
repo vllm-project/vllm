@@ -194,6 +194,11 @@ class RocmPlatform(Platform):
     dist_backend: str = "nccl"
     # rocm shares the same device control env var as CUDA
     device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    ray_noset_device_env_vars: list[str] = [
+        "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+    ]
 
     supported_quantization: list[str] = [
         "awq",
