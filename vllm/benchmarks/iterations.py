@@ -209,6 +209,33 @@ async def fetch_server_config(
     return ServerConfig()
 
 
+async def run_warmup(
+    session: aiohttp.ClientSession,
+    rotator: EndpointRotator,
+    model: str,
+) -> None:
+    """Send a warmup request to trigger runtime compilation."""
+    endpoint = rotator.all()[0]
+    logger.info("Sending warmup request to trigger compilation...")
+    try:
+        resp = await session.post(
+            f"{endpoint}/v1/completions",
+            json={
+                "model": model,
+                "prompt": "Hello",
+                "max_tokens": 1,
+                "stream": False,
+            },
+        )
+        if resp.status == 200:
+            await resp.json()
+            logger.info("Warmup complete")
+        else:
+            logger.warning("Warmup request failed: HTTP %d", resp.status)
+    except Exception as e:
+        logger.warning("Warmup request failed: %s", e)
+
+
 async def run_single_iteration(
     session: aiohttp.ClientSession,
     config: BenchmarkConfig,
@@ -324,6 +351,9 @@ async def run_benchmark(
             server_config.tensor_parallel_size,
             server_config.pipeline_parallel_size,
         )
+
+        # Warmup: trigger runtime compilation before benchmarking
+        await run_warmup(session, rotator, config.model)
 
         # Start profiling if requested
         prefix = None
