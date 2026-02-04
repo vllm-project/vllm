@@ -56,6 +56,14 @@ Modes:
              so we measure ONLY decode latency, not prefill.
              context_len > 0 is REQUIRED (cannot decode without context).
 
+Batch Size Semantics:
+    --batch-size specifies the batch size PER DP domain, matching the standalone
+    benchmark (fbcode) semantics. The client automatically queries the server's
+    DP configuration and multiplies to get the global batch size.
+
+    Example: With DP=8 and --batch-size 64, the client sends 64*8=512 total
+    requests distributed round-robin across all DP ranks.
+
 NOTE: For accurate prefill benchmarks, do NOT use --enable-chunked-prefill on the
 server. Chunked prefill breaks long prefills into multiple steps, which interferes
 with measuring true prefill performance.
@@ -419,9 +427,10 @@ async def run_benchmark(
     async with aiohttp.ClientSession(connector=connector) as session:
         # Fetch server config once
         server_config = await fetch_server_config(session, rotator)
+        dp_size = server_config.data_parallel_size
         logger.info(
             "Server config: DP=%d, TP=%d, PP=%d",
-            server_config.data_parallel_size,
+            dp_size,
             server_config.tensor_parallel_size,
             server_config.pipeline_parallel_size,
         )
@@ -449,31 +458,40 @@ async def run_benchmark(
         # Track all trace prefixes for fetching at the end
         trace_prefixes: list[str] = []
 
-        for ctx_len, in_len, batch_size in param_combos:
+        for ctx_len, in_len, batch_size_per_dp in param_combos:
+            # Scale batch size by DP to match standalone benchmark semantics
+            # User specifies per-DP batch size, we compute global batch size
+            global_batch_size = batch_size_per_dp * dp_size
+
             # Build all prompts for this parameter combination
             context_prompt, benchmark_prompt = build_prompts(
                 ctx_len, in_len, config.mode
             )
 
             logger.info(
-                "Running: mode=%s, ctx=%d, input=%d, batch=%d, output_tokens=%d",
+                "Running: mode=%s, ctx=%d, input=%d, batch=%d/dp (global=%d), "
+                "output_tokens=%d",
                 config.mode,
                 ctx_len,
                 in_len,
-                batch_size,
+                batch_size_per_dp,
+                global_batch_size,
                 num_output_tokens,
             )
 
             # Prefix cache warmup: populate KV cache before profiling
             # This is NOT profiled - we only profile the actual benchmark
             await run_prefix_cache_warmup(
-                session, rotator, config.model, context_prompt, batch_size
+                session, rotator, config.model, context_prompt, global_batch_size
             )
 
             # Start profiling for this param combo (after prefix cache warmup)
+            # Use batch_size_per_dp in trace prefix for consistency with SA naming
             trace_prefix = None
             if config.profile:
-                trace_prefix = f"{config.mode}_ctx{ctx_len}_in{in_len}_bs{batch_size}"
+                trace_prefix = (
+                    f"{config.mode}_ctx{ctx_len}_in{in_len}_bs{batch_size_per_dp}"
+                )
                 started = await call_debug_endpoint(
                     session, rotator, "/debug/profile/start", {"prefix": trace_prefix}
                 )
@@ -491,7 +509,7 @@ async def run_benchmark(
                 config,
                 rotator,
                 benchmark_prompt,
-                batch_size,
+                global_batch_size,
             )
 
             # Stop profiling for this param combo
@@ -506,13 +524,14 @@ async def run_benchmark(
                 elapsed_ms / num_output_tokens if num_output_tokens > 0 else elapsed_ms
             )
 
+            # Record per-DP batch size for comparison with standalone benchmark
             results.append(
                 IterationResult(
                     endpoint=",".join(rotator.all()),
                     mode=config.mode,
                     context_len=ctx_len,
                     input_len=in_len,
-                    batch_size=batch_size,
+                    batch_size=batch_size_per_dp,
                     iteration=num_output_tokens,
                     total_latency_ms=elapsed_ms,
                     latency_per_iter_ms=latency_per_iter,
@@ -640,7 +659,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> None:
         "--batch-size",
         type=str,
         default="1",
-        help="Batch sizes, comma-separated for sweep (e.g., 1,4,8)",
+        help="Batch size per DP domain, comma-separated for sweep (e.g., 1,4,8). "
+        "Automatically multiplied by server DP size to get global batch size.",
     )
     parser.add_argument(
         "--mode",
