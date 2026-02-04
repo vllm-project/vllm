@@ -1202,61 +1202,15 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
         else:
             num_warps = 8
 
-        if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
-            from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
+        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
+            layer.w13_weight, layer.w13_weight_scale, num_warps
+        )
+        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
+            layer.w2_weight, layer.w2_weight_scale, num_warps
+        )
 
-            w13_aiter_weight = layer.w13_weight.contiguous()
-            w13_aiter_scale = layer.w13_weight_scale.contiguous()
-            w2_aiter_weight = layer.w2_weight.contiguous()
-            w2_aiter_scale = layer.w2_weight_scale.contiguous()
-
-            e, n, k = w13_aiter_weight.shape
-            w13_aiter_weight = (
-                w13_aiter_weight.view(e, n // 2, 2, k)
-                .permute(0, 2, 1, 3)
-                .contiguous()
-                .view(e, n, k)
-            )
-            w13_aiter_scale = (
-                w13_aiter_scale.view(e, n // 2, 2, -1)
-                .permute(0, 2, 1, 3)
-                .contiguous()
-                .view(e, n, -1)
-            )
-
-            w13_aiter_weight = w13_aiter_weight.view(torch.float4_e2m1fn_x2)
-            w13_aiter_scale = w13_aiter_scale.view(-1, w13_aiter_scale.shape[-1])
-            w2_aiter_weight = w2_aiter_weight.view(torch.float4_e2m1fn_x2)
-            w2_aiter_scale = w2_aiter_scale.view(-1, w2_aiter_scale.shape[-1])
-
-            self.w13_weight_aiter_tensor = shuffle_weight_a16w4(
-                w13_aiter_weight, 16, True
-            )
-            self.w13_scale_aiter_tensor = shuffle_scale_a16w4(
-                w13_aiter_scale, self.num_experts, True
-            )
-            self.w2_weight_aiter_tensor = shuffle_weight_a16w4(
-                w2_aiter_weight, 16, False
-            )
-            self.w2_scale_aiter_tensor = shuffle_scale_a16w4(
-                w2_aiter_scale, self.num_experts, False
-            )
-            self.w13_bias_aiter_tensor = (
-                layer.w13_bias.view(-1, n // 2, 2)
-                .permute(0, 2, 1)
-                .contiguous()
-                .view(-1, n)
-            )
-        else:
-            w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
-                layer.w13_weight, layer.w13_weight_scale, num_warps
-            )
-            w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
-                layer.w2_weight, layer.w2_weight_scale, num_warps
-            )
-
-            self.w13_weight_triton_tensor = w13_weight
-            self.w2_weight_triton_tensor = w2_weight
+        self.w13_weight_triton_tensor = w13_weight
+        self.w2_weight_triton_tensor = w2_weight
 
         # need to delete the original weights to save memory on single GPU
         del layer.w13_weight
@@ -1265,7 +1219,7 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
         layer.w2_weight = None
         torch.cuda.empty_cache()
 
-        if self.static_input_scales and not envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
+        if self.static_input_scales:
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
                 raise ValueError(
                     "QuantConfig has static quantization, but found "
@@ -1308,24 +1262,16 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
-            return mxfp4_w4a4_moe_quant_config(
-                w1_bias=layer.w13_bias,
-                w2_bias=layer.w2_bias,
-                w1_scale=self.w13_scale_aiter_tensor,
-                w2_scale=self.w2_scale_aiter_tensor,
-            )
-        else:
-            w1_scale = self.w13_precision_config
-            w2_scale = self.w2_precision_config
+        w1_scale = self.w13_precision_config
+        w2_scale = self.w2_precision_config
 
-            # TODO: how to set scale?
-            return mxfp4_w4a4_moe_quant_config(
-                w1_bias=layer.w13_bias,
-                w2_bias=layer.w2_bias,
-                w1_scale=w1_scale,
-                w2_scale=w2_scale,
-            )
+        # TODO: how to set scale?
+        return mxfp4_w4a4_moe_quant_config(
+            w1_bias=layer.w13_bias,
+            w2_bias=layer.w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+        )
 
     def apply(
         self,
@@ -1340,80 +1286,23 @@ class QuarkW4MXFp4MoEMethod_OSS(QuarkW4MXFp4MoEMethodBase):
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet."
             )
 
-        if envs.VLLM_ROCM_USE_AITER_FUSED_MOE_A16W4:
-            from aiter import moe_cktile2stages_gemm1, moe_cktile2stages_gemm2
-            from aiter.fused_moe import fused_topk, moe_sorting
+        from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
+            triton_kernel_moe_oss_forward,
+        )
 
-            token_num = x.shape[0]
-            BLOCKM = 16 if token_num < 2048 else 32
-            topk_weights, topk_ids = fused_topk(x, router_logits, layer.top_k, True)
-            sorted_ids, sorted_weights, sorted_expert_ids, num_valid_ids, moe_out = (
-                moe_sorting(
-                    topk_ids,
-                    topk_weights,
-                    self.num_experts,
-                    x.shape[1],
-                    torch.bfloat16,
-                    BLOCKM,
-                )
-            )
-            _, n1, k1 = self.w13_weight_aiter_tensor.shape
-            _, k2, n2 = self.w2_weight_aiter_tensor.shape
-            D = n2 if k2 == k1 else n2 * 2
-            cktile_moe_out1 = torch.empty(
-                (token_num, layer.top_k, D), dtype=torch.bfloat16, device=x.device
-            )
-            moe_cktile2stages_gemm1(
-                x,
-                self.w13_weight_aiter_tensor,
-                cktile_moe_out1,
-                sorted_ids,
-                sorted_expert_ids,
-                num_valid_ids,
-                layer.top_k,
-                self.intermediate_pad // 64 * 64 * 2,
-                self.hidden_pad // 128 * 128,  # k_pad_zeros
-                None,  # sorted_weights
-                None,
-                self.w13_scale_aiter_tensor,
-                self.w13_bias_aiter_tensor,
-                BLOCKM,  # block_size
-            )
-            moe_cktile2stages_gemm2(
-                cktile_moe_out1,
-                self.w2_weight_aiter_tensor,
-                moe_out,
-                sorted_ids,
-                sorted_expert_ids,
-                num_valid_ids,
-                layer.top_k,
-                self.hidden_pad // 64 * 64,  # n_pad_zeros
-                self.intermediate_pad // 128 * 128,
-                sorted_weights,  # sorted_weights
-                None,
-                self.w2_scale_aiter_tensor,
-                layer.w2_bias,
-                BLOCKM,  # block_size
-            )
-            return moe_out
-        else:
-            from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
-                triton_kernel_moe_oss_forward,
-            )
-
-            return triton_kernel_moe_oss_forward(
-                hidden_states=x,
-                w1=self.w13_weight_triton_tensor,
-                w2=self.w2_weight_triton_tensor,
-                gating_output=router_logits,
-                topk=layer.top_k,
-                renormalize=layer.renormalize,
-                global_num_experts=layer.global_num_experts,
-                expert_map=expert_map,
-                quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                unpadded_N_w1=self.intermediate_size_per_partition * 2,
-                unpadded_K_w1=self.unpadded_hidden_size,
-                unpadded_N_w2=self.unpadded_hidden_size,
-                unpadded_K_w2=self.intermediate_size_per_partition,
-            )
+        return triton_kernel_moe_oss_forward(
+            hidden_states=x,
+            w1=self.w13_weight_triton_tensor,
+            w2=self.w2_weight_triton_tensor,
+            gating_output=router_logits,
+            topk=layer.top_k,
+            renormalize=layer.renormalize,
+            global_num_experts=layer.global_num_experts,
+            expert_map=expert_map,
+            quant_config=self.moe_quant_config,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            unpadded_N_w1=self.intermediate_size_per_partition * 2,
+            unpadded_K_w1=self.unpadded_hidden_size,
+            unpadded_N_w2=self.unpadded_hidden_size,
+            unpadded_K_w2=self.intermediate_size_per_partition,
+        )
