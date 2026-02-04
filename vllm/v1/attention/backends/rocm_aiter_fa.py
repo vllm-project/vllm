@@ -32,10 +32,17 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 if current_platform.is_rocm():
-    from vllm.triton_utils import tl, triton
+    # IMPORTANT: This import is UNCONDITIONAL on ROCm (no env var check).
+    # This enables explicit backend selection via attention_config to work
+    # even when VLLM_ROCM_USE_AITER=0. Auto-discovery (which checks the env var)
+    # is handled in eagle.py and other discovery code, which avoids importing
+    # this module when the backend is not enabled, preventing JIT warnings.
+    # This file is not going to be imported unless the user explicitly
+    # imports it or selects it via attention_config, so the aiter import
+    # here should not cause any issues.
+    import aiter
 
-    if rocm_aiter_ops.is_enabled():
-        import aiter
+    from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))

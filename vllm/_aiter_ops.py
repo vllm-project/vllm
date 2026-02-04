@@ -31,12 +31,22 @@ IS_AITER_FOUND = is_aiter_found()
 
 
 def is_aiter_found_and_supported() -> bool:
-    """Check if AITER is available AND enabled via environment variable.
+    """Check if AITER library is available and platform supports it.
 
-    Checks: platform (ROCm), device arch (gfx9), library existence,
-    and VLLM_ROCM_USE_AITER env variable.
+    Checks: platform (ROCm), device arch (gfx9), and library existence.
+    Does NOT check environment variables - that's handled by rocm_aiter_ops.is_enabled().
+
+    This function determines if aiter CAN be used, not if it SHOULD be used.
+
+    Separation of concerns:
+    - This function: Can aiter work on this system? (platform + library availability)
+    - rocm_aiter_ops.is_enabled(): Should aiter be used by default? (adds env var check)
+    - Backend selection: Can explicitly request aiter regardless of env var
+
+    This allows explicit backend selection via attention_config to work even when
+    VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
-    if current_platform.is_rocm() and IS_AITER_FOUND and envs.VLLM_ROCM_USE_AITER:
+    if current_platform.is_rocm() and IS_AITER_FOUND:
         from vllm.platforms.rocm import on_gfx9
 
         return on_gfx9()
@@ -62,14 +72,23 @@ def if_aiter_supported(func: Callable) -> Callable:
 # because it returns wrong result on gfx942.
 # This is a workaround to get the correct FP8 dtype.
 # This might because that the get_gfx() is wrapped as a custom op.
-if is_aiter_found_and_supported():
+#
+# Import strategy to avoid unwanted JIT warnings:
+# - Only import aiter dtypes at module load if VLLM_ROCM_USE_AITER=1 (env var set)
+# - This prevents JIT warnings during backend auto-discovery when aiter is not preferred
+# - Explicit backend selection (via attention_config) still works because:
+#   1. Backend modules (rocm_aiter_fa.py) import aiter directly when loaded
+#   2. Individual op implementations import aiter locally when called
+#   3. This module's ops are only called when an aiter backend is actually in use
+if is_aiter_found_and_supported() and envs.VLLM_ROCM_USE_AITER:
     from aiter import dtypes
 
     AITER_FP8_DTYPE = dtypes.fp8
 else:
-    # Placeholder when AITER is disabled - prevents NameError during module load.
-    # Note: When AITER is disabled, ops are not registered, so fake implementations
-    # referencing this variable won't actually be called at runtime.
+    # Placeholder when AITER is not the default - prevents NameError during module load.
+    # Note: This fallback is used for fake implementations and type checking.
+    # If an AITER backend is explicitly selected (even with env var=0),
+    # the backend module will import aiter directly (rocm_aiter_fa.py line 35).
     AITER_FP8_DTYPE = _FP8_DTYPE
 
 

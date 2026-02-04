@@ -34,6 +34,15 @@ elif current_platform.is_rocm():
                 "to be installed. Please install flash-attn first."
             )
 
+    # ROCm doesn't use scheduler metadata (FA3 feature), provide stub
+    def get_scheduler_metadata(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
+        return None
+
+    # ROCm uses the C++ custom op for reshape_and_cache
+    from vllm import _custom_ops as ops
+
+    reshape_and_cache_flash = ops.reshape_and_cache_flash
+
 
 def get_flash_attn_version(requires_alibi: bool = False) -> int | None:
     # import here to avoid circular dependencies
@@ -128,4 +137,19 @@ def flash_attn_supports_mla():
 
 
 def is_flash_attn_varlen_func_available() -> bool:
-    return current_platform.is_cuda() or current_platform.is_xpu()
+    if current_platform.is_cuda() or current_platform.is_xpu():
+        return True
+
+    # On ROCm, flash_attn_varlen_func is provided by the aiter package
+    # not vllm_flash_attn extension. This function checks CAPABILITY
+    # (can it work?) not PREFERENCE (should it be used by default?).
+    # Tests and other code use this to determine if the functionality
+    # exists on the system, regardless of VLLM_ROCM_USE_AITER.
+    # We use is_aiter_found_and_supported() instead of importing aiter directly
+    # to avoid triggering JIT compilation warnings during the availability check.
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import is_aiter_found_and_supported
+
+        return is_aiter_found_and_supported()
+
+    return False
