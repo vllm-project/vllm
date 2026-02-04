@@ -245,12 +245,22 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         """
         num_requests = self.async_llm.output_processor.get_num_unfinished_requests()
 
+        # Get KV transfer config if available
+        kv_connector = ""
+        kv_role = ""
+        kv_transfer_config = self.async_llm.vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            kv_connector = kv_transfer_config.kv_connector or ""
+            kv_role = kv_transfer_config.kv_role or ""
+
         return vllm_engine_pb2.GetServerInfoResponse(
             active_requests=num_requests,
             is_paused=False,  # TODO
             last_receive_timestamp=time.time(),  # TODO looks wrong?
             uptime_seconds=time.time() - self.start_time,
             server_type="vllm-grpc",
+            kv_connector=kv_connector,
+            kv_role=kv_role,
         )
 
     # ========== Helper methods ==========

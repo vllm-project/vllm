@@ -206,4 +206,8 @@ message GetServerInfoResponse {
   double last_receive_timestamp = 3;
   double uptime_seconds = 4;
   string server_type = 5;  // "vllm-grpc"
+
+  // KV transfer config (for PD disaggregation)
+  string kv_connector = 6;  // "MooncakeConnector", "NixlConnector", "" if not configured
+  string kv_role = 7;       // "kv_producer", "kv_consumer", "kv_both", "" if not configured
 }
