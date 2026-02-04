@@ -46,7 +46,6 @@ class UnquantizedMoeBackend(Enum):
 UNSUPPORTED_BACKEND = [
     UnquantizedMoeBackend.FLASHINFER_TRTLLM,
     UnquantizedMoeBackend.CPU,
-    UnquantizedMoeBackend.XPU,
     UnquantizedMoeBackend.TPU,
     UnquantizedMoeBackend.OOT,
 ]
@@ -192,6 +191,16 @@ def make_unquantized_moe_kernel(
         kernel = mk.FusedMoEModularKernel(
             MoEPrepareAndFinalizeNoEP(),
             TritonExperts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
+        )
+    elif backend == UnquantizedMoeBackend.XPU:
+        from vllm.model_executor.layers.fused_moe import XPUExperts
+
+        kernel = mk.FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            XPUExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
