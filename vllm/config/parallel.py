@@ -81,7 +81,7 @@ class EPLBConfig:
     Whether to use non-blocking EPLB.
     """
 
-    max_num_transfers: int | None = None
+    max_num_transfers: int | None = Field(default=None, ge=0)
     """
     The maximum number of tensor transfers that EPLB will execute for each layer.
     This is a global, not a per-rank, maximum. This value should only be
@@ -107,8 +107,6 @@ class EPLBConfig:
             raise ValueError("Async EPLB is only supported with the default policy.")
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
-        if self.max_num_transfers and self.max_num_transfers <= 0:
-            raise ValueError("max_num_transfers must be greater than 0.")
         if self.max_num_transfers and self.num_redundant_experts > 0:
             raise ValueError(
                 "Setting max_num_transfers is not supported when using "
