@@ -6,7 +6,6 @@ from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from pydantic import Field, field_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import config
@@ -24,7 +23,6 @@ SchedulerPolicy = Literal["fcfs", "priority"]
 
 
 @config
-@dataclass
 class SchedulerConfig:
     """Scheduler configuration."""
 
